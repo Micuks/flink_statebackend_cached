@@ -22,6 +22,7 @@ import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.StateBackendFactory;
 import org.apache.flink.runtime.state.memory.MemoryStateBackendFactory;
+import org.apache.flink.contrib.streaming.state.RocksDBStateBackendFactory;
 
 /**
  * A factory for creating {@link CachingStateBackend} instances. This factory allows configuring the
@@ -111,20 +112,17 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
         try {
             // Attempt to create RocksDBStateBackend using its factory and current config
             // This assumes RocksDBStateBackendFactory is available and configured as usual
-            // RocksDBStateBackendFactory rocksFactory = new RocksDBStateBackendFactory();
-            // //
-            // Commented out direct instantiation
-            // delegateBackend = rocksFactory.createFromConfig(config, classLoader);
-            // TEMPORARY: Force MemoryStateBackend to avoid RocksDB dependency for now
-            System.err.println(
-                    "WARNING: CachingStateBackend is temporarily forced to use MemoryStateBackend as delegate for compilation purposes.");
-            delegateBackend = new MemoryStateBackendFactory().createFromConfig(config, classLoader);
+            RocksDBStateBackendFactory rocksFactory = new RocksDBStateBackendFactory();
+            delegateBackend = rocksFactory.createFromConfig(config, classLoader);
+    } catch (org.apache.flink.configuration.IllegalConfigurationException e) {
+            // Propagate configuration errors as the test expects this.
+            throw e;
         } catch (Exception e) {
             System.err.println(
-                    "Failed to configure underlying RocksDBStateBackend from factory, falling back to MemoryStateBackend for CachingStateBackend. Error: "
+                            "Failed to configure underlying RocksDBStateBackend from factory (non-configuration error), falling back to MemoryStateBackend for CachingStateBackend. Error: "
                             + e.getMessage());
             System.err.println(
-                    "WARNING: CachingStateBackend is using MemoryStateBackend as delegate due to RocksDB setup failure.");
+                            "WARNING: CachingStateBackend is using MemoryStateBackend as delegate due to RocksDB setup failure. THIS IS A FALLBACK.");
             delegateBackend = new MemoryStateBackendFactory().createFromConfig(config, classLoader);
         }
 
