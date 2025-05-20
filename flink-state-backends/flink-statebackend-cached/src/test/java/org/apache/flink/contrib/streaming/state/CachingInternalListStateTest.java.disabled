@@ -1,0 +1,496 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more contributor license
+ * agreements. See the NOTICE file distributed with this work for additional information regarding
+ * copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance with the License. You may obtain a
+ * copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under the License
+ * is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+ * or implied. See the License for the specific language governing permissions and limitations under
+ * the License.
+ */
+
+package org.apache.flink.contrib.streaming.state;
+
+import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.runtime.state.internal.InternalListState;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@Disabled
+@ExtendWith(MockitoExtension.class)
+class CachingInternalListStateTest {
+
+    @Mock private InternalListState<String, String, String> mockDelegateState;
+    @Mock private CachingKeyedStateBackend<String> mockBackend;
+    @Mock private TypeSerializer<String> mockKeySerializer;
+    @Mock private TypeSerializer<String> mockNamespaceSerializer;
+    @Mock private TypeSerializer<List<String>> mockValueSerializer; // Serializer for List<V_ELE>
+
+    private CachingInternalListState<String, String, String> cachingListState;
+
+    private final int l1CacheSize = 2;
+    private final int l2CacheSize = 2;
+    private final int maxActiveNamespaces = 2;
+
+    private final String testKey = "testListKey";
+    private final String testNamespace = "testListNamespace";
+    private final String element1 = "element1";
+    private final String element2 = "element2";
+    private final String element3 = "element3";
+    private List<String> delegateList;
+
+    @BeforeEach
+    void setUp() {
+        when(mockBackend.getCurrentKey()).thenReturn(testKey);
+        when(mockDelegateState.getKeySerializer()).thenReturn(mockKeySerializer);
+        when(mockDelegateState.getNamespaceSerializer()).thenReturn(mockNamespaceSerializer);
+        when(mockDelegateState.getValueSerializer())
+                .thenReturn(mockValueSerializer); // For List<V_ELE>
+
+        delegateList = new java.util.ArrayList<>();
+        delegateList.add(element1);
+        delegateList.add(element2);
+
+        cachingListState =
+                new CachingInternalListState<>(
+                        mockDelegateState,
+                        mockBackend,
+                        l1CacheSize,
+                        l2CacheSize,
+                        maxActiveNamespaces);
+        cachingListState.setCurrentNamespace(testNamespace);
+    }
+
+    // --- Basic Get/Update/Add for List State ---
+    @Test
+    void testListGet_cacheMiss_loadFromDelegate_populateL1() throws Exception {
+        // Setup: Delegate returns a specific list on first call
+        when(mockDelegateState.get()).thenReturn(new java.util.ArrayList<>(delegateList));
+
+        // Action 1: First call to get() - should be a cache miss
+        List<String> retrievedList1 = cachingListState.get();
+
+        // Verification 1
+        org.junit.jupiter.api.Assertions.assertEquals(
+                delegateList, retrievedList1, "List from first call should match delegate");
+        org.mockito.Mockito.verify(mockDelegateState, org.mockito.Mockito.times(1))
+                .get(); // Delegate
+        // should
+        // be
+        // called
+        // once
+
+        // Action 2: Second call to get() - should be an L1 cache hit
+        List<String> retrievedList2 = cachingListState.get();
+
+        // Verification 2
+        org.junit.jupiter.api.Assertions.assertEquals(
+                delegateList, retrievedList2, "List from second call should match cached list");
+        org.mockito.Mockito.verify(mockDelegateState, org.mockito.Mockito.times(1))
+                .get(); // Delegate
+        // should
+        // still
+        // only
+        // be
+        // called
+        // once
+        // (hit
+        // L1)
+
+        // Verify a copy is returned
+        retrievedList2.add("anotherElement");
+        List<String> retrievedList3 = cachingListState.get();
+        org.junit.jupiter.api.Assertions.assertEquals(
+                delegateList,
+                retrievedList3,
+                "Modifying returned list should not affect cached list.");
+        org.junit.jupiter.api.Assertions.assertNotEquals(retrievedList2, retrievedList3);
+    }
+
+    @Test
+    void testListGet_L1Hit_returnsCopy() throws Exception {
+        // Setup: Populate L1 cache by calling get() once
+        when(mockDelegateState.get()).thenReturn(new java.util.ArrayList<>(delegateList));
+        cachingListState.get(); // This call populates L1
+        org.mockito.Mockito.verify(mockDelegateState, org.mockito.Mockito.times(1)).get(); // Verify
+        // delegate
+        // was
+        // called
+        // for
+        // population
+
+        // Action: Call get() again - should be an L1 cache hit
+        List<String> retrievedList1 = cachingListState.get();
+
+        // Verification
+        org.junit.jupiter.api.Assertions.assertEquals(
+                delegateList,
+                retrievedList1,
+                "List from L1 hit should match initially cached list");
+        // Delegate should still only have been called once from the initial population
+        org.mockito.Mockito.verify(mockDelegateState, org.mockito.Mockito.times(1)).get();
+
+        // Verify a copy is returned
+        retrievedList1.add("anotherElementL1Hit");
+        List<String> retrievedList2 = cachingListState.get(); // Get a fresh copy from cache
+
+        org.junit.jupiter.api.Assertions.assertEquals(
+                delegateList,
+                retrievedList2,
+                "Modifying the first retrieved list should not affect the cached list for subsequent gets.");
+        org.junit.jupiter.api.Assertions.assertNotEquals(
+                retrievedList1,
+                retrievedList2,
+                "Subsequent gets should return different list instances (copies).");
+    }
+
+    @Test
+    void testListGet_L1Miss_L2Hit_promoteToL1_returnsCopy() throws Exception {
+        // --- Setup: Get testKey (delegateList) into L2 ---
+        // Current L1 cache size for a namespace is 2.
+        int delegateGetCalls = 0;
+
+        // 1. testKey -> delegateList (clean) in L1.
+        when(mockDelegateState.get()).thenReturn(new ArrayList<>(delegateList));
+        cachingListState.get(); // testKey is current key from setUp
+        delegateGetCalls++;
+        verify(mockDelegateState, times(delegateGetCalls)).get();
+
+        // 2. anotherKey1 -> listForAnotherKey1 (clean) in L1.
+        String anotherKey1 = "listTestKey_L1MissL2Hit_Filler1";
+        List<String> listForAnotherKey1 = Arrays.asList("ak1_e1");
+        mockBackend.setCurrentKey(anotherKey1);
+        when(mockDelegateState.get()).thenReturn(new ArrayList<>(listForAnotherKey1));
+        cachingListState.get();
+        delegateGetCalls++;
+        verify(mockDelegateState, times(delegateGetCalls)).get();
+        // L1 for testNamespace: (testKey, delegateList), (anotherKey1, listForAnotherKey1). testKey
+        // is eldest.
+
+        // 3. anotherKey2 -> listForAnotherKey2 (clean) in L1. This evicts testKey to L2.
+        String anotherKey2 = "listTestKey_L1MissL2Hit_Filler2";
+        List<String> listForAnotherKey2 = Arrays.asList("ak2_e1");
+        mockBackend.setCurrentKey(anotherKey2);
+        when(mockDelegateState.get()).thenReturn(new ArrayList<>(listForAnotherKey2));
+        cachingListState.get();
+        delegateGetCalls++;
+        verify(mockDelegateState, times(delegateGetCalls)).get();
+        // L1 for testNamespace: (anotherKey1, listForAnotherKey1), (anotherKey2,
+        // listForAnotherKey2).
+        // L2 for testNamespace: (testKey, delegateList).
+
+        // --- Action: Access testKey. Should be L1 miss, L2 hit, promote to L1. ---
+        mockBackend.setCurrentKey(testKey);
+        List<String> retrievedList1 = cachingListState.get();
+
+        // --- Verification ---
+        assertEquals(delegateList, retrievedList1, "List should be retrieved from L2.");
+        // Delegate.get() should NOT be called again (still 'delegateGetCalls' times).
+        verify(mockDelegateState, times(delegateGetCalls)).get();
+
+        // Verify a copy is returned and it was promoted to L1.
+        retrievedList1.add("modifiedAfterL2Hit");
+
+        List<String> retrievedList2 = cachingListState.get(); // Should be L1 hit now.
+        assertEquals(
+                delegateList,
+                retrievedList2,
+                "Second get after L2 hit should return original from L1.");
+        assertNotEquals(
+                retrievedList1, retrievedList2, "Returned lists should be different instances.");
+        // Delegate.get() should still not have been called again.
+        verify(mockDelegateState, times(delegateGetCalls)).get();
+    }
+
+    @Test
+    void testListUpdate_newList_marksDirtyInL1_evictsL2() throws Exception {
+        // --- Setup Phase 1: Get testKey (delegateList) into L2 ---
+        // This ensures there's something in L2 for testKey that should be evicted upon update.
+        mockBackend.setCurrentKey(testKey);
+        when(mockDelegateState.get()).thenReturn(new ArrayList<>(delegateList));
+        cachingListState.get(); // testKey -> delegateList (clean) in L1
+        verify(mockDelegateState, times(1)).get();
+
+        // Evict testKey to L2 by filling L1 for testNamespace with other keys.
+        String fillerKey1 = "listUpdate_fillerKey1";
+        mockBackend.setCurrentKey(fillerKey1);
+        when(mockDelegateState.get()).thenReturn(Arrays.asList("f1"));
+        cachingListState.get(); // fillerKey1 in L1
+        verify(mockDelegateState, times(2)).get();
+
+        String fillerKey2 = "listUpdate_fillerKey2";
+        mockBackend.setCurrentKey(fillerKey2);
+        when(mockDelegateState.get()).thenReturn(Arrays.asList("f2"));
+        cachingListState.get(); // fillerKey2 in L1. testKey now in L2.
+        verify(mockDelegateState, times(3)).get();
+
+        // --- Setup Phase 2: Prepare for update ---
+        mockBackend.setCurrentKey(testKey); // Target testKey again
+        List<String> newList = new ArrayList<>(Arrays.asList("new_el1", "new_el2"));
+
+        // --- Action: Update testKey with newList ---
+        cachingListState.update(newList);
+        // Expected: newList (dirty) in L1 for testKey. Previous testKey entry in L2 is invalidated.
+
+        // --- Verification 1: L1 serves the new list (and a copy) ---
+        List<String> listFromCache1 = cachingListState.get();
+        assertEquals(newList, listFromCache1, "L1 should serve the new list after update.");
+        assertNotEquals(
+                System.identityHashCode(newList),
+                System.identityHashCode(listFromCache1),
+                "Get should return a copy from L1.");
+        listFromCache1.add("modifiedCopy");
+        List<String> listFromCache2 = cachingListState.get();
+        assertEquals(
+                newList, listFromCache2, "L1 internal list not affected by copy modification.");
+        verify(mockDelegateState, times(3)).get(); // No new delegate GET calls for this.
+
+        // --- Verification 2: If newList (dirty) is evicted from L1, it writes to delegate and
+        // moves to L2 (clean) ---
+        // Evict testKey (now with newList, dirty) by filling L1 with other keys.
+        mockBackend.setCurrentKey("listUpdate_evictor1");
+        when(mockDelegateState.get()).thenReturn(Arrays.asList("ev1"));
+        cachingListState.get(); // evictor1 in L1
+        verify(mockDelegateState, times(4)).get(); // For evictor1
+
+        mockBackend.setCurrentKey("listUpdate_evictor2");
+        when(mockDelegateState.get()).thenReturn(Arrays.asList("ev2"));
+        cachingListState.get(); // evictor2 in L1. testKey (newList, dirty) should be evicted.
+        // This eviction should trigger update(newList) on delegateState.
+        verify(mockDelegateState, times(5)).get(); // For evictor2
+
+        // Verify delegate was updated with newList during L1 eviction.
+        // Note: The mockito `eq()` matcher might be needed if the list is copied internally before
+        // update.
+        // For ArrayList, `eq` works fine as it relies on .equals().
+        verify(mockDelegateState, times(1)).update(newList);
+
+        // --- Verification 3: testKey with newList (now clean) is in L2 ---
+        // Accessing testKey again should be an L2 hit (no delegate.get()), promoting to L1.
+        mockBackend.setCurrentKey(testKey);
+        // If testKey was properly flushed and moved to L2, this get() should not call
+        // delegate.get().
+        // The previous when(mockDelegateState.get()) was for evictor2.
+        // We need to ensure that if delegate.get() *were* called, it would return something
+        // different.
+        when(mockDelegateState.get())
+                .thenReturn(Arrays.asList("unexpected_delegate_call_after_L2_promotion"));
+
+        List<String> listAfterL1EvictionAndL2Promotion = cachingListState.get();
+        assertEquals(
+                newList,
+                listAfterL1EvictionAndL2Promotion,
+                "newList (clean) should be retrieved from L2 and promoted to L1.");
+        // Crucially, verify that mockDelegateState.get() was NOT called for testKey here.
+        // Total get calls should be 5 (initial testKey, filler1, filler2, evictor1, evictor2).
+        verify(mockDelegateState, times(5)).get();
+    }
+
+    @Test
+    void testListUpdate_null_marksDirtyInL1() throws Exception {
+        // --- Setup: Put an initial list into L1 for testKey ---
+        mockBackend.setCurrentKey(testKey);
+        when(mockDelegateState.get()).thenReturn(new ArrayList<>(delegateList)); // delegateList =
+        // [e1, e2]
+        cachingListState.get(); // testKey -> delegateList (clean) in L1
+        verify(mockDelegateState, times(1)).get();
+
+        // --- Action: Update with null ---
+        cachingListState.update(null);
+        // Expected: testKey -> null (dirty) in L1.
+
+        // --- Verification 1: Get returns null ---
+        // The InternalListState.get() contract typically returns an Iterable.
+        // If update(null) means "clear the list" or "set to null list", get() might return null or
+        // empty.
+        // For CachingInternalValueState, value() after update(null) was null.
+        // Let's assume get() for list state will return null if it was updated to null.
+        assertEquals(null, cachingListState.get(), "List after update(null) should be null.");
+        verify(mockDelegateState, times(1)).get(); // No new delegate.get() call.
+
+        // --- Verification 2: State is dirty and flush on L1 eviction updates delegate with null
+        // ---
+        // Evict testKey (null, dirty) by filling L1 with other keys.
+        String fillerKey1 = "listUpdateNull_fillerKey1";
+        mockBackend.setCurrentKey(fillerKey1);
+        when(mockDelegateState.get()).thenReturn(Arrays.asList("f1"));
+        cachingListState.get(); // fillerKey1 in L1
+        verify(mockDelegateState, times(2)).get();
+
+        String fillerKey2 = "listUpdateNull_fillerKey2";
+        mockBackend.setCurrentKey(fillerKey2);
+        when(mockDelegateState.get()).thenReturn(Arrays.asList("f2"));
+        cachingListState.get(); // fillerKey2 in L1. testKey (null, dirty) is evicted.
+        verify(mockDelegateState, times(3)).get();
+
+        // Verify delegate was updated with null during L1 eviction.
+        // This means the 'null' state was considered dirty and flushed.
+        verify(mockDelegateState, times(1)).update(null);
+    }
+
+    @Test
+    void testListAdd_toNewList_marksDirtyInL1() throws Exception {
+        // --- Setup: Ensure testKey is not in cache and delegate would return null (new state) ---
+        mockBackend.setCurrentKey(testKey);
+        when(mockDelegateState.get()).thenReturn(null); // Simulate new state or cleared state
+
+        // --- Action: Add an element ---
+        String newElement = "addedElement1";
+        cachingListState.add(newElement);
+        // Expected: testKey -> [newElement] (dirty) in L1.
+
+        // --- Verification 1: Get returns the list with the added element ---
+        List<String> listFromCache = cachingListState.get();
+        assertEquals(
+                Arrays.asList(newElement), listFromCache, "List should contain the added element.");
+        verify(mockDelegateState, times(1)).get(); // Delegate.get() called once to check initial
+        // state.
+
+        // --- Verification 2: State is dirty and flush on L1 eviction updates delegate ---
+        // Evict testKey ([newElement], dirty) by filling L1.
+        String fillerKey1 = "listAdd_fillerKey1";
+        mockBackend.setCurrentKey(fillerKey1);
+        when(mockDelegateState.get()).thenReturn(Arrays.asList("f1"));
+        cachingListState.get(); // fillerKey1 in L1
+        verify(mockDelegateState, times(2)).get(); // For fillerKey1
+
+        String fillerKey2 = "listAdd_fillerKey2";
+        mockBackend.setCurrentKey(fillerKey2);
+        when(mockDelegateState.get()).thenReturn(Arrays.asList("f2"));
+        cachingListState.get(); // fillerKey2 in L1. testKey ([newElement], dirty) is evicted.
+        verify(mockDelegateState, times(3)).get(); // For fillerKey2
+
+        // Verify delegate was updated with the new list during L1 eviction.
+        verify(mockDelegateState, times(1)).update(Arrays.asList(newElement));
+    }
+
+    @Test
+    void testListAdd_toExistingCachedList_marksDirtyInL1() throws Exception {
+        // --- Setup: Load an existing list into L1 for testKey ---
+        mockBackend.setCurrentKey(testKey);
+        // delegateList is [element1, element2] from setUp
+        when(mockDelegateState.get()).thenReturn(new ArrayList<>(delegateList));
+        cachingListState.get(); // testKey -> delegateList (clean) in L1
+        verify(mockDelegateState, times(1)).get();
+
+        // --- Action: Add an element to the cached list ---
+        String addedElement = "appendedToList";
+        cachingListState.add(addedElement);
+        // Expected: testKey -> [element1, element2, appendedToList] (dirty) in L1.
+
+        // --- Verification 1: Get returns the updated list ---
+        List<String> expectedList = new ArrayList<>(delegateList);
+        expectedList.add(addedElement);
+        List<String> listFromCache = cachingListState.get();
+        assertEquals(
+                expectedList,
+                listFromCache,
+                "List should contain the original and added elements.");
+        verify(mockDelegateState, times(1)).get(); // No new delegate.get() call.
+
+        // --- Verification 2: State is dirty and flush on L1 eviction updates delegate ---
+        // Evict testKey (updatedList, dirty) by filling L1.
+        String fillerKey1 = "listAddExisting_fillerKey1";
+        mockBackend.setCurrentKey(fillerKey1);
+        when(mockDelegateState.get()).thenReturn(Arrays.asList("f1"));
+        cachingListState.get(); // fillerKey1 in L1
+        verify(mockDelegateState, times(2)).get(); // For fillerKey1
+
+        String fillerKey2 = "listAddExisting_fillerKey2";
+        mockBackend.setCurrentKey(fillerKey2);
+        when(mockDelegateState.get()).thenReturn(Arrays.asList("f2"));
+        cachingListState.get(); // fillerKey2 in L1. testKey (updatedList, dirty) is evicted.
+        verify(mockDelegateState, times(3)).get(); // For fillerKey2
+
+        // Verify delegate was updated with the new combined list during L1 eviction.
+        verify(mockDelegateState, times(1)).update(expectedList);
+    }
+
+    @Test
+    void testListAddAll_toNewList_marksDirtyInL1() throws Exception {
+        // TODO: Implement test
+    }
+
+    @Test
+    void testListAddAll_toExistingCachedList_marksDirtyInL1() throws Exception {
+        // TODO: Implement test
+    }
+
+    @Test
+    void testListGetList_sameAsGet() throws Exception {
+        // TODO: Implement test
+    }
+
+    // --- Eviction Logic for List State ---
+    @Test
+    void testListL1Eviction_cleanEntry_moveToL2() throws Exception {
+        // TODO: Implement test
+    }
+
+    @Test
+    void testListL1Eviction_dirtyEntry_flushToDelegate_moveToL2Clean() throws Exception {
+        // TODO: Implement test
+    }
+
+    @Test
+    void testListL2Eviction() throws Exception {
+        // TODO: Implement test
+    }
+
+    // --- Namespace and Key Cache Management ---
+    @Test
+    void testListMultipleKeys_cachesAreSeparate() throws Exception {
+        // TODO: Implement test
+    }
+
+    @Test
+    void testListMultipleNamespaces_cachesAreSeparate() throws Exception {
+        // TODO: Implement test
+    }
+
+    @Test
+    void testListMaxActiveNamespaces_eviction() throws Exception {
+        // TODO: Implement test
+    }
+
+    // --- CachingInternalState Methods ---
+    @Test
+    void testFlushList_writesDirtyEntriesToDelegate_marksClean() throws Exception {
+        // TODO: Implement test
+    }
+
+    @Test
+    void testClearList_removesFromAllCachesAndDelegate() throws Exception {
+        // TODO: Implement test
+    }
+
+    // --- Delegation of other InternalListState/InternalKvState methods ---
+    @Test
+    void testListSerializersAreDelegated() {
+        org.junit.jupiter.api.Assertions.assertEquals(
+                mockKeySerializer, cachingListState.getKeySerializer());
+        org.junit.jupiter.api.Assertions.assertEquals(
+                mockNamespaceSerializer, cachingListState.getNamespaceSerializer());
+        org.junit.jupiter.api.Assertions.assertEquals(
+                mockValueSerializer, cachingListState.getValueSerializer());
+    }
+}

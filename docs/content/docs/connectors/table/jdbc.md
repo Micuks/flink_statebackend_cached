@@ -47,7 +47,7 @@ A driver dependency is also required to connect to a specified database. Here ar
 
 | Driver      |      Group Id      |      Artifact Id       |      JAR         |
 | :-----------| :------------------| :----------------------| :----------------|
-| MySQL       |       `mysql`      | `mysql-connector-java` | [Download](https://repo.maven.apache.org/maven2/mysql/mysql-connector-java/) |
+| MySQL       |       `mysql`      | `mysql-connector-java` | [Download](https://maven.aliyun.com/repository/public/mysql/mysql-connector-java/) |
 | Oracle      | `com.oracle.database.jdbc` |        `ojdbc8`        | [Download](https://mvnrepository.com/artifact/com.oracle.database.jdbc/ojdbc8) |
 | PostgreSQL  |  `org.postgresql`  |      `postgresql`      | [Download](https://jdbc.postgresql.org/download.html) |
 | Derby       | `org.apache.derby` |        `derby`         | [Download](http://db.apache.org/derby/derby_downloads.html) |

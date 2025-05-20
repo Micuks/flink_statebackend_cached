@@ -1,13 +1,25 @@
-package com.micuks.flink.cachingstate;
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more contributor license
+ * agreements. See the NOTICE file distributed with this work for additional information regarding
+ * copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance with the License. You may obtain a
+ * copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under the License
+ * is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+ * or implied. See the License for the specific language governing permissions and limitations under
+ * the License.
+ */
 
-import org.apache.flink.api.common.state.ValueStateDescriptor;
+package org.apache.flink.contrib.streaming.state;
+
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.runtime.state.internal.InternalValueState;
-import org.apache.flink.runtime.state.internal.InternalKvState;
-import org.apache.flink.runtime.state.AbstractKeyedStateBackend; // For context
-// Assuming LRUMap and CacheEntry are in the same package (default for now)
 
 import javax.annotation.Nonnull;
+
 import java.io.IOException;
 import java.util.Map;
 
@@ -19,31 +31,35 @@ import java.util.Map;
  * @param <V> The type of the value.
  */
 public class CachingInternalValueState<K, N, V>
-        implements InternalValueState<K, N, V>, CachingInternalState<K, N, V, InternalValueState<K, N, V>> {
+        implements InternalValueState<K, N, V>,
+                CachingInternalState<K, N, V, InternalValueState<K, N, V>> {
 
     private final InternalValueState<K, N, V> delegateState;
     private final CachingKeyedStateBackend<K> backend; // For accessing current key
-    private final LRUMap<N, LRUMap<K, CacheEntry<V>>> namespaceCachesL1; // Namespace -> Key -> L1 CacheEntry
-    private final LRUMap<N, LRUMap<K, CacheEntry<V>>> namespaceCachesL2; // Namespace -> Key -> L2 CacheEntry
+    private final LRUMap<N, LRUMap<K, CacheEntry<V>>> namespaceCachesL1; // Namespace -> Key -> L1
+    // CacheEntry
+    private final LRUMap<N, LRUMap<K, CacheEntry<V>>> namespaceCachesL2; // Namespace -> Key -> L2
+    // CacheEntry
 
     private final int l1CacheSizePerKeyPerNamespace;
     private final int l2CacheSizePerKeyPerNamespace;
     private final int maxActiveNamespacesInCache;
     private final long maxCacheMemoryMb;
+    private N currentNamespace;
 
     public CachingInternalValueState(
             InternalValueState<K, N, V> delegateState,
             CachingKeyedStateBackend<K> backend,
-            int l1CacheSize, 
+            int l1CacheSize,
             int l2CacheSize,
-            long maxCacheMemoryMb
-    ) {
+            int maxActiveNamespacesInCache,
+            long maxCacheMemoryMb) {
         this.delegateState = delegateState;
         this.backend = backend;
-        this.l1CacheSizePerKeyPerNamespace = l1CacheSize; 
-        this.l2CacheSizePerKeyPerNamespace = l2CacheSize; 
-        this.maxActiveNamespacesInCache = 100; // Example, make configurable
-        this.maxCacheMemoryMb = maxCacheMemoryMb; // Initialize field
+        this.l1CacheSizePerKeyPerNamespace = l1CacheSize;
+        this.l2CacheSizePerKeyPerNamespace = l2CacheSize;
+        this.maxActiveNamespacesInCache = maxActiveNamespacesInCache;
+        this.maxCacheMemoryMb = maxCacheMemoryMb;
 
         this.namespaceCachesL1 = new LRUMap<>(maxActiveNamespacesInCache);
         this.namespaceCachesL2 = new LRUMap<>(maxActiveNamespacesInCache);
@@ -56,41 +72,51 @@ public class CachingInternalValueState<K, N, V>
     }
 
     private LRUMap<K, CacheEntry<V>> getL1CacheForNamespace(N namespace) {
-        return namespaceCachesL1.computeIfAbsent(namespace, ns -> 
-            new LRUMap<>(l1CacheSizePerKeyPerNamespace, evictedL1Entry -> {
-                LRUMap<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(ns);
-                K evictedKey = evictedL1Entry.getKey();
-                CacheEntry<V> evictedValueWrapper = evictedL1Entry.getValue();
-                V evictedValue = evictedValueWrapper.getValue();
+        return namespaceCachesL1.computeIfAbsent(
+                namespace,
+                ns ->
+                        new LRUMap<>(
+                                l1CacheSizePerKeyPerNamespace,
+                                evictedL1Entry -> {
+                                    LRUMap<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(ns);
+                                    K evictedKey = evictedL1Entry.getKey();
+                                    CacheEntry<V> evictedValueWrapper = evictedL1Entry.getValue();
+                                    V evictedValue = evictedValueWrapper.getValue();
 
-                if (evictedValueWrapper.isDirty()) {
-                    try {
-                        N originalNamespace = getCurrentNamespace();
-                        K originalKey = backend.getCurrentKey();
-                        
-                        backend.setCurrentKey(evictedKey);
-                        setCurrentNamespace(ns); 
-                        delegateState.update(evictedValue);
-                        
-                        backend.setCurrentKey(originalKey); // Restore
-                        setCurrentNamespace(originalNamespace); // Restore
+                                    if (evictedValueWrapper.isDirty()) {
+                                        try {
+                                            N originalNamespace = getCurrentNamespace();
+                                            K originalKey = backend.getCurrentKey();
 
-                        l2Cache.put(evictedKey, CacheEntry.clean(evictedValue)); 
-                        evictedValueWrapper.setDirty(false); // It's now clean in L2 context
-                    } catch (IOException e) {
-                        throw new RuntimeException("Failed to flush L1 entry to delegate/L2 on eviction for key: " + evictedKey, e);
-                    }
-                } else {
-                     l2Cache.put(evictedKey, evictedValueWrapper); 
-                }
-            })
-        );
+                                            backend.setCurrentKey(evictedKey);
+                                            this.setCurrentNamespace(ns);
+                                            delegateState.update(evictedValue);
+
+                                            backend.setCurrentKey(originalKey); // Restore
+                                            this.setCurrentNamespace(originalNamespace);
+
+                                            l2Cache.put(evictedKey, CacheEntry.clean(evictedValue));
+                                            evictedValueWrapper.setDirty(
+                                                    false); // It's now clean in L2
+                                            // context
+                                        } catch (IOException e) {
+                                            throw new RuntimeException(
+                                                    "Failed to flush L1 entry to delegate/L2 on eviction for key: "
+                                                            + evictedKey,
+                                                    e);
+                                        }
+                                    } else {
+                                        l2Cache.put(evictedKey, evictedValueWrapper);
+                                    }
+                                }));
     }
 
     private LRUMap<K, CacheEntry<V>> getL2CacheForNamespace(N namespace) {
-        return namespaceCachesL2.computeIfAbsent(namespace, ns -> 
-            new LRUMap<>(l2CacheSizePerKeyPerNamespace) // L2 eviction doesn't trigger further writes here
-        );
+        return namespaceCachesL2.computeIfAbsent(
+                namespace,
+                ns -> new LRUMap<>(l2CacheSizePerKeyPerNamespace) // L2 eviction doesn't trigger
+                // further writes here
+                );
     }
 
     @Override
@@ -109,13 +135,14 @@ public class CachingInternalValueState<K, N, V>
         CacheEntry<V> l2Entry = l2Cache.get(currentKey);
 
         if (l2Entry != null) {
-            l2Cache.remove(currentKey); 
-            l1Cache.put(currentKey, l2Entry); 
+            l2Cache.remove(currentKey);
+            l1Cache.put(currentKey, l2Entry);
             return l2Entry.getValue();
         }
 
         V valueFromDelegate = delegateState.value();
-        if (valueFromDelegate != null) { // Only cache non-null, Flink state differentiates null from empty
+        if (valueFromDelegate != null) { // Only cache non-null, Flink state differentiates null
+            // from empty
             l1Cache.put(currentKey, CacheEntry.clean(valueFromDelegate));
         }
         return valueFromDelegate;
@@ -125,7 +152,7 @@ public class CachingInternalValueState<K, N, V>
     public void update(V value) throws IOException {
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
-        
+
         if (value == null) { // As per Flink ValueState contract
             clear();
             return;
@@ -133,7 +160,7 @@ public class CachingInternalValueState<K, N, V>
 
         LRUMap<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
         l1Cache.put(currentKey, CacheEntry.dirty(value));
-        
+
         // If L2 had this key, it's now stale, remove it.
         LRUMap<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
         l2Cache.remove(currentKey);
@@ -152,7 +179,7 @@ public class CachingInternalValueState<K, N, V>
 
         delegateState.clear(); // Clear the underlying state
     }
-    
+
     @Override
     public void flushToUnderlyingState() throws IOException {
         N originalNamespace = getCurrentNamespace();
@@ -162,23 +189,29 @@ public class CachingInternalValueState<K, N, V>
         for (Map.Entry<N, LRUMap<K, CacheEntry<V>>> nsEntry : namespaceCachesL1.entrySet()) {
             N namespace = nsEntry.getKey();
             LRUMap<K, CacheEntry<V>> l1Cache = nsEntry.getValue();
-            setCurrentNamespace(namespace); 
+            setCurrentNamespace(namespace);
 
-            // Iterate over a copy of keys to avoid ConcurrentModificationException if map is modified by L1 eviction
-            for (K key : new java.util.ArrayList<>(l1Cache.keySet())) { 
-                CacheEntry<V> entry = l1Cache.get(key); // Re-fetch, as it might have been evicted then re-added
+            // Iterate over a copy of keys to avoid ConcurrentModificationException if map is
+            // modified by L1 eviction
+            for (K key : new java.util.ArrayList<>(l1Cache.keySet())) {
+                CacheEntry<V> entry = l1Cache.get(key); // Re-fetch, as it might have been evicted
+                // then re-added
                 if (entry != null && entry.isDirty()) {
                     V value = entry.getValue();
-                    backend.setCurrentKey(key); 
-                    delegateState.update(value); 
-                    entry.setDirty(false); 
-                    // After successful flush, entry in L1 is clean. L2 is write-through on L1 eviction.
+                    backend.setCurrentKey(key);
+                    delegateState.update(value);
+                    entry.setDirty(false);
+                    // After successful flush, entry in L1 is clean. L2 is write-through on L1
+                    // eviction.
                 }
             }
         }
         setCurrentNamespace(originalNamespace);
-        if(keyWasSet) backend.setCurrentKey(originalKey);
-        else backend.setCurrentKey(null); // Or whatever Flink expects for un-setting a key
+        if (keyWasSet) {
+            backend.setCurrentKey(originalKey);
+        } else {
+            backend.setCurrentKey(null); // Or whatever Flink expects for un-setting a key
+        }
     }
 
     @Override
@@ -199,6 +232,7 @@ public class CachingInternalValueState<K, N, V>
     @Override
     public void setCurrentNamespace(@Nonnull N namespace) {
         // Set for the delegate, the cache keying already uses the namespace.
+        this.currentNamespace = namespace;
         delegateState.setCurrentNamespace(namespace);
     }
 
@@ -207,18 +241,23 @@ public class CachingInternalValueState<K, N, V>
             byte[] serializedKeyAndNamespace,
             TypeSerializer<K> safeKeySerializer,
             TypeSerializer<N> safeNamespaceSerializer,
-            TypeSerializer<V> safeValueSerializer) throws Exception {
-        return delegateState.getSerializedValue(serializedKeyAndNamespace, safeKeySerializer, safeNamespaceSerializer, safeValueSerializer);
+            TypeSerializer<V> safeValueSerializer)
+            throws Exception {
+        return delegateState.getSerializedValue(
+                serializedKeyAndNamespace,
+                safeKeySerializer,
+                safeNamespaceSerializer,
+                safeValueSerializer);
     }
 
     @Override
-    public StateIncrementalVisitor<K, N, V> getStateIncrementalVisitor(int recommendedMaxNumberOfReturnedRecords) {
+    public StateIncrementalVisitor<K, N, V> getStateIncrementalVisitor(
+            int recommendedMaxNumberOfReturnedRecords) {
         return delegateState.getStateIncrementalVisitor(recommendedMaxNumberOfReturnedRecords);
     }
 
-    @Override
     @Nonnull
     public N getCurrentNamespace() {
-        return delegateState.getCurrentNamespace();
+        return this.currentNamespace;
     }
-} 
+}

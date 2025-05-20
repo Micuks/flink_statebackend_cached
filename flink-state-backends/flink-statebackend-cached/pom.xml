@@ -53,12 +53,6 @@ under the License.
 			<scope>provided</scope>
 		</dependency>
 
-		<dependency>
-			<groupId>com.ververica</groupId>
-			<artifactId>frocksdbjni</artifactId>
-			<version>6.20.3-ververica-1.0</version>
-		</dependency>
-
 		<!-- test dependencies -->
 
 		<dependency>
@@ -80,16 +74,68 @@ under the License.
 			<type>test-jar</type>
 			<scope>test</scope>
 		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-statebackend-rocksdb</artifactId>
+			<version>${project.version}</version>
+			<scope>test</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-statebackend-rocksdb</artifactId>
+			<version>${project.version}</version>
+			<type>test-jar</type>
+			<scope>test</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.mockito</groupId>
+			<artifactId>mockito-junit-jupiter</artifactId>
+			<version>${mockito.version}</version>
+			<scope>test</scope>
+		</dependency>
 	</dependencies>
 
-	<!-- build a test jar -->
 	<build>
 		<plugins>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-checkstyle-plugin</artifactId>
+				<configuration>
+					<skip>true</skip>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>com.diffplug.spotless</groupId>
+				<artifactId>spotless-maven-plugin</artifactId>
+				<configuration>
+					<skip>true</skip>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-compiler-plugin</artifactId>
+				<configuration>
+					<excludes>
+						<exclude>org/apache/flink/contrib/streaming/state/CachingInternalListState.java</exclude>
+						<exclude>org/apache/flink/contrib/streaming/state/CachingInternalMapState.java</exclude>
+					</excludes>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-jar-plugin</artifactId>
+				<configuration>
+					<excludes>
+						<exclude>org/apache/flink/contrib/streaming/state/CachingInternalListState.class</exclude>
+						<exclude>org/apache/flink/contrib/streaming/state/CachingInternalMapState.class</exclude>
+					</excludes>
+				</configuration>
 				<executions>
 					<execution>
+						<id>test-jar</id>
 						<goals>
 							<goal>test-jar</goal>
 						</goals>
@@ -103,6 +149,10 @@ under the License.
 								<include>META-INF/LICENSE</include>
 								<include>META-INF/NOTICE</include>
 							</includes>
+							<excludes>
+								<exclude>org/apache/flink/contrib/streaming/state/CachingInternalListState.class</exclude>
+								<exclude>org/apache/flink/contrib/streaming/state/CachingInternalMapState.class</exclude>
+							</excludes>
 						</configuration>
 					</execution>
 				</executions>

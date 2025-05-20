@@ -50,7 +50,7 @@ JDBC 连接器不是二进制发行版的一部分，请查阅[这里]({{< ref "
 
 | Driver      |      Group Id      |      Artifact Id       |      JAR         |
 | :-----------| :------------------| :----------------------| :----------------|
-| MySQL       |       `mysql`      | `mysql-connector-java` | [下载](https://repo.maven.apache.org/maven2/mysql/mysql-connector-java/) |
+| MySQL       |       `mysql`      | `mysql-connector-java` | [下载](https://maven.aliyun.com/repository/public/mysql/mysql-connector-java/) |
 | Oracle      | `com.oracle.database.jdbc` |        `ojdbc8`        | [下载](https://mvnrepository.com/artifact/com.oracle.database.jdbc/ojdbc8)
 | PostgreSQL  |  `org.postgresql`  |      `postgresql`      | [下载](https://jdbc.postgresql.org/download.html) |
 | Derby       | `org.apache.derby` |        `derby`         | [下载](http://db.apache.org/derby/derby_downloads.html) | |

@@ -1,43 +1,77 @@
-package com.micuks.flink.cachingstate;
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more contributor license
+ * agreements. See the NOTICE file distributed with this work for additional information regarding
+ * copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance with the License. You may obtain a
+ * copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under the License
+ * is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+ * or implied. See the License for the specific language governing permissions and limitations under
+ * the License.
+ */
+
+package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.configuration.IllegalConfigurationException;
+import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.AbstractStateBackend;
+import org.apache.flink.runtime.state.CheckpointStorage;
 import org.apache.flink.runtime.state.CheckpointStorageAccess;
 import org.apache.flink.runtime.state.CompletedCheckpointStorageLocation;
+import org.apache.flink.runtime.state.ConfigurableStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.OperatorStateBackend;
 import org.apache.flink.runtime.state.OperatorStateHandle;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
-import org.apache.flink.contrib.streaming.state.RocksDBStateBackend; // Delegate
 
 import javax.annotation.Nonnull;
+
 import java.io.IOException;
 import java.util.Collection;
 
 /**
- * A state backend that wraps another state backend (e.g., RocksDBStateBackend)
- * to provide an L1/L2 caching layer for deserialized objects.
+ * A state backend that wraps another state backend (e.g., RocksDBStateBackend) to provide an L1/L2
+ * caching layer for deserialized objects.
  */
-public class CachingStateBackend extends AbstractStateBackend {
+public class CachingStateBackend extends AbstractStateBackend
+        implements ConfigurableStateBackend, CheckpointStorage {
 
-    private final StateBackend delegateBackend; // This will be RocksDBStateBackend
+    private static final long serialVersionUID = 1L;
+
+    private final StateBackend delegateBackend;
     private final long l1CacheSize;
     private final long l2CacheSize;
+    private final long maxActiveNamespaces;
     private final long maxCacheMemoryMb;
 
-    public CachingStateBackend(StateBackend delegateBackend, long l1CacheSize, long l2CacheSize, long maxCacheMemoryMb) {
+    public CachingStateBackend(
+            StateBackend delegateBackend,
+            long l1CacheSize,
+            long l2CacheSize,
+            long maxActiveNamespaces,
+            long maxCacheMemoryMb) {
         this.delegateBackend = delegateBackend;
         this.l1CacheSize = l1CacheSize;
         this.l2CacheSize = l2CacheSize;
+        this.maxActiveNamespaces = maxActiveNamespaces;
         this.maxCacheMemoryMb = maxCacheMemoryMb;
+
+        if (!(delegateBackend instanceof AbstractStateBackend)) {
+            System.err.println(
+                    "Warning: CachingStateBackend delegate is not an AbstractStateBackend. Some features like checkpoint resolution might fail if not overridden by the specific StateBackend implementation.");
+        }
     }
 
     @Override
@@ -55,27 +89,40 @@ public class CachingStateBackend extends AbstractStateBackend {
             CloseableRegistry cancelStreamRegistry)
             throws IOException {
 
-        // Create the delegate keyed state backend
-        AbstractKeyedStateBackend<K> delegateKeyedStateBackend = 
-            (AbstractKeyedStateBackend<K>) delegateBackend.createKeyedStateBackend(
-                env, jobID, operatorIdentifier, keySerializer, numberOfKeyGroups,
-                keyGroupRange, kvStateRegistry, ttlTimeProvider, metricGroup, 
-                stateHandles, cancelStreamRegistry);
+        AbstractKeyedStateBackend<K> delegateKeyedStateBackend;
+        try {
+            delegateKeyedStateBackend =
+                    (AbstractKeyedStateBackend<K>)
+                            delegateBackend.createKeyedStateBackend(
+                                    env,
+                                    jobID,
+                                    operatorIdentifier,
+                                    keySerializer,
+                                    numberOfKeyGroups,
+                                    keyGroupRange,
+                                    kvStateRegistry,
+                                    ttlTimeProvider,
+                                    metricGroup,
+                                    stateHandles,
+                                    cancelStreamRegistry);
+        } catch (Exception e) {
+            throw new IOException("Failed to create delegate keyed state backend", e);
+        }
 
-        return new CachingKeyedStateBackend<>(
-                kvStateRegistry,                             // 1. TaskKvStateRegistry
-                keySerializer,                               // 2. TypeSerializer<K>
-                env.getUserCodeClassLoader().asClassLoader(),// 3. ClassLoader
-                env.getExecutionConfig(),                    // 4. ExecutionConfig
-                ttlTimeProvider,                             // 5. TtlTimeProvider
-                metricGroup,                                 // 6. MetricGroup
-                stateHandles,                                // 7. Collection<KeyedStateHandle>
-                cancelStreamRegistry,                        // 8. CloseableRegistry
-                delegateKeyedStateBackend,                   // 9. AbstractKeyedStateBackend<K>
-                l1CacheSize,                                 // 10. long
-                l2CacheSize,                                 // 11. long
-                maxCacheMemoryMb                             // 12. long
-        );
+        return new CachingKeyedStateBackend<K>(
+                kvStateRegistry,
+                keySerializer,
+                env.getUserCodeClassLoader().asClassLoader(),
+                env.getExecutionConfig(),
+                ttlTimeProvider,
+                metricGroup,
+                stateHandles,
+                cancelStreamRegistry,
+                delegateKeyedStateBackend,
+                (int) l1CacheSize,
+                (int) l2CacheSize,
+                (int) maxActiveNamespaces,
+                this.maxCacheMemoryMb);
     }
 
     @Override
@@ -85,12 +132,9 @@ public class CachingStateBackend extends AbstractStateBackend {
             @Nonnull Collection<OperatorStateHandle> stateHandles,
             CloseableRegistry cancelStreamRegistry)
             throws Exception {
-        // Operator state is not cached in this example, pass directly to delegate
-        return delegateBackend.createOperatorStateBackend(env, operatorIdentifier, stateHandles, cancelStreamRegistry);
+        return delegateBackend.createOperatorStateBackend(
+                env, operatorIdentifier, stateHandles, cancelStreamRegistry);
     }
-
-    // Delegate other methods if AbstractStateBackend doesn't cover them or if specific logic is needed.
-    // For example, checkpointing-related methods.
 
     @Override
     public boolean useManagedMemory() {
@@ -98,14 +142,34 @@ public class CachingStateBackend extends AbstractStateBackend {
     }
 
     @Override
-    public CompletedCheckpointStorageLocation resolveCheckpoint(String externalPointer) throws IOException {
-        // StateBackend interface declares this, so direct delegation is correct.
-        return delegateBackend.resolveCheckpoint(externalPointer);
+    public CompletedCheckpointStorageLocation resolveCheckpoint(String externalPointer)
+            throws IOException {
+        if (delegateBackend instanceof CheckpointStorage) {
+            return ((CheckpointStorage) delegateBackend).resolveCheckpoint(externalPointer);
+        } else {
+            throw new UnsupportedOperationException(
+                    "Delegate backend of type "
+                            + delegateBackend.getClass().getName()
+                            + " does not support resolveCheckpoint directly and is not an instance of AbstractStateBackend that formerly provided this.");
+        }
     }
 
     @Override
-    public CheckpointStorageAccess createCheckpointStorage(@Nonnull JobID jobId) throws IOException {
-        // StateBackend interface declares this, so direct delegation is correct.
-        return delegateBackend.createCheckpointStorage(jobId);
+    public CheckpointStorageAccess createCheckpointStorage(@Nonnull JobID jobId)
+            throws IOException {
+        if (delegateBackend instanceof CheckpointStorage) {
+            return ((CheckpointStorage) delegateBackend).createCheckpointStorage(jobId);
+        } else {
+            throw new UnsupportedOperationException(
+                    "Delegate backend of type "
+                            + delegateBackend.getClass().getName()
+                            + " does not support createCheckpointStorage directly and is not an instance of AbstractStateBackend that formerly provided this.");
+        }
     }
-} 
+
+    @Override
+    public StateBackend configure(ReadableConfig config, ClassLoader classLoader)
+            throws IllegalConfigurationException {
+        return this;
+    }
+}
