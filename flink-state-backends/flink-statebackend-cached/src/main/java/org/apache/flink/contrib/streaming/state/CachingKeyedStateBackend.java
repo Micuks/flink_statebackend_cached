@@ -104,6 +104,10 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.registeredStates = new ArrayList<>();
     }
 
+    public int getMaxActiveNamespaceOrPerKeyCacheContainers() {
+        return maxActiveNamespaceOrPerKeyCacheContainers;
+    }
+
     @Nonnull
     @Override
     @SuppressWarnings({
@@ -147,46 +151,41 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             InternalMapState<K, N, Object, Object> actualState =
                     (InternalMapState<K, N, Object, Object>) actualStateRaw;
 
-            // CachingInternalMapState<K, N, Object, Object> cachingMapState =
-            //         new CachingInternalMapState<>(
-            //                 actualState,
-            //                 this,
-            //                 l1EntryCacheSize,
-            //                 l2EntryCacheSize,
-            //                 maxActiveNamespaceOrPerKeyCacheContainers,
-            //                 this.maxCacheMemoryMb);
-            // synchronized (registeredStates) {
-            //     boolean alreadyExists =
-            //             registeredStates.stream()
-            //                     .anyMatch(st -> st.getDelegateState() == actualState);
-            //     if (!alreadyExists) {
-            //         registeredStates.add(cachingMapState);
-            //     }
-            // }
-            // return (S) cachingMapState;
+            CachingInternalMapState<K, N, Object, Object> cachingMapState =
+                    new CachingInternalMapState<>(actualState, this, l1EntryCacheSize,
+                            l2EntryCacheSize, maxActiveNamespaceOrPerKeyCacheContainers,
+                            this.maxCacheMemoryMb);
+            synchronized (registeredStates) {
+                boolean alreadyExists = registeredStates.stream()
+                        .anyMatch(st -> st.getDelegateState() == actualState);
+                if (!alreadyExists) {
+                    registeredStates.add(cachingMapState);
+                }
+            }
+            return (S) cachingMapState;
         } else if (stateDescriptor.getType() == StateDescriptor.Type.LIST
                 && actualStateRaw instanceof InternalListState) {
             // For ListStateDescriptor<V_ELE>, V_SD is List<V_ELE>.
             InternalListState<K, N, Object> actualState =
                     (InternalListState<K, N, Object>) actualStateRaw;
 
-            // CachingInternalListState<K, N, Object> cachingListState =
-            //         new CachingInternalListState<>(
-            //                 actualState,
-            //                 this,
-            //                 l1EntryCacheSize,
-            //                 l2EntryCacheSize,
-            //                 maxActiveNamespaceOrPerKeyCacheContainers,
-            //                 this.maxCacheMemoryMb);
-            // synchronized (registeredStates) {
-            //     boolean alreadyExists =
-            //             registeredStates.stream()
-            //                     .anyMatch(st -> st.getDelegateState() == actualState);
-            //     if (!alreadyExists) {
-            //         registeredStates.add(cachingListState);
-            //     }
-            // }
-            // return (S) cachingListState;
+            CachingInternalListState<K, N, Object> cachingListState =
+                    new CachingInternalListState<>(actualState, this, l1EntryCacheSize, // Max
+                                                                                        // K->List
+                                                                                        // entries
+                                                                                        // in L1 per
+                                                                                        // Namespace
+                            l2EntryCacheSize, // Max K->List entries in L2 per Namespace
+                            maxActiveNamespaceOrPerKeyCacheContainers); // Max Namespaces for L1/L2
+                                                                        // of N->(K->List)
+            synchronized (registeredStates) {
+                boolean alreadyExists = registeredStates.stream()
+                        .anyMatch(st -> st.getDelegateState() == actualState);
+                if (!alreadyExists) {
+                    registeredStates.add(cachingListState);
+                }
+            }
+            return (S) cachingListState;
         }
         return (S) actualStateRaw;
     }

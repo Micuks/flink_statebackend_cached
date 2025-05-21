@@ -152,7 +152,8 @@ class CachingStateBackendTest {
     @Test
     void testResolveCheckpointDelegation() throws IOException {
         StateBackend mockDelegate =
-                mock(StateBackend.class, withSettings().extraInterfaces(CheckpointStorage.class));
+                mock(AbstractStateBackend.class,
+                        withSettings().extraInterfaces(CheckpointStorage.class));
         CompletedCheckpointStorageLocation mockLocation =
                 mock(CompletedCheckpointStorageLocation.class);
         String pointer = "testPointer";
@@ -171,7 +172,8 @@ class CachingStateBackendTest {
     @Test
     void testCreateCheckpointStorageDelegation() throws IOException {
         StateBackend mockDelegate =
-                mock(StateBackend.class, withSettings().extraInterfaces(CheckpointStorage.class));
+                mock(AbstractStateBackend.class,
+                        withSettings().extraInterfaces(CheckpointStorage.class));
         CheckpointStorageAccess mockStorageAccess = mock(CheckpointStorageAccess.class);
         JobID jobID = new JobID();
 

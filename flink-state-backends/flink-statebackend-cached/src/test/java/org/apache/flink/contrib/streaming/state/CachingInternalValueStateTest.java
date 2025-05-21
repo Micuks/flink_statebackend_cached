@@ -364,7 +364,8 @@ class CachingInternalValueStateTest {
         when(mockBackend.getCurrentKey()).thenReturn(testKey);
         // Configure delegate.value() to return something different to ensure L2 hit
         // is not accidentally a delegate passthrough after a failed L2 population.
-        when(mockDelegateState.value()).thenReturn("unexpectedValueFromDelegate");
+        // This stubbing is intentionally not expected to be called if L2 hit works.
+        lenient().when(mockDelegateState.value()).thenReturn("unexpectedValueFromDelegate");
 
         String retrievedValue = cachingState.value();
         assertEquals(
