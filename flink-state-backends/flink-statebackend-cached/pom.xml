@@ -116,22 +116,10 @@ under the License.
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-compiler-plugin</artifactId>
-				<configuration>
-					<excludes>
-						<exclude>org/apache/flink/contrib/streaming/state/CachingInternalListState.java</exclude>
-						<exclude>org/apache/flink/contrib/streaming/state/CachingInternalMapState.java</exclude>
-					</excludes>
-				</configuration>
 			</plugin>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-jar-plugin</artifactId>
-				<configuration>
-					<excludes>
-						<exclude>org/apache/flink/contrib/streaming/state/CachingInternalListState.class</exclude>
-						<exclude>org/apache/flink/contrib/streaming/state/CachingInternalMapState.class</exclude>
-					</excludes>
-				</configuration>
 				<executions>
 					<execution>
 						<id>test-jar</id>
@@ -148,10 +136,6 @@ under the License.
 								<include>META-INF/LICENSE</include>
 								<include>META-INF/NOTICE</include>
 							</includes>
-							<excludes>
-								<exclude>org/apache/flink/contrib/streaming/state/CachingInternalListState.class</exclude>
-								<exclude>org/apache/flink/contrib/streaming/state/CachingInternalMapState.class</exclude>
-							</excludes>
 						</configuration>
 					</execution>
 				</executions>
