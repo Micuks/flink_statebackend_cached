@@ -23,6 +23,8 @@ import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.contrib.streaming.state.snapshot.RocksDBSnapshotStrategyBase;
+import org.apache.flink.contrib.streaming.state.ttl.RocksDbTtlCompactFiltersManager;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
@@ -61,7 +63,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     private static final long serialVersionUID = 1L;
 
-    private final AbstractKeyedStateBackend<K> delegateKeyedStateBackend;
+    private final AbstractKeyedStateBackend<K> delegateKeyedStateBackend; // RocksDBKeyedStateBackend
     private final int l1EntryCacheSize;
     private final int l2EntryCacheSize;
     private final int maxActiveNamespaceOrPerKeyCacheContainers;
@@ -102,6 +104,73 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.maxActiveNamespaceOrPerKeyCacheContainers = maxActiveNamespaceOrPerKeyCacheContainers;
         this.maxCacheMemoryMb = maxCacheMemoryMb;
         this.registeredStates = new ArrayList<>();
+    }
+
+    // create a new RocksDB backend
+    public CachingKeyedStateBackend(
+            ClassLoader userCodeClassLoader,
+            File instanceBasePath,
+            RocksDBResourceContainer optionsContainer,
+            Function<String, ColumnFamilyOptions> columnFamilyOptionsFactory,
+            TaskKvStateRegistry kvStateRegistry,
+            TypeSerializer<K> keySerializer,
+            ExecutionConfig executionConfig,
+            TtlTimeProvider ttlTimeProvider,
+            LatencyTrackingStateConfig latencyTrackingStateConfig,
+            RocksDB db,
+            LinkedHashMap<String, RocksDBKeyedStateBackend.RocksDbKvStateInfo> kvStateInformation,
+            Map<String, HeapPriorityQueueSnapshotRestoreWrapper<?>> registeredPQStates,
+            int keyGroupPrefixBytes,
+            CloseableRegistry cancelStreamRegistry,
+            StreamCompressionDecorator keyGroupCompressionDecorator,
+            ResourceGuard rocksDBResourceGuard,
+            RocksDBSnapshotStrategyBase<K, ?> checkpointSnapshotStrategy,
+            RocksDBWriteBatchWrapper writeBatchWrapper,
+            ColumnFamilyHandle defaultColumnFamilyHandle,
+            RocksDBNativeMetricMonitor nativeMetricMonitor,
+            SerializedCompositeKeyBuilder<K> sharedRocksKeyBuilder,
+            PriorityQueueSetFactory priorityQueueFactory,
+            RocksDbTtlCompactFiltersManager ttlCompactFiltersManager,
+            InternalKeyContext<K> keyContext,
+            @Nonnegative long writeBatchSize,
+            MetricGroup metricGroup,
+            @Nonnull Collection<KeyedStateHandle> stateHandles,
+            int l1EntryCacheSize,
+            int l2EntryCacheSize,
+            int maxActiveNamespaceOrPerKeyCacheContainers,
+            long maxCacheMemoryMb
+    ){
+        this.delegateKeyedStateBackend = new RocksDBStateBackend(userCodeClassLoader,
+                instanceBasePath,
+                optionsContainer,
+                columnFamilyOptionsFactory,
+                kvStateRegistry,
+                keySerializer,
+                executionConfig,
+                ttlTimeProvider,
+                latencyTrackingStateConfig,
+                db,
+                kvStateInformation,
+                registeredPQStates,
+                keyGroupPrefixBytes,
+                cancelStreamRegistry,
+                keyGroupCompressionDecorator,
+                rocksDBResourceGuard,
+                checkpointSnapshotStrategy,
+                writeBatchWrapper,
+                defaultColumnFamilyHandle,
+                nativeMetricMonitor,
+                sharedRocksKeyBuilder,
+                priorityQueueFactory,
+                ttlCompactFiltersManager,
+                keyContext,
+                writeBatchSize);
+        this.l1EntryCacheSize = l1EntryCacheSize;
+        this.l2EntryCacheSize = l2EntryCacheSize;
+        this.maxActiveNamespaceOrPerKeyCacheContainers = maxActiveNamespaceOrPerKeyCacheContainers;
+        this.maxCacheMemoryMb = maxCacheMemoryMb;
+        this.registeredStates = new ArrayList<>();
+
     }
 
     public int getMaxActiveNamespaceOrPerKeyCacheContainers() {
@@ -224,11 +293,44 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @Nonnull
     @Override
+    public <N, SV, SEV, S extends State, IS extends S> IS createOrUpdateInternalState(
+            @Nonnull TypeSerializer<N> namespaceSerializer,
+            @Nonnull StateDescriptor<S, SV> stateDesc,
+            @Nonnull
+            StateSnapshotTransformer.StateSnapshotTransformFactory<SEV>
+                    snapshotTransformFactory,
+            boolean allowFutureMetadataUpdates)
+            throws Exception {
+        return delegateKeyedStateBackend.createOrUpdateInternalState(
+                namespaceSerializer, stateDesc, snapshotTransformFactory, allowFutureMetadataUpdates);
+    }
+
+    private <N, SV, S extends State, IS extends S> IS createState(
+            StateDescriptor<S, SV> stateDesc,
+            Tuple2<ColumnFamilyHandle, RegisteredKeyValueStateBackendMetaInfo<N, SV>>
+                    registerResult)
+            throws Exception {
+        return delegateKeyedStateBackend.createState(stateDesc, registerResult);
+    }
+
+
+    @Nonnull
+    @Override
     public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
             KeyGroupedInternalPriorityQueue<T> create(
                     @Nonnull String stateName,
                     @Nonnull TypeSerializer<T> byteOrderedElementSerializer) {
         return delegateKeyedStateBackend.create(stateName, byteOrderedElementSerializer);
+    }
+
+    @Nonnull
+    @Override
+    public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
+    KeyGroupedInternalPriorityQueue<T> create(
+            @Nonnull String stateName,
+            @Nonnull TypeSerializer<T> byteOrderedElementSerializer,
+            boolean allowFutureMetadataUpdates) {
+        return delegateKeyedStateBackend.create(stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
     }
 
     @Override
@@ -267,6 +369,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         delegateKeyedStateBackend.notifyCheckpointAborted(checkpointId);
     }
 
+    @SuppressWarnings("unchecked")
     @Override
     public <N> Stream<K> getKeys(String state, N namespace) {
         return delegateKeyedStateBackend.getKeys(state, namespace);
@@ -276,6 +379,29 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     public <N> Stream<Tuple2<K, N>> getKeysAndNamespaces(String stateName) {
         return delegateKeyedStateBackend.getKeysAndNamespaces(stateName);
     }
+
+    @VisibleForTesting
+    ColumnFamilyHandle getColumnFamilyHandle(String state) {
+        return delegateKeyedStateBackend.getColumnFamilyHandle(state);
+    }
+
+    public int getKeyGroupPrefixBytes(){return delegateKeyedStateBackend.getKeyGroupPrefixBytes(); }
+
+    @VisibleForTesting
+    PriorityQueueSetFactory getPriorityQueueFactory(){return delegateKeyedStateBackend.getPriorityQueueFactory(); }
+
+    public WriteOptions getWriteOptions(){ return delegateKeyedStateBackend.getWriteOptions(); }
+
+    public ReadOptions getReadOptions(){ return delegateKeyedStateBackend.getReadOptions(); }
+
+    SerializedCompositeKeyBuilder<K> getSharedRocksKeyBuilder(){return delegateKeyedStateBackend.getSharedRocksKeyBuilder(); }
+
+    @VisibleForTesting
+    boolean isDisposed(){
+        return delegateKeyedStateBackend.isDisposed();
+    }
+
+
 
     @Override
     public void registerKeySelectionListener(KeySelectionListener<K> listener) {
@@ -310,4 +436,36 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     public int numKeyValueStateEntries() {
         return delegateKeyedStateBackend.numKeyValueStateEntries();
     }
+
+    @Override
+    public boolean requiresLegacySynchronousTimerSnapshots(SnapshotType checkpointType) {
+        return delegateKeyedStateBackend.requiresLegacySynchronousTimerSnapshots(checkpointType);
+    }
+
+    @Override
+    public boolean isSafeToReuseKVState(){
+        return true;
+    }
+
+    @VisibleForTesting
+    public void compactState(StateDescriptor<?, ?> stateDesc) throws RocksDBException {
+        // 注意下这个函数，没有返回值是在做什么？
+        delegateKeyedStateBackend.compactState(stateDesc);
+    }
+
+    public static class CachingKvStateInfo extends RocksDBKeyedStateBackend.RocksDbKvStateInfo{
+        // RocksDB这里有一个静态类RocksDbKvStateInfo放信息，我直接继承了不知道行不行
+        public CachingKvStateInfo(
+                ColumnFamilyHandle columnFamilyHandle,
+                RegisteredStateMetaInfoBase metaInfo) {
+                super(columnFamilyHandle, metaInfo);
+        }
+    }
+
+    @Nonnegative
+    long getWriteBatchSize() {
+        return delegateKeyedStateBackend.getWriteBatchSize();
+    }
+
+
 }
