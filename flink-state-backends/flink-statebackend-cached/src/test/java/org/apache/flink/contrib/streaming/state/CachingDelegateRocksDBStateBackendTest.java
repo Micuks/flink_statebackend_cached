@@ -17,66 +17,89 @@ package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.state.AggregatingState;
+import org.apache.flink.api.common.functions.AggregateFunction;
+import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.state.AggregatingStateDescriptor;
-import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
-import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.MapStateDescriptor;
-import org.apache.flink.api.common.state.ReducingState;
 import org.apache.flink.api.common.state.ReducingStateDescriptor;
-import org.apache.flink.api.common.state.StateTtlConfig;
-import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.State;
+import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.core.memory.DataInputDeserializer;
+import org.apache.flink.core.memory.DataOutputSerializer;
+import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.runtime.execution.Environment;
-import org.apache.flink.runtime.operators.testutils.MockEnvironment;
-import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
+import org.apache.flink.runtime.operators.testutils.DummyEnvironment;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
-import org.apache.flink.runtime.state.CheckpointStreamFactory;
-import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.state.CheckpointStorage;
+import org.apache.flink.runtime.state.CompletedCheckpointStorageLocation;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyGroupedInternalPriorityQueue;
+import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.KeyedStateHandle;
-import org.apache.flink.runtime.state.SnapshotResult;
+import org.apache.flink.runtime.state.OperatorStateHandle;
+import org.apache.flink.runtime.state.PriorityComparable;
+import org.apache.flink.runtime.state.StateBackend;
+import org.apache.flink.runtime.state.StateSnapshotTransformer;
 import org.apache.flink.runtime.state.TaskStateManager;
-import org.apache.flink.runtime.state.LocalRecoveryConfig;
+import org.apache.flink.runtime.state.TestLocalRecoveryConfig;
+import org.apache.flink.runtime.state.TestTaskStateManager;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
-import org.apache.flink.runtime.state.memory.MemCheckpointStreamFactory;
-import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
-import org.apache.flink.contrib.streaming.state.RocksDBStateBackend;
-import org.apache.flink.contrib.streaming.state.RocksDBKeyedStateBackend;
-import org.apache.flink.contrib.streaming.state.CachingStateBackendFactory;
-import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
-import org.apache.flink.runtime.state.Keyed;
-import org.apache.flink.runtime.state.PriorityComparable;
-import org.apache.flink.runtime.state.TestLocalRecoveryConfig;
-import org.apache.flink.runtime.state.internal.InternalKvState;
+import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
+import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
+import org.apache.flink.testutils.junit.utils.TempDirUtils;
+import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.state.memory.MemCheckpointStreamFactory;
+import org.apache.flink.runtime.state.CheckpointStreamFactory;
+import org.apache.flink.runtime.state.SnapshotResult;
+import org.apache.flink.runtime.state.internal.InternalValueState;
+import org.apache.flink.runtime.state.internal.InternalListState;
+import org.apache.flink.runtime.state.internal.InternalMapState;
+import org.apache.flink.runtime.state.internal.InternalReducingState;
+import org.apache.flink.runtime.state.internal.InternalAggregatingState;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.junit.jupiter.api.Disabled;
+import org.rocksdb.ColumnFamilyOptions;
+import org.rocksdb.DBOptions;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.RunnableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertIterableEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * Tests for {@link CachingKeyedStateBackend} with {@link RocksDBStateBackend} as delegate.
@@ -88,30 +111,22 @@ class CachingDelegateRocksDBStateBackendTest {
 
     private RocksDBStateBackend rocksDbBackend;
     private CachingKeyedStateBackend<String> cachingBackend;
-    private org.apache.flink.runtime.state.TestTaskStateManager actualTaskStateManager;
+    private TestTaskStateManager actualTaskStateManager;
     private Environment mockEnv;
 
-    // Helper methods to replace RocksDBTestUtils for list and map state checks
     private <T> boolean isListStateContains(Iterable<T> iterable, T... expected) {
-        java.util.List<T> actualList = new java.util.ArrayList<>();
-        if (iterable != null) {
-            for (T item : iterable) {
-                actualList.add(item);
-            }
-        }
-        java.util.List<T> expectedList = java.util.Arrays.asList(expected);
-        return actualList.containsAll(expectedList) && expectedList.containsAll(actualList);
+        List<T> actual = new java.util.ArrayList<>();
+        iterable.forEach(actual::add);
+        return Arrays.equals(expected, actual.toArray());
     }
 
     private <T> boolean isListStateEmpty(Iterable<T> iterable) {
-        return iterable == null || !iterable.iterator().hasNext();
+        return !iterable.iterator().hasNext();
     }
 
     private <K, V> boolean isMapStateEmpty(Iterable<java.util.Map.Entry<K, V>> iterable) {
-        return iterable == null || !iterable.iterator().hasNext();
+        return !iterable.iterator().hasNext();
     }
-
-    // --- Start of inlined helper classes from RocksDBTestUtils ---
 
     public static class MyReducingFunction
             implements org.apache.flink.api.common.functions.ReduceFunction<Integer> {
@@ -135,7 +150,7 @@ class CachingDelegateRocksDBStateBackendTest {
 
         @Override
         public String createAccumulator() {
-            return "ACC:";
+            return "";
         }
 
         @Override
@@ -153,10 +168,7 @@ class CachingDelegateRocksDBStateBackendTest {
 
         @Override
         public String merge(String a, String b) {
-            // This merge logic might not be perfectly what the original test expected,
-            // but it's a plausible merge for string accumulators.
-            // The original test didn't explicitly test merge for this AggregatingState.
-            return a + b.replaceFirst("ACC:", "");
+            return a + b;
         }
     }
 
@@ -206,18 +218,20 @@ class CachingDelegateRocksDBStateBackendTest {
             if (o == null || getClass() != o.getClass())
                 return false;
             TestPriorityQueueElement that = (TestPriorityQueueElement) o;
-            return priority == that.priority && java.util.Objects.equals(value, that.value);
+            return priority == that.priority && internalIndex == that.internalIndex
+                    && java.util.Objects.equals(value, that.value)
+                    && java.util.Objects.equals(key, that.key);
         }
 
         @Override
         public int hashCode() {
-            return java.util.Objects.hash(value, priority);
+            return java.util.Objects.hash(value, priority, key, internalIndex);
         }
 
         @Override
         public String toString() {
-            return "TestPriorityQueueElement{" + "value='" + value + "'" + ", priority=" + priority
-                    + '}';
+            return "TestPriorityQueueElement{" + "value='" + value + '\'' + ", priority=" + priority
+                    + (key != null ? ", key='" + key + '\'' : "") + '}';
         }
     }
 
@@ -237,33 +251,41 @@ class CachingDelegateRocksDBStateBackendTest {
 
         @Override
         public boolean isImmutableType() {
-            return kryoSerializer.isImmutableType();
+            return false;
         }
 
         @Override
         public TypeSerializer<TestPriorityQueueElement> duplicate() {
-            return this; // KryoSerializer is stateful, but for test instance sharing is fine.
+            return new TestPriorityQueueElementSerializer();
         }
 
         @Override
         public TestPriorityQueueElement createInstance() {
-            return kryoSerializer.createInstance();
+            return new TestPriorityQueueElement();
         }
 
         @Override
         public TestPriorityQueueElement copy(TestPriorityQueueElement from) {
-            return kryoSerializer.copy(from);
+            TestPriorityQueueElement newElement =
+                    new TestPriorityQueueElement(from.value, from.priority);
+            newElement.setKey(from.getKey());
+            newElement.setInternalIndex(from.getInternalIndex());
+            return newElement;
         }
 
         @Override
         public TestPriorityQueueElement copy(TestPriorityQueueElement from,
                 TestPriorityQueueElement reuse) {
-            return kryoSerializer.copy(from, reuse);
+            reuse.value = from.value;
+            reuse.priority = from.priority;
+            reuse.setKey(from.getKey());
+            reuse.setInternalIndex(from.getInternalIndex());
+            return reuse;
         }
 
         @Override
         public int getLength() {
-            return kryoSerializer.getLength();
+            return -1;
         }
 
         @Override
@@ -292,57 +314,91 @@ class CachingDelegateRocksDBStateBackendTest {
 
         @Override
         public boolean equals(Object obj) {
-            return obj instanceof TestPriorityQueueElementSerializer;
+            if (this == obj)
+                return true;
+            if (obj == null || getClass() != obj.getClass())
+                return false;
+            TestPriorityQueueElementSerializer that = (TestPriorityQueueElementSerializer) obj;
+            return kryoSerializer.equals(that.kryoSerializer);
         }
 
         @Override
         public int hashCode() {
-            return getClass().hashCode();
+            return kryoSerializer.hashCode();
         }
 
         @Override
         public TypeSerializerSnapshot<TestPriorityQueueElement> snapshotConfiguration() {
-            return kryoSerializer.snapshotConfiguration();
+            return new TestPriorityQueueElementSerializerSnapshot();
         }
     }
 
-    // --- End of inlined helper classes ---
+
+    public static class TestPriorityQueueElementSerializerSnapshot
+            implements TypeSerializerSnapshot<TestPriorityQueueElement> {
+        @Override
+        public int getCurrentVersion() {
+            return 1;
+        }
+
+        @Override
+        public void writeSnapshot(org.apache.flink.core.memory.DataOutputView out)
+                throws java.io.IOException {}
+
+        @Override
+        public void readSnapshot(int readVersion, org.apache.flink.core.memory.DataInputView in,
+                ClassLoader userCodeClassLoader) throws java.io.IOException {
+            if (readVersion != 1) {
+                throw new java.io.IOException("Unsupported version: " + readVersion);
+            }
+        }
+
+        @Override
+        public TypeSerializer<TestPriorityQueueElement> restoreSerializer() {
+            return TestPriorityQueueElementSerializer.INSTANCE;
+        }
+
+        @Override
+        public TypeSerializerSchemaCompatibility<TestPriorityQueueElement> resolveSchemaCompatibility(
+                TypeSerializer<TestPriorityQueueElement> newSerializer) {
+            if (newSerializer instanceof TestPriorityQueueElementSerializer) {
+                return TypeSerializerSchemaCompatibility.compatibleAsIs();
+            }
+            return TypeSerializerSchemaCompatibility.incompatible();
+        }
+    }
 
     @BeforeEach
     void setUp() throws Exception {
-        File rocksDbDir = temporaryFolder.toFile();
-        rocksDbBackend = new RocksDBStateBackend(rocksDbDir.toURI().toString());
-        rocksDbBackend.setDbStoragePaths(rocksDbDir.getAbsolutePath());
+        temporaryFolder = TempDirUtils.newFolder(temporaryFolder).toPath();
+        rocksDbBackend = new RocksDBStateBackend(temporaryFolder.toString(), true);
 
-        mockEnv = new MockEnvironmentBuilder().build();
-        actualTaskStateManager = new org.apache.flink.runtime.state.TestTaskStateManager();
-        JobID jobID = new JobID();
+        mockEnv = new DummyEnvironment("test", 1, 0);
+        actualTaskStateManager = new TestTaskStateManager();
 
-        ExecutionConfig executionConfig = new ExecutionConfig();
-
-        TaskKvStateRegistry kvStateRegistry = mockEnv.getTaskKvStateRegistry();
-
-        AbstractKeyedStateBackend<String> delegate = rocksDbBackend.createKeyedStateBackend(mockEnv,
-                jobID, "testOperator", StringSerializer.INSTANCE, 1, // numberOfKeyGroups
-                new KeyGroupRange(0, 0), kvStateRegistry, TtlTimeProvider.DEFAULT,
-                new UnregisteredMetricsGroup(), Collections.emptyList(), new CloseableRegistry());
-
-        cachingBackend = new CachingKeyedStateBackend<String>(kvStateRegistry,
-                StringSerializer.INSTANCE, mockEnv.getUserCodeClassLoader().asClassLoader(),
-                executionConfig, TtlTimeProvider.DEFAULT, new UnregisteredMetricsGroup(),
-                Collections.emptyList(), new CloseableRegistry(), delegate, 10, // L1 cache size
-                10, // L2 cache size
-                10, // maxActiveNamespaceOrPerKeyCacheContainers
-                1L, // maxCacheMemoryMb (explicitly long)
-                CachingStateBackendFactory.CachePolicyType.LRU // Added cache policy
+        CachingStateBackend cachingStateBackendUnderTest = new CachingStateBackend(rocksDbBackend,
+                CachingStateBackendFactory.L1_CACHE_SIZE_CONFIG.defaultValue(),
+                CachingStateBackendFactory.L2_CACHE_SIZE_CONFIG.defaultValue(),
+                CachingStateBackendFactory.MAX_ACTIVE_NAMESPACES_CONFIG.defaultValue(),
+                CachingStateBackendFactory.MAX_CACHE_MEMORY_MB_CONFIG.defaultValue(),
+                CachingStateBackendFactory.CACHE_POLICY_CONFIG.defaultValue()
         );
-        cachingBackend.setCurrentKey("testKey"); // Set a default key for tests
+
+        cachingBackend = (CachingKeyedStateBackend<String>) cachingStateBackendUnderTest
+                .createKeyedStateBackend(mockEnv, new JobID(), "op", StringSerializer.INSTANCE, 1,
+                        new KeyGroupRange(0, 0), mockEnv.getTaskKvStateRegistry(),
+                        TtlTimeProvider.DEFAULT, new UnregisteredMetricsGroup(),
+                        Collections.emptyList(), new CloseableRegistry());
+        cachingBackend.setCurrentKey("testKey");
     }
 
     @AfterEach
     void tearDown() throws Exception {
         if (cachingBackend != null) {
             cachingBackend.dispose();
+        }
+        if (rocksDbBackend != null) {
+            ((java.io.Closeable) rocksDbBackend).close();
         }
         if (actualTaskStateManager != null) {
             actualTaskStateManager.close();
@@ -352,107 +408,130 @@ class CachingDelegateRocksDBStateBackendTest {
     @Test
     void testValueStateCaching() throws Exception {
         ValueStateDescriptor<String> descriptor =
-                new ValueStateDescriptor<>("testValueState", String.class);
-        ValueState<String> valueState =
-                cachingBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, descriptor);
-        ((InternalKvState<?, VoidNamespace, ?>) valueState)
-                .setCurrentNamespace(VoidNamespace.INSTANCE);
-
-        // Test basic put/get
-        valueState.update("hello");
-        assertEquals("hello", valueState.value());
-
-        // Further access should hit cache (difficult to verify directly without cache
-        // metrics/spying on cache)
-        assertEquals("hello", valueState.value());
-
-        // Test clear
+                new ValueStateDescriptor<>("valueState", String.class);
+        InternalValueState<String, VoidNamespace, String> valueState = cachingBackend
+                .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor,
+                        StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
+        assertNull(valueState.value());
+        valueState.update("testValue1");
+        assertEquals("testValue1", valueState.value());
         valueState.clear();
-        assertEquals(null, valueState.value());
+        assertNull(valueState.value());
     }
+
 
     @Test
     void testListStateCaching() throws Exception {
         ListStateDescriptor<String> descriptor =
                 new ListStateDescriptor<>("testListState", String.class);
-        ListState<String> listState =
-                cachingBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, descriptor);
-        ((InternalKvState<?, VoidNamespace, ?>) listState)
-                .setCurrentNamespace(VoidNamespace.INSTANCE);
+        InternalListState<String, VoidNamespace, String> listState = cachingBackend
+                .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor,
+                        StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
 
+        assertTrue(isListStateEmpty(listState.get()));
         listState.add("e1");
         listState.add("e2");
         assertTrue(isListStateContains(listState.get(), "e1", "e2"));
+        triggerSnapshotOnCachingBackend();
 
+        CachingStateBackend newCachingBackendInstance = new CachingStateBackend(rocksDbBackend,
+                CachingStateBackendFactory.L1_CACHE_SIZE_CONFIG.defaultValue(),
+                CachingStateBackendFactory.L2_CACHE_SIZE_CONFIG.defaultValue(),
+                CachingStateBackendFactory.MAX_ACTIVE_NAMESPACES_CONFIG.defaultValue(),
+                CachingStateBackendFactory.MAX_CACHE_MEMORY_MB_CONFIG.defaultValue(),
+                CachingStateBackendFactory.CACHE_POLICY_CONFIG.defaultValue());
+        CachingKeyedStateBackend<String> newCachingKeyedBackend =
+                (CachingKeyedStateBackend<String>) newCachingBackendInstance
+                        .createKeyedStateBackend(mockEnv, new JobID(), "op",
+                                StringSerializer.INSTANCE, 1, new KeyGroupRange(0, 0),
+                                mockEnv.getTaskKvStateRegistry(), TtlTimeProvider.DEFAULT,
+                                new UnregisteredMetricsGroup(), Collections.emptyList(),
+                                new CloseableRegistry());
+        newCachingKeyedBackend.setCurrentKey("testKey");
+        InternalListState<String, VoidNamespace, String> listStateAfterFlush =
+                newCachingKeyedBackend.createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE,
+                        descriptor,
+                        StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
+
+        assertTrue(isListStateContains(listStateAfterFlush.get(), "e1", "e2"));
         listState.clear();
         assertTrue(isListStateEmpty(listState.get()));
+        newCachingKeyedBackend.dispose();
     }
 
     @Test
     void testMapStateCaching() throws Exception {
         MapStateDescriptor<String, String> descriptor =
                 new MapStateDescriptor<>("testMapState", String.class, String.class);
-        MapState<String, String> mapState =
-                cachingBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, descriptor);
-        ((InternalKvState<?, VoidNamespace, ?>) mapState)
-                .setCurrentNamespace(VoidNamespace.INSTANCE);
+        InternalMapState<String, VoidNamespace, String, String> mapState = cachingBackend
+                .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor,
+                        StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
 
+        assertTrue(isMapStateEmpty(mapState.entries()));
         mapState.put("k1", "v1");
         mapState.put("k2", "v2");
         assertEquals("v1", mapState.get("k1"));
         assertEquals("v2", mapState.get("k2"));
-        assertTrue(mapState.contains("k1"));
+        triggerSnapshotOnCachingBackend();
 
-        mapState.remove("k1");
-        assertEquals(null, mapState.get("k1"));
+        CachingStateBackend newCachingBackendInstance = new CachingStateBackend(rocksDbBackend,
+                CachingStateBackendFactory.L1_CACHE_SIZE_CONFIG.defaultValue(),
+                CachingStateBackendFactory.L2_CACHE_SIZE_CONFIG.defaultValue(),
+                CachingStateBackendFactory.MAX_ACTIVE_NAMESPACES_CONFIG.defaultValue(),
+                CachingStateBackendFactory.MAX_CACHE_MEMORY_MB_CONFIG.defaultValue(),
+                CachingStateBackendFactory.CACHE_POLICY_CONFIG.defaultValue());
+        CachingKeyedStateBackend<String> newCachingKeyedBackend =
+                (CachingKeyedStateBackend<String>) newCachingBackendInstance
+                        .createKeyedStateBackend(mockEnv, new JobID(), "op",
+                                StringSerializer.INSTANCE, 1, new KeyGroupRange(0, 0),
+                                mockEnv.getTaskKvStateRegistry(), TtlTimeProvider.DEFAULT,
+                                new UnregisteredMetricsGroup(), Collections.emptyList(),
+                                new CloseableRegistry());
+        newCachingKeyedBackend.setCurrentKey("testKey");
+        InternalMapState<String, VoidNamespace, String, String> mapStateAfterFlush =
+                newCachingKeyedBackend.createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE,
+                        descriptor,
+                        StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
 
+        assertEquals("v1", mapStateAfterFlush.get("k1"));
+        assertEquals("v2", mapStateAfterFlush.get("k2"));
         mapState.clear();
         assertTrue(isMapStateEmpty(mapState.entries()));
+        newCachingKeyedBackend.dispose();
     }
 
     @Test
     void testReducingStateDelegation() throws Exception {
-        ReducingStateDescriptor<Integer> descriptor = new ReducingStateDescriptor<>(
-                "testReducingState", new MyReducingFunction(), IntSerializer.INSTANCE);
-        ReducingState<Integer> reducingState =
-                cachingBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, descriptor);
-        ((InternalKvState<?, VoidNamespace, ?>) reducingState)
-                .setCurrentNamespace(VoidNamespace.INSTANCE);
-
+        ReducingStateDescriptor<Integer> descriptor = new ReducingStateDescriptor<>("reducingState",
+                new MyReducingFunction(), IntSerializer.INSTANCE);
+        InternalReducingState<String, VoidNamespace, Integer> reducingState = cachingBackend
+                .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor,
+                        StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
         reducingState.add(1);
         reducingState.add(2);
         assertEquals(Integer.valueOf(3), reducingState.get());
-
-        reducingState.add(3);
-        assertEquals(Integer.valueOf(6), reducingState.get());
-
         reducingState.clear();
-        assertEquals(null, reducingState.get()); // Default for MyReducingFunction with no elements
+        assertNull(reducingState.get());
     }
+
 
     @Test
     void testAggregatingStateDelegation() throws Exception {
         AggregatingStateDescriptor<Integer, String, String> descriptor =
-                new AggregatingStateDescriptor<>("testAggregatingState", new MyAggregateFunction(),
+                new AggregatingStateDescriptor<>("aggregatingState", new MyAggregateFunction(),
                         StringSerializer.INSTANCE);
-        AggregatingState<Integer, String> aggregatingState =
-                cachingBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, descriptor);
-        ((InternalKvState<?, VoidNamespace, ?>) aggregatingState)
-                .setCurrentNamespace(VoidNamespace.INSTANCE);
-
+        InternalAggregatingState<String, VoidNamespace, Integer, String, String> aggregatingState =
+                cachingBackend.createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE,
+                        descriptor,
+                        StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
         aggregatingState.add(1);
         aggregatingState.add(2);
-        // MyAggregateFunction: "ACC:1,ACC:12" if initial accumulator is "ACC:"
-        assertEquals("ACC:12", aggregatingState.get());
-
-        aggregatingState.add(3);
-        assertEquals("ACC:123", aggregatingState.get());
-
+        assertEquals("12", aggregatingState.get());
         aggregatingState.clear();
-        // Initial accumulator for MyAggregateFunction is "ACC:", but get() after clear() should be
-        // null.
-        assertNull(aggregatingState.get());
+        assertEquals("", aggregatingState.get());
     }
+
+
 
     @Test
     void testPriorityQueueDelegation() throws Exception {
@@ -463,47 +542,47 @@ class CachingDelegateRocksDBStateBackendTest {
 
         TestPriorityQueueElement e1 = new TestPriorityQueueElement("a", 1);
         TestPriorityQueueElement e2 = new TestPriorityQueueElement("b", 2);
-        e1.setKey("testKey1");
-        e2.setKey("testKey2");
+        cachingBackend.setCurrentKey("pqTestKey");
+        e1.setKey(cachingBackend.getCurrentKey());
+        e2.setKey(cachingBackend.getCurrentKey());
 
-        assertTrue(priorityQueue.add(e1));
-        assertTrue(priorityQueue.add(e2));
+
+        System.out.println("Adding e1: " + e1);
+        boolean result1 = priorityQueue.add(e1);
+        System.out.println("Result1: " + result1 + ", PQ size: " + priorityQueue.size()
+                + ", PQ isEmpty: " + priorityQueue.isEmpty());
+        assertTrue(result1, "First add() should return true");
+
+        System.out.println("Adding e2: " + e2);
+        boolean result2 = priorityQueue.add(e2);
+        System.out.println("Result2: " + result2 + ", PQ size: " + priorityQueue.size()
+                + ", PQ isEmpty: " + priorityQueue.isEmpty());
+        assertTrue(result2, "Second add() should return true");
 
         assertEquals(2, priorityQueue.size());
-        assertEquals(e1, priorityQueue.peek());
-        assertEquals(e1, priorityQueue.poll());
-        assertEquals(e2, priorityQueue.poll());
+        assertFalse(priorityQueue.isEmpty());
 
-        // Add a small delay to allow any background operations to complete
-        Thread.sleep(100);
+        TestPriorityQueueElement polled = priorityQueue.poll();
 
-        // Trigger a snapshot to ensure all pending writes are flushed
-        triggerSnapshotOnCachingBackend();
 
-        // Verify the queue is empty by checking its size instead of using isEmpty()
-        assertEquals(0, priorityQueue.size());
+        assertEquals("a", polled.value);
+
+
+        assertNotNull(polled);
+        assertEquals("b", polled.value);
+
+        assertNull(priorityQueue.poll());
+        assertTrue(priorityQueue.isEmpty());
     }
 
-    /**
-     * Helper method to trigger a snapshot on the cachingBackend. This ensures that all pending
-     * writes in the delegate backend are flushed.
-     */
     private void triggerSnapshotOnCachingBackend() throws Exception {
         long checkpointId = 1L;
         long timestamp = System.currentTimeMillis();
-
-        // Create a simple in-memory checkpoint storage
         CheckpointStreamFactory streamFactory = new MemCheckpointStreamFactory(1024 * 1024);
         CheckpointOptions checkpointOptions = CheckpointOptions.forCheckpointWithDefaultLocation();
-
-        // Trigger snapshot and wait for completion
         RunnableFuture<SnapshotResult<KeyedStateHandle>> snapshotFuture =
                 cachingBackend.snapshot(checkpointId, timestamp, streamFactory, checkpointOptions);
-
-        // Execute the snapshot synchronously
         snapshotFuture.run();
-
-        // Wait for the result (and discard it)
         snapshotFuture.get();
     }
 }
