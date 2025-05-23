@@ -28,7 +28,7 @@ import java.util.function.Consumer;
  * @param <K> Key type
  * @param <V> Value type
  */
-public class LRUMap<K, V> extends LinkedHashMap<K, V> {
+public class LRUMap<K, V> extends LinkedHashMap<K, V> implements CachePolicy<K, V> {
     private final int maxCapacity;
     private final Consumer<Map.Entry<K, V>> evictionListener;
 
@@ -54,5 +54,26 @@ public class LRUMap<K, V> extends LinkedHashMap<K, V> {
     public V getOrDefault(Object key, V defaultValue) {
         V v;
         return (((v = get(key)) != null) || containsKey(key)) ? v : defaultValue;
+    }
+
+    @Override
+    public java.util.Set<Map.Entry<K, V>> entrySet() {
+        return super.entrySet();
+    }
+
+    @Override
+    public V computeIfAbsent(K key,
+            java.util.function.Function<? super K, ? extends V> mappingFunction) {
+        return super.computeIfAbsent(key, mappingFunction);
+    }
+
+    @Override
+    public java.util.Collection<V> values() {
+        return super.values();
+    }
+
+    @Override
+    public boolean isEmpty() {
+        return super.isEmpty();
     }
 }

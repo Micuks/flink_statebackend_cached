@@ -62,6 +62,15 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .withDescription(
                             "The maximum total memory in megabytes for all caches in this backend instance.");
 
+    public enum CachePolicyType {
+            LRU, TINYLFU
+    }
+
+    public static final ConfigOption<CachePolicyType> CACHE_POLICY_CONFIG =
+                    ConfigOptions.key("state.backend.cached.policy").enumType(CachePolicyType.class)
+                                    .defaultValue(CachePolicyType.LRU)
+                                    .withDescription("The caching policy to use (LRU or TINYLFU).");
+
     // Potentially, a config for delegate backend factory if it's not hardcoded to RocksDB
     // For now, assumes RocksDBStateBackend is the default delegate and is configured using its own
     // factory/options.
@@ -105,6 +114,7 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                                 });
         long maxActiveNamespaces = config.get(MAX_ACTIVE_NAMESPACES_CONFIG);
         long maxCacheMemoryMb = config.get(MAX_CACHE_MEMORY_MB_CONFIG);
+        CachePolicyType cachePolicy = config.get(CACHE_POLICY_CONFIG);
 
         // Create the delegate backend. Default to RocksDBStateBackend for now.
         // A more flexible approach might allow specifying the delegate factory in config.
@@ -141,6 +151,7 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
         // delegateBackend is already StateBackend. l1CacheSize, l2CacheSize, maxActiveNamespaces
         // are already long.
         return new CachingStateBackend(
-                delegateBackend, l1CacheSize, l2CacheSize, maxActiveNamespaces, maxCacheMemoryMb);
+                        delegateBackend, l1CacheSize, l2CacheSize, maxActiveNamespaces,
+                        maxCacheMemoryMb, cachePolicy);
     }
 }

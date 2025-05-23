@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * An {@link InternalListState} that uses an L1/L2 cache for its list values. The entire list is
@@ -41,34 +42,59 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
     private N currentNamespace;
 
     // Cache structure: Namespace -> Flink Key -> CacheEntry<List<V_ELE>>
-    private final LRUMap<N, LRUMap<K, CacheEntry<List<V_ELE>>>> namespaceCachesL1;
-    private final LRUMap<N, LRUMap<K, CacheEntry<List<V_ELE>>>> namespaceCachesL2;
+    private final CachePolicy<N, CachePolicy<K, CacheEntry<List<V_ELE>>>> namespaceCachesL1;
+    private final CachePolicy<N, CachePolicy<K, CacheEntry<List<V_ELE>>>> namespaceCachesL2;
 
     private final int l1CacheSizePerNamespace; // Max Flink Keys with cached lists in L1 for a
     // Namespace
     private final int l2CacheSizePerNamespace; // Max Flink Keys with cached lists in L2 for a
     // Namespace
     private final int maxActiveNamespacesInCache; // Max Namespaces with active caches
+    private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
 
     public CachingInternalListState(InternalListState<K, N, V_ELE> delegateState,
             CachingKeyedStateBackend<K> backend, int l1CacheSize, int l2CacheSize,
-            int maxActiveNamespaces) {
+            int maxActiveNamespaces, CachingStateBackendFactory.CachePolicyType cachePolicyType) {
         this.delegateState = delegateState;
         this.backend = backend;
         this.l1CacheSizePerNamespace = l1CacheSize; // Max K->List entries in L1 per Namespace
         this.l2CacheSizePerNamespace = l2CacheSize; // Max K->List entries in L2 per Namespace
         this.maxActiveNamespacesInCache = maxActiveNamespaces;
+        this.cachePolicyType = cachePolicyType;
 
-        this.namespaceCachesL1 = new LRUMap<>(this.maxActiveNamespacesInCache);
-        this.namespaceCachesL2 = new LRUMap<>(this.maxActiveNamespacesInCache);
+        this.namespaceCachesL1 = createCachePolicy(this.maxActiveNamespacesInCache);
+        this.namespaceCachesL2 = createCachePolicy(this.maxActiveNamespacesInCache);
     }
 
-    private LRUMap<K, CacheEntry<List<V_ELE>>> getL1CacheForNamespace(N namespace) {
+    private <CK, CV> CachePolicy<CK, CV> createCachePolicy(int capacity) {
+        switch (cachePolicyType) {
+            case TINYLFU:
+                return new TinyLFUMap<>(capacity);
+            case LRU:
+            default:
+                return new LRUMap<>(capacity);
+        }
+    }
+
+    private <CK, CV> CachePolicy<CK, CV> createCachePolicyWithEvictionListener(int capacity,
+            Consumer<Map.Entry<CK, CV>> evictionListener) {
+        switch (cachePolicyType) {
+            case TINYLFU:
+                // TODO: Add eviction listener support to TinyLFU or adapt
+                return new TinyLFUMap<>(capacity);
+            case LRU:
+            default:
+                return new LRUMap<>(capacity, evictionListener);
+        }
+    }
+
+    private CachePolicy<K, CacheEntry<List<V_ELE>>> getL1CacheForNamespace(N namespace) {
         return namespaceCachesL1.computeIfAbsent(namespace,
-                ns -> new LRUMap<>(l1CacheSizePerNamespace, evictedL1Entry -> { // Eviction from L1
-                                                                                // for namespace
-                                                                                // 'ns'
-                    LRUMap<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(ns);
+                ns -> createCachePolicyWithEvictionListener(l1CacheSizePerNamespace,
+                        evictedL1Entry -> { // Eviction from L1
+                            // for namespace
+                            // 'ns'
+                    CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(ns);
                     K evictedKey = evictedL1Entry.getKey();
                     CacheEntry<List<V_ELE>> evictedListWrapper = evictedL1Entry.getValue();
                     List<V_ELE> evictedList = evictedListWrapper.getValue();
@@ -112,9 +138,9 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
                 }));
     }
 
-    private LRUMap<K, CacheEntry<List<V_ELE>>> getL2CacheForNamespace(N namespace) {
+    private CachePolicy<K, CacheEntry<List<V_ELE>>> getL2CacheForNamespace(N namespace) {
         return namespaceCachesL2.computeIfAbsent(namespace,
-                ns -> new LRUMap<>(l2CacheSizePerNamespace));
+                ns -> createCachePolicy(l2CacheSizePerNamespace));
     }
 
     @Override
@@ -122,13 +148,13 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
-        LRUMap<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
+        CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
         CacheEntry<List<V_ELE>> l1Entry = l1Cache.get(currentKey);
         if (l1Entry != null) {
             return l1Entry.getValue() != null ? new ArrayList<>(l1Entry.getValue()) : null;
         }
 
-        LRUMap<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace);
+        CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace);
         CacheEntry<List<V_ELE>> l2Entry = l2Cache.get(currentKey);
         if (l2Entry != null) {
             l2Cache.remove(currentKey); // Remove from L2
@@ -159,8 +185,8 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
     public void update(List<V_ELE> values) throws Exception {
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
-        LRUMap<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        LRUMap<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace);
+        CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
+        CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace);
 
         if (values == null) {
             // Mark the entry as dirty with a null value in L1.
@@ -186,7 +212,7 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
         }
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
-        LRUMap<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
+        CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
 
         CacheEntry<List<V_ELE>> l1Entry = l1Cache.get(currentKey);
         List<V_ELE> currentList;
@@ -223,7 +249,7 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
         }
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
-        LRUMap<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
+        CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
 
         CacheEntry<List<V_ELE>> l1Entry = l1Cache.get(currentKey);
         List<V_ELE> currentList;
@@ -256,10 +282,10 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
-        LRUMap<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
+        CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
         l1Cache.remove(currentKey);
 
-        LRUMap<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace);
+        CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace);
         l2Cache.remove(currentKey);
 
         delegateState.clear();
@@ -267,14 +293,25 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
 
     @Override
     public void flushToUnderlyingState() throws IOException {
-        for (Map.Entry<N, LRUMap<K, CacheEntry<List<V_ELE>>>> nsEntryL1 : namespaceCachesL1
+        N currentNamespaceForFlush = getCurrentNamespace();
+        K currentKeyForFlush = backend.getCurrentKey();
+
+        for (Map.Entry<N, CachePolicy<K, CacheEntry<List<V_ELE>>>> nsEntry : namespaceCachesL1
                 .entrySet()) {
-            N namespace = nsEntryL1.getKey();
-            LRUMap<K, CacheEntry<List<V_ELE>>> keyCachesL1 = nsEntryL1.getValue();
-            for (Map.Entry<K, CacheEntry<List<V_ELE>>> keyEntry : keyCachesL1.entrySet()) {
-                K key = keyEntry.getKey();
-                CacheEntry<List<V_ELE>> cacheEntry = keyEntry.getValue();
-                if (cacheEntry.isDirty()) {
+            N namespace = nsEntry.getKey();
+            CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = nsEntry.getValue();
+            this.setCurrentNamespace(namespace);
+
+            // Iterate over a copy of keys to avoid ConcurrentModificationException
+            java.util.List<K> keysToFlush = new java.util.ArrayList<>();
+            for (Map.Entry<K, CacheEntry<List<V_ELE>>> entry : l1Cache.entrySet()) {
+                keysToFlush.add(entry.getKey());
+            }
+
+            for (K key : keysToFlush) {
+                CacheEntry<List<V_ELE>> entry = l1Cache.get(key); // Re-fetch
+                if (entry != null && entry.isDirty()) {
+                    List<V_ELE> listValue = entry.getValue();
                     try {
                         // Temporarily set context for delegate state operation
                         K originalKey = backend.getCurrentKey();
@@ -285,13 +322,13 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
                         this.setCurrentNamespace(namespace); // Sets on CachingListState and
                         // delegate
 
-                        delegateState.update(cacheEntry.getValue());
-                        cacheEntry.setDirty(false); // Mark as clean
+                        delegateState.update(listValue);
+                        entry.setDirty(false); // Mark as clean
 
                         // Optionally move to L2 after successful flush
-                        LRUMap<K, CacheEntry<List<V_ELE>>> l2Cache =
+                        CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache =
                                 getL2CacheForNamespace(namespace);
-                        l2Cache.put(key, CacheEntry.clean(new ArrayList<>(cacheEntry.getValue())));
+                        l2Cache.put(key, CacheEntry.clean(new ArrayList<>(listValue)));
 
                         // Restore context
                         backend.setCurrentKey(originalKey);
@@ -361,13 +398,13 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace(); // this.currentNamespace
 
-        LRUMap<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
+        CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
         CacheEntry<List<V_ELE>> l1Entry = l1Cache.get(currentKey);
         if (l1Entry != null) {
             return l1Entry.getValue(); // Return direct from L1
         }
 
-        LRUMap<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace);
+        CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace);
         CacheEntry<List<V_ELE>> l2Entry = l2Cache.get(currentKey);
         if (l2Entry != null) {
             l2Cache.remove(currentKey); // Remove from L2
@@ -393,11 +430,11 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace(); // this.currentNamespace
 
-        LRUMap<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
+        CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
         // Store the provided list directly, mark dirty
         l1Cache.put(currentKey, CacheEntry.dirty(valueToStore));
 
-        LRUMap<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace);
+        CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace);
         l2Cache.remove(currentKey); // Invalidate L2
     }
 
@@ -434,30 +471,16 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
     }
 
     private void clearCacheForNamespace(N namespace) {
-        // Clearing L1 will trigger eviction listener for dirty entries, which should
-        // flush them.
-        LRUMap<K, CacheEntry<List<V_ELE>>> l1Cache = namespaceCachesL1.get(namespace);
+        CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = namespaceCachesL1.get(namespace);
         if (l1Cache != null) {
-            // To ensure dirty entries are flushed via eviction listener:
-            // Create a list of keys to avoid ConcurrentModificationException if clear()
-            // triggers
-            // modifications.
-            List<K> keysInL1 = new ArrayList<>(l1Cache.keySet());
-            for (K key : keysInL1) {
-                l1Cache.remove(key); // Removing will trigger eviction for each entry
-            }
-            // Or, if l1Cache.clear() correctly triggers eviction for all items:
-            // l1Cache.clear();
+            l1Cache.clear();
         }
-        // After L1 entries are processed (flushed if dirty), remove the namespace from
-        // L1 map.
-        namespaceCachesL1.remove(namespace);
-
-        // L2 cache only contains clean entries, so just clear it.
-        LRUMap<K, CacheEntry<List<V_ELE>>> l2Cache = namespaceCachesL2.get(namespace);
+        CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = namespaceCachesL2.get(namespace);
         if (l2Cache != null) {
             l2Cache.clear();
         }
+        // Removing from the top-level map ensures the namespace-specific maps are eligible for GC
+        namespaceCachesL1.remove(namespace);
         namespaceCachesL2.remove(namespace);
     }
 }

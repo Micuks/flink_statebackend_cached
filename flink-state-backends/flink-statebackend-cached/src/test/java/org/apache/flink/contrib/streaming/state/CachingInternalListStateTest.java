@@ -103,7 +103,8 @@ class CachingInternalListStateTest {
         }).when(mockBackend).setCurrentKey(any(String.class)); // Assuming K is String
 
         cachingListState = new CachingInternalListState<>(mockDelegateState, mockBackend,
-                l1CacheSize, l2CacheSize, maxActiveNamespaces);
+                l1CacheSize, l2CacheSize, maxActiveNamespaces,
+                CachingStateBackendFactory.CachePolicyType.LRU);
         cachingListState.setCurrentNamespace(testNamespace); // Default namespace for tests
     }
 

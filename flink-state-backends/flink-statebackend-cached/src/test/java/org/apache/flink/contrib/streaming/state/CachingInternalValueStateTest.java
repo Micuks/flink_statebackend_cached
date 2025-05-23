@@ -74,7 +74,7 @@ class CachingInternalValueStateTest {
                         l1CacheSize,
                         l2CacheSize,
                         maxActiveNamespaces,
-                        0L);
+                                        0L, CachingStateBackendFactory.CachePolicyType.LRU);
         // Set current namespace for the caching state (and its delegate)
         cachingState.setCurrentNamespace(testNamespace);
     }

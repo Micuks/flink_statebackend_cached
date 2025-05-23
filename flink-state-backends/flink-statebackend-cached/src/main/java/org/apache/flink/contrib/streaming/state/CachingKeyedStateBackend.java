@@ -45,15 +45,18 @@ import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
+import org.apache.flink.util.CloseableIterator;
 
 import javax.annotation.Nonnull;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.RunnableFuture;
 import java.util.stream.Stream;
+import java.util.Set;
 
 /**
  * The keyed state backend that implements caching. It wraps a delegate AbstractKeyedStateBackend
@@ -68,6 +71,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int l2EntryCacheSize;
     private final int maxActiveNamespaceOrPerKeyCacheContainers;
     private final long maxCacheMemoryMb;
+    private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
 
     private final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
 
@@ -84,7 +88,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int l1EntryCacheSize,
             int l2EntryCacheSize,
             int maxActiveNamespaceOrPerKeyCacheContainers,
-            long maxCacheMemoryMb) {
+            long maxCacheMemoryMb, CachingStateBackendFactory.CachePolicyType cachePolicyType) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -104,6 +108,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.maxActiveNamespaceOrPerKeyCacheContainers = maxActiveNamespaceOrPerKeyCacheContainers;
         this.maxCacheMemoryMb = maxCacheMemoryMb;
         this.registeredStates = new ArrayList<>();
+        this.cachePolicyType = cachePolicyType;
     }
 
     // create a new RocksDB backend
@@ -203,7 +208,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                             l1EntryCacheSize,
                             l2EntryCacheSize,
                             maxActiveNamespaceOrPerKeyCacheContainers,
-                            this.maxCacheMemoryMb);
+                            this.maxCacheMemoryMb, this.cachePolicyType);
             synchronized (registeredStates) {
                 boolean alreadyExists =
                         registeredStates.stream()
@@ -223,7 +228,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             CachingInternalMapState<K, N, Object, Object> cachingMapState =
                     new CachingInternalMapState<>(actualState, this, l1EntryCacheSize,
                             l2EntryCacheSize, maxActiveNamespaceOrPerKeyCacheContainers,
-                            this.maxCacheMemoryMb);
+                            this.maxCacheMemoryMb, this.cachePolicyType);
             synchronized (registeredStates) {
                 boolean alreadyExists = registeredStates.stream()
                         .anyMatch(st -> st.getDelegateState() == actualState);
@@ -245,8 +250,9 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                                                                                         // in L1 per
                                                                                         // Namespace
                             l2EntryCacheSize, // Max K->List entries in L2 per Namespace
-                            maxActiveNamespaceOrPerKeyCacheContainers); // Max Namespaces for L1/L2
-                                                                        // of N->(K->List)
+                            maxActiveNamespaceOrPerKeyCacheContainers, // Max Namespaces for L1/L2
+                                                                       // of N->(K->List)
+                            this.cachePolicyType);
             synchronized (registeredStates) {
                 boolean alreadyExists = registeredStates.stream()
                         .anyMatch(st -> st.getDelegateState() == actualState);
@@ -320,7 +326,74 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             KeyGroupedInternalPriorityQueue<T> create(
                     @Nonnull String stateName,
                     @Nonnull TypeSerializer<T> byteOrderedElementSerializer) {
-        return delegateKeyedStateBackend.create(stateName, byteOrderedElementSerializer);
+        KeyGroupedInternalPriorityQueue<T> delegateQueue =
+                delegateKeyedStateBackend.create(stateName, byteOrderedElementSerializer);
+
+        // Return a proxy that ensures isEmpty() is consistent with poll() operations
+        return new KeyGroupedInternalPriorityQueue<T>() {
+            private int elementCount = 0;
+
+            @Override
+            public T poll() {
+                T result = delegateQueue.poll();
+                if (result != null) {
+                    elementCount--;
+                }
+                return result;
+            }
+
+            @Override
+            public T peek() {
+                return delegateQueue.peek();
+            }
+
+            @Override
+            public boolean add(@Nonnull T toAdd) {
+                boolean result = delegateQueue.add(toAdd);
+                if (result) {
+                    elementCount++;
+                }
+                return result;
+            }
+
+            @Override
+            public boolean remove(@Nonnull T toRemove) {
+                boolean result = delegateQueue.remove(toRemove);
+                if (result) {
+                    elementCount--;
+                }
+                return result;
+            }
+
+            @Override
+            public boolean isEmpty() {
+                return elementCount == 0;
+            }
+
+            @Override
+            public int size() {
+                return elementCount;
+            }
+
+            @Override
+            public void addAll(@Nonnull Collection<? extends T> toAdd) {
+                for (T element : toAdd) {
+                    add(element);
+                }
+            }
+
+            @Nonnull
+            @Override
+            public CloseableIterator<T> iterator() {
+                return delegateQueue.iterator();
+            }
+
+            @Nonnull
+            @Override
+            public Set<T> getSubsetForKeyGroup(int keyGroupId) {
+                return delegateQueue.getSubsetForKeyGroup(keyGroupId);
+            }
+        };
     }
 
     @Nonnull

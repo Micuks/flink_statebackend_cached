@@ -97,7 +97,8 @@ class CachingStateBackendTest {
         delegatePlainBackend = actualDelegateBackend; // Keep a reference to the plain backend for
                                                       // other tests
 
-        cachingStateBackend = new CachingStateBackend(delegatePlainBackend, 10, 100, 10, 20L);
+        cachingStateBackend = new CachingStateBackend(actualDelegateBackend, 10, 10, 10, 10L,
+                        CachingStateBackendFactory.CachePolicyType.LRU);
     }
 
     @AfterEach
@@ -133,7 +134,8 @@ class CachingStateBackendTest {
     @Test
     void testCreateOperatorStateBackend() throws Exception {
         CachingStateBackend cachingBackendWithPlainDelegate =
-                new CachingStateBackend(delegatePlainBackend, 10, 100, 10, 20L);
+                        new CachingStateBackend(delegatePlainBackend, 10, 100, 10, 20L,
+                                        CachingStateBackendFactory.CachePolicyType.LRU);
 
         assertNotNull(cachingBackendWithPlainDelegate.createOperatorStateBackend(mockEnv,
                 "testOperator", Collections.emptyList(), new CloseableRegistry()));
@@ -144,7 +146,8 @@ class CachingStateBackendTest {
         AbstractStateBackend mockDelegate = mock(AbstractStateBackend.class);
         when(mockDelegate.useManagedMemory()).thenReturn(true);
         CachingStateBackend cachingBackend =
-                new CachingStateBackend(mockDelegate, 10, 100, 10, 20L);
+                        new CachingStateBackend(mockDelegate, 10, 100, 10, 20L,
+                                        CachingStateBackendFactory.CachePolicyType.LRU);
         assertTrue(cachingBackend.useManagedMemory());
         verify(mockDelegate).useManagedMemory();
     }
@@ -161,7 +164,8 @@ class CachingStateBackendTest {
                 .thenReturn(mockLocation);
 
         CachingStateBackend cachingBackend =
-                new CachingStateBackend(mockDelegate, 10, 100, 10, 20L);
+                        new CachingStateBackend(mockDelegate, 10, 100, 10, 20L,
+                                        CachingStateBackendFactory.CachePolicyType.LRU);
         CompletedCheckpointStorageLocation resolvedLocation =
                 cachingBackend.resolveCheckpoint(pointer);
 
@@ -181,7 +185,8 @@ class CachingStateBackendTest {
                 .thenReturn(mockStorageAccess);
 
         CachingStateBackend cachingBackend =
-                new CachingStateBackend(mockDelegate, 10, 100, 10, 20L);
+                        new CachingStateBackend(mockDelegate, 10, 100, 10, 20L,
+                                        CachingStateBackendFactory.CachePolicyType.LRU);
         CheckpointStorageAccess createdStorageAccess =
                 cachingBackend.createCheckpointStorage(jobID);
 

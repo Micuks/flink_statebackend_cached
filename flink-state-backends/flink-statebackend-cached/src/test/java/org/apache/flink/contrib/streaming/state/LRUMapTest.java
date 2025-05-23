@@ -225,20 +225,18 @@ class LRUMapTest {
 
     @Test
     void testEntrySet() {
-        lruMap.put("key1", "value1");
-        lruMap.put("key2", "value2");
-        Assertions.assertEquals(2, lruMap.entrySet().size());
-        boolean foundKey1 = false;
-        boolean foundKey2 = false;
-        for (Map.Entry<String, String> entry : lruMap.entrySet()) {
-            if (entry.getKey().equals("key1") && entry.getValue().equals("value1")) {
-                foundKey1 = true;
-            }
-            if (entry.getKey().equals("key2") && entry.getValue().equals("value2")) {
-                foundKey2 = true;
-            }
-        }
-        Assertions.assertTrue(foundKey1);
-        Assertions.assertTrue(foundKey2);
+        LRUMap<String, String> map = new LRUMap<>(3);
+        map.put("1", "a");
+        map.put("2", "b");
+        map.put("3", "c");
+
+        java.util.Set<Map.Entry<String, String>> entrySet = map.entrySet();
+        Assertions.assertEquals(3, entrySet.size());
+
+        // Test iterator remove
+        java.util.Iterator<Map.Entry<String, String>> iterator = entrySet.iterator();
+        iterator.next();
+        iterator.remove();
+        Assertions.assertEquals(2, entrySet.size());
     }
 }
