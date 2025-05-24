@@ -25,6 +25,7 @@ import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
+import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
@@ -81,11 +82,15 @@ class CachingInternalValueStateTest {
         lenient()
                 .when(mockAbstractKeyedStateBackendDelegate.getKeySerializer())
                 .thenReturn(mockKeySerializer);
+
+        // Create proper KeyGroupRange and numberOfKeyGroups for InternalKeyContextImpl
+        KeyGroupRange keyGroupRange = new KeyGroupRange(0, 15);
+        int numberOfKeyGroups = 16;
         lenient()
                 .when(mockAbstractKeyedStateBackendDelegate.getKeyContext())
                 .thenReturn(
                         new org.apache.flink.runtime.state.heap.InternalKeyContextImpl<>(
-                                null, 0));
+                                keyGroupRange, numberOfKeyGroups));
 
         cachingKeyedStateBackend =
                 new CachingKeyedStateBackend<>(
@@ -287,7 +292,6 @@ class CachingInternalValueStateTest {
         // or delegate.
         // Simpler: If we access testKey now, it should be an L2 hit for testValue2_updated.
         cachingKeyedStateBackend.setCurrentKey(testKey);
-        when(mockDelegateState.value()).thenReturn(testValue2_updated);
         // The previous eviction of testKey (dirty) wrote testValue2_updated to delegate and put clean
         // testValue2_updated to L2.
         // So, current access to testKey should be an L2 hit.
@@ -396,8 +400,8 @@ class CachingInternalValueStateTest {
         //    Accessing it should not call delegate.value()
         cachingKeyedStateBackend.setCurrentKey(testKey);
         // If it's in L2, the delegate shouldn't be called.
-        // We need to make sure the delegate *would* return it if asked, to confirm it was flushed.
-        when(mockDelegateState.value()).thenReturn(testValue1); // Simulate it's in underlying store
+        // We need to make sure the delegate *would* return it if asked, to confirm it
+        // was flushed.
         assertEquals(
                 testValue1,
                 cachingState.value(),
@@ -552,7 +556,6 @@ class CachingInternalValueStateTest {
         // --- Verify ns1 is still intact and served from its L1 cache ---
         cachingState.setCurrentNamespace(ns1);
         // Key remains the same (key)
-        when(mockDelegateState.value()).thenReturn(valNs1);
         assertEquals(
                 valNs1,
                 cachingState.value(),
@@ -562,7 +565,6 @@ class CachingInternalValueStateTest {
         // --- Verify ns2 is still intact and served from its L1 cache ---
         cachingState.setCurrentNamespace(ns2);
         // Key remains the same (key)
-        when(mockDelegateState.value()).thenReturn(valNs2);
         assertEquals(
                 valNs2,
                 cachingState.value(),
@@ -573,60 +575,74 @@ class CachingInternalValueStateTest {
     @Test
     void testMaxActiveNamespaces_eviction() throws Exception {
         String ns1 = "max_ns_1";
-        String valNs1 = "val_max_ns1";
+        String valNs1 = "val_max_ns1_DISTINCT"; // Make distinct
         String ns2 = "max_ns_2";
-        String valNs2 = "val_max_ns2";
+        String valNs2 = "val_max_ns2_DISTINCT"; // Make distinct
         String ns3_evictor = "max_ns_3_evictor"; // This will evict ns1
-        String valNs3 = "val_max_ns3";
+        String valNs3 = "val_max_ns3_DISTINCT"; // Make distinct
 
         // Keep key constant
         cachingKeyedStateBackend.setCurrentKey(testKey);
-        AtomicInteger delegateGets = new AtomicInteger(0);
+        AtomicInteger delegateValueCallCount = new AtomicInteger(0);
+
+        // Use thenAnswer to count calls and ensure distinct returns are possible
+        when(mockDelegateState.value())
+                .thenAnswer(
+                        invocation -> {
+                                            delegateValueCallCount.incrementAndGet();
+                                            String currentNs = cachingState.getCurrentNamespace(); // Get ns from
+                                            // cachingState
+                                            if (ns1.equals(currentNs))
+                                                return valNs1;
+                            if (ns2.equals(currentNs)) {
+                                return valNs2;
+                            }
+                            if (ns3_evictor.equals(currentNs)) {
+                                return valNs3;
+                            }
+                            // If an unexpected namespace is queried to the mock, fail loudly.
+                            throw new AssertionError(
+                                    "Unexpected namespace in mockDelegateState.value(): "
+                                    + currentNs);
+                        });
 
         // --- Populate with ns1 ---
         cachingState.setCurrentNamespace(ns1);
-        when(mockDelegateState.value())
-                .thenAnswer(
-                        invocation -> {
-                            delegateGets.incrementAndGet();
-                            if (cachingKeyedStateBackend.getCurrentKey().equals(testKey)
-                                    && cachingState.getCurrentNamespace().equals(ns1)) {
-                                return valNs1;
-                            }
-                            return null; // Should not happen in this specific re-access
-                        });
-        assertEquals(valNs1, cachingState.value(), "Value for ns1 should be re-fetched.");
-        assertEquals(4, delegateGets.get(), "Delegate should be called for ns1 re-fetch.");
+        assertEquals(valNs1, cachingState.value(), "Value for ns1 should be fetched initially.");
+        assertEquals(1, delegateValueCallCount.get(), "Delegate should be called once for ns1 initial load.");
 
-        // --- Access ns2 (should be L1/L2 hit) ---
+        // --- Populate with ns2 (maxActiveNamespaces=2, so ns1 and ns2 both fit) ---
         cachingState.setCurrentNamespace(ns2);
-        when(mockDelegateState.value())
-                .thenAnswer(
-                        invocation -> {
-                            delegateGets.incrementAndGet();
-                            if (cachingKeyedStateBackend.getCurrentKey().equals(testKey)
-                                    && cachingState.getCurrentNamespace().equals(ns2)) {
-                                return valNs2;
-                            }
-                            return null; // Should not happen in this specific re-access
-                        });
-        assertEquals(valNs2, cachingState.value(), "Value for ns2 should be re-fetched.");
-        assertEquals(5, delegateGets.get(), "Delegate should be called for ns2 re-fetch.");
+        assertEquals(valNs2, cachingState.value(), "Value for ns2 should be fetched initially.");
+        assertEquals(2, delegateValueCallCount.get(), "Delegate should be called for ns2 initial load.");
 
-        // --- Access ns3 (should be L1/L2 hit) ---
+        // --- Verify both ns1 and ns2 are still in cache ---
+        cachingState.setCurrentNamespace(ns1);
+        assertEquals(valNs1, cachingState.value(), "Value for ns1 should be from cache.");
+        assertEquals(2, delegateValueCallCount.get(), "Delegate call count should not increase for ns1 cache hit.");
+
+        cachingState.setCurrentNamespace(ns2);
+        assertEquals(valNs2, cachingState.value(), "Value for ns2 should be from cache.");
+        assertEquals(2, delegateValueCallCount.get(), "Delegate call count should not increase for ns2 cache hit.");
+
+        // --- Populate with ns3 (should evict ns1 since maxActiveNamespaces=2) ---
         cachingState.setCurrentNamespace(ns3_evictor);
-        when(mockDelegateState.value())
-                .thenAnswer(
-                        invocation -> {
-                            delegateGets.incrementAndGet();
-                            if (cachingKeyedStateBackend.getCurrentKey().equals(testKey)
-                                    && cachingState.getCurrentNamespace().equals(ns3_evictor)) {
-                                return valNs3;
-                            }
-                            return null; // Should not happen in this specific re-access
-                        });
-        assertEquals(valNs3, cachingState.value(), "Value for ns3 should be re-fetched.");
-        assertEquals(6, delegateGets.get(), "Delegate should be called for ns3 re-fetch.");
+        assertEquals(valNs3, cachingState.value(), "Value for ns3 should be fetched initially.");
+        assertEquals(3, delegateValueCallCount.get(), "Delegate should be called for ns3 initial load, ns1 evicted.");
+
+        // --- Re-access ns1 after eviction (should require re-fetch from delegate) ---
+        cachingState.setCurrentNamespace(ns1);
+        assertEquals(valNs1, cachingState.value(), "Value for ns1 should be re-fetched after namespace eviction.");
+        assertEquals(4, delegateValueCallCount.get(), "Delegate should be called for ns1 re-fetch.");
+
+        // --- Verify ns2 and ns3 are still accessible from cache ---
+        cachingState.setCurrentNamespace(ns2);
+        assertEquals(valNs2, cachingState.value(), "Value for ns2 should be re-fetched after ns3_evictor caused its eviction.");
+        assertEquals(5, delegateValueCallCount.get(), "Delegate should be called for ns2 re-fetch.");
+
+        cachingState.setCurrentNamespace(ns3_evictor);
+        assertEquals(valNs3, cachingState.value(), "Value for ns3 should be re-fetched after ns1 caused its eviction.");
+        assertEquals(6, delegateValueCallCount.get(), "Delegate should be called for ns3 re-fetch.");
     }
 
     // --- flushToUnderlyingState() Tests ---
@@ -663,10 +679,7 @@ class CachingInternalValueStateTest {
 
         cachingKeyedStateBackend.setCurrentKey(key2Ns1Dirty);
         cachingState.update(val2Ns1Dirty); // L1 dirty
-
-        cachingKeyedStateBackend.setCurrentKey(keyCleanNs1);
-        when(mockDelegateState.value()).thenReturn(valCleanNs1);
-        cachingState.value(); // L1 clean (after L2 if evicted, or direct to L1)
+        // Note: L1 size is 2, so both dirty entries should fit in L1 for ns1
 
         // Namespace 2: key1 (dirty), keyClean (clean)
         cachingState.setCurrentNamespace(ns2);
@@ -678,12 +691,19 @@ class CachingInternalValueStateTest {
         when(mockDelegateState.value()).thenReturn(valCleanNs2);
         cachingState.value(); // L1 clean
 
+        // Add clean entry to ns1 AFTER setting up ns2 to avoid evicting ns1 dirty
+        // entries
+        cachingState.setCurrentNamespace(ns1);
+        cachingKeyedStateBackend.setCurrentKey(keyCleanNs1);
+        when(mockDelegateState.value()).thenReturn(valCleanNs1);
+        cachingState.value(); // This might evict key1Ns1Dirty to L2, but key2Ns1Dirty should stay in L1
+
         // Reset to test defaults for safety, though not strictly needed for flush
         cachingState.setCurrentNamespace(testNamespace);
         cachingKeyedStateBackend.setCurrentKey(testKey);
 
         // --- Action: Flush all states ---
-        // cachingState.flush(); // CachingInternalValueState does not have a flush() method
+        cachingState.flushToUnderlyingState();
 
         // --- Verification: Delegate's update should be called for all dirty entries ---
         verify(mockDelegateState, times(1)).update(val1Ns1Dirty);

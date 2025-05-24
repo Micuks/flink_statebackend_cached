@@ -21,6 +21,7 @@ import org.apache.flink.runtime.state.internal.InternalListState;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -150,35 +151,45 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
 
         CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
         CacheEntry<List<V_ELE>> l1Entry = l1Cache.get(currentKey);
+
         if (l1Entry != null) {
-            return l1Entry.getValue() != null ? new ArrayList<>(l1Entry.getValue()) : null;
+            List<V_ELE> value = l1Entry.getValue();
+            // If L1 has an entry, it's the source of truth.
+            // If value is null, it means it was explicitly set to null.
+            // If non-null (could be empty list), return a copy.
+            return value != null ? new ArrayList<>(value) : null; // MODIFIED: if null in cache, return null
         }
 
         CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace);
         CacheEntry<List<V_ELE>> l2Entry = l2Cache.get(currentKey);
+
         if (l2Entry != null) {
             l2Cache.remove(currentKey); // Remove from L2
-            List<V_ELE> listCopy =
-                    l2Entry.getValue() != null ? new ArrayList<>(l2Entry.getValue()) : null;
-            l1Cache.put(currentKey, CacheEntry.clean(listCopy)); // Promote copy to L1
-            return listCopy != null ? new ArrayList<>(listCopy) : null;
+            List<V_ELE> listFromL2 = l2Entry.getValue(); // This is a clean copy from L2
+
+            // Promote to L1. If listFromL2 is null, CacheEntry.clean(null) is put.
+            l1Cache.put(currentKey, CacheEntry.clean(listFromL2 != null ? new ArrayList<>(listFromL2) : null));
+            return listFromL2 != null ? new ArrayList<>(listFromL2) : null; // Return copy or null
         }
 
+        // Not in L1 or L2, fetch from delegate
         Iterable<V_ELE> iterableFromDelegate = delegateState.get();
-        List<V_ELE> listFromDelegate = null;
-        if (iterableFromDelegate != null) {
-            listFromDelegate = new ArrayList<>();
+
+        if (iterableFromDelegate == null) {
+            // Delegate returned null. Cache and return null.
+            l1Cache.put(currentKey, CacheEntry.clean(null)); // Cache null (as clean)
+            return null; // Return null
+        } else {
+            // Delegate returned something. Convert to list.
+            List<V_ELE> listFromDelegate = new ArrayList<>();
             for (V_ELE item : iterableFromDelegate) {
                 listFromDelegate.add(item);
             }
-        }
-
-        if (listFromDelegate != null) {
-            // Store a mutable copy in L1
+            // Store a new copy in L1, marked as clean.
             l1Cache.put(currentKey, CacheEntry.clean(new ArrayList<>(listFromDelegate)));
+            // Return a new copy to the user.
+            return new ArrayList<>(listFromDelegate);
         }
-        // Return a copy to the user
-        return listFromDelegate != null ? new ArrayList<>(listFromDelegate) : null;
     }
 
     @Override

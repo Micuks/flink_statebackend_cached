@@ -66,8 +66,21 @@ public class CachingInternalValueState<K, N, V>
         this.maxCacheMemoryMb = maxCacheMemoryMb;
         this.cachePolicyType = cachePolicyType;
 
-        this.namespaceCachesL1 = createCachePolicy(maxActiveNamespacesInCache);
-        this.namespaceCachesL2 = createCachePolicy(maxActiveNamespacesInCache);
+        // Create namespace caches with eviction listeners that flush dirty entries
+        this.namespaceCachesL1 = createCachePolicyWithEvictionListener(maxActiveNamespacesInCache,
+                evictedNsEntry -> {
+                    // Flush any dirty entries in the evicted namespace before removing it
+                    N evictedNamespace = evictedNsEntry.getKey();
+                    CachePolicy<K, CacheEntry<V>> evictedL1Cache = evictedNsEntry.getValue();
+                    flushCacheForNamespace(evictedNamespace, evictedL1Cache);
+                });
+        this.namespaceCachesL2 = createCachePolicyWithEvictionListener(maxActiveNamespacesInCache,
+                evictedNsEntry -> {
+                    // Flush any dirty entries in the evicted namespace before removing it
+                    N evictedNamespace = evictedNsEntry.getKey();
+                    CachePolicy<K, CacheEntry<V>> evictedL2Cache = evictedNsEntry.getValue();
+                    flushCacheForNamespace(evictedNamespace, evictedL2Cache);
+                });
     }
 
     private <CK, CV> CachePolicy<CK, CV> createCachePolicy(int capacity) {
@@ -85,10 +98,47 @@ public class CachingInternalValueState<K, N, V>
         switch (cachePolicyType) {
             case TINYLFU:
                 // TODO: Add eviction listener support to TinyLFU or adapt
-                return new TinyLFUMap<>(capacity);
+                return new LRUMap<>(capacity, evictionListener);
+            // return new TinyLFUMap<>(capacity);
             case LRU:
             default:
                 return new LRUMap<>(capacity, evictionListener);
+        }
+    }
+
+    private void flushCacheForNamespace(N namespace, CachePolicy<K, CacheEntry<V>> cache) {
+        try {
+            N originalNamespace = getCurrentNamespace();
+            K originalKey = backend.getCurrentKey();
+            boolean keyWasSet = originalKey != null;
+
+            setCurrentNamespace(namespace);
+
+            // Create a copy of entries to avoid ConcurrentModificationException
+            java.util.List<Map.Entry<K, CacheEntry<V>>> entries = new java.util.ArrayList<>();
+            for (Map.Entry<K, CacheEntry<V>> entry : cache.entrySet()) {
+                entries.add(entry);
+            }
+
+            for (Map.Entry<K, CacheEntry<V>> entry : entries) {
+                K key = entry.getKey();
+                CacheEntry<V> cacheEntry = entry.getValue();
+                if (cacheEntry != null && cacheEntry.isDirty()) {
+                    V value = cacheEntry.getValue();
+                    backend.setCurrentKey(key);
+                    delegateState.update(value);
+                    cacheEntry.setDirty(false); // Mark clean after flushing
+                }
+            }
+
+            setCurrentNamespace(originalNamespace);
+            if (keyWasSet) {
+                backend.setCurrentKey(originalKey);
+            } else {
+                backend.setCurrentKey(null);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to flush dirty entries for evicted namespace: " + namespace, e);
         }
     }
 
@@ -211,31 +261,56 @@ public class CachingInternalValueState<K, N, V>
         K originalKey = backend.getCurrentKey();
         boolean keyWasSet = originalKey != null; // Check if key was actually set
 
+        // Flush L1 caches
         for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL1.entrySet()) {
             N namespace = nsEntry.getKey();
             CachePolicy<K, CacheEntry<V>> l1Cache = nsEntry.getValue();
             setCurrentNamespace(namespace);
 
-            // Iterate over a copy of keys to avoid ConcurrentModificationException if map is
-            // modified by L1 eviction
-            java.util.List<K> keys = new java.util.ArrayList<>();
+            // Iterate over a defensive copy of entries to avoid
+            // ConcurrentModificationException
+            java.util.List<Map.Entry<K, CacheEntry<V>>> currentL1Entries = new java.util.ArrayList<>();
             for (Map.Entry<K, CacheEntry<V>> entry : l1Cache.entrySet()) {
-                keys.add(entry.getKey());
+                currentL1Entries.add(entry);
             }
 
-            for (K key : keys) {
-                CacheEntry<V> entry = l1Cache.get(key); // Re-fetch, as it might have been evicted
-                // then re-added
-                if (entry != null && entry.isDirty()) {
+            for (Map.Entry<K, CacheEntry<V>> mapEntry : currentL1Entries) {
+                K key = mapEntry.getKey();
+                CacheEntry<V> entry = mapEntry.getValue(); // Use the entry directly from the snapshot
+                if (entry.isDirty()) { // No need for null check if it came from entrySet
                     V value = entry.getValue();
                     backend.setCurrentKey(key);
                     delegateState.update(value);
                     entry.setDirty(false);
-                    // After successful flush, entry in L1 is clean. L2 is write-through on L1
-                    // eviction.
                 }
             }
         }
+
+        // Flush L2 caches
+        for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL2.entrySet()) {
+            N namespace = nsEntry.getKey();
+            CachePolicy<K, CacheEntry<V>> l2Cache = nsEntry.getValue();
+            setCurrentNamespace(namespace);
+
+            // Iterate over a defensive copy of entries to avoid
+            // ConcurrentModificationException
+            java.util.List<Map.Entry<K, CacheEntry<V>>> currentL2Entries = new java.util.ArrayList<>();
+            for (Map.Entry<K, CacheEntry<V>> entry : l2Cache.entrySet()) {
+                currentL2Entries.add(entry);
+            }
+
+            for (Map.Entry<K, CacheEntry<V>> mapEntry : currentL2Entries) {
+                K key = mapEntry.getKey();
+                CacheEntry<V> entry = mapEntry.getValue();
+                if (entry.isDirty()) { // L2 entries ideally shouldn't be dirty with current logic
+                    V value = entry.getValue();
+                    backend.setCurrentKey(key);
+                    delegateState.update(value);
+                    entry.setDirty(false);
+                }
+            }
+        }
+
         setCurrentNamespace(originalNamespace);
         if (keyWasSet) {
             backend.setCurrentKey(originalKey);
