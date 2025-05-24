@@ -86,8 +86,6 @@ import org.rocksdb.RocksDBException;
 import org.rocksdb.WriteOptions;
 import org.rocksdb.ReadOptions;
 
-import org.apache.flink.runtime.checkpoint.SnapshotType;
-
 /**
  * The keyed state backend that implements caching. It wraps a delegate AbstractKeyedStateBackend
  * (e.g., RocksDBKeyedStateBackend) and creates CachingInternal*State objects.
@@ -119,19 +117,18 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int l2EntryCacheSize,
             int maxActiveNamespaceOrPerKeyCacheContainers,
             long maxCacheMemoryMb, CachingStateBackendFactory.CachePolicyType cachePolicyType) {
+
         super(
                 kvStateRegistry,
                 keySerializer,
                 userCodeClassLoader,
                 executionConfig,
                 ttlTimeProvider,
-                LatencyTrackingStateConfig.newBuilder()
-                        .setMetricGroup(metricGroup)
-                        .setEnabled(executionConfig.getLatencyTrackingInterval() > 0)
-                        .build(),
-                cancelStreamRegistry,
+                CachingKeyedStateBackend.buildLatencyTrackingConfig(metricGroup, executionConfig),
+                        cancelStreamRegistry,
                 delegateKeyedStateBackend.getKeyGroupCompressionDecorator(),
                 delegateKeyedStateBackend.getKeyContext());
+
         this.delegateKeyedStateBackend = delegateKeyedStateBackend;
         this.l1EntryCacheSize = l1EntryCacheSize;
         this.l2EntryCacheSize = l2EntryCacheSize;
@@ -682,5 +679,14 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         throw new UnsupportedOperationException("Delegate is not a RocksDBKeyedStateBackend");
     }
 
-
+    private static LatencyTrackingStateConfig buildLatencyTrackingConfig(
+            MetricGroup metricGroup, ExecutionConfig executionConfig) {
+        LatencyTrackingStateConfig.Builder latencyBuilder = LatencyTrackingStateConfig.newBuilder();
+        if (metricGroup != null) {
+            latencyBuilder.setMetricGroup(metricGroup);
+        }
+        return latencyBuilder
+                .setEnabled(executionConfig.getLatencyTrackingInterval() > 0)
+                .build();
+    }
 }

@@ -191,7 +191,8 @@ class CachingKeyedStateBackendTest {
         // Setup mock delegate backend behavior
         when(mockDelegateBackend.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
         when(mockDelegateBackend.getCurrentKey()).thenReturn("testKey");
-        when(mockDelegateBackend.getKeyGroupCompressionDecorator()).thenReturn(null);
+        when(mockDelegateBackend.getKeyGroupCompressionDecorator())
+                        .thenReturn(org.apache.flink.runtime.state.UncompressedStreamCompressionDecorator.INSTANCE);
 
         // Setup mock states
         when(mockValueState.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);

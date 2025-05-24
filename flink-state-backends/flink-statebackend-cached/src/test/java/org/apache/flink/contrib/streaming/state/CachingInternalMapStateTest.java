@@ -358,7 +358,6 @@ class CachingInternalMapStateTest {
     }
 
     @Test
-    @Disabled("Temporarily disabled - mock verification issue")
     void testMapEntries_iterator_loadsAllIfCacheNotFullAndDirtyFlushed() throws Exception {
         cachingMapState.put(testUserKey1, testUserValue1);
 
