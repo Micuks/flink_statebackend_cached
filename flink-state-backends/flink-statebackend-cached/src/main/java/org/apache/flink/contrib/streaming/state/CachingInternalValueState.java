@@ -279,9 +279,11 @@ public class CachingInternalValueState<K, N, V>
                 CacheEntry<V> entry = mapEntry.getValue(); // Use the entry directly from the snapshot
                 if (entry.isDirty()) { // No need for null check if it came from entrySet
                     V value = entry.getValue();
-                    backend.setCurrentKey(key);
-                    delegateState.update(value);
-                    entry.setDirty(false);
+                    if (key != null) { // Guard against null key
+                        backend.setCurrentKey(key);
+                        delegateState.update(value);
+                        entry.setDirty(false);
+                    }
                 }
             }
         }
@@ -304,9 +306,11 @@ public class CachingInternalValueState<K, N, V>
                 CacheEntry<V> entry = mapEntry.getValue();
                 if (entry.isDirty()) { // L2 entries ideally shouldn't be dirty with current logic
                     V value = entry.getValue();
-                    backend.setCurrentKey(key);
-                    delegateState.update(value);
-                    entry.setDirty(false);
+                    if (key != null) { // Guard against null key
+                        backend.setCurrentKey(key);
+                        delegateState.update(value);
+                        entry.setDirty(false);
+                    }
                 }
             }
         }

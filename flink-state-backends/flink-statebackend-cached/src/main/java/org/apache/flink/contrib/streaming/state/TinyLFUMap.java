@@ -78,7 +78,7 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
                 Math.max(MIN_WINDOW_SIZE, (int) Math.ceil(maxCapacity * WINDOW_CACHE_RATIO));
 
         // Rest of capacity goes to main cache
-        this.mainCacheCapacity = maxCapacity - windowCacheCapacity;
+        this.mainCacheCapacity = Math.max(0, maxCapacity - windowCacheCapacity);
 
         // Initialize frequency sketch
         this.sketch = new CountMinSketchInternal(maxCapacity);
@@ -89,7 +89,11 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
             protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
                 // When window cache is full, try to admit the eldest entry to main cache
                 if (size() > windowCacheCapacity) {
-                    tryAdmitToMainCache(eldest.getKey(), eldest.getValue());
+                    // Only try to admit if main cache has capacity
+                    if (mainCacheCapacity > 0) {
+                        tryAdmitToMainCache(eldest.getKey(), eldest.getValue());
+                    }
+                    // Always remove from window cache, whether admitted to main or not
                     return true;
                 }
                 return false;
@@ -101,24 +105,31 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
     }
 
     /**
-     * Tries to admit an entry from the window cache to the main cache. Uses TinyLFU's admission
+     * Tries to admit an entry from the window cache to the main cache. Uses
+     * TinyLFU's admission
      * policy based on frequency estimation.
      * 
-     * @param key The key to admit
+     * @param key   The key to admit
      * @param value The value to admit
+     * @return true if the entry was admitted to main cache, false otherwise
      */
-    private void tryAdmitToMainCache(K key, V value) {
+    private boolean tryAdmitToMainCache(K key, V value) {
         // If main cache has space, admit directly
         if (mainLruCache.size() < mainCacheCapacity) {
             mainLruCache.put(key, value);
-            return;
+            return true;
+        }
+
+        // If main cache capacity is 0, cannot admit
+        if (mainCacheCapacity == 0) {
+            return false;
         }
 
         // Otherwise, use the TinyLFU admission policy
         Iterator<Map.Entry<K, V>> it = mainLruCache.entrySet().iterator();
         if (!it.hasNext()) {
             // Shouldn't happen if capacities are set correctly
-            return;
+            return false;
         }
 
         // Get the victim (LRU item from main cache)
@@ -129,12 +140,15 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
         long candidateFreq = sketch.estimate(key);
         long victimFreq = sketch.estimate(victimKey);
 
-        // If candidate is accessed more frequently, evict victim
+        // If candidate is accessed more frequently than victim, evict victim
+        // In case of tie, favor the victim (don't admit candidate)
         if (candidateFreq > victimFreq) {
             it.remove();
             mainLruCache.put(key, value);
+            return true;
         }
         // Otherwise, the candidate is not admitted and is evicted
+        return false;
     }
 
     @Override
@@ -145,9 +159,8 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
         // Check window cache first
         V value = windowLruCache.get(key);
         if (value != null) {
-            // Found in window cache, promote to main cache
-            windowLruCache.remove(key);
-            tryAdmitToMainCache(key, value);
+            // Found in window cache, return without trying to promote
+            // Promotion will happen naturally during window eviction
             return value;
         }
 

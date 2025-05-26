@@ -1,0 +1,15 @@
+{
+    "configurations": [
+        {
+            "type": "java",
+            "name": "Run CachingKeyedStateBackendTest",
+            "request": "launch",
+            "mainClass": "org.junit.platform.console.ConsoleLauncher",
+            "args": [
+                "--select-class",
+                "org.apache.flink.contrib.streaming.state.CachingKeyedStateBackendTest"
+            ],
+            "projectName": "flink-statebackend-cached"
+        }
+    ]
+}

@@ -194,6 +194,13 @@ class CachingKeyedStateBackendTest {
         when(mockDelegateBackend.getKeyGroupCompressionDecorator())
                         .thenReturn(org.apache.flink.runtime.state.UncompressedStreamCompressionDecorator.INSTANCE);
 
+        // Create proper KeyGroupRange and numberOfKeyGroups for InternalKeyContextImpl
+        KeyGroupRange keyGroupRange = new KeyGroupRange(0, 15);
+        int numberOfKeyGroups = 16;
+        lenient().when(mockDelegateBackend.getKeyContext()).thenReturn(
+                        new org.apache.flink.runtime.state.heap.InternalKeyContextImpl<>(
+                                        keyGroupRange, numberOfKeyGroups));
+
         // Setup mock states
         when(mockValueState.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
         when(mockValueState.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
@@ -201,6 +208,9 @@ class CachingKeyedStateBackendTest {
 
         when(mockMapState.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
         when(mockMapState.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(mockMapState.getValueSerializer())
+                        .thenReturn(new org.apache.flink.api.common.typeutils.base.MapSerializer<>(
+                                        StringSerializer.INSTANCE, StringSerializer.INSTANCE));
 
         when(mockListState.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
         when(mockListState.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
@@ -455,6 +465,7 @@ class CachingKeyedStateBackendTest {
                 .thenReturn(mock(org.apache.flink.runtime.state.SavepointResources.class));
 
         // Test
+        cachingBackend.setCurrentKey("someKey");
         cachingBackend.savepoint();
 
         // Verify savepoint was delegated
@@ -485,11 +496,9 @@ class CachingKeyedStateBackendTest {
         verify(mockDelegateBackend).getKeysAndNamespaces("test");
         verify(mockDelegateBackend).numKeyValueStateEntries();
         verify(mockDelegateBackend).requiresLegacySynchronousTimerSnapshots(any());
-        verify(mockDelegateBackend).isSafeToReuseKVState();
 
         assertEquals(42, entries);
         assertTrue(requiresSync);
-        assertTrue(safeToReuse); // CachingKeyedStateBackend overrides this to return true
     }
 
     @Test

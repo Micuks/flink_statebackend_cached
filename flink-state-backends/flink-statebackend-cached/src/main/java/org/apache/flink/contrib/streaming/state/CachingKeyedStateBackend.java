@@ -236,18 +236,22 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             TypeSerializer<N> namespaceSerializer, StateDescriptor<S, V_SD> stateDescriptor)
             throws Exception {
 
-        InternalKvState<K, N, ?> actualStateRaw =
-                (InternalKvState<K, N, ?>)
-                        delegateKeyedStateBackend.getOrCreateKeyedState(
-                                namespaceSerializer, stateDescriptor);
+        S actualState = delegateKeyedStateBackend.getOrCreateKeyedState(namespaceSerializer,
+                stateDescriptor);
+
+        if (!(actualState instanceof InternalKvState)) {
+            return actualState; // Return directly if not an InternalKvState
+        }
+
+        InternalKvState<K, N, ?> actualStateRaw = (InternalKvState<K, N, ?>) actualState;
 
         if (stateDescriptor.getType() == StateDescriptor.Type.VALUE
                 && actualStateRaw instanceof InternalValueState) {
-            InternalValueState<K, N, V_SD> actualState =
+            InternalValueState<K, N, V_SD> actualStateValue =
                     (InternalValueState<K, N, V_SD>) actualStateRaw;
             CachingInternalValueState<K, N, V_SD> cachingState =
                     new CachingInternalValueState<K, N, V_SD>(
-                            actualState,
+                            actualStateValue,
                             this,
                             l1EntryCacheSize,
                             l2EntryCacheSize,
@@ -256,7 +260,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             synchronized (registeredStates) {
                 boolean alreadyExists =
                         registeredStates.stream()
-                                .anyMatch(st -> st.getDelegateState() == actualState);
+                                .anyMatch(st -> st.getDelegateState() == actualStateValue);
                 if (!alreadyExists) {
                     registeredStates.add(cachingState);
                 }
@@ -264,18 +268,17 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             return (S) cachingState;
         } else if (stateDescriptor.getType() == StateDescriptor.Type.MAP
                 && actualStateRaw instanceof InternalMapState) {
-            // For MapStateDescriptor<UK, UV>, V_SD is Map<UK, UV>.
-            // We need to cast actualStateRaw to its specific InternalMapState type.
-            InternalMapState<K, N, Object, Object> actualState =
-                    (InternalMapState<K, N, Object, Object>) actualStateRaw;
+            // actualStateRaw is already InternalMapState<K, N, UK, UV>
+            // Let CachingInternalMapState infer UK, UV from the delegate's actual types
+            InternalMapState<K, N, ?, ?> actualDelegateMapState = (InternalMapState<K, N, ?, ?>) actualStateRaw;
 
-            CachingInternalMapState<K, N, Object, Object> cachingMapState =
-                    new CachingInternalMapState<>(actualState, this, l1EntryCacheSize,
+            CachingInternalMapState<K, N, ?, ?> cachingMapState =
+                    new CachingInternalMapState<>(actualDelegateMapState, this, l1EntryCacheSize,
                             l2EntryCacheSize, maxActiveNamespaceOrPerKeyCacheContainers,
                             this.maxCacheMemoryMb, this.cachePolicyType);
             synchronized (registeredStates) {
                 boolean alreadyExists = registeredStates.stream()
-                        .anyMatch(st -> st.getDelegateState() == actualState);
+                        .anyMatch(st -> st.getDelegateState() == actualDelegateMapState);
                 if (!alreadyExists) {
                     registeredStates.add(cachingMapState);
                 }
@@ -283,30 +286,24 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             return (S) cachingMapState;
         } else if (stateDescriptor.getType() == StateDescriptor.Type.LIST
                 && actualStateRaw instanceof InternalListState) {
-            // For ListStateDescriptor<V_ELE>, V_SD is List<V_ELE>.
-            InternalListState<K, N, Object> actualState =
-                    (InternalListState<K, N, Object>) actualStateRaw;
+            // actualStateRaw is already InternalListState<K, N, V_ELE>
+            // Let CachingInternalListState infer V_ELE from the delegate's actual type
+            InternalListState<K, N, ?> actualDelegateListState = (InternalListState<K, N, ?>) actualStateRaw;
 
-            CachingInternalListState<K, N, Object> cachingListState =
-                    new CachingInternalListState<>(actualState, this, l1EntryCacheSize, // Max
-                                                                                        // K->List
-                                                                                        // entries
-                                                                                        // in L1 per
-                                                                                        // Namespace
-                            l2EntryCacheSize, // Max K->List entries in L2 per Namespace
-                            maxActiveNamespaceOrPerKeyCacheContainers, // Max Namespaces for L1/L2
-                                                                       // of N->(K->List)
+            CachingInternalListState<K, N, ?> cachingListState =
+                    new CachingInternalListState<>(actualDelegateListState, this, l1EntryCacheSize, 
+                            l2EntryCacheSize, maxActiveNamespaceOrPerKeyCacheContainers,
                             this.cachePolicyType);
             synchronized (registeredStates) {
                 boolean alreadyExists = registeredStates.stream()
-                        .anyMatch(st -> st.getDelegateState() == actualState);
+                        .anyMatch(st -> st.getDelegateState() == actualDelegateListState);
                 if (!alreadyExists) {
                     registeredStates.add(cachingListState);
                 }
             }
             return (S) cachingListState;
         }
-        return (S) actualStateRaw;
+        return (S) actualStateRaw; // Return the raw state if not a supported caching type
     }
 
     // --- Methods to delegate to underlyingKeyedStateBackend ---

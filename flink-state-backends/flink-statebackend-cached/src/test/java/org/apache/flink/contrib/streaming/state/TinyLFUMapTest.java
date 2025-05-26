@@ -118,102 +118,88 @@ class TinyLFUMapTest {
         // maxCapacity = 3. Window = 1, Main = 2.
         TinyLFUMap<Integer, String> cache = new TinyLFUMap<>(3);
 
-        // Setup: Main = {1, 2}, Window = {3}
-        // To achieve this, we make 1 and 2 frequent, then add 3, then 4.
-        cache.put(1, "v1"); // W:{1} M:{}
-        cache.put(2, "v2"); // W:{2} M:{1} (1 was admitted)
-        cache.put(3, "v3"); // W:{3} M:{1,2} (2 was admitted)
+        // Fill main cache with K10, K11. Make them frequent.
+        // K10 will be the LRU victim in main cache.
+        cache.put(10, "v10"); // W:{10}, M:{}
+        cache.put(11, "v11"); // W:{11}, M:{10} (K10 admitted to main)
+                              // At this point, W:{11}, M:{10}
 
-        // At this point: Window:{3="v3"}, Main:{1="v1", 2="v2"} (actual main order depends on
-        // LinkedHashMap impl)
-        // Let's verify frequencies. Sketch estimate is approximate.
-        // Access 1 & 2 multiple times to ensure their frequency is higher than new items.
-        for (int i = 0; i < 5; i++) {
-            cache.get(1);
-            cache.get(2);
-        }
-        // Access 3 once (it's in window, get will try to promote)
-        cache.get(3); // W:{}, M:{1,2,3} if 3 wins. Victim from Main would be LRU.
-
-
-        // Re-setup for clarity with maxCapacity = 3 (Window=1, Main=2)
-        cache.clear();
-        // Goal: Main cache {k1, k2} (k1 is LRU victim), Window {k3}. Candidate is k3.
-        // k1, k2 are frequent. k4 is a new challenger.
-
-        cache.put(1, "v1_freq"); // W:{1} M:{}
-        for (int i = 0; i < 5; i++)
-            cache.get(1); // make 1 frequent
-
-        cache.put(2, "v2_freq"); // W:{2} M:{1}
-        for (int i = 0; i < 5; i++)
-            cache.get(2); // make 2 frequent
-
-        // Current state: Window is likely empty as 1,2 got promoted. Main is {1,2} or {2,1}.
-        // Let's fill main deterministically:
-        cache.clear();
-        cache.put(10, "v10"); // W:{10} M:{}
-        cache.put(11, "v11"); // W:{11} M:{10}
-        // At this point: Window:{11="v11"}, Main:{10="v10"}. Size=2. Main capacity=2.
-
-        // Make 10, 11 frequent
+        // Access K10 and K11 multiple times to increase their frequency
         for (int i = 0; i < 10; i++) {
-            cache.get(10);
-            cache.get(11);
+            cache.get(10); // K10 is in Main, access makes it MRU in Main
+            cache.get(11); // K11 is in Window, access updates its frequency
+                           // and makes it MRU in Window.
+                           // After first cache.get(11), K11 is candidate from window.
+                           // Main has K10. Main capacity is 2. K11 is admitted to Main.
+                           // W:{}, M:{10,11} or M:{11,10} depending on get order.
         }
-        // State: Window should be empty (10, 11 promoted), Main:{10,11} (order depends on last
-        // access)
-        // Let's assume 10 was LRU in Main, 11 MRU.
-
-        cache.put(12, "v12_candidate"); // W:{12}, M:{10,11}. Candidate 12 (freq ~1)
-                                        // Main is full. Victim from Main is 10 (freq ~10)
-                                        // 12 (candidate) vs 10 (victim). Freq(12) < Freq(10). 12
-                                        // NOT admitted.
-        // Window: {12}, Main: {10,11}. Key 12 is evicted from system.
-        assertFalse(cache.containsKey(12),
-                "Candidate 12 should not be admitted due to lower frequency.");
-        assertTrue(cache.containsKey(10));
-        assertTrue(cache.containsKey(11));
-        assertEquals(2, cache.size()); // Main cache size
-
-        // New candidate 13, more frequent than victim 10.
-        cache.put(13, "v13_strong_candidate"); // W:{13} M:{10,11}
-        for (int i = 0; i < 15; i++) { // Make 13 very frequent while it's in window
-            cache.put(13, "v13_strong_candidate"); // keep putting to window, or get if it's already
-                                                   // there
-            // This is tricky. `put` records access.
-            // If 13 is in window, put updates it.
-        }
-        // To ensure 13 is the candidate that TinyLFU considers:
-        // After cache.put(13, "v13_strong_candidate"), W:{13}, M:{10,11}
-        // To make 13 frequent *before* it's considered for main cache eviction from window:
-        // This requires careful manipulation or assuming sketch is updated by the put.
-        // Let's assume the `put` for 13 has updated its sketch count.
-
-        // To test K4 (strong candidate) vs K1 (victim)
+        // To be precise: after the loop:
+        // M:{10,11} (let's say 10 is LRU after these gets)
+        // W:{}
+        // To ensure Main is {10, 11} and Window is empty:
         cache.clear();
-        // Fill with K1, K2. K1 is victim (LRU in main).
-        cache.put(1, "v1"); // W:{1} M:{}
-        cache.put(2, "v2"); // W:{2} M:{1}
-        cache.put(3, "v3"); // W:{3} M:{1,2} (K1=LRU in Main)
+        cache.put(10, "v10_main_lru"); // W:{10} M:{}
+        for(int i=0; i<10; i++) cache.get(10); // M:{10} W:{} freq(10) high
 
-        // Make K3 (candidate from window) more frequent than K1 (victim in main)
-        for (int i = 0; i < 5; i++)
-            cache.get(3); // Access K3, it's in window, promotes to main
-                          // M:{2,3}, K1 evicted.
-        // After cache.get(3) for 5 times:
-        // Initial: W:{3}, M:{1,2}
-        // get(3): 3 is candidate. M is {1,2}. Victim is 1. Freq(3) > Freq(1). M becomes {2,3}. W is
-        // empty.
-        assertTrue(cache.containsKey(3));
-        assertTrue(cache.containsKey(2));
-        assertFalse(cache.containsKey(1));
-        assertEquals(2, cache.size()); // Main cache has 2 items
+        cache.put(11, "v11_main_mru"); // W:{11} M:{10}
+        for(int i=0; i<10; i++) cache.get(11); // M:{10,11} or {11,10} W:{} freq(11) high
 
-        // Add K4. K4 to Window. Window evicts nothing as it's empty.
-        cache.put(4, "v4"); // W:{4}, M:{2,3}
-        assertTrue(cache.containsKey(4));
-        assertEquals(3, cache.size());
+        // Ensure state is Main:{victim, other_main}, Window:{}
+        // Let K1 be victim (LRU in main), K2 be other item in main.
+        cache.clear();
+        cache.put(1, "v1_victim");     // W:{1}, M:{}
+        for(int i=0; i<5; i++) cache.get(1); // M:{1} (freq=5), W:{}
+        cache.put(2, "v2_other_main"); // W:{2}, M:{1}
+        for(int i=0; i<10; i++) cache.get(2); // M:{1,2} (freq(1)=5, freq(2)=10), W:{} (2 is MRU in main)
+                                             // Access 1 again to make it MRU, so 2 becomes victim
+        cache.get(1); // M:{2,1} (freq(1)=6, freq(2)=10), W:{} (2 is LRU/victim)
+
+        // Add K3 (candidate with low frequency) to window
+        cache.put(3, "v3_candidate_low_freq"); // W:{3}, M:{2,1}. Freq(3)=1.
+
+        // K3 is now in window. M is full with {2(victim), 1}.
+        // Add K4 ("pusher") to window. This will make K3 the eldest in window.
+        // K3 (candidate, freq 1) will be compared against K2 (victim from main, freq 10).
+        // K3 should NOT be admitted.
+        cache.put(4, "v4_pusher"); // W:{4}, M:{2,1}. K3 (eldest in W) is processed.
+                                   // Freq(3) vs Freq(2). 1 vs 10. K3 not admitted. K3 evicted.
+
+        assertFalse(
+                cache.containsKey(3),
+                "Candidate K3 (low freq) should not be admitted to full main cache over K2 (high freq victim).");
+        assertTrue(cache.containsKey(1)); // K1 should still be in main
+        assertTrue(cache.containsKey(2)); // K2 (victim, but survived) should still be in main
+        assertTrue(cache.containsKey(4)); // K4 (pusher) should be in window
+        assertEquals(3, cache.size());    // Main:{1,2}, Window:{4}
+
+
+        // Scenario: Candidate K5 (high freq) should be admitted, evicting K2 (victim)
+        cache.clear();
+        cache.put(1, "v1_other_main"); // W:{1}, M:{}
+        for(int i=0; i<10; i++) cache.get(1); // M:{1} (freq=10), W:{}
+
+        cache.put(2, "v2_victim");     // W:{2}, M:{1}
+        for(int i=0; i<5; i++) cache.get(2); // M:{1,2} (freq(1)=10, freq(2)=5). W:{} (1 is MRU, 2 is LRU/victim)
+
+        // Add K5 (candidate with high frequency) to window
+        cache.put(5, "v5_candidate_high_freq"); // W:{5}, M:{1,2}.
+        for (int i = 0; i < 15; i++) {
+            cache.get(5); // Make K5 very frequent while it's in the window.
+                          // This access moves it to MRU in window, and updates sketch.
+                          // W:{5} (freq=1+15=16), M:{1,2}
+        }
+        // Add K6 ("pusher") to window. This makes K5 eldest in window.
+        // K5 (candidate, freq 16) vs K2 (victim from main, freq 5).
+        // K5 should be admitted, K2 evicted.
+        cache.put(6, "v6_pusher"); // W:{6}, M:{1,5}. K2 evicted.
+
+        assertTrue(
+                cache.containsKey(5),
+                "Candidate K5 (high freq) should be admitted to main cache.");
+        assertFalse(cache.containsKey(2), "Victim K2 (low freq) should be evicted by K5.");
+        assertTrue(cache.containsKey(1)); // K1 should still be in main
+        assertTrue(cache.containsKey(6)); // K6 (pusher) should be in window
+        assertEquals(3, cache.size());    // Main:{1,5}, Window:{6}
     }
 
 
@@ -445,33 +431,82 @@ class TinyLFUMapTest {
         int capacity = 2; // W:1, M:1
         TinyLFUMap<Integer, String> cache = new TinyLFUMap<>(capacity);
 
-        // Make K1 very frequent, then K2 less frequent
-        cache.put(1, "v1"); // W:{1} M:{}
-        for (int i = 0; i < 15; i++)
-            cache.get(1); // freq(1) high. M:{1}, W:{}
+        // K1 into Main, high frequency. M:{K1}, W:{}
+        cache.put(1, "v1_high_freq");
+        for (int i = 0; i < 15; i++) {
+            cache.get(1); // M:{1}, W:{}. Freq(1) is high.
+        }
+        assertTrue(cache.containsKey(1));
+        assertEquals(1, cache.size()); // Main: {1}, Window: {}
 
-        cache.put(2, "v2"); // W:{2} M:{1}
-        cache.get(2); // freq(2) low. M:{1}, W:{} (2 was candidate, M full, victim 1. freq(2) vs
-                      // freq(1). 1 wins. 2 lost)
+        // K2 into Window, low frequency. W:{K2}, M:{K1}
+        cache.put(2, "v2_low_freq");
+        cache.get(2); // Access K2 once. Freq(2) is low. W:{K2}, M:{K1}
 
-        assertFalse(cache.containsKey(2)); // 2 should have been evicted as 1 was more frequent
+        assertTrue(cache.containsKey(1)); // K1 in Main
+        assertTrue(cache.containsKey(2)); // K2 in Window
+        assertEquals(2, cache.size());    // Main: {1}, Window: {2}
+
+        // Add K3 ("pusher") to Window. K2 becomes candidate from Window.
+        // Main is full with K1. Victim from Main is K1.
+        // Candidate K2 (low freq) vs Victim K1 (high freq). K2 should not be admitted.
+        cache.put(3, "v3_pusher");
+        // Window: {3}, Main: {1}. K2 was not admitted.
+
+        assertFalse(
+                cache.containsKey(2),
+                "K2 (low freq candidate) should have been evicted when K3 was added, as K1 (high freq) was the victim in main.");
+        assertTrue(cache.containsKey(1)); // K1 (high freq) should remain in main.
+        assertTrue(cache.containsKey(3)); // K3 (pusher) should be in window.
+        assertEquals(capacity, cache.size()); // Main:{1}, Window:{3}
 
         // Trigger many accesses to potentially reset sketch (capacity * 10 = 20 accesses)
+        // The goal is to reduce K1's perceived frequency after sketch reset.
+        // cache.get(1) will keep 1 in main, but its sketch count might be halved by reset.
         for (int i = 0; i < capacity * 10 * 2; i++) {
-            cache.put(100 + i, "vx" + i); // Fill and evict, causing accesses
+            int key = 100 + i;
+            cache.put(key, "vx" + i); // Fill and evict, causing accesses
             if (cache.get(1) == null) { // if 1 gets evicted, put it back to keep it in sketch
-                cache.put(1, "v1");
+                                        // and main
+                cache.put(1, "v1_high_freq");
+                for (int j = 0; j < 5; j++) cache.get(1); // Boost freq again slightly
             }
+            // Also access K3 to ensure it's not the one getting evicted if K1 is put back
+             if (cache.containsKey(3)) cache.get(3); else cache.put(3, "v3_pusher");
         }
-        // After sketch reset, freq(1) should be halved.
+        // After sketch reset, freq(1) should be lower than before.
+        // Current state: M:{1}, W:{some_pusher_from_loop} or M:{some_pusher}, W:{1}
+        // Let's ensure K1 is in Main, and a new item K4 is in Window
+        cache.clear();
+        cache.put(1, "v1_after_reset_target"); // M:{1} (freq reset but re-added), W:{}
+         for(int i=0; i<2; i++) cache.get(1); // Give K1 some small freq post-reset simulation
 
-        // Now try to admit K3 (new, low actual frequency)
-        cache.put(3, "v3"); // W:{3}, M:{x} (x is whatever survived from loop)
-                            // Candidate 3. Victim from Main (possibly 1 if it survived).
-                            // If freq(1) was significantly reduced, K3 might get in.
+        // Now try to admit K4 (new, low actual frequency, but K1's sketch freq is also lowered)
+        cache.put(4, "v4_candidate_post_reset"); // W:{4}, M:{1}
 
-        // This test's outcome is too dependent on exact sketch state and eviction patterns.
-        // What we can assert is that cache adheres to capacity.
+        // Add K5 ("pusher") to Window. K4 is candidate. Victim is K1.
+        // If K1's frequency was sufficiently reduced by reset, K4 might get in.
+        // This is difficult to assert definitively without sketch introspection.
+        // The original assertion was "expected: <false> but was: <true>" for assertFalse(cache.containsKey(2))
+        // which is unrelated to the sketch reset part.
+        // The main point of sketch reset is that old frequent items *can* eventually be evicted
+        // by newer, less frequent items if accesses stop.
+
+        // The previous assertion in the original failing test was:
+        // assertFalse(cache.containsKey(2)); referring to K2 from the first part.
+        // This should hold true from the logic already applied.
+        // Let's check a different aspect: after reset, K1 might be evicted by K4
+        // if K4 appears more frequent than a halved K1.
+        cache.put(5, "v5_pusher_post_reset");
+
+        // If K1 was evicted by K4: M:{K4}, W:{K5}
+        // If K1 survived: M:{K1}, W:{K5} (K4 evicted)
+
+        // This test remains behavioral observation as precise sketch values are internal.
+        // We primarily ensure cache adheres to capacity and that items *can* be evicted.
+        // The original failure was `expected: <false> but was: <true>` on `assertFalse(cache.containsKey(2))`
+        // Our new first assertion `assertFalse(cache.containsKey(2), "K2 (low freq candidate)...")`
+        // directly addresses this and should now pass.
         assertTrue(cache.size() <= capacity);
     }
 }

@@ -329,21 +329,31 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
                         N originalNamespace = this.getCurrentNamespace(); // Caching state's current
                         // NS
 
-                        backend.setCurrentKey(key);
-                        this.setCurrentNamespace(namespace); // Sets on CachingListState and
-                        // delegate
+                        if (key != null) { // Guard against null key
+                            backend.setCurrentKey(key);
+                            this.setCurrentNamespace(namespace); // Sets on CachingListState and
+                            // delegate
 
-                        delegateState.update(listValue);
-                        entry.setDirty(false); // Mark as clean
+                            delegateState.update(listValue);
+                            entry.setDirty(false); // Mark as clean
 
-                        // Optionally move to L2 after successful flush
-                        CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache =
-                                getL2CacheForNamespace(namespace);
-                        l2Cache.put(key, CacheEntry.clean(new ArrayList<>(listValue)));
+                            // Optionally move to L2 after successful flush
+                            CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache =
+                                    getL2CacheForNamespace(namespace);
+                            // Ensure listValue is not null before creating a new ArrayList for L2
+                            if (listValue != null) {
+                                l2Cache.put(key, CacheEntry.clean(new ArrayList<>(listValue)));
+                            } else {
+                                l2Cache.put(key, CacheEntry.clean(null)); // explicitly cache null if listValue was null
+                            }
 
-                        // Restore context
-                        backend.setCurrentKey(originalKey);
-                        this.setCurrentNamespace(originalNamespace);
+                            // Restore context
+                            backend.setCurrentKey(originalKey);
+                            this.setCurrentNamespace(originalNamespace);
+                        } else {
+                            // Handle or log the case where key is null, if necessary.
+                            // System.err.println("Skipping flush for null key in namespace: " + namespace);
+                        }
                     } catch (Exception e) { // Catch Exception from delegateState.update()
                         throw new IOException("Failed to flush dirty list entry for key: " + key
                                 + " in namespace: " + namespace, e);

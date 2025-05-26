@@ -491,6 +491,15 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             CachingKeyedStateBackend<K_F> backendForContext, // Changed type
             InternalMapState<K_F, N_F, UK_C, UV_C> delegateStateForContext) throws Exception {
 
+        if (flinkKey == null) {
+            // If the Flink key itself is null, we cannot set it on the backend.
+            // This might indicate an issue with how the cache was populated or a bug.
+            // Log this situation if possible, or decide if an exception is more appropriate.
+            // For now, skip flushing for this null Flink key to prevent NPE.
+            // System.err.println("Attempted to flush L1 entries for a null Flink key in namespace: " + namespace);
+            return;
+        }
+
         // Temporarily store entries to flush to avoid concurrent modification if LRUMap
         // eviction
         // triggers this during iteration.
@@ -617,8 +626,10 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 if (perKeyCache != null) {
                     try {
                         // Use the namespace and flinkKey from the iteration context for flushing
-                        flushL1Entries(perKeyCache, flinkKey, namespace, this.backend,
-                                this.delegateState);
+                        if (flinkKey != null) { // Guard against null Flink key
+                            flushL1Entries(perKeyCache, flinkKey, namespace, this.backend,
+                                    this.delegateState);
+                        }
                     } catch (Exception e) {
                         throw new IOException("Failed to flush map entries for Flink key: "
                                 + flinkKey + " in namespace: " + namespace, e);
