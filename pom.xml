@@ -564,14 +564,14 @@ under the License.
 				<!-- mockito/powermock mismatch -->
 				<groupId>net.bytebuddy</groupId>
 				<artifactId>byte-buddy</artifactId>
-				<version>1.10.14</version>
+				<version>1.17.5</version>
 			</dependency>
 
 			<dependency>
 				<!-- mockito/powermock mismatch -->
 				<groupId>net.bytebuddy</groupId>
 				<artifactId>byte-buddy-agent</artifactId>
-				<version>1.10.14</version>
+				<version>1.17.5</version>
 			</dependency>
 
 			<!-- For dependency convergence -->

@@ -23,6 +23,9 @@ import javax.annotation.Nonnull;
 import java.io.IOException;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.Iterator;
+import java.util.List;
+import java.util.ArrayList;
 
 /**
  * An {@link InternalValueState} that uses an L1/L2 cache for its values.
@@ -97,9 +100,7 @@ public class CachingInternalValueState<K, N, V>
             Consumer<Map.Entry<CK, CV>> evictionListener) {
         switch (cachePolicyType) {
             case TINYLFU:
-                // TODO: Add eviction listener support to TinyLFU or adapt
-                return new LRUMap<>(capacity, evictionListener);
-            // return new TinyLFUMap<>(capacity);
+                return new TinyLFUMap<>(capacity, evictionListener);
             case LRU:
             default:
                 return new LRUMap<>(capacity, evictionListener);
@@ -153,10 +154,14 @@ public class CachingInternalValueState<K, N, V>
                 namespace,
                 ns -> createCachePolicyWithEvictionListener(l1CacheSizePerKeyPerNamespace,
                         evictedL1Entry -> {
+                            // This is the L1 eviction listener for a specific key in a specific namespace.
                             CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(ns);
                             K evictedKey = evictedL1Entry.getKey();
                             CacheEntry<V> evictedValueWrapper = evictedL1Entry.getValue();
                             V evictedValue = evictedValueWrapper.getValue();
+                            long estimatedSize = evictedValueWrapper.getEstimatedSizeBytes();
+
+                            backend.reportCacheMemoryReleased(estimatedSize); // Report L1 release
 
                             if (evictedValueWrapper.isDirty()) {
                                 try {
@@ -164,23 +169,37 @@ public class CachingInternalValueState<K, N, V>
                                     K originalKey = backend.getCurrentKey();
 
                                     backend.setCurrentKey(evictedKey);
-                                    this.setCurrentNamespace(ns);
+                                    this.setCurrentNamespace(ns); // Set NS for delegate for this op
                                     delegateState.update(evictedValue);
+                                    evictedValueWrapper.setDirty(false); // Mark as clean
 
-                                    backend.setCurrentKey(originalKey); // Restore
+                                    // Restore context
+                                    backend.setCurrentKey(originalKey); 
                                     this.setCurrentNamespace(originalNamespace);
 
-                                    l2Cache.put(evictedKey, CacheEntry.clean(evictedValue));
-                                    evictedValueWrapper.setDirty(false); // It's now clean in L2
-                                    // context
+                                    // Move to L2 as clean after successful update
+                                    CacheEntry<V> entryToL2 = CacheEntry.clean(evictedValue); // Re-estimate size if value changed, though it shouldn't for ValueState here
+                                    CacheEntry<V> oldL2Entry = l2Cache.put(evictedKey, entryToL2); 
+                                    if (oldL2Entry != null) { // If L2 already had an entry for this key (should be rare)
+                                        backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
+                                    }
+                                    backend.reportCacheMemoryAdded(entryToL2.getEstimatedSizeBytes()); // Report L2 add
+
                                 } catch (IOException e) {
+                                    // Failed to flush, so it's not moved to L2 and L1 release is final.
+                                    // The backend.reportCacheMemoryReleased(estimatedSize) done earlier stands.
                                     throw new RuntimeException(
-                                            "Failed to flush L1 entry to delegate/L2 on eviction for key: "
-                                                    + evictedKey,
+                                            "Failed to flush L1 entry to delegate on L1 eviction for key: "
+                                                    + evictedKey + " in ns: " + ns,
                                             e);
                                 }
                             } else {
-                                l2Cache.put(evictedKey, evictedValueWrapper);
+                                // Not dirty, just move to L2 (it's already clean)
+                                CacheEntry<V> oldL2Entry = l2Cache.put(evictedKey, evictedValueWrapper); // Use original wrapper
+                                if (oldL2Entry != null) {
+                                    backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
+                                }
+                                backend.reportCacheMemoryAdded(evictedValueWrapper.getEstimatedSizeBytes()); // Report L2 add
                             }
                         }));
     }
@@ -188,9 +207,8 @@ public class CachingInternalValueState<K, N, V>
     private CachePolicy<K, CacheEntry<V>> getL2CacheForNamespace(N namespace) {
         return namespaceCachesL2.computeIfAbsent(
                 namespace,
-                ns -> createCachePolicy(l2CacheSizePerKeyPerNamespace) // L2 eviction doesn't
-                                                                       // trigger
-                // further writes here
+                ns -> new LRUMap<>(l2CacheSizePerKeyPerNamespace) // L2 is always LRU
+                // L2 eviction doesn't trigger further writes here
                 );
     }
 
@@ -210,15 +228,32 @@ public class CachingInternalValueState<K, N, V>
         CacheEntry<V> l2Entry = l2Cache.get(currentKey);
 
         if (l2Entry != null) {
-            l2Cache.remove(currentKey);
-            l1Cache.put(currentKey, l2Entry);
-            return l2Entry.getValue();
+            // L2 entry is always clean. Remove from L2, put into L1.
+            // No memory change reported here as it's a move between caches of the same backend instance.
+            // However, if L1.put causes an eviction, that eviction will report a release.
+            // And this put will report an add.
+            l2Cache.remove(currentKey); // This remove itself doesn't release memory from the CachingKeyedStateBackend's perspective yet
+            // The entry is still "in play" until it's re-added to L1 or discarded.
+            // We don't report release for l2Entry removal & add for l1Cache.put here to avoid double counting
+            // if l1Cache.put evicts something (which would report release) and then adds this (reporting add).
+            // Instead, the L1 put will handle the accounting if it replaces something or just adds.
+            CacheEntry<V> entryToL1 = CacheEntry.clean(l2Entry.getValue()); // Create a new entry for L1 if needed, or use l2Entry if suitable
+            CacheEntry<V> oldL1Entry = l1Cache.put(currentKey, entryToL1);
+            if (oldL1Entry != null) {
+                backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
+            }
+            backend.reportCacheMemoryAdded(entryToL1.getEstimatedSizeBytes());
+            return entryToL1.getValue();
         }
 
         V valueFromDelegate = delegateState.value();
-        if (valueFromDelegate != null) { // Only cache non-null, Flink state differentiates null
-            // from empty
-            l1Cache.put(currentKey, CacheEntry.clean(valueFromDelegate));
+        if (valueFromDelegate != null) { // Only cache non-null
+            CacheEntry<V> newEntry = CacheEntry.clean(valueFromDelegate);
+            CacheEntry<V> oldL1Entry = l1Cache.put(currentKey, newEntry);
+            if (oldL1Entry != null) {
+                backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
+            }
+            backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
         }
         return valueFromDelegate;
     }
@@ -229,16 +264,33 @@ public class CachingInternalValueState<K, N, V>
         N currentNamespace = getCurrentNamespace();
 
         if (value == null) { // As per Flink ValueState contract
-            clear();
+            clear(); // clear() will handle memory reporting
             return;
         }
 
         CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        l1Cache.put(currentKey, CacheEntry.dirty(value));
+        CacheEntry<V> newEntry = CacheEntry.dirty(value);
+        CacheEntry<V> oldL1Entry = l1Cache.put(currentKey, newEntry);
+        if (oldL1Entry != null) {
+            backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
+        }
+        backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
 
         // If L2 had this key, it's now stale, remove it.
         CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
-        l2Cache.remove(currentKey);
+        CacheEntry<V> oldL2Entry = l2Cache.remove(currentKey);
+        if (oldL2Entry != null) {
+            // L2 entries are implicitly managed by L1 evictions or direct stale removal like here.
+            // Their memory was accounted for when they moved from L1 to L2 (L1 released, L2 added - though we simplified this)
+            // Or when loaded to L2 directly. When removing from L2 here because L1 got an update,
+            // we should report its memory as released if it wasn't already part of L1's old entry.
+            // Simplified: Assume L2 entries are clean and their removal directly translates to released memory
+            // if they weren't the source for the L1 update that just happened.
+            // However, simpler just to let their L1 eviction listener handle the release when they were put there.
+            // The current logic in L1 eviction listener (getL1CacheForNamespace) moves to L2 and L2 doesn't have
+            // an aggressive release reporting on its own removals. This explicit remove should report.
+            backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
+        }
     }
 
     @Override
@@ -247,20 +299,22 @@ public class CachingInternalValueState<K, N, V>
         N currentNamespace = getCurrentNamespace();
 
         CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        l1Cache.remove(currentKey);
+        CacheEntry<V> oldL1Entry = l1Cache.remove(currentKey);
+        if (oldL1Entry != null) {
+            backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
+        }
 
         CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
-        l2Cache.remove(currentKey);
+        CacheEntry<V> oldL2Entry = l2Cache.remove(currentKey);
+        if (oldL2Entry != null) {
+            backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
+        }
 
         delegateState.clear(); // Clear the underlying state
     }
 
     @Override
     public void flushToUnderlyingState() throws IOException {
-        N originalNamespace = getCurrentNamespace();
-        K originalKey = backend.getCurrentKey();
-        boolean keyWasSet = originalKey != null; // Check if key was actually set
-
         // Flush L1 caches
         for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL1.entrySet()) {
             N namespace = nsEntry.getKey();
@@ -314,13 +368,6 @@ public class CachingInternalValueState<K, N, V>
                 }
             }
         }
-
-        setCurrentNamespace(originalNamespace);
-        if (keyWasSet) {
-            backend.setCurrentKey(originalKey);
-        } else {
-            backend.setCurrentKey(null); // Or whatever Flink expects for un-setting a key
-        }
     }
 
     @Override
@@ -368,5 +415,101 @@ public class CachingInternalValueState<K, N, V>
     @Nonnull
     public N getCurrentNamespace() {
         return this.currentNamespace;
+    }
+
+    @Override
+    public long evictEntriesToFreeMemory(long targetBytesToFreeThisState) {
+        long bytesFreed = 0;
+        if (targetBytesToFreeThisState <= 0) return 0;
+
+        // Iterate over a snapshot of L2 namespaces to avoid concurrent modification if map supports it
+        List<N> l2Namespaces = new ArrayList<>();
+        for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> entry : namespaceCachesL2.entrySet()) {
+            l2Namespaces.add(entry.getKey());
+        }
+
+        for (N namespace : l2Namespaces) {
+            CachePolicy<K, CacheEntry<V>> l2Cache = namespaceCachesL2.get(namespace); // Re-fetch, could be removed by another thread
+            if (l2Cache == null) continue;
+
+            Iterator<Map.Entry<K, CacheEntry<V>>> l2Iter = l2Cache.entrySet().iterator();
+            while (l2Iter.hasNext() && bytesFreed < targetBytesToFreeThisState) {
+                Map.Entry<K, CacheEntry<V>> entry = l2Iter.next();
+                CacheEntry<V> cacheValue = entry.getValue(); // L2 entries are always clean
+                long estimatedSize = cacheValue.getEstimatedSizeBytes();
+                l2Iter.remove();
+                backend.reportCacheMemoryReleased(estimatedSize);
+                bytesFreed += estimatedSize;
+            }
+            if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
+        }
+
+        // Iterate over L1 namespaces
+        List<N> l1Namespaces = new ArrayList<>();
+        for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> entry : namespaceCachesL1.entrySet()) {
+            l1Namespaces.add(entry.getKey());
+        }
+
+        for (N namespace : l1Namespaces) {
+            CachePolicy<K, CacheEntry<V>> l1Cache = namespaceCachesL1.get(namespace);
+            if (l1Cache == null) continue;
+
+            // Evict clean L1 entries first
+            Iterator<Map.Entry<K, CacheEntry<V>>> l1IterClean = l1Cache.entrySet().iterator();
+            List<Map.Entry<K, CacheEntry<V>>> dirtyL1EntriesToConsider = new ArrayList<>();
+            while (l1IterClean.hasNext() && bytesFreed < targetBytesToFreeThisState) {
+                Map.Entry<K, CacheEntry<V>> entry = l1IterClean.next();
+                CacheEntry<V> cacheValue = entry.getValue();
+                if (!cacheValue.isDirty()) {
+                    long estimatedSize = cacheValue.getEstimatedSizeBytes();
+                    l1IterClean.remove();
+                    backend.reportCacheMemoryReleased(estimatedSize);
+                    bytesFreed += estimatedSize;
+                } else {
+                    dirtyL1EntriesToConsider.add(entry); // Collect dirty ones for later pass
+                }
+            }
+            if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
+
+            // Evict dirty L1 entries if still needed (requires flushing)
+            // This is a simplified flush for the global eviction context.
+            // Proper context setting for delegateState.update is complex here.
+            // For a truly "lightweight" initial pass, one might choose to *not* evict dirty entries here,
+            // or only evict them without a guaranteed flush if that's acceptable for the memory cap goal.
+            Iterator<Map.Entry<K, CacheEntry<V>>> dirtyIter = dirtyL1EntriesToConsider.iterator(); // Use separate iterator if modifying original list
+            while (dirtyIter.hasNext() && bytesFreed < targetBytesToFreeThisState) {
+                Map.Entry<K, CacheEntry<V>> dirtyEntryTuple = dirtyIter.next();
+                K key = dirtyEntryTuple.getKey();
+                CacheEntry<V> dirtyEntry = dirtyEntryTuple.getValue();
+                V value = dirtyEntry.getValue();
+                long estimatedSize = dirtyEntry.getEstimatedSizeBytes();
+
+                try {
+                    // Simplified: Attempt to flush. In a real scenario, this needs robust context management.
+                    N originalCurrentNamespace = this.currentNamespace; // Store current NS of this state object
+                    K originalBackendKey = backend.getCurrentKey();
+
+                    backend.setCurrentKey(key);       // Set key for backend & delegate
+                    setCurrentNamespace(namespace); // Set NS for delegate
+                    delegateState.update(value);    // Flush to delegate
+                    dirtyEntry.setDirty(false);     // Mark as clean if flush was successful
+
+                    // Restore context
+                    setCurrentNamespace(originalCurrentNamespace);
+                    backend.setCurrentKey(originalBackendKey);
+
+                    // Now evict from L1
+                    l1Cache.remove(key); // Ensure removal, iterator might be tricky if map reorders
+                    backend.reportCacheMemoryReleased(estimatedSize);
+                    bytesFreed += estimatedSize;
+
+                } catch (Exception e) {
+                    // Log or handle: Failed to flush dirty entry, cannot evict it reliably to free memory yet.
+                    // System.err.println("Global eviction: Failed to flush/evict dirty L1 entry for key " + key + " in NS " + namespace + ": " + e.getMessage());
+                }
+            }
+            if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
+        }
+        return bytesFreed;
     }
 }

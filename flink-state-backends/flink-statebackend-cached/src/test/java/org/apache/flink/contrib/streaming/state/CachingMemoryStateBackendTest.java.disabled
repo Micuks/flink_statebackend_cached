@@ -1,0 +1,157 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.flink.contrib.streaming.state;
+
+import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
+import org.apache.flink.runtime.execution.Environment;
+import org.apache.flink.runtime.operators.testutils.MockEnvironment;
+import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
+import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
+import org.apache.flink.runtime.state.KeyGroupRange;
+import org.apache.flink.runtime.state.StateBackendTestBase;
+import org.apache.flink.runtime.state.VoidNamespace;
+import org.apache.flink.runtime.state.VoidNamespaceSerializer;
+import org.apache.flink.runtime.state.memory.MemoryStateBackend;
+import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.Collections;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+
+/**
+ * Tests for {@link CachingStateBackend} with {@link MemoryStateBackend} as delegate,
+ * focusing on computational correctness by leveraging {@link StateBackendTestBase}.
+ */
+public class CachingMemoryStateBackendTest extends StateBackendTestBase<CachingStateBackend> {
+
+    private CachingKeyedStateBackend<String> cachingKeyedStateBackend;
+
+    @Override
+    protected CachingStateBackend getStateBackend() throws Exception {
+        MemoryStateBackend memoryStateBackendDelegate = new MemoryStateBackend();
+        // Use default cache configurations from CachingStateBackendFactory
+        long l1CacheSize = CachingStateBackendFactory.L1_CACHE_SIZE_CONFIG.defaultValue();
+        long l2CacheSize = CachingStateBackendFactory.L2_CACHE_SIZE_CONFIG.defaultValue();
+        long maxActiveNamespaces = CachingStateBackendFactory.MAX_ACTIVE_NAMESPACES_CONFIG.defaultValue();
+        long maxCacheMemoryMb = CachingStateBackendFactory.MAX_CACHE_MEMORY_MB_CONFIG.defaultValue();
+        CachingStateBackendFactory.CachePolicyType cachePolicy = CachingStateBackendFactory.CACHE_POLICY_CONFIG.defaultValue();
+
+        return new CachingStateBackend(
+                memoryStateBackendDelegate,
+                l1CacheSize,
+                l2CacheSize,
+                maxActiveNamespaces,
+                maxCacheMemoryMb,
+                cachePolicy
+        );
+    }
+
+    @Override
+    protected boolean supportsAsynchronousSnapshots() {
+        // MemoryStateBackend snapshots are synchronous
+        return false;
+    }
+
+    @Override
+    protected boolean isSerializerPresenceRequiredOnRestore() {
+        return false;
+    }
+
+    // Most tests are inherited from StateBackendTestBase.
+    // We can add specific simple tests here to ensure the basic wiring with
+    // MemoryStateBackend as delegate is correct.
+
+    @Test
+    void testValueStateOperationsWithCachingAndMemoryDelegate() throws Exception {
+        // Setup specific to this test, if different from StateBackendTestBase.env
+        // For this simple test, we can reuse the `backend` and `env` from the base class setup.
+        // `this.backend` is initialized by StateBackendTestBase calling our getStateBackend()
+        // `this.env` is initialized by StateBackendTestBase
+
+        int parallelism = this.env.getExecutionConfig().getParallelism();
+        KeyGroupRange keyGroupRange = new KeyGroupRange(0, Math.max(0, parallelism - 1));
+
+        this.cachingKeyedStateBackend = (CachingKeyedStateBackend<String>) getStateBackend().createKeyedStateBackend(
+                this.env,
+                new JobID(),
+                "testValueStateOperator",
+                StringSerializer.INSTANCE,
+                parallelism, // Use parallelism from env
+                keyGroupRange,
+                this.env.getTaskKvStateRegistry(),
+                TtlTimeProvider.DEFAULT,
+                new UnregisteredMetricsGroup(),
+                Collections.emptyList(),
+                new CloseableRegistry()
+        );
+
+        try {
+            ValueStateDescriptor<String> descriptor =
+                    new ValueStateDescriptor<>("testValueState", String.class);
+
+            // Test with key "testKey1"
+            this.cachingKeyedStateBackend.setCurrentKey("testKey1");
+            ValueState<String> valueState1 =
+                    this.cachingKeyedStateBackend.getPartitionedState(
+                            VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            descriptor);
+
+            assertNull(valueState1.value(), "Initial value should be null for key1");
+            valueState1.update("hello");
+            assertEquals("hello", valueState1.value(), "Value should be 'hello' for key1");
+
+            // Test with key "testKey2" - ensure isolation and caching doesn't mix them up
+            this.cachingKeyedStateBackend.setCurrentKey("testKey2");
+            ValueState<String> valueState2 =
+                    this.cachingKeyedStateBackend.getPartitionedState(
+                            VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            descriptor);
+
+            assertNull(valueState2.value(), "Initial value should be null for key2");
+            valueState2.update("world");
+            assertEquals("world", valueState2.value(), "Value should be 'world' for key2");
+
+            // Re-check key1 to ensure its value is still correct (potentially from cache or delegate)
+            this.cachingKeyedStateBackend.setCurrentKey("testKey1");
+            assertEquals("hello", valueState1.value(), "Value for key1 should still be 'hello'");
+
+            valueState1.clear();
+            assertNull(valueState1.value(), "Value for key1 should be null after clear");
+
+            // Ensure key2 is unaffected
+            this.cachingKeyedStateBackend.setCurrentKey("testKey2");
+            assertEquals("world", valueState2.value(), "Value for key2 should be unaffected by clearing key1");
+
+        } finally {
+            if (this.cachingKeyedStateBackend != null) {
+                this.cachingKeyedStateBackend.dispose();
+            }
+        }
+    }
+} 

@@ -14,28 +14,28 @@
  */
 package org.apache.flink.contrib.streaming.state;
 
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Tests for {@link TinyLFUMap}. */
+@SuppressWarnings("serial")
 class TinyLFUMapTest {
 
     // Window cache is 1% of maxCapacity, min 1. Main cache is the rest.
@@ -174,24 +174,41 @@ class TinyLFUMapTest {
 
 
         // Scenario: Candidate K5 (high freq) should be admitted, evicting K2 (victim)
-        cache.clear();
-        cache.put(1, "v1_other_main"); // W:{1}, M:{}
-        for(int i=0; i<10; i++) cache.get(1); // M:{1} (freq=10), W:{}
+        cache.clear(); // Window cache capacity: 1, Main cache capacity: 2
 
-        cache.put(2, "v2_victim");     // W:{2}, M:{1}
-        for(int i=0; i<5; i++) cache.get(2); // M:{1,2} (freq(1)=10, freq(2)=5). W:{} (1 is MRU, 2 is LRU/victim)
+        // Setup Main cache: K2 (victim, LRU, low freq), K1 (other, MRU, high freq)
+        // K2: sketch frequency will be 1 (put) + 5 (gets) = 6
+        cache.put(2, "v2_victim");
+        for(int i = 0; i < 5; i++) cache.get(2);   // Window: {2 (freq 6)}, Main: {}
+
+        // K1: sketch frequency will be 1 (put) + 10 (gets) = 11
+        // When K1 is put, K2 (eldest from Window) is admitted to Main.
+        cache.put(1, "v1_other_main");           // Window: {1 (freq 1)}, Main: {2 (freq 6)}
+        for(int i = 0; i < 10; i++) cache.get(1);  // Window: {1 (freq 11)}, Main: {2 (freq 6)}
+
+        // Push K1 from Window to Main by adding a temporary item.
+        // This makes K2 LRU and K1 MRU in Main.
+        cache.put(99, "temp_pusher_to_fill_main"); // K1 (eldest from Window) is admitted to Main.
+                                                   // Window: {99}, Main: {2 (LRU, freq 6), 1 (MRU, freq 11)}
+        
+        // Clean up pusher from Window (if it's still there, remove it; otherwise no-op)
+        // remove() will check both window and main. If 99 somehow made it to main (it shouldn't here),
+        // it would be removed. Here, it should only be in window.
+        cache.remove(99);                          
+                                                   // Window: {}, Main: {2 (LRU, freq 6), 1 (MRU, freq 11)}
 
         // Add K5 (candidate with high frequency) to window
-        cache.put(5, "v5_candidate_high_freq"); // W:{5}, M:{1,2}.
+        // K5: sketch frequency will be 1 (put) + 15 (gets) = 16
+        cache.put(5, "v5_candidate_high_freq");    // Window: {5 (freq 1)}, Main: {2,1}
         for (int i = 0; i < 15; i++) {
-            cache.get(5); // Make K5 very frequent while it's in the window.
-                          // This access moves it to MRU in window, and updates sketch.
-                          // W:{5} (freq=1+15=16), M:{1,2}
+            cache.get(5);                          // Window: {5 (freq 16)}, Main: {2,1}
         }
+
         // Add K6 ("pusher") to window. This makes K5 eldest in window.
-        // K5 (candidate, freq 16) vs K2 (victim from main, freq 5).
-        // K5 should be admitted, K2 evicted.
-        cache.put(6, "v6_pusher"); // W:{6}, M:{1,5}. K2 evicted.
+        // Candidate K5 (freq 16) vs. Victim K2 from main (freq 6).
+        // K5 should be admitted, K2 should be evicted.
+        cache.put(6, "v6_pusher");
+        // Expected state: Window: {6}, Main: {1 (LRU), 5 (MRU)}. K2 evicted.
 
         assertTrue(
                 cache.containsKey(5),
@@ -508,5 +525,65 @@ class TinyLFUMapTest {
         // Our new first assertion `assertFalse(cache.containsKey(2), "K2 (low freq candidate)...")`
         // directly addresses this and should now pass.
         assertTrue(cache.size() <= capacity);
+    }
+    
+    @Test
+    public void testEvictionListenerCalledWithCorrectEntry() {
+        final AtomicReference<Map.Entry<Integer, String>> evictedEntryRef = new AtomicReference<>();
+        Consumer<Map.Entry<Integer, String>> listener = evictedEntryRef::set;
+
+        TinyLFUMap<Integer, String> cache = new TinyLFUMap<>(1, listener); // Capacity 1
+        cache.put(1, "v1");
+        cache.put(2, "v2"); // This should evict (1, "v1")
+
+        Map.Entry<Integer, String> evicted = evictedEntryRef.get();
+        assertNotNull(evicted, "Eviction listener should have been called.");
+        assertEquals(Integer.valueOf(1), evicted.getKey());
+        assertEquals("v1", evicted.getValue());
+    }
+
+    @Test
+    public void testEvictionListenerReceivesCorrectMutableCacheEntryState() {
+        final AtomicReference<Map.Entry<String, CacheEntry<String>>> evictedEntryRef =
+                new AtomicReference<>();
+        Consumer<Map.Entry<String, CacheEntry<String>>> listener = evictedEntryRef::set;
+
+        // Max capacity 2 ensures: window cache capacity = 1, main cache capacity = 1.
+        TinyLFUMap<String, CacheEntry<String>> cache = new TinyLFUMap<>(2, listener);
+
+        CacheEntry<String> entryBeingEvicted = CacheEntry.dirty("value_initial_e");
+        CacheEntry<String> entryTriggeringEviction = CacheEntry.dirty("value_trigger");
+
+        // 1. Put entryBeingEvicted ("key_e"). Access it to ensure it gets into main cache.
+        cache.put("key_e", entryBeingEvicted);
+        cache.get("key_e"); 
+        cache.get("key_e"); 
+      
+        // 2. Modify the state of entryBeingEvicted *while it is in the cache*.
+        entryBeingEvicted.setValue("value_modified_e");
+        entryBeingEvicted.setDirty(true); 
+
+        // 3. Put entryTriggeringEviction ("key_t"). Access it to make it a candidate for main cache.
+        cache.put("key_t", entryTriggeringEviction); 
+        cache.get("key_t"); 
+        cache.get("key_t"); 
+        cache.get("key_t"); 
+        
+        // 4. Add another entry to trigger eviction from main cache by "key_t"
+        cache.put("key_pusher", CacheEntry.clean("pusher_value"));
+        
+        // 5. Check the evicted entry.
+        Map.Entry<String, CacheEntry<String>> evicted = evictedEntryRef.get();
+        assertNotNull(evicted, "An entry should have been evicted.");
+        assertEquals("key_e", evicted.getKey(), "Evicted key mismatch.");
+
+        CacheEntry<String> evictedValueWrapper = evicted.getValue();
+        assertNotNull(evictedValueWrapper, "Evicted value wrapper should not be null.");
+
+        assertSame(entryBeingEvicted, evictedValueWrapper,
+                "Evicted CacheEntry instance should be the same as the one originally put and modified.");
+        assertTrue(evictedValueWrapper.isDirty(), "Evicted CacheEntry should be dirty.");
+        assertEquals("value_modified_e", evictedValueWrapper.getValue(),
+                "Evicted CacheEntry value should reflect modifications.");
     }
 }

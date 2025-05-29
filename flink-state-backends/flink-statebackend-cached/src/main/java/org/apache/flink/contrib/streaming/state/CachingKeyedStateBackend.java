@@ -62,6 +62,7 @@ import java.util.concurrent.RunnableFuture;
 import java.util.stream.Stream;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.flink.contrib.streaming.state.RocksDBKeyedStateBackend;
 import org.apache.flink.contrib.streaming.state.RocksDBResourceContainer;
@@ -103,6 +104,12 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     private final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
 
+    // Added for memory capping
+    private transient AtomicLong currentEstimatedCacheSizeBytes;
+    private transient long maxConfiguredCacheSizeBytes;
+    // Using the static ValueSizeUtils for now, but a Function could be injected here
+    // private transient Function<Object, Long> valueSizeEstimator;
+
     public CachingKeyedStateBackend(
             TaskKvStateRegistry kvStateRegistry,
             TypeSerializer<K> keySerializer,
@@ -136,6 +143,11 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.maxCacheMemoryMb = maxCacheMemoryMb;
         this.registeredStates = new ArrayList<>();
         this.cachePolicyType = cachePolicyType;
+
+        // Initialize memory capping fields
+        this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
+        this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
+        // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
     }
 
     // create a new RocksDB backend
@@ -220,6 +232,11 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.maxCacheMemoryMb = maxCacheMemoryMb;
         this.registeredStates = new ArrayList<>();
         this.cachePolicyType = cachePolicyType;
+
+        // Initialize memory capping fields
+        this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
+        this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
+        // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
     }
 
     public int getMaxActiveNamespaceOrPerKeyCacheContainers() {
@@ -244,6 +261,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
 
         InternalKvState<K, N, ?> actualStateRaw = (InternalKvState<K, N, ?>) actualState;
+        CachingInternalState<K, N, ?, ?> cachingStateToRegister = null;
 
         if (stateDescriptor.getType() == StateDescriptor.Type.VALUE
                 && actualStateRaw instanceof InternalValueState) {
@@ -257,53 +275,40 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                             l2EntryCacheSize,
                             maxActiveNamespaceOrPerKeyCacheContainers,
                             this.maxCacheMemoryMb, this.cachePolicyType);
-            synchronized (registeredStates) {
-                boolean alreadyExists =
-                        registeredStates.stream()
-                                .anyMatch(st -> st.getDelegateState() == actualStateValue);
-                if (!alreadyExists) {
-                    registeredStates.add(cachingState);
-                }
-            }
-            return (S) cachingState;
+            cachingStateToRegister = cachingState;
         } else if (stateDescriptor.getType() == StateDescriptor.Type.MAP
                 && actualStateRaw instanceof InternalMapState) {
-            // actualStateRaw is already InternalMapState<K, N, UK, UV>
-            // Let CachingInternalMapState infer UK, UV from the delegate's actual types
             InternalMapState<K, N, ?, ?> actualDelegateMapState = (InternalMapState<K, N, ?, ?>) actualStateRaw;
 
             CachingInternalMapState<K, N, ?, ?> cachingMapState =
                     new CachingInternalMapState<>(actualDelegateMapState, this, l1EntryCacheSize,
                             l2EntryCacheSize, maxActiveNamespaceOrPerKeyCacheContainers,
                             this.maxCacheMemoryMb, this.cachePolicyType);
-            synchronized (registeredStates) {
-                boolean alreadyExists = registeredStates.stream()
-                        .anyMatch(st -> st.getDelegateState() == actualDelegateMapState);
-                if (!alreadyExists) {
-                    registeredStates.add(cachingMapState);
-                }
-            }
-            return (S) cachingMapState;
+            cachingStateToRegister = cachingMapState;
         } else if (stateDescriptor.getType() == StateDescriptor.Type.LIST
                 && actualStateRaw instanceof InternalListState) {
-            // actualStateRaw is already InternalListState<K, N, V_ELE>
-            // Let CachingInternalListState infer V_ELE from the delegate's actual type
             InternalListState<K, N, ?> actualDelegateListState = (InternalListState<K, N, ?>) actualStateRaw;
 
             CachingInternalListState<K, N, ?> cachingListState =
                     new CachingInternalListState<>(actualDelegateListState, this, l1EntryCacheSize, 
                             l2EntryCacheSize, maxActiveNamespaceOrPerKeyCacheContainers,
                             this.cachePolicyType);
+            cachingStateToRegister = cachingListState;
+        }
+
+        if (cachingStateToRegister != null) {
             synchronized (registeredStates) {
-                boolean alreadyExists = registeredStates.stream()
-                        .anyMatch(st -> st.getDelegateState() == actualDelegateListState);
+                boolean alreadyExists =
+                        registeredStates.stream()
+                                .anyMatch(st -> st.getDelegateState() == actualStateRaw);
                 if (!alreadyExists) {
-                    registeredStates.add(cachingListState);
+                    registeredStates.add(cachingStateToRegister);
                 }
             }
-            return (S) cachingListState;
+            return (S) cachingStateToRegister;
+        } else {
+            return (S) actualStateRaw; // Return the raw state if not a supported caching type
         }
-        return (S) actualStateRaw; // Return the raw state if not a supported caching type
     }
 
     // --- Methods to delegate to underlyingKeyedStateBackend ---
@@ -312,8 +317,17 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @Override
     public void setCurrentKey(K newKey) {
-        super.setCurrentKey(newKey);
-        delegateKeyedStateBackend.setCurrentKey(newKey); // Keep delegate in sync
+        if (newKey == null) {
+            // The CachingKeyedStateBackend manages its perception of the current key via its keyContext.
+            getKeyContext().setCurrentKey(null); // InternalKeyContext can handle null.
+            // Explicitly DO NOT call delegateKeyedStateBackend.setCurrentKey(null) here,
+            // as AbstractKeyedStateBackend (and thus RocksDBKeyedStateBackend) throws NPE.
+        } else {
+            super.setCurrentKey(newKey); // This is for non-null keys, should be safe.
+            if (delegateKeyedStateBackend != null) {
+                delegateKeyedStateBackend.setCurrentKey(newKey);
+            }
+        }
     }
 
     @Override
@@ -685,5 +699,62 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         return latencyBuilder
                 .setEnabled(executionConfig.getLatencyTrackingInterval() > 0)
                 .build();
+    }
+
+    // Added for memory capping: To be called by CachingInternal*State when entries are added
+    public void reportCacheMemoryAdded(long sizeBytes) {
+        if (sizeBytes <= 0) return;
+        currentEstimatedCacheSizeBytes.addAndGet(sizeBytes);
+        checkAndTriggerGlobalEviction();
+    }
+
+    // Added for memory capping: To be called by CachingInternal*State when entries are released
+    public void reportCacheMemoryReleased(long sizeBytes) {
+        if (sizeBytes <= 0) return;
+        currentEstimatedCacheSizeBytes.addAndGet(-sizeBytes);
+    }
+
+    private void checkAndTriggerGlobalEviction() {
+        if (maxConfiguredCacheSizeBytes <= 0) { // Memory capping disabled if limit is zero or negative
+            return;
+        }
+        if (currentEstimatedCacheSizeBytes.get() > maxConfiguredCacheSizeBytes) {
+            long memoryToFree = currentEstimatedCacheSizeBytes.get() - maxConfiguredCacheSizeBytes;
+            if (memoryToFree <= 0) return; // Should not happen if check above is true, but for safety
+
+            // System.out.println("Need to free memory: " + memoryToFree + " bytes. Current: " + currentEstimatedCacheSizeBytes.get());
+
+            synchronized (registeredStates) { // Synchronize access to registeredStates list
+                // Simple strategy: Iterate registered states and ask each to free a proportional amount or just iterate until enough is freed.
+                // This could be made more sophisticated (e.g., based on state sizes, LRU of states etc.)
+                long freedSoFar = 0;
+                for (CachingInternalState<K, ?, ?, ?> state : registeredStates) {
+                    if (freedSoFar >= memoryToFree) {
+                        break;
+                    }
+                    // Ask state to free up to remaining needed, or its fair share
+                    long remainingToFreeThisIteration = memoryToFree - freedSoFar;
+                    // Simple: ask it to free up to the remaining. Could be smarter.
+                    long freedByThisState = state.evictEntriesToFreeMemory(remainingToFreeThisIteration);
+                    freedSoFar += freedByThisState;
+                }
+                // System.out.println("Freed memory: " + freedSoFar + " bytes. New current: " + currentEstimatedCacheSizeBytes.get());
+            }
+        }
+    }
+
+    @VisibleForTesting
+    long getCurrentEstimatedCacheSizeBytesValue() {
+        return currentEstimatedCacheSizeBytes.get();
+    }
+
+    @VisibleForTesting
+    long getMaxConfiguredCacheSizeBytesValue() {
+        return maxConfiguredCacheSizeBytes;
+    }
+
+    // This is the crucial method needed by CachingInternalMapState
+    CloseableRegistry getCloseableRegistry() {
+        return this.cancelStreamRegistry;
     }
 }

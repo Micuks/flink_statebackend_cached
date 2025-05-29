@@ -125,7 +125,7 @@ Maven 3.0 及更高版本，不再支持通过命令行指定仓库（-Darchetyp
       <repositories>
         <repository>
           <id>apache-snapshots</id>
-          <url>https://repository.apache.org/content/repositories/snapshots/</url>
+          <url>https://maven.aliyun.com/repository/apache-snapshots/</url>
         </repository>
       </repositories>
     </profile>

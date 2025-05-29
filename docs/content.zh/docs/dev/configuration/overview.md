@@ -115,7 +115,7 @@ applicationDefaultJvmArgs = ["-Dlog4j.configurationFile=log4j2.properties"]
 repositories {
     mavenCentral()
     maven {
-        url "https://repository.apache.org/content/repositories/snapshots"
+        url "https://maven.aliyun.com/repository/apache-snapshots"
         mavenContent {
             snapshotsOnly()
         }

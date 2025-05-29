@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
  * An implementation of the W-TinyLFU cache eviction policy.
@@ -64,14 +65,28 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
     // Counter for total number of accesses
     private final AtomicLong accessCounter;
 
+    // Eviction listener
+    private final Consumer<Map.Entry<K, V>> evictionListener;
+
     /**
      * Creates a new W-TinyLFU cache with the specified maximum capacity.
      * 
      * @param maxCapacity Maximum total capacity of the cache
      */
     public TinyLFUMap(int maxCapacity) {
+        this(maxCapacity, null);
+    }
+
+    /**
+     * Creates a new W-TinyLFU cache with the specified maximum capacity and eviction listener.
+     *
+     * @param maxCapacity Maximum total capacity of the cache
+     * @param evictionListener A consumer that will be called with evicted entries
+     */
+    public TinyLFUMap(int maxCapacity, Consumer<Map.Entry<K, V>> evictionListener) {
         this.maxCapacity = maxCapacity;
         this.accessCounter = new AtomicLong();
+        this.evictionListener = evictionListener;
 
         // Calculate window cache size (at least 1 element)
         this.windowCacheCapacity =
@@ -89,9 +104,14 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
             protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
                 // When window cache is full, try to admit the eldest entry to main cache
                 if (size() > windowCacheCapacity) {
-                    // Only try to admit if main cache has capacity
+                    boolean admittedToMain = false;
                     if (mainCacheCapacity > 0) {
-                        tryAdmitToMainCache(eldest.getKey(), eldest.getValue());
+                        admittedToMain = tryAdmitToMainCache(eldest.getKey(), eldest.getValue());
+                    }
+                    // If not admitted to main, it's a true eviction from the overall cache system via window
+                    if (!admittedToMain && evictionListener != null) {
+                        // Pass the original eldest entry directly to the listener.
+                        evictionListener.accept(eldest);
                     }
                     // Always remove from window cache, whether admitted to main or not
                     return true;
@@ -101,6 +121,8 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
         };
 
         // Create access-ordered main cache (LRU eviction)
+        // The mainLruCache itself does not have an eviction listener that writes to a lower tier.
+        // Evictions from mainLruCache happen within tryAdmitToMainCache, which calls the listener.
         this.mainLruCache = new LinkedHashMap<K, V>(16, 0.75f, true);
     }
 
@@ -125,30 +147,36 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
             return false;
         }
 
-        // Otherwise, use the TinyLFU admission policy
-        Iterator<Map.Entry<K, V>> it = mainLruCache.entrySet().iterator();
-        if (!it.hasNext()) {
-            // Shouldn't happen if capacities are set correctly
-            return false;
+        // Use TinyLFU admission policy, but continue evicting until we have space
+        while (mainLruCache.size() >= mainCacheCapacity) {
+            Iterator<Map.Entry<K, V>> it = mainLruCache.entrySet().iterator();
+            if (!it.hasNext()) {
+                // Shouldn't happen if capacities are set correctly
+                return false;
+            }
+
+            // Get the victim (LRU item from main cache)
+            Map.Entry<K, V> victim = it.next();
+
+            // Compare estimated frequency of candidate vs victim
+            long candidateFreq = sketch.estimate(key);
+            long victimFreq = sketch.estimate(victim.getKey());
+
+            // If candidate is accessed more frequently than victim, evict victim
+            if (candidateFreq > victimFreq) {
+                it.remove(); // Removes victim from mainLruCache
+                if (evictionListener != null) {
+                    evictionListener.accept(victim);
+                }
+            } else {
+                // Candidate is not more frequent, cannot admit
+                return false;
+            }
         }
 
-        // Get the victim (LRU item from main cache)
-        Map.Entry<K, V> victim = it.next();
-        K victimKey = victim.getKey();
-
-        // Compare estimated frequency of candidate vs victim
-        long candidateFreq = sketch.estimate(key);
-        long victimFreq = sketch.estimate(victimKey);
-
-        // If candidate is accessed more frequently than victim, evict victim
-        // In case of tie, favor the victim (don't admit candidate)
-        if (candidateFreq > victimFreq) {
-            it.remove();
-            mainLruCache.put(key, value);
-            return true;
-        }
-        // Otherwise, the candidate is not admitted and is evicted
-        return false;
+        // After evicting some victims, we now have space
+        mainLruCache.put(key, value);
+        return true;
     }
 
     @Override
@@ -200,10 +228,37 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
         // Check both caches
         V removedValue = windowLruCache.remove(key);
         if (removedValue != null) {
+            if (evictionListener != null) {
+                // Create an ad-hoc entry for the listener
+                // This assumes that a direct removal is also an "eviction" in the context of the listener's purpose (e.g., resource cleanup)
+                final K finalKey = key;
+                final V finalRemovedValueWindow = removedValue;
+                Map.Entry<K,V> evictedEntry = new Map.Entry<K,V>() {
+                    @Override public K getKey() { return finalKey; }
+                    @Override public V getValue() { return finalRemovedValueWindow; }
+                    @Override public V setValue(V value) { throw new UnsupportedOperationException(); }
+                    @Override public boolean equals(Object o) { return (o instanceof Map.Entry) && Objects.equals(finalKey, ((Map.Entry<?,?>)o).getKey()) && Objects.equals(finalRemovedValueWindow, ((Map.Entry<?,?>)o).getValue()); }
+                    @Override public int hashCode() { return Objects.hashCode(finalKey) ^ Objects.hashCode(finalRemovedValueWindow); }
+                };
+                evictionListener.accept(evictedEntry);
+            }
             return removedValue;
         }
 
-        return mainLruCache.remove(key);
+        removedValue = mainLruCache.remove(key);
+        if (removedValue != null && evictionListener != null) {
+            final K finalKeyMain = key;
+            final V finalRemovedValueMain = removedValue;
+            Map.Entry<K,V> evictedEntry = new Map.Entry<K,V>() {
+                @Override public K getKey() { return finalKeyMain; }
+                @Override public V getValue() { return finalRemovedValueMain; }
+                @Override public V setValue(V value) { throw new UnsupportedOperationException(); }
+                @Override public boolean equals(Object o) { return (o instanceof Map.Entry) && Objects.equals(finalKeyMain, ((Map.Entry<?,?>)o).getKey()) && Objects.equals(finalRemovedValueMain, ((Map.Entry<?,?>)o).getValue()); }
+                @Override public int hashCode() { return Objects.hashCode(finalKeyMain) ^ Objects.hashCode(finalRemovedValueMain); }
+            };
+            evictionListener.accept(evictedEntry);
+        }
+        return removedValue;
     }
 
     @Override

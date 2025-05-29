@@ -37,4 +37,6 @@ public interface CachingInternalState<K, N, SV, S_DEL extends InternalKvState<K,
     void flushToUnderlyingState() throws IOException;
 
     S_DEL getDelegateState();
+
+    long evictEntriesToFreeMemory(long targetBytesToFreeThisState);
 }

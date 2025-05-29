@@ -111,7 +111,7 @@ If you wish to use the snapshot repository, you need to add a repository entry t
       <repositories>
         <repository>
           <id>apache-snapshots</id>
-          <url>https://repository.apache.org/content/repositories/snapshots/</url>
+          <url>https://maven.aliyun.com/repository/apache-snapshots/</url>
         </repository>
       </repositories>
     </profile>

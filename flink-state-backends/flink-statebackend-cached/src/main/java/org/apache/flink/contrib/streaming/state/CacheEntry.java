@@ -26,10 +26,12 @@ package org.apache.flink.contrib.streaming.state;
 public class CacheEntry<V> {
     private V value;
     private boolean dirty;
+    private transient long estimatedSizeBytes;
 
     public CacheEntry(V value, boolean dirty) {
         this.value = value;
         this.dirty = dirty;
+        this.estimatedSizeBytes = ValueSizeUtils.estimate(value);
     }
 
     public V getValue() {
@@ -38,6 +40,7 @@ public class CacheEntry<V> {
 
     public void setValue(V value) {
         this.value = value;
+        this.estimatedSizeBytes = ValueSizeUtils.estimate(value);
     }
 
     public boolean isDirty() {
@@ -48,11 +51,41 @@ public class CacheEntry<V> {
         this.dirty = dirty;
     }
 
+    public long getEstimatedSizeBytes() {
+        return estimatedSizeBytes;
+    }
+
     public static <V> CacheEntry<V> clean(V value) {
         return new CacheEntry<>(value, false);
     }
 
     public static <V> CacheEntry<V> dirty(V value) {
         return new CacheEntry<>(value, true);
+    }
+}
+
+class ValueSizeUtils {
+    private static final long OBJECT_SHELL_SIZE = 16;
+    private static final long STRING_CHAR_SIZE = 2;
+    private static final long AVG_COLLECTION_ELEMENT_SIZE = 16;
+    private static final long MAP_ENTRY_OVERHEAD = 32;
+
+    @SuppressWarnings("rawtypes")
+    public static long estimate(Object o) {
+        if (o == null) {
+            return 0;
+        }
+        if (o instanceof String) {
+            return ((String) o).length() * STRING_CHAR_SIZE + OBJECT_SHELL_SIZE;
+        }
+        if (o instanceof java.util.List) {
+            return ((java.util.List) o).size() * AVG_COLLECTION_ELEMENT_SIZE + OBJECT_SHELL_SIZE;
+        }
+        if (o instanceof java.util.Map) {
+            long size = OBJECT_SHELL_SIZE;
+            size += ((java.util.Map) o).size() * (AVG_COLLECTION_ELEMENT_SIZE + AVG_COLLECTION_ELEMENT_SIZE + MAP_ENTRY_OVERHEAD);
+            return size;
+        }
+        return AVG_COLLECTION_ELEMENT_SIZE + OBJECT_SHELL_SIZE;
     }
 }
