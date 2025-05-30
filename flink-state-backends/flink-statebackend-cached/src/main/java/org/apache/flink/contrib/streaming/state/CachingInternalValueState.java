@@ -430,7 +430,7 @@ public class CachingInternalValueState<K, N, V>
 
         for (N namespace : l2Namespaces) {
             CachePolicy<K, CacheEntry<V>> l2Cache = namespaceCachesL2.get(namespace); // Re-fetch, could be removed by another thread
-            if (l2Cache == null) continue;
+            if (l2Cache == null || l2Cache.isEmpty()) continue; // Optimization: skip empty L2 caches
 
             Iterator<Map.Entry<K, CacheEntry<V>>> l2Iter = l2Cache.entrySet().iterator();
             while (l2Iter.hasNext() && bytesFreed < targetBytesToFreeThisState) {
@@ -452,7 +452,7 @@ public class CachingInternalValueState<K, N, V>
 
         for (N namespace : l1Namespaces) {
             CachePolicy<K, CacheEntry<V>> l1Cache = namespaceCachesL1.get(namespace);
-            if (l1Cache == null) continue;
+            if (l1Cache == null || l1Cache.isEmpty()) continue; // Optimization: skip empty L1 caches
 
             // Evict clean L1 entries first
             Iterator<Map.Entry<K, CacheEntry<V>>> l1IterClean = l1Cache.entrySet().iterator();

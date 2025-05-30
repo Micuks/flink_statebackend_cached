@@ -102,6 +102,8 @@ class CachingInternalMapStateTest {
     private final int l2CacheSizePerMap = 2;
     private final int maxActiveFlinkKeysWithActiveCachesPerNamespace = 2;
     private final long maxCacheMemoryMb = 10;
+    private final int mapL1KeyPresenceCacheSize = 2;
+    private final int mapL2KeyPresenceCacheSize = 2;
 
     private final String testFlinkKey = "testFlinkKey";
     private final String testNamespace = "testNamespace";
@@ -148,7 +150,7 @@ class CachingInternalMapStateTest {
                 Collections.<KeyedStateHandle>emptyList(), cancelStreamRegistry,
                 mockAbstractKeyedStateBackendDelegate, l1CacheSizePerMap, l2CacheSizePerMap,
                 maxActiveFlinkKeysWithActiveCachesPerNamespace, maxCacheMemoryMb,
-                currentCachePolicyType);
+                currentCachePolicyType, mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize);
         cachingKeyedStateBackend.setCurrentKey(testFlinkKey);
 
         when(mockDelegateState.getKeySerializer()).thenReturn(mockKeySerializer);
@@ -160,7 +162,7 @@ class CachingInternalMapStateTest {
         cachingMapState = new CachingInternalMapState<>(mockDelegateState, cachingKeyedStateBackend,
                 l1CacheSizePerMap, l2CacheSizePerMap,
                 maxActiveFlinkKeysWithActiveCachesPerNamespace, maxCacheMemoryMb,
-                currentCachePolicyType);
+                currentCachePolicyType, mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize);
         
         cachingMapState.setCurrentNamespace(testNamespace);
     }
@@ -791,4 +793,512 @@ class CachingInternalMapStateTest {
         assertEquals(mockUserKeySerializer, cachingMapState.getUserKeySerializer());
         // ... existing code ...
     }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapGet_L1PresenceHit_KeyPresent(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // 1. uk1 is in delegate, uv1
+        when(mockDelegateState.get(testUserKey1)).thenReturn(testUserValue1);
+        when(mockDelegateState.contains(testUserKey1)).thenReturn(true);
+
+        // 2. First get(uk1) - populates L1 value & L1 presence (true)
+        assertEquals(testUserValue1, cachingMapState.get(testUserKey1));
+        verify(mockDelegateState, times(1)).get(testUserKey1); // Delegate.get for value
+        // Presence cache for testUserKey1 should now be true in L1
+
+        // 3. Evict uk1 from L1 *value* cache by getting other keys
+        // L1 value cache size is 2.
+        when(mockDelegateState.get(testUserKey2)).thenReturn(testUserValue2);
+        cachingMapState.get(testUserKey2); // uk2 in L1 value, uk1 might move to L2 value or be evicted from value cache
+        when(mockDelegateState.get(testUserKey3)).thenReturn(testUserValue3);
+        cachingMapState.get(testUserKey3); // uk3 in L1 value, uk2 might move to L2 value, uk1 value definitely not in L1 value
+                                         // uk1's L1 presence (true) should still be there.
+
+        // 4. Call get(uk1) again
+        // Expectation: L1 presence for uk1 is hit (true). Value not in L1 value cache.
+        // Should fetch value from delegate again.
+        assertEquals(testUserValue1, cachingMapState.get(testUserKey1));
+        verify(mockDelegateState, times(2)).get(testUserKey1); // Delegate.get called again
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapGet_L1PresenceHit_KeyAbsent(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // 1. uk1 is NOT in delegate
+        when(mockDelegateState.get(testUserKey1)).thenReturn(null);
+        when(mockDelegateState.contains(testUserKey1)).thenReturn(false);
+
+        // 2. First get(uk1) - populates L1 presence (false)
+        assertNull(cachingMapState.get(testUserKey1));
+        verify(mockDelegateState, times(1)).get(testUserKey1); // To check absence and populate presence
+        // L1 Presence cache for testUserKey1 should now be false
+
+        // 3. Call get(uk1) again
+        // Expectation: L1 presence for uk1 is hit (false). Should return null immediately.
+        assertNull(cachingMapState.get(testUserKey1));
+        verify(mockDelegateState, times(1)).get(testUserKey1); // Delegate.get NOT called again
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapContains_L1PresenceHit_KeyPresent(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // 1. uk1 is in delegate
+        when(mockDelegateState.contains(testUserKey1)).thenReturn(true);
+        when(mockDelegateState.get(testUserKey1)).thenReturn(testUserValue1); // For potential value load by 'contains'
+
+        // 2. First contains(uk1) - populates L1 presence (true)
+        assertTrue(cachingMapState.contains(testUserKey1));
+        verify(mockDelegateState, times(1)).contains(testUserKey1);
+        // Depending on impl, get might be called by contains if it loads value too.
+        // Current CachingInternalMapState.contains logic calls get() if delegate.contains is true.
+        verify(mockDelegateState, times(1)).get(testUserKey1);
+
+        // 3. Call contains(uk1) again
+        // Expectation: L1 presence hit (true).
+        assertTrue(cachingMapState.contains(testUserKey1));
+        verify(mockDelegateState, times(1)).contains(testUserKey1); // Delegate.contains NOT called again
+        verify(mockDelegateState, times(1)).get(testUserKey1); // Delegate.get NOT called again
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapContains_L1PresenceHit_KeyAbsent(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // 1. uk1 is NOT in delegate
+        when(mockDelegateState.contains(testUserKey1)).thenReturn(false);
+        // No mock for get(testUserKey1) as it shouldn't be called if contains is false.
+
+        // 2. First contains(uk1) - populates L1 presence (false)
+        assertFalse(cachingMapState.contains(testUserKey1));
+        verify(mockDelegateState, times(1)).contains(testUserKey1);
+        verify(mockDelegateState, never()).get(testUserKey1); // Delegate.get should not be called
+
+        // 3. Call contains(uk1) again
+        // Expectation: L1 presence hit (false).
+        assertFalse(cachingMapState.contains(testUserKey1));
+        verify(mockDelegateState, times(1)).contains(testUserKey1); // Delegate.contains NOT called again
+        verify(mockDelegateState, never()).get(testUserKey1); // Still not called
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapGet_L1PresenceMiss_L2PresenceHit_KeyPresent_PromoteToL1(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // 1. Populate L1 value & L1 presence for uk1 (present).
+        when(mockDelegateState.get(testUserKey1)).thenReturn(testUserValue1);
+        when(mockDelegateState.contains(testUserKey1)).thenReturn(true);
+        cachingMapState.get(testUserKey1); // Populates L1 value & L1 presence(true)
+        verify(mockDelegateState, times(1)).get(testUserKey1);
+
+        // 2. Evict uk1's L1 presence entry to L2 presence.
+        // L1 presence cache size is 2 (mapL1KeyPresenceCacheSize)
+        when(mockDelegateState.contains("pKey2")).thenReturn(false);
+        cachingMapState.contains("pKey2"); // pKey2 into L1 presence (false)
+        when(mockDelegateState.contains("pKey3")).thenReturn(false);
+        cachingMapState.contains("pKey3"); // pKey3 into L1 presence (false), uk1 presence (true) evicted to L2 presence.
+        // Verify pKey2, pKey3 delegate calls for contains.
+        verify(mockDelegateState, times(1)).contains("pKey2");
+        verify(mockDelegateState, times(1)).contains("pKey3");
+
+        // 3. Ensure uk1's value is not in L1 value cache (it might have been evicted by get(pKeyX) if contains also loads value)
+        // To be certain, evict value cache separately if necessary or ensure contains doesn't always load value.
+        // For this test, assume value for uk1 might be gone from L1 value cache.
+        // For simplicity, we re-mock get for uk1 to trace the next call.
+        // when(mockDelegateState.get(testUserKey1)).thenReturn(testUserValue1); // Already mocked initially
+
+        // 4. Call get(uk1).
+        assertEquals(testUserValue1, cachingMapState.get(testUserKey1));
+        // Expectation: L1 presence miss. L2 presence hit (true) -> promote to L1 presence.
+        // Value fetched from delegate as it's not in L1/L2 value.
+        verify(mockDelegateState, times(2)).get(testUserKey1); // Delegate.get for value called again.
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapGet_L1PresenceMiss_L2PresenceHit_KeyAbsent_PromoteToL1(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // 1. Populate L1 presence for uk1 (absent).
+        when(mockDelegateState.get(testUserKey1)).thenReturn(null);
+        when(mockDelegateState.contains(testUserKey1)).thenReturn(false);
+        cachingMapState.get(testUserKey1); // Populates L1 presence(false)
+        verify(mockDelegateState, times(1)).get(testUserKey1); // for initial check
+
+        // 2. Evict uk1's L1 presence (false) to L2 presence.
+        when(mockDelegateState.contains("pKey2_absent")).thenReturn(false);
+        cachingMapState.contains("pKey2_absent");
+        when(mockDelegateState.contains("pKey3_absent")).thenReturn(false);
+        cachingMapState.contains("pKey3_absent");
+        verify(mockDelegateState, times(1)).contains("pKey2_absent");
+        verify(mockDelegateState, times(1)).contains("pKey3_absent");
+
+        // 3. Call get(uk1).
+        assertNull(cachingMapState.get(testUserKey1));
+        // Expectation: L1 presence miss. L2 presence hit (false) -> promote to L1 presence.
+        // Returns null immediately.
+        verify(mockDelegateState, times(1)).get(testUserKey1); // Delegate.get NOT called again.
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapContains_L1PresenceMiss_L2PresenceHit_KeyPresent_PromoteToL1(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // 1. Populate L1 presence for uk1 (present).
+        when(mockDelegateState.contains(testUserKey1)).thenReturn(true);
+        when(mockDelegateState.get(testUserKey1)).thenReturn(testUserValue1); // For contains to potentially load value
+        cachingMapState.contains(testUserKey1); // Populates L1 presence(true)
+        verify(mockDelegateState, times(1)).contains(testUserKey1);
+        verify(mockDelegateState, times(1)).get(testUserKey1); // If contains also loads value
+
+        // 2. Evict uk1's L1 presence (true) to L2 presence.
+        when(mockDelegateState.contains("pKeyC2")).thenReturn(false);
+        cachingMapState.contains("pKeyC2");
+        when(mockDelegateState.contains("pKeyC3")).thenReturn(false);
+        cachingMapState.contains("pKeyC3");
+        verify(mockDelegateState, times(1)).contains("pKeyC2");
+        verify(mockDelegateState, times(1)).contains("pKeyC3");
+
+        // 3. Call contains(uk1).
+        assertTrue(cachingMapState.contains(testUserKey1));
+        // Expectation: L1 presence miss. L2 presence hit (true). Promoted to L1 presence.
+        // Returns true.
+        verify(mockDelegateState, times(1)).contains(testUserKey1); // Delegate.contains NOT called again
+        verify(mockDelegateState, times(1)).get(testUserKey1);      // Delegate.get NOT called again
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapContains_L1PresenceMiss_L2PresenceHit_KeyAbsent_PromoteToL1(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // 1. Populate L1 presence for uk1 (absent).
+        when(mockDelegateState.contains(testUserKey1)).thenReturn(false);
+        cachingMapState.contains(testUserKey1); // Populates L1 presence(false)
+        verify(mockDelegateState, times(1)).contains(testUserKey1);
+        verify(mockDelegateState, never()).get(testUserKey1);
+
+        // 2. Evict uk1's L1 presence (false) to L2 presence.
+        when(mockDelegateState.contains("pKeyCA2")).thenReturn(true);
+        when(mockDelegateState.get("pKeyCA2")).thenReturn("v_pca2");
+        cachingMapState.contains("pKeyCA2"); // Evictor 1
+        when(mockDelegateState.contains("pKeyCA3")).thenReturn(true);
+        when(mockDelegateState.get("pKeyCA3")).thenReturn("v_pca3");
+        cachingMapState.contains("pKeyCA3"); // Evictor 2, uk1 presence (false) -> L2
+
+        // 3. Call contains(uk1).
+        assertFalse(cachingMapState.contains(testUserKey1));
+        // Expectation: L1 presence miss. L2 presence hit (false) -> promote to L1 presence.
+        // Returns false.
+        verify(mockDelegateState, times(1)).contains(testUserKey1); // Delegate.contains NOT called again
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapPut_NewKey_PopulatesL1ValueAndL1Presence(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // 1. uk1 not in any cache initially.
+        // No mocks for delegate initially, as put shouldn't read first.
+
+        // 2. Call put(uk1, uv1)
+        cachingMapState.put(testUserKey1, testUserValue1);
+        // Expectation: L1 value cache has (uk1, uv1) (dirty).
+        // L1 presence cache has (uk1, true).
+
+        // 3. Call get(uk1)
+        assertEquals(testUserValue1, cachingMapState.get(testUserKey1));
+        verify(mockDelegateState, never()).get(testUserKey1); // L1 value hit
+
+        // 4. Call contains(uk1)
+        assertTrue(cachingMapState.contains(testUserKey1));
+        verify(mockDelegateState, never()).contains(testUserKey1); // L1 presence/value hit
+
+        // Evict to verify put to delegate
+        when(mockDelegateState.get(testUserKey2)).thenReturn(testUserValue2);
+        cachingMapState.get(testUserKey2);
+        when(mockDelegateState.get(testUserKey3)).thenReturn(testUserValue3);
+        cachingMapState.get(testUserKey3); // Evicts testUserKey1 dirty value
+        verify(mockDelegateState, times(1)).put(testUserKey1, testUserValue1);
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapPut_ExistingKey_UpdatesL1Value_KeepsL1Presence(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // 1. Populate L1 value (uv1, clean) and L1 presence (true).
+        when(mockDelegateState.get(testUserKey1)).thenReturn(testUserValue1);
+        when(mockDelegateState.contains(testUserKey1)).thenReturn(true);
+        assertEquals(testUserValue1, cachingMapState.get(testUserKey1));
+        verify(mockDelegateState, times(1)).get(testUserKey1);
+
+        // 2. Call put(uk1, "updatedValue")
+        String updatedValue = "updatedValue";
+        cachingMapState.put(testUserKey1, updatedValue);
+        // Expectation: L1 value for uk1 is (updatedValue, dirty).
+        // L1 presence for uk1 is (true).
+
+        // 3. Verify get(uk1) returns updatedValue (L1 hit).
+        assertEquals(updatedValue, cachingMapState.get(testUserKey1));
+        verify(mockDelegateState, times(1)).get(testUserKey1); // No new delegate get
+
+        // 4. Verify contains(uk1) returns true (L1 presence/value hit).
+        assertTrue(cachingMapState.contains(testUserKey1));
+        verify(mockDelegateState, times(1)).contains(testUserKey1); // No new delegate contains
+
+        // Evict to verify put to delegate
+        when(mockDelegateState.get(testUserKey2)).thenReturn(testUserValue2);
+        cachingMapState.get(testUserKey2);
+        when(mockDelegateState.get(testUserKey3)).thenReturn(testUserValue3);
+        cachingMapState.get(testUserKey3); // Evicts testUserKey1 dirty value
+        verify(mockDelegateState, times(1)).put(testUserKey1, updatedValue);
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapRemove_ExistingKey_UpdatesL1ValueToTombstone_L1PresenceToFalse(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // 1. Populate L1 value (uv1, clean) and L1 presence (true).
+        when(mockDelegateState.get(testUserKey1)).thenReturn(testUserValue1);
+        when(mockDelegateState.contains(testUserKey1)).thenReturn(true);
+        assertEquals(testUserValue1, cachingMapState.get(testUserKey1));
+
+        // 2. Call remove(uk1)
+        cachingMapState.remove(testUserKey1);
+        // Expectation: L1 value for uk1 is (null, dirty tombstone).
+        // L1 presence for uk1 is (false).
+
+        // 3. Verify get(uk1) returns null (L1 hit).
+        assertNull(cachingMapState.get(testUserKey1));
+
+        // 4. Verify contains(uk1) returns false (L1 presence hit).
+        assertFalse(cachingMapState.contains(testUserKey1));
+
+        // 5. Evict uk1's L1 value tombstone and L1 presence.
+        // Eviction of value cache (mapL1CacheSize = 2)
+        when(mockDelegateState.get(testUserKey2)).thenReturn(testUserValue2);
+        cachingMapState.get(testUserKey2); // uk2, uv2 into L1 value
+        when(mockDelegateState.get(testUserKey3)).thenReturn(testUserValue3);
+        cachingMapState.get(testUserKey3); // uk3, uv3 into L1 value, uk1 (tombstone) flushed.
+        verify(mockDelegateState, times(1)).remove(testUserKey1); // Delegate remove called on flush.
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapPut_NullValue_SameAsRemove_UpdatesL1ValueToTombstone_L1PresenceToFalse(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // 1. Populate L1 value (uv1, clean) and L1 presence (true).
+        when(mockDelegateState.get(testUserKey1)).thenReturn(testUserValue1);
+        when(mockDelegateState.contains(testUserKey1)).thenReturn(true);
+        assertEquals(testUserValue1, cachingMapState.get(testUserKey1));
+
+        // 2. Call put(uk1, null)
+        cachingMapState.put(testUserKey1, null);
+        // Expectation: L1 value for uk1 is (null, dirty tombstone).
+        // L1 presence for uk1 is (false).
+
+        // 3. Verify get(uk1) returns null (L1 hit).
+        assertNull(cachingMapState.get(testUserKey1));
+
+        // 4. Verify contains(uk1) returns false (L1 presence hit).
+        assertFalse(cachingMapState.contains(testUserKey1));
+
+        // 5. Evict to verify delegate remove.
+        when(mockDelegateState.get(testUserKey2)).thenReturn(testUserValue2);
+        cachingMapState.get(testUserKey2);
+        when(mockDelegateState.get(testUserKey3)).thenReturn(testUserValue3);
+        cachingMapState.get(testUserKey3);
+        verify(mockDelegateState, times(1)).remove(testUserKey1);
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMap_L1PresenceEviction_MovesToL2Presence(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // mapL1KeyPresenceCacheSize is 2, mapL2KeyPresenceCacheSize is 2
+
+        // 1. Populate L1 presence for uk1 (present).
+        when(mockDelegateState.contains(testUserKey1)).thenReturn(true);
+        // If CachingInternalMapState.contains calls get() when delegate.contains() is true and value not in cache:
+        when(mockDelegateState.get(testUserKey1)).thenReturn(testUserValue1);
+        cachingMapState.contains(testUserKey1); // uk1 -> L1p(true), potentially L1v(testUserValue1)
+        verify(mockDelegateState, times(1)).contains(testUserKey1);
+        verify(mockDelegateState, times(1)).get(testUserKey1); // Assuming contains might load the value initially.
+
+        // 2. Access other keys with contains() to evict uk1's presence from L1 to L2.
+        String pEvictKey1 = "p_evict_1";
+        String pEvictKey2 = "p_evict_2";
+        when(mockDelegateState.contains(pEvictKey1)).thenReturn(false);
+        cachingMapState.contains(pEvictKey1); // pEvictKey1 into L1p. uk1 still in L1p.
+        when(mockDelegateState.contains(pEvictKey2)).thenReturn(false);
+        cachingMapState.contains(pEvictKey2); // pEvictKey2 into L1p. uk1 (true) should be evicted to L2p.
+
+        // uk1's presence is now in L2p(true). Its value might be in L1v, L2v, or evicted from value caches.
+
+        // 3. Call contains(uk1) again.
+        assertTrue(cachingMapState.contains(testUserKey1));
+        // Expectation: L1p miss. L2p hit (true). Promoted to L1p.
+        // Delegate contains() should NOT be called again for testUserKey1 at this step.
+        verify(mockDelegateState, times(1)).contains(testUserKey1);
+        // Delegate get() should NOT be called again if the value is still in a cache layer (L1v/L2v).
+        verify(mockDelegateState, times(1)).get(testUserKey1); // Remains 1, as L2p hit does not re-fetch value if already cached.
+
+        // 4. Call get(uk1) to confirm value retrieval without further delegate interaction if value cached.
+        assertEquals(testUserValue1, cachingMapState.get(testUserKey1));
+        // Still 1, confirming value was available in L1v (promoted from L2v or retained) or L2v,
+        // and L2p->L1p promotion + get() didn't cause re-fetch of value from delegate.
+        verify(mockDelegateState, times(1)).get(testUserKey1);
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMap_L2PresenceEviction_ReleasesMemory_AndDelegateCalledOnMiss(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // mapL1KeyPresenceCacheSize = 2, mapL2KeyPresenceCacheSize = 2
+
+        // Stage 1: Populate L1 presence for testUserKey1 (true) and evict to L2 presence.
+        when(mockDelegateState.contains(testUserKey1)).thenReturn(true);
+        when(mockDelegateState.get(testUserKey1)).thenReturn(testUserValue1);
+        cachingMapState.contains(testUserKey1); // uk1 -> L1p(true)
+
+        when(mockDelegateState.contains("evict_l1p_A")).thenReturn(false);
+        cachingMapState.contains("evict_l1p_A"); // evict_l1p_A -> L1p(false)
+        when(mockDelegateState.contains("evict_l1p_B")).thenReturn(false);
+        cachingMapState.contains("evict_l1p_B"); // evict_l1p_B -> L1p(false). uk1 -> L2p(true)
+        // At this point, L1p: {evict_l1p_A(false), evict_l1p_B(false)}, L2p: {uk1(true)}
+        verify(mockDelegateState, times(1)).contains(testUserKey1);
+
+        // Stage 2: Populate L1 presence for mapL2KeyPresenceCacheSize (2) other new keys,
+        // and evict them to L2 presence to cause uk1's presence to be evicted from L2p.
+        String l2Evictor1 = "l2p_evict_1";
+        String l2Evictor2 = "l2p_evict_2";
+
+        // Entry 1 to displace from L1p to L2p (evicting evict_l1p_A from L1p to L2p)
+        when(mockDelegateState.contains(l2Evictor1)).thenReturn(false);
+        cachingMapState.contains(l2Evictor1);
+        // L1p: {evict_l1p_B(f), l2Evictor1(f)}, L2p: {uk1(t), evict_l1p_A(f)}
+
+        // Entry 2 to displace from L1p to L2p (evicting evict_l1p_B from L1p to L2p, L2p full, uk1 evicted from L2p)
+        when(mockDelegateState.contains(l2Evictor2)).thenReturn(false);
+        cachingMapState.contains(l2Evictor2);
+        // L1p: {l2Evictor1(f), l2Evictor2(f)}, L2p: {evict_l1p_A(f), evict_l1p_B(f)}
+        // uk1(true) should have been evicted from L2p.
+
+        // ArgumentCaptor for memory released needs to be set up on the backend mock if we want to verify specific values.
+        // For this test, we primarily verify by checking delegate interaction.
+
+        // 3. Call contains(uk1).
+        // Resetting and re-mocking contains for testUserKey1 for clarity on the NEXT call.
+        // Mockito.reset(mockDelegateState); // Too broad.
+        // For the purpose of verify(..., times(2)), we need to ensure the mock is set up for the next call.
+        // The initial when(mockDelegateState.contains(testUserKey1)).thenReturn(true) is still active.
+
+        assertTrue(cachingMapState.contains(testUserKey1));
+        // Expectation: L1p miss, L2p miss for uk1. Delegate contains(uk1) should be called.
+        // L1p for uk1 repopulated.
+        verify(mockDelegateState, times(2)).contains(testUserKey1); // Called once initially, and once now.
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapGet_FullyLoaded_KeyNotCached_ReturnsNullAndCachesAbsence(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        // L1/L2 value/presence cache sizes are 2.
+        Map<String, String> delegateMap = new HashMap<>();
+        delegateMap.put(testUserKey1, testUserValue1);
+        delegateMap.put(testUserKey2, testUserValue2);
+        when(mockDelegateState.entries()).thenReturn(delegateMap.entrySet());
+
+        // 1. Call entries() to make it fully loaded.
+        cachingMapState.entries().forEach(entry -> {}); // Iterate to trigger loadAll
+        verify(mockDelegateState, times(1)).entries(); // entries() called on delegate
+
+        // At this point, L1 value/presence for uk1, uk2 should be populated.
+        // fullyLoaded should be true.
+
+        // 2. Call get("nonExistentKey")
+        String nonExistentKey = "nonExistentKey";
+        when(mockDelegateState.get(nonExistentKey)).thenReturn(null); // Delegate would return null
+        when(mockDelegateState.contains(nonExistentKey)).thenReturn(false);
+
+        assertNull(cachingMapState.get(nonExistentKey));
+        // Expectation: Since fullyLoaded, and key not in L1/L2 value/presence from loadAll,
+        // it should return null. Delegate get() should NOT be called for value.
+        // L1 presence for nonExistentKey should be populated as false.
+        verify(mockDelegateState, never()).get(nonExistentKey); // IMPORTANT: get() on delegate should not be called if fullyLoaded and not found in cache
+
+        // 3. Call get("nonExistentKey") again.
+        assertNull(cachingMapState.get(nonExistentKey));
+        // Expectation: L1 presence hit (false). Returns null. Delegate get NOT called.
+        verify(mockDelegateState, never()).get(nonExistentKey); // Still not called
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapContains_FullyLoaded_KeyNotCached_ReturnsFalseAndCachesAbsence(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        Map<String, String> delegateMap = new HashMap<>();
+        delegateMap.put(testUserKey1, testUserValue1);
+        delegateMap.put(testUserKey2, testUserValue2);
+        when(mockDelegateState.entries()).thenReturn(delegateMap.entrySet());
+
+        // 1. Call entries()
+        cachingMapState.entries().forEach(entry -> {});
+        verify(mockDelegateState, times(1)).entries();
+
+        // 2. Call contains("nonExistentKey")
+        String nonExistentKey = "nonExistentKey_contains";
+        when(mockDelegateState.contains(nonExistentKey)).thenReturn(false); // Delegate would return false
+
+        assertFalse(cachingMapState.contains(nonExistentKey));
+        // Expectation: fullyLoaded, key not found. Returns false.
+        // Delegate contains() should NOT be called.
+        verify(mockDelegateState, never()).contains(nonExistentKey);
+        // L1 presence for nonExistentKey populated as false.
+
+        // 3. Call contains("nonExistentKey") again.
+        assertFalse(cachingMapState.contains(nonExistentKey));
+        verify(mockDelegateState, never()).contains(nonExistentKey); // Still not called
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testMapEntries_LoadsAll_PopulatesValueAndPresenceCaches(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        setPolicyAndSetup(policyType);
+        Map<String, String> delegateMap = new HashMap<>();
+        delegateMap.put(testUserKey1, testUserValue1);
+        delegateMap.put(testUserKey2, testUserValue2);
+        when(mockDelegateState.entries()).thenReturn(delegateMap.entrySet());
+
+        // 1. Call entries()
+        List<Map.Entry<String, String>> resultEntries = new ArrayList<>();
+        cachingMapState.entries().forEach(resultEntries::add);
+        assertEquals(2, resultEntries.size());
+        assertTrue(resultEntries.stream().anyMatch(e -> e.getKey().equals(testUserKey1) && e.getValue().equals(testUserValue1)));
+        assertTrue(resultEntries.stream().anyMatch(e -> e.getKey().equals(testUserKey2) && e.getValue().equals(testUserValue2)));
+        verify(mockDelegateState, times(1)).entries();
+
+        // 2. Verify L1 value and presence hits for uk1
+        assertEquals(testUserValue1, cachingMapState.get(testUserKey1));
+        verify(mockDelegateState, times(1)).get(testUserKey1); // Only called during initial load if get is part of load logic for presence, or never if entries() directly populates presence
+                                                              // With current CachingInternalMapState, loadAllEntries also populates presence if not there.
+                                                              // Let's adjust verify count if initial when(mockDelegateState.entries()) is the sole source.
+                                                              // If loadAll calls get, it would be 1. If not, 0. Assume 0 extra calls here.
+
+        assertTrue(cachingMapState.contains(testUserKey1));
+        verify(mockDelegateState, times(1)).contains(testUserKey1); // Similarly, only during initial load if contains is part of that logic.
+
+        // 3. Verify L1 value and presence hits for uk2
+        assertEquals(testUserValue2, cachingMapState.get(testUserKey2));
+        verify(mockDelegateState, times(1)).get(testUserKey2);
+
+        assertTrue(cachingMapState.contains(testUserKey2));
+        verify(mockDelegateState, times(1)).contains(testUserKey2);
+
+        // To verify fullyLoaded behavior implicitly:
+        String nonExistentKey = "fullyLoadedCheckKey";
+        when(mockDelegateState.contains(nonExistentKey)).thenReturn(false); // Mock for delegate if it were called
+        assertFalse(cachingMapState.contains(nonExistentKey));
+        verify(mockDelegateState, never()).contains(nonExistentKey); // Should not call delegate because fullyLoaded=true and key not found
+    }
+
 }

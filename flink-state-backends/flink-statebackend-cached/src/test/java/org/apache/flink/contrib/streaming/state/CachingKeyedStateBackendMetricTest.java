@@ -77,11 +77,17 @@ class CachingKeyedStateBackendMetricTest {
                 mockEnv.getTaskKvStateRegistry(), TtlTimeProvider.DEFAULT, metricsGroup,
                 Collections.emptyList(), new CloseableRegistry());
 
+        long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+
         cachingBackend = new CachingKeyedStateBackend<String>(mockEnv.getTaskKvStateRegistry(),
                 StringSerializer.INSTANCE, mockEnv.getUserCodeClassLoader().asClassLoader(),
                 new ExecutionConfig(), TtlTimeProvider.DEFAULT, metricsGroup,
                 Collections.emptyList(), new CloseableRegistry(), delegateBackend, 5, 5, 2, 1L,
-                CachingStateBackendFactory.CachePolicyType.LRU);
+                CachingStateBackendFactory.CachePolicyType.LRU,
+                (int) mapL1KeyPresenceCacheSize,
+                (int) mapL2KeyPresenceCacheSize
+                );
         cachingBackend.setCurrentKey("testKey");
     }
 

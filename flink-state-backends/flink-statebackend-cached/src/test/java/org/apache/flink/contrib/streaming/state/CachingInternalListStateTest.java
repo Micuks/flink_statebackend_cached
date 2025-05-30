@@ -164,6 +164,9 @@ class CachingInternalListStateTest {
         when(mockAbstractKeyedStateBackendDelegate.getKeyGroupCompressionDecorator())
                 .thenReturn(UncompressedStreamCompressionDecorator.INSTANCE);
 
+        // Add default values for the new map cache presence parameters
+        long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
 
         cachingKeyedStateBackend = new CachingKeyedStateBackend<>(
                 kvStateRegistry,
@@ -179,7 +182,9 @@ class CachingInternalListStateTest {
                 l2CacheSize,
                 maxActiveNamespaces,
                 10, // maxCacheMemoryMb
-                currentCachePolicyType // Use the current policy type
+                currentCachePolicyType, // Use the current policy type
+                (int) mapL1KeyPresenceCacheSize, // Added
+                (int) mapL2KeyPresenceCacheSize  // Added
         );
         cachingKeyedStateBackend.setCurrentKey(testKey);
 

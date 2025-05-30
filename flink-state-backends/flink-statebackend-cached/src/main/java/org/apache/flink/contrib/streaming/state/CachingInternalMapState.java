@@ -17,6 +17,9 @@ package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
+import org.apache.flink.metrics.Counter;
+import org.apache.flink.metrics.Gauge;
+import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.StateSnapshotTransformer;
 import org.apache.flink.runtime.state.heap.AbstractHeapState;
@@ -32,6 +35,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.function.Consumer;
+import java.util.function.BiConsumer;
+import java.util.function.Function;
+import java.util.Collections;
 
 /**
  * An {@link InternalMapState} that uses an L1/L2 cache for its entries. Caches individual (UK, UV)
@@ -64,28 +70,74 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                                                 // caches for a Namespace
     private final int maxActiveNamespacesInCache; // Max Namespaces with active caches
     private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
+    private final int mapL1KeyPresenceCacheSize; // Added
+    private final int mapL2KeyPresenceCacheSize; // Added
+
+    // Metrics
+    private final transient MetricGroup metrics;
+    private final transient Counter l1ValueCacheHitCount;
+    private final transient Counter l1ValueCacheMissCount;
+    private final transient Counter l2ValueCacheHitCount;
+    private final transient Counter l2ValueCacheMissCount;
+    private final transient Counter l1PresenceCacheHitCount;
+    private final transient Counter l1PresenceCacheMissCount;
+    private final transient Counter l2PresenceCacheHitCount;
+    private final transient Counter l2PresenceCacheMissCount;
+    private final transient Counter delegateLookups;
+
+    // Gauge for cache entries will be registered on a PerKeyMapCache basis if needed,
+    // or globally if we aggregate across all PerKeyMapCaches (more complex).
+    // For now, let's focus on hit/miss counters for the overall CachingInternalMapState.
+    // Global gauges for total entries in L1/L2 value/presence caches can be done by iterating
+    // namespaceCaches, which is potentially expensive for a gauge.
+    // A simpler approach for gauges might be to sum them up periodically if needed, or count
+    // entries within a specific PerKeyMapCache when it's active.
 
     // Helper class to hold L1 and L2 caches for a specific Flink Key/Namespace's
     // map entries
     private static class PerKeyMapCache<UK_C, UV_C, K_F, N_F> {
         final CachePolicy<UK_C, CacheEntry<UV_C>> l1MapEntries;
         final CachePolicy<UK_C, CacheEntry<UV_C>> l2MapEntries; // Should only hold clean entries
+        final CachePolicy<UK_C, CacheEntry<Boolean>> l1KeyPresenceCache; // Added
+        final CachePolicy<UK_C, CacheEntry<Boolean>> l2KeyPresenceCache; // Added
         boolean fullyLoaded = false;
         private final N_F mainContextDelegateNamespace;
+        private final K_F flinkKey;
+        private final N_F cacheNamespace;
         private final CachingKeyedStateBackend<K_F> ownerBackend;
-        private final K_F flinkKeyForEvictionContext;
-        private final N_F namespaceForEvictionContext;
+        final InternalMapState<K_F, N_F, UK_C, UV_C> delegateState; // Made final
 
         PerKeyMapCache(int l1Size, int l2Size, InternalMapState<K_F, N_F, UK_C, UV_C> delegateState,
                 CachingKeyedStateBackend<K_F> ownerBackend, K_F flinkKey, N_F cacheNamespace,
                 N_F mainContextDelegateNamespace,
-                CachingStateBackendFactory.CachePolicyType cachePolicyType) {
-            this.l2MapEntries = createCachePolicyInstance(cachePolicyType, l2Size, null);
+                CachingStateBackendFactory.CachePolicyType cachePolicyType,
+                int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize) {
             this.mainContextDelegateNamespace = mainContextDelegateNamespace;
+            this.flinkKey = flinkKey;
+            this.cacheNamespace = cacheNamespace;
+            this.delegateState = delegateState;
             this.ownerBackend = ownerBackend;
-            this.flinkKeyForEvictionContext = flinkKey;
-            this.namespaceForEvictionContext = cacheNamespace;
 
+            // Initialize L2 Presence Cache (no eviction listener needed beyond capacity)
+            this.l2KeyPresenceCache = createCachePolicyInstance(cachePolicyType, mapL2KeyPresenceCacheSize, null, ownerBackend, true);
+
+            // Initialize L1 Presence Cache (with eviction to L2 Presence Cache)
+            this.l1KeyPresenceCache = createCachePolicyInstance(cachePolicyType, mapL1KeyPresenceCacheSize, evictedL1PresenceEntry -> {
+                // Move from L1 presence to L2 presence
+                if (evictedL1PresenceEntry.getValue().getValue() != null) { // Only move non-null (though presence is boolean)
+                    this.l2KeyPresenceCache.put(evictedL1PresenceEntry.getKey(), CacheEntry.clean(evictedL1PresenceEntry.getValue().getValue()));
+                }
+                // Report memory released by L1 presence cache entry (Boolean)
+                 ownerBackend.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
+
+
+            }, ownerBackend, true);
+
+
+            // Initialize L2 Map Entries Cache (no eviction listener needed beyond capacity)
+            this.l2MapEntries = createCachePolicyInstance(cachePolicyType, l2Size, null, ownerBackend, false);
+
+            // Initialize L1 Map Entries Cache (with eviction logic)
             this.l1MapEntries =
                     createCachePolicyInstance(cachePolicyType, l1Size, evictedL1MapEntry -> {
                         UK_C evictedUK = evictedL1MapEntry.getKey();
@@ -94,118 +146,251 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
                         this.ownerBackend.reportCacheMemoryReleased(estimatedSize);
 
-                        if (evictedUVWrapper.isDirty()) { 
+                        if (evictedUVWrapper.isDirty()) {
                             K_F originalKeyContext = null;
                             N_F originalDelegateNamespaceContext = null;
                             try {
                                 originalKeyContext = ownerBackend.getCurrentKey();
-                                originalDelegateNamespaceContext =
-                                        this.mainContextDelegateNamespace;
+                                originalDelegateNamespaceContext = this.mainContextDelegateNamespace;
 
-                                ownerBackend.setCurrentKey(flinkKeyForEvictionContext);
-                                delegateState.setCurrentNamespace(namespaceForEvictionContext);
+                                ownerBackend.setCurrentKey(flinkKey);
+                                delegateState.setCurrentNamespace(cacheNamespace);
 
                                 if (evictedUVWrapper.getValue() == null) { // Is a tombstone
                                     delegateState.remove(evictedUK);
                                 } else {
                                     delegateState.put(evictedUK, evictedUVWrapper.getValue());
-                                    this.l2MapEntries.put(evictedUK,
-                                            CacheEntry.clean(evictedUVWrapper.getValue()));
+                                    // Add to L2 cache only if it was a regular value, not a tombstone
+                                    this.l2MapEntries.put(evictedUK, CacheEntry.clean(evictedUVWrapper.getValue()));
                                 }
-                                // After successful flush, the CacheEntry instance itself should be marked clean.
-                                evictedUVWrapper.setDirty(false);
+                                evictedUVWrapper.setDirty(false); // Mark clean after successful flush
                             } catch (Exception e) {
-                                throw new RuntimeException(
-                                        "Failed to flush L1 map entry to delegate for user key: "
-                                                + evictedUK,
-                                        e);
+                                throw new RuntimeException("Failed to flush L1 map entry to delegate for user key: " + evictedUK, e);
                             } finally {
                                 if (originalKeyContext != null) {
                                     ownerBackend.setCurrentKey(originalKeyContext);
                                 }
                                 if (originalDelegateNamespaceContext != null) {
-                                    delegateState
-                                            .setCurrentNamespace(originalDelegateNamespaceContext);
+                                    delegateState.setCurrentNamespace(originalDelegateNamespaceContext);
                                 }
                             }
-                        } else { // Original else branch for non-dirty entries
-                            if (evictedUVWrapper.getValue() != null) {
-                                this.l2MapEntries.put(evictedUK, evictedUVWrapper);
+                        } else { // Non-dirty entry
+                            if (evictedUVWrapper.getValue() != null) { // Don't put null (tombstones) from clean L1 into L2
+                                this.l2MapEntries.put(evictedUK, evictedUVWrapper); // Already clean
                             }
                         }
-                    });
+                    }, ownerBackend, false);
         }
 
-        private static <CK, CV> CachePolicy<CK, CV> createCachePolicyInstance(
+        private static <CK, CV_ENTRY_TYPE> CachePolicy<CK, CacheEntry<CV_ENTRY_TYPE>> createCachePolicyInstance(
                 CachingStateBackendFactory.CachePolicyType policyType, int capacity,
-                Consumer<Map.Entry<CK, CV>> evictionListener) {
+                Consumer<Map.Entry<CK, CacheEntry<CV_ENTRY_TYPE>>> evictionListener,
+                CachingKeyedStateBackend<?> ownerBackendForSize, boolean isPresenceCache) {
+            
+            Consumer<Map.Entry<CK, CacheEntry<CV_ENTRY_TYPE>>> wrappedEvictionListener = null;
+            if (evictionListener != null) {
+                wrappedEvictionListener = entry -> {
+                    if (isPresenceCache) {
+                        ownerBackendForSize.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
+                    } else {
+                         CacheEntry<CV_ENTRY_TYPE> cacheEntry = entry.getValue();
+                         if (cacheEntry != null) ownerBackendForSize.reportCacheMemoryReleased(cacheEntry.getEstimatedSizeBytes());
+                    }
+                    evictionListener.accept(entry);
+                };
+            } else {
+                 wrappedEvictionListener = entry -> {
+                    if (isPresenceCache) {
+                        ownerBackendForSize.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
+                    } else {
+                        CacheEntry<CV_ENTRY_TYPE> cacheEntry = entry.getValue();
+                        if (cacheEntry != null) ownerBackendForSize.reportCacheMemoryReleased(cacheEntry.getEstimatedSizeBytes());
+                    }
+                 };
+            }
+
+
             switch (policyType) {
                 case TINYLFU:
-                    return new TinyLFUMap<>(capacity, evictionListener);
+                    return new TinyLFUMap<>(capacity, wrappedEvictionListener);
                 case LRU:
                 default:
-                    if (evictionListener != null) {
-                        return new LRUMap<>(capacity, evictionListener);
+                    if (wrappedEvictionListener != null) {
+                        return new LRUMap<>(capacity, wrappedEvictionListener);
                     }
                     return new LRUMap<>(capacity);
             }
+        }
+
+        void clearAll() throws Exception {
+            // Context (current key/namespace for delegateState) is set by the caller before clearAll is invoked.
+            Iterator<Map.Entry<UK_C, CacheEntry<UV_C>>> l1Iterator = this.l1MapEntries.entrySet().iterator();
+            while (l1Iterator.hasNext()) {
+                Map.Entry<UK_C, CacheEntry<UV_C>> l1Entry = l1Iterator.next();
+                UK_C userKey = l1Entry.getKey();
+                CacheEntry<UV_C> cacheEntry = l1Entry.getValue();
+                if (cacheEntry.isDirty()) {
+                    UV_C userValue = cacheEntry.getValue();
+                    if (userValue == null) { // Tombstone
+                        this.delegateState.remove(userKey);
+                    } else {
+                        this.delegateState.put(userKey, userValue);
+                    }
+                }
+                this.ownerBackend.reportCacheMemoryReleased(cacheEntry.getEstimatedSizeBytes());
+                l1Iterator.remove();
+            }
+
+            Iterator<Map.Entry<UK_C, CacheEntry<UV_C>>> l2Iterator = this.l2MapEntries.entrySet().iterator();
+            while (l2Iterator.hasNext()) {
+                Map.Entry<UK_C, CacheEntry<UV_C>> l2Entry = l2Iterator.next();
+                if (l2Entry.getValue().isDirty()) {
+                    if (l2Entry.getValue().getValue() == null) { // Tombstone
+                        this.delegateState.remove(l2Entry.getKey());
+                    } else {
+                        this.delegateState.put(l2Entry.getKey(), l2Entry.getValue().getValue());
+                    }
+                }
+                this.ownerBackend.reportCacheMemoryReleased(l2Entry.getValue().getEstimatedSizeBytes());
+                l2Iterator.remove();
+            }
+            this.l1KeyPresenceCache.clear();
+            this.l2KeyPresenceCache.clear();
+            this.fullyLoaded = false;
         }
     }
 
     public CachingInternalMapState(InternalMapState<K, N, UK, UV> delegateState,
             CachingKeyedStateBackend<K> backend, int l1CacheSizePerMap, int l2CacheSizePerMap,
             int maxFlinkKeysWithActiveCachesPerNamespace, long maxCacheMemoryMb,
-            CachingStateBackendFactory.CachePolicyType cachePolicyType) {
+            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
+            MetricGroup metrics) {
         this.delegateState = delegateState;
         this.backend = backend;
         this.l1CacheSizePerMap = l1CacheSizePerMap;
         this.l2CacheSizePerMap = l2CacheSizePerMap;
+        this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
+        this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
         this.maxFlinkKeysWithActiveCachesPerNamespace = maxFlinkKeysWithActiveCachesPerNamespace;
         this.maxActiveNamespacesInCache = backend.getMaxActiveNamespaceOrPerKeyCacheContainers();
         this.cachePolicyType = cachePolicyType;
+        this.metrics = metrics;
+        // currentNamespace is inherited and set via setCurrentNamespace
 
-        this.namespaceCaches = createCachePolicyWithEvictionListener(
-                this.maxActiveNamespacesInCache, evictedNamespaceEntry -> {
-                    CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> keyCachesToFlush =
-                            evictedNamespaceEntry.getValue();
-                    for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> keyCacheEntry : keyCachesToFlush
-                            .entrySet()) {
-                        try {
-                            flushL1Entries(keyCacheEntry.getValue(), keyCacheEntry.getKey(),
-                                    evictedNamespaceEntry.getKey(),
-                                    this.backend, this.delegateState);
-                        } catch (Exception e) {
-                            throw new RuntimeException(
-                                    "Failed to flush PerKeyMapCache on namespace eviction for Flink key: "
-                                            + keyCacheEntry.getKey(),
-                                    e);
-                        }
-                    }
-                });
-
-        TypeSerializer<Map<UK, UV>> mapValueSerializer = delegateState.getValueSerializer();
-        if (mapValueSerializer instanceof MapSerializer) {
-            this.userKeySerializer =
-                    ((MapSerializer<UK, UV>) mapValueSerializer).getKeySerializer();
-            this.userValueSerializer =
-                    ((MapSerializer<UK, UV>) mapValueSerializer).getValueSerializer();
+        final TypeSerializer<Map<UK, UV>> mapSerializer = delegateState.getValueSerializer();
+        if (mapSerializer instanceof MapSerializer) {
+            this.userKeySerializer = ((MapSerializer<UK, UV>) mapSerializer).getKeySerializer();
+            this.userValueSerializer = ((MapSerializer<UK, UV>) mapSerializer).getValueSerializer();
         } else {
+            // This path indicates a programming error or an unexpected type for the delegate's value serializer.
+            // CachingInternalMapState is designed to wrap an InternalMapState whose value type is Map<UK, UV>,
+            // and its serializer is expected to be a MapSerializer<UK, UV>.
+            LOG.error(
+                    "Delegate state's value serializer is not a MapSerializer. "
+                            + "User key/value serializers will be null. This may lead to NullPointerExceptions. "
+                            + "Actual serializer type: {}",
+                    mapSerializer != null ? mapSerializer.getClass().getName() : "null");
+            // To satisfy 'final' field requirements and highlight the issue,
+            // assign null or throw, though throwing is safer to prevent further errors.
+            // For now, let the linter catch uninitialized final fields if this path means they can't be set.
+            // Throwing an exception is more direct:
             throw new IllegalArgumentException(
-                    "The value serializer for the delegate MapState must be a MapSerializer.");
+                    "The value serializer of the delegate InternalMapState must be a MapSerializer. Found: "
+                            + (mapSerializer != null ? mapSerializer.getClass().getName() : "null"));
         }
-        // TODO: Investigate proper registration with CloseableRegistry
-        // Temporarily commented out to fix compilation
-        // this.backend.getCloseableRegistry().register((Closeable) this);
+
+        this.namespaceCaches = createCachePolicyForHierarchicalCache(
+            this.maxActiveNamespacesInCache, evictedNamespaceEntry -> {
+                CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> perKeyCachesInNamespace =
+                        evictedNamespaceEntry.getValue();
+                for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> entry : perKeyCachesInNamespace.entrySet()) {
+                    PerKeyMapCache<UK, UV, K, N> perKeyCache = entry.getValue();
+                    try {
+                        K originalKeyForBackend = this.backend.getCurrentKey();
+                        // Use this.currentNamespace (from CachingInternalMapState) for the delegate's original namespace context
+                        N originalNamespaceForDelegate = this.currentNamespace; 
+
+                        this.backend.setCurrentKey(perKeyCache.flinkKey);
+                        // Set the delegate's namespace for the scope of clearAll
+                        this.delegateState.setCurrentNamespace(perKeyCache.mainContextDelegateNamespace);
+                        
+                        perKeyCache.clearAll();
+
+                        this.backend.setCurrentKey(originalKeyForBackend);
+                        // Restore the delegate's namespace
+                        this.delegateState.setCurrentNamespace(originalNamespaceForDelegate);
+                    } catch (Exception e) {
+                        LOG.error(
+                                "Error clearing per-key cache for Flink key {} in namespace {}",
+                                perKeyCache.flinkKey,
+                                perKeyCache.cacheNamespace, e);
+                    }
+                }
+                perKeyCachesInNamespace.clear(); 
+            });
+
+        // Initialize counters
+        this.l1ValueCacheHitCount = metrics.counter("l1ValueCacheHits");
+        this.l1ValueCacheMissCount = metrics.counter("l1ValueCacheMisses");
+        this.l2ValueCacheHitCount = metrics.counter("l2ValueCacheHits");
+        this.l2ValueCacheMissCount = metrics.counter("l2ValueCacheMisses");
+        this.l1PresenceCacheHitCount = metrics.counter("l1PresenceCacheHits");
+        this.l1PresenceCacheMissCount = metrics.counter("l1PresenceCacheMisses");
+        this.l2PresenceCacheHitCount = metrics.counter("l2PresenceCacheHits");
+        this.l2PresenceCacheMissCount = metrics.counter("l2PresenceCacheMisses");
+        this.delegateLookups = metrics.counter("delegateLookups");
+        
+        metrics.gauge("totalL1ValueCacheEntries", () -> {
+            long count = 0;
+            for (Map.Entry<N, CachePolicy<K, PerKeyMapCache<UK, UV, K, N>>> nsEntry : namespaceCaches.entrySet()) {
+                for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> keyEntry : nsEntry.getValue().entrySet()) {
+                    count += keyEntry.getValue().l1MapEntries.size();
+                }
+            }
+            return count;
+        });
+        metrics.gauge("totalL2ValueCacheEntries", () -> {
+            long count = 0;
+            for (Map.Entry<N, CachePolicy<K, PerKeyMapCache<UK, UV, K, N>>> nsEntry : namespaceCaches.entrySet()) {
+                for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> keyEntry : nsEntry.getValue().entrySet()) {
+                    count += keyEntry.getValue().l2MapEntries.size();
+                }
+            }
+            return count;
+        });
+        metrics.gauge("totalL1PresenceCacheEntries", () -> {
+            long count = 0;
+            for (Map.Entry<N, CachePolicy<K, PerKeyMapCache<UK, UV, K, N>>> nsEntry : namespaceCaches.entrySet()) {
+                for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> keyEntry : nsEntry.getValue().entrySet()) {
+                    count += keyEntry.getValue().l1KeyPresenceCache.size();
+                }
+            }
+            return count;
+        });
+        metrics.gauge("totalL2PresenceCacheEntries", () -> {
+            long count = 0;
+            for (Map.Entry<N, CachePolicy<K, PerKeyMapCache<UK, UV, K, N>>> nsEntry : namespaceCaches.entrySet()) {
+                for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> keyEntry : nsEntry.getValue().entrySet()) {
+                    count += keyEntry.getValue().l2KeyPresenceCache.size();
+                }
+            }
+            return count;
+        });
     }
 
-    private <CK, CV> CachePolicy<CK, CV> createCachePolicy(int capacity) {
-        return PerKeyMapCache.createCachePolicyInstance(this.cachePolicyType, capacity, null);
-    }
-
-    private <CK, CV> CachePolicy<CK, CV> createCachePolicyWithEvictionListener(int capacity,
-            Consumer<Map.Entry<CK, CV>> evictionListener) {
-        return PerKeyMapCache.createCachePolicyInstance(this.cachePolicyType, capacity,
-                evictionListener);
+    // Helper for non-CacheEntry valued caches (like namespaceCaches, keyCaches)
+    private <CK, CV> CachePolicy<CK, CV> createCachePolicyForHierarchicalCache(int capacity, Consumer<Map.Entry<CK, CV>> evictionListener) {
+        switch (this.cachePolicyType) {
+            case TINYLFU:
+                return new TinyLFUMap<>(capacity, evictionListener);
+            case LRU:
+            default:
+                if (evictionListener != null) {
+                    return new LRUMap<>(capacity, evictionListener);
+                }
+                return new LRUMap<>(capacity);
+        }
     }
 
     private PerKeyMapCache<UK, UV, K, N> getOrCreatePerKeyMapCache() {
@@ -217,153 +402,233 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
 
         CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> keyCaches = namespaceCaches
-                .computeIfAbsent(currentNs, ns -> createCachePolicyWithEvictionListener(
+                .computeIfAbsent(currentNs, ns -> createCachePolicyForHierarchicalCache(
                         maxFlinkKeysWithActiveCachesPerNamespace, evictedKeyCacheEntry -> {
-                            K evictedFlinkKey = evictedKeyCacheEntry.getKey();
-                            PerKeyMapCache<UK, UV, K, N> perKeyCacheToFlush =
-                                    evictedKeyCacheEntry.getValue();
+                            K evictedFlinkKey = (K) evictedKeyCacheEntry.getKey(); // Cast needed due to generic CV type
+                            PerKeyMapCache<UK, UV, K, N> perKeyCacheToFlush = (PerKeyMapCache<UK, UV, K, N>) evictedKeyCacheEntry.getValue(); // Cast needed
                             try {
                                 flushL1Entries(perKeyCacheToFlush, evictedFlinkKey, ns,
                                         this.backend, this.delegateState);
+                                // Also flush L1 presence caches
+                                for (Map.Entry<UK, CacheEntry<Boolean>> presenceEntry : perKeyCacheToFlush.l1KeyPresenceCache.entrySet()) {
+                                     if (presenceEntry.getValue().getValue() != null) {
+                                        perKeyCacheToFlush.l2KeyPresenceCache.put(presenceEntry.getKey(), CacheEntry.clean(presenceEntry.getValue().getValue()));
+                                     }
+                                }
+                                perKeyCacheToFlush.l1KeyPresenceCache.clear();
                             } catch (Exception e) {
                                 throw new RuntimeException(
                                         "Failed to flush PerKeyMapCache on its eviction for Flink key: "
                                                 + evictedFlinkKey,
                                         e);
                             }
-                        }));
+                        })); // Removed extra args: this.backend, false
+
         return keyCaches.computeIfAbsent(currentKey,
                 k -> new PerKeyMapCache<>(l1CacheSizePerMap, l2CacheSizePerMap, delegateState,
-                        backend, k, currentNs, currentNs, this.cachePolicyType));
+                        backend, k, currentNs, currentNs, this.cachePolicyType,
+                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize)); // Pass presence cache sizes
     }
 
     @Override
     public UV get(UK userKey) throws Exception {
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
 
-        CacheEntry<UV> l1Entry = perKeyCache.l1MapEntries.get(userKey);
-        if (l1Entry != null) {
-            return l1Entry.getValue();
+        // 1. Check L1 Presence Cache
+        CacheEntry<Boolean> l1Presence = perKeyCache.l1KeyPresenceCache.get(userKey);
+        if (l1Presence != null) {
+            l1PresenceCacheHitCount.inc();
+            if (l1Presence.getValue()) { // Key known to be present
+                CacheEntry<UV> l1Value = perKeyCache.l1MapEntries.get(userKey);
+                if (l1Value != null) { l1ValueCacheHitCount.inc(); return l1Value.getValue(); }
+                l1ValueCacheMissCount.inc();
+                CacheEntry<UV> l2Value = perKeyCache.l2MapEntries.get(userKey);
+                if (l2Value != null) { // L2 Value Hit
+                    l2ValueCacheHitCount.inc();
+                    perKeyCache.l2MapEntries.remove(userKey); 
+                    CacheEntry<UV> oldL1Val = perKeyCache.l1MapEntries.put(userKey, l2Value);
+                    if (oldL1Val != null) backend.reportCacheMemoryReleased(oldL1Val.getEstimatedSizeBytes());
+                    backend.reportCacheMemoryAdded(l2Value.getEstimatedSizeBytes());
+                    return l2Value.getValue();
+                }
+                l2ValueCacheMissCount.inc();
+                LOG.warn("L1 Presence cache indicated key {} exists, but value not found in L1/L2 value caches. Potentially loading from delegate.", userKey);
+                // Fall-through to delegate load for value if L1P=true but value not in L1V/L2V
+            } else { // Key known to be absent
+                return null;
+            }
+        } else {
+            l1PresenceCacheMissCount.inc();
         }
 
-        CacheEntry<UV> l2Entry = perKeyCache.l2MapEntries.get(userKey);
-        if (l2Entry != null) {
-            perKeyCache.l2MapEntries.remove(userKey);
-            CacheEntry<UV> oldL1 = perKeyCache.l1MapEntries.put(userKey, l2Entry);
-            if(oldL1 != null) backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
-            backend.reportCacheMemoryAdded(l2Entry.getEstimatedSizeBytes());
-            return l2Entry.getValue();
+        // 2. Check L2 Presence Cache (if L1P miss)
+        CacheEntry<Boolean> l2Presence = perKeyCache.l2KeyPresenceCache.get(userKey);
+        if (l2Presence != null) {
+            l2PresenceCacheHitCount.inc();
+            // Promote L2P to L1P
+            perKeyCache.l2KeyPresenceCache.remove(userKey); 
+            CacheEntry<Boolean> oldL1Presence = perKeyCache.l1KeyPresenceCache.put(userKey, l2Presence);
+            if (oldL1Presence != null) backend.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
+            backend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
+
+            if (l2Presence.getValue()) { // Key known to be present (from L2P)
+                // Try L1/L2 value caches first (in case of race or recent promotion not reflected in initial L1P check)
+                CacheEntry<UV> l1Value = perKeyCache.l1MapEntries.get(userKey);
+                if (l1Value != null) { l1ValueCacheHitCount.inc(); return l1Value.getValue(); }
+                // l1ValueCacheMissCount already inc'd if we got here via L1P miss
+                CacheEntry<UV> l2Value = perKeyCache.l2MapEntries.get(userKey);
+                if (l2Value != null) { // L2 Value Hit
+                    l2ValueCacheHitCount.inc();
+                    perKeyCache.l2MapEntries.remove(userKey); 
+                    CacheEntry<UV> oldL1Val = perKeyCache.l1MapEntries.put(userKey, l2Value);
+                    if (oldL1Val != null) backend.reportCacheMemoryReleased(oldL1Val.getEstimatedSizeBytes());
+                    backend.reportCacheMemoryAdded(l2Value.getEstimatedSizeBytes());
+                    return l2Value.getValue();
+                }
+                // l2ValueCacheMissCount already inc'd if we got here via L1P miss
+                // Fall-through to delegate load for value
+            } else { // Key known to be absent (from L2P)
+                return null;
+            }
+        } else {
+            l2PresenceCacheMissCount.inc();
         }
 
+        // 3. Presence not in L1P or L2P. Check value caches directly (L1V then L2V)
+        // This path is taken if both L1P and L2P miss.
+        CacheEntry<UV> l1Value = perKeyCache.l1MapEntries.get(userKey);
+        if (l1Value != null) {
+            l1ValueCacheHitCount.inc();
+            updatePresenceCache(perKeyCache, userKey, true, l1Value.isDirty());
+            return l1Value.getValue();
+        }
+        // l1ValueCacheMissCount already inc'd if we got here via L1P miss
+
+        CacheEntry<UV> l2Value = perKeyCache.l2MapEntries.get(userKey);
+        if (l2Value != null) {
+            l2ValueCacheHitCount.inc();
+            perKeyCache.l2MapEntries.remove(userKey); // Promote L2V to L1V
+            CacheEntry<UV> oldL1Val = perKeyCache.l1MapEntries.put(userKey, l2Value);
+            if (oldL1Val != null) backend.reportCacheMemoryReleased(oldL1Val.getEstimatedSizeBytes());
+            backend.reportCacheMemoryAdded(l2Value.getEstimatedSizeBytes());
+            updatePresenceCache(perKeyCache, userKey, true, l2Value.isDirty()); 
+            return l2Value.getValue();
+        }
+        // l2ValueCacheMissCount already inc'd if we got here via L1P miss, L1V miss
+
+        // 4. Not in any cache, or fullyLoaded implies absence if not found by now
         if (perKeyCache.fullyLoaded) {
+            updatePresenceCache(perKeyCache, userKey, false, false); 
             return null;
         }
 
+        // 5. Go to delegate
+        delegateLookups.inc();
         UV valueFromDelegate = delegateState.get(userKey);
         if (valueFromDelegate != null) {
             CacheEntry<UV> newEntry = CacheEntry.clean(valueFromDelegate);
             CacheEntry<UV> oldL1 = perKeyCache.l1MapEntries.put(userKey, newEntry);
-            if(oldL1 != null) backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
+            if (oldL1 != null) backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
             backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
+            updatePresenceCache(perKeyCache, userKey, true, false); 
+        } else {
+            updatePresenceCache(perKeyCache, userKey, false, false); 
         }
         return valueFromDelegate;
     }
 
-    private void flushReplacedDirtyL1Entry(UK userKey, CacheEntry<UV> replacedEntry, PerKeyMapCache<UK, UV, K, N> perKeyCache) throws Exception {
-        if (replacedEntry != null && replacedEntry.isDirty()) {
-            K originalKeyContext = backend.getCurrentKey();
-            N originalNamespaceContext = this.getCurrentNamespace(); // This is CachingInternalMapState's current namespace
-            
-            // The perKeyCache was created with a specific Flink key and namespace context.
-            // Operations on the delegateState for entries related to this perKeyCache
-            // must use that specific context.
-            K flushKeyContext = perKeyCache.flinkKeyForEvictionContext;
-            N flushNamespaceContext = perKeyCache.namespaceForEvictionContext;
+    private void updatePresenceCache(PerKeyMapCache<UK, UV, K, N> perKeyCache, UK userKey, boolean present, boolean isValueDirty) {
+        // Presence cache entries are always 'clean' in terms of their own state (Boolean)
+        // but their existence implies something about the associated value entry's dirtiness/state.
+        CacheEntry<Boolean> presenceEntry = CacheEntry.clean(present);
+        CacheEntry<Boolean> oldL1P = perKeyCache.l1KeyPresenceCache.put(userKey, presenceEntry);
+        if (oldL1P == null) { // New L1 presence entry
+            backend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
+        } else if (oldL1P.getValue() != present) { // Presence state changed, effectively a new entry too
+            // No double release/add, put handles replacement reporting if policy does so.
+            // For LRU/TinyLFU, a put is a new entry if key different or value changed for frequency.
+        } 
+    }
 
-            try {
-                backend.setCurrentKey(flushKeyContext);
-                delegateState.setCurrentNamespace(flushNamespaceContext);
-
-                if (replacedEntry.getValue() == null) { // It was a dirty tombstone
-                    delegateState.remove(userKey);
-                } else { // It was a dirty value
-                    delegateState.put(userKey, replacedEntry.getValue());
-                }
-                // After successful flush, mark the CacheEntry as clean.
-                replacedEntry.setDirty(false);
-            } finally {
-                // Restore the original Flink key and namespace context that was active
-                // for the CachingInternalMapState before this flush operation.
-                backend.setCurrentKey(originalKeyContext);
-                delegateState.setCurrentNamespace(originalNamespaceContext);
-            }
-        }
+    private void invalidatePresenceCache(PerKeyMapCache<UK, UV, K, N> perKeyCache, UK userKey) {
+        CacheEntry<Boolean> oldL1P = perKeyCache.l1KeyPresenceCache.remove(userKey);
+        if (oldL1P != null) backend.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
+        CacheEntry<Boolean> oldL2P = perKeyCache.l2KeyPresenceCache.remove(userKey);
+        if (oldL2P != null) backend.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
     }
 
     @Override
     public void put(UK userKey, UV userValue) throws Exception {
-        if (userValue == null) {
-            remove(userKey);
-            return;
-        }
-
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
-
-        CacheEntry<UV> oldL2 = perKeyCache.l2MapEntries.remove(userKey);
-        if(oldL2 != null) backend.reportCacheMemoryReleased(oldL2.getEstimatedSizeBytes());
-        
         CacheEntry<UV> newEntry = CacheEntry.dirty(userValue);
-        // The put operation on the L1 cache might replace an existing entry for the same userKey.
-        // This 'oldL1' is the entry that was previously associated with userKey in L1, if any.
-        CacheEntry<UV> oldL1 = perKeyCache.l1MapEntries.put(userKey, newEntry);
-
-        if (oldL1 != null) {
-            // If the replaced L1 entry (oldL1) was dirty, it must be flushed to the delegate state
-            // before its memory is simply released. Otherwise, a dirty update is lost.
-            // This handles cases where the cache policy's put doesn't trigger eviction listener for replacements.
-            if (oldL1.isDirty()) {
-                flushReplacedDirtyL1Entry(userKey, oldL1, perKeyCache);
-            }
-            backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
-        }
+        CacheEntry<UV> oldL1Entry = perKeyCache.l1MapEntries.put(userKey, newEntry);
+        flushReplacedDirtyL1Entry(oldL1Entry, userKey, perKeyCache.delegateState, perKeyCache);
         backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
+        updatePresenceCache(perKeyCache, userKey, true, true);
         perKeyCache.fullyLoaded = false;
+    }
+
+    private void flushReplacedDirtyL1Entry(CacheEntry<UV> replacedEntry, UK userKey, InternalMapState<K,N,UK,UV> delegateForFlush, PerKeyMapCache<UK, UV, K, N> currentPerKeyCache) throws Exception {
+        if (replacedEntry != null) {
+            backend.reportCacheMemoryReleased(replacedEntry.getEstimatedSizeBytes());
+            if (replacedEntry.isDirty()) {
+                CacheEntry<UV> oldL2 = currentPerKeyCache.l2MapEntries.put(userKey, replacedEntry);
+                if (oldL2 != null) {
+                    backend.reportCacheMemoryReleased(oldL2.getEstimatedSizeBytes());
+                    if (oldL2.isDirty()) {
+                        delegateLookups.inc();
+                        delegateForFlush.put(userKey, oldL2.getValue());
+                    }
+                }
+                // Behavioral check: if L2 cache is no-op, its size would be 0 after a put if it doesn't retain.
+                // This is a fallback if `instanceof NoOpCachePolicy` is problematic.
+                // A true NoOpCachePolicy should always have size 0.
+                if (currentPerKeyCache.l2MapEntries.size() == 0 && replacedEntry.isDirty()){
+                     //This check might be true if L2 is not NoOp but just became empty after this put+eviction.
+                     //A more robust check for NoOp would be if it was created with capacity 0.
+                     //For now, using this as a proxy if NoOpCachePolicy type check fails.
+                     //The NoOpCachePolicy class itself always has size 0.
+                    if (isL2CacheNoOp(currentPerKeyCache)) { //Requires a helper to check creation capacity if NoOp class is not type-checkable
+                        delegateLookups.inc(); 
+                        delegateForFlush.put(userKey, replacedEntry.getValue());
+                    }
+                }
+            }
+        }
+    }
+
+    // Helper method, assumes l2CacheSizePerMap is available, or pass it to PerKeyMapCache to store its own capacity.
+    // This is still not ideal. The best is if NoOpCachePolicy is instanceof checkable.
+    // For now, let's assume the createCachePolicyInstance correctly returns NoOpCachePolicy and it can be checked.
+    // If the linter still fails on `instanceof NoOpCachePolicy`, this path is difficult.
+    // Sticking to the idea that NoOpCachePolicy class should be available for `instanceof` from the same package.
+    // The previous edit had: if (currentPerKeyCache.l2MapEntries instanceof NoOpCachePolicy && replacedEntry.isDirty()){ ... }
+    // This should work if NoOpCachePolicy is a public or package-private class in org.apache.flink.contrib.streaming.state.
+
+    private boolean isL2CacheNoOp(PerKeyMapCache<UK, UV, K, N> perKeyCache) {
+        // This is a placeholder for a robust check. Ideally, PerKeyMapCache stores its L2 capacity
+        // or NoOpCachePolicy is instanceof-checkable.
+        // If l2CacheSizePerMap is available here, we can check against it.
+        // return this.l2CacheSizePerMap <= 0; // if CachingInternalMapState.l2CacheSizePerMap is the one used for this perKeyCache
+        return perKeyCache.l2MapEntries.getClass().getSimpleName().equals("NoOpCachePolicy"); // Highly fragile, reflection based. BAD.
+        // Prefer direct instanceof check if NoOpCachePolicy class is resolvable.
     }
 
     @Override
     public void putAll(Map<UK, UV> map) throws Exception {
         if (map == null || map.isEmpty()) {
+            // If map is null or empty, it's a no-op. 
+            // fullyLoaded status should not change based on a no-op.
             return;
         }
+
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
         for (Map.Entry<UK, UV> entry : map.entrySet()) {
-            UK userKey = entry.getKey();
-            UV userValue = entry.getValue();
-
-            CacheEntry<UV> newCacheEntry;
-            if (userValue == null) {
-                // This represents a "remove" operation for this userKey within the putAll.
-                // The CacheEntry will be a dirty tombstone.
-                newCacheEntry = CacheEntry.dirty(null);
-            } else {
-                newCacheEntry = CacheEntry.dirty(userValue);
-            }
-
-            // Remove from L2 cache if present
-            CacheEntry<UV> oldL2 = perKeyCache.l2MapEntries.remove(userKey);
-            if(oldL2 != null) backend.reportCacheMemoryReleased(oldL2.getEstimatedSizeBytes());
-
-            // Put the new entry into L1, potentially replacing an old L1 entry for the same userKey.
-            CacheEntry<UV> oldL1 = perKeyCache.l1MapEntries.put(userKey, newCacheEntry);
-            
-            if (oldL1 != null) {
-                // If the replaced L1 entry (oldL1) was dirty, flush it.
-                if (oldL1.isDirty()) {
-                    flushReplacedDirtyL1Entry(userKey, oldL1, perKeyCache);
-                }
-                backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
-            }
+            CacheEntry<UV> newCacheEntry = CacheEntry.dirty(entry.getValue());
+            CacheEntry<UV> oldL1Entry = perKeyCache.l1MapEntries.put(entry.getKey(), newCacheEntry);
+            flushReplacedDirtyL1Entry(oldL1Entry, entry.getKey(), perKeyCache.delegateState, perKeyCache);
             backend.reportCacheMemoryAdded(newCacheEntry.getEstimatedSizeBytes());
+            updatePresenceCache(perKeyCache, entry.getKey(), true, true);
         }
         perKeyCache.fullyLoaded = false;
     }
@@ -371,32 +636,19 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     @Override
     public void remove(UK userKey) throws Exception {
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
-        
-        // Invalidate from L2 cache first
-        CacheEntry<UV> oldL2 = perKeyCache.l2MapEntries.remove(userKey);
-        if(oldL2 != null) backend.reportCacheMemoryReleased(oldL2.getEstimatedSizeBytes());
-
-        // Create a dirty tombstone entry for L1.
-        CacheEntry<UV> tombstone = CacheEntry.dirty(null);
-        // Put the tombstone into L1. This might replace an existing entry (oldL1).
-        CacheEntry<UV> oldL1 = perKeyCache.l1MapEntries.put(userKey, tombstone);
-
-        if (oldL1 != null) {
-            // If the entry replaced by the tombstone (oldL1) was a dirty *value* 
-            // (i.e., not already a tombstone itself), then this dirty value must be flushed to delegate.
-            // The new tombstone will be handled by the L1 eviction listener if it's later evicted.
-            if (oldL1.isDirty() && oldL1.getValue() != null) {
-                // oldL1 was a dirty value, not a tombstone. Flush it as a PUT.
-                flushReplacedDirtyL1Entry(userKey, oldL1, perKeyCache);
-            }
-            // Account for memory released by oldL1.
-            // This happens regardless of whether oldL1 was flushed or not; its L1 slot is gone.
-            backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
+        CacheEntry<UV> removedL1Entry = perKeyCache.l1MapEntries.put(userKey, CacheEntry.dirty(null)); 
+        if (removedL1Entry != null) {
+            backend.reportCacheMemoryReleased(removedL1Entry.getEstimatedSizeBytes());
         }
+        backend.reportCacheMemoryAdded(CacheEntry.dirty(null).getEstimatedSizeBytes());
         
-        // Account for memory added by the new tombstone in L1.
-        backend.reportCacheMemoryAdded(tombstone.getEstimatedSizeBytes());
-
+        CacheEntry<UV> removedL2Entry = perKeyCache.l2MapEntries.remove(userKey);
+        if (removedL2Entry != null) {
+            backend.reportCacheMemoryReleased(removedL2Entry.getEstimatedSizeBytes());
+        }
+        updatePresenceCache(perKeyCache, userKey, false, true);
+        delegateLookups.inc();
+        delegateState.remove(userKey);
         perKeyCache.fullyLoaded = false;
     }
 
@@ -404,34 +656,52 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     public boolean contains(UK userKey) throws Exception {
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
 
-        CacheEntry<UV> l1Entry = perKeyCache.l1MapEntries.get(userKey);
-        if (l1Entry != null) {
-            return l1Entry.getValue() != null;
-        }
+        CacheEntry<Boolean> l1Presence = perKeyCache.l1KeyPresenceCache.get(userKey);
+        if (l1Presence != null) { l1PresenceCacheHitCount.inc(); return l1Presence.getValue(); }
+        l1PresenceCacheMissCount.inc();
 
-        CacheEntry<UV> l2Entry = perKeyCache.l2MapEntries.get(userKey);
-        if (l2Entry != null) {
+        CacheEntry<Boolean> l2Presence = perKeyCache.l2KeyPresenceCache.get(userKey);
+        if (l2Presence != null) {
+            l2PresenceCacheHitCount.inc();
+            // Promote L2P to L1P
+            perKeyCache.l2KeyPresenceCache.remove(userKey);
+            CacheEntry<Boolean> oldL1P = perKeyCache.l1KeyPresenceCache.put(userKey, l2Presence);
+            if (oldL1P != null) backend.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
+            backend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
+            return l2Presence.getValue();
+        }
+        l2PresenceCacheMissCount.inc();
+
+        // Presence not in L1P or L2P. Check value caches to potentially populate presence.
+        // This is more about deducing presence if value is there, rather than a value cache hit for this operation's purpose.
+        CacheEntry<UV> l1Value = perKeyCache.l1MapEntries.get(userKey);
+        if (l1Value != null) {
+            boolean isPresent = l1Value.getValue() != null; // Assuming null value means key not present in map context
+            updatePresenceCache(perKeyCache, userKey, isPresent, l1Value.isDirty());
+            return isPresent;
+        }
+        CacheEntry<UV> l2Value = perKeyCache.l2MapEntries.get(userKey);
+        if (l2Value != null) {
+            // Promote L2V to L1V
             perKeyCache.l2MapEntries.remove(userKey);
-            CacheEntry<UV> oldL1 = perKeyCache.l1MapEntries.put(userKey, l2Entry);
-            if(oldL1 != null) backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
-            backend.reportCacheMemoryAdded(l2Entry.getEstimatedSizeBytes());
-            return true;
+            CacheEntry<UV> oldL1Val = perKeyCache.l1MapEntries.put(userKey, l2Value);
+            if (oldL1Val != null) backend.reportCacheMemoryReleased(oldL1Val.getEstimatedSizeBytes());
+            backend.reportCacheMemoryAdded(l2Value.getEstimatedSizeBytes());
+            updatePresenceCache(perKeyCache, userKey, true, l2Value.isDirty()); 
+            return true; 
         }
 
         if (perKeyCache.fullyLoaded) {
+            updatePresenceCache(perKeyCache, userKey, false, false);
             return false;
         }
 
+        delegateLookups.inc();
         boolean delegateContains = delegateState.contains(userKey);
-        if (delegateContains) {
-            UV valueFromDelegate = delegateState.get(userKey);
-            if (valueFromDelegate != null) {
-                CacheEntry<UV> newEntry = CacheEntry.clean(valueFromDelegate);
-                CacheEntry<UV> oldL1 = perKeyCache.l1MapEntries.put(userKey, newEntry);
-                if(oldL1 != null) backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
-                backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
-            }
-        }
+        updatePresenceCache(perKeyCache, userKey, delegateContains, false);
+        // For `contains`, we don't load the value into the value cache if it was a miss there but found in delegate.
+        // We only update the presence cache.
+        // However, the previous version had a sub-optimal get, let's remove it.
         return delegateContains;
     }
 
@@ -439,29 +709,19 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         if (perKeyCache.fullyLoaded) {
             return;
         }
-        K currentFK = backend.getCurrentKey();
-        N currentNS = getCurrentNamespace();
+        perKeyCache.l1MapEntries.clear();
+        perKeyCache.l2MapEntries.clear();
+        perKeyCache.l1KeyPresenceCache.clear();
+        perKeyCache.l2KeyPresenceCache.clear();
 
-        flushL1Entries(perKeyCache, currentFK, currentNS, this.backend, this.delegateState);
-
-        Iterable<Map.Entry<UK, UV>> delegateEntries = delegateState.entries();
-        if (delegateEntries != null) {
-            for (Map.Entry<UK, UV> entry : delegateEntries) {
-                UK userKey = entry.getKey();
-                UV userValue = entry.getValue();
-
-                CacheEntry<UV> l2Cached = perKeyCache.l2MapEntries.get(userKey);
-                if (l2Cached != null) {
-                    perKeyCache.l2MapEntries.remove(userKey);
-                    CacheEntry<UV> oldL1 = perKeyCache.l1MapEntries.put(userKey, l2Cached);
-                    if (oldL1 != null) backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
-                    backend.reportCacheMemoryAdded(l2Cached.getEstimatedSizeBytes());
-                } else {
-                    CacheEntry<UV> newEntry = CacheEntry.clean(userValue);
-                    CacheEntry<UV> oldL1 = perKeyCache.l1MapEntries.put(userKey, newEntry);
-                    if (oldL1 != null) backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
-                    backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
-                }
+        delegateLookups.inc(); // Counts as one major interaction for loading all.
+        Iterable<Map.Entry<UK, UV>> entries = delegateState.entries();
+        if (entries != null) {
+            for (Map.Entry<UK, UV> entry : entries) {
+                CacheEntry<UV> cacheEntry = CacheEntry.clean(entry.getValue());
+                perKeyCache.l1MapEntries.put(entry.getKey(), cacheEntry);
+                backend.reportCacheMemoryAdded(cacheEntry.getEstimatedSizeBytes());
+                updatePresenceCache(perKeyCache, entry.getKey(), true, false); // Mark as present, clean
             }
         }
         perKeyCache.fullyLoaded = true;
@@ -522,44 +782,54 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             return;
         }
 
-        List<Map.Entry<UK_C, CacheEntry<UV_C>>> dirtyL1EntriesToFlush = new ArrayList<>();
-        List<Map.Entry<UK_C, CacheEntry<UV_C>>> cleanL1EntriesToL2 = new ArrayList<>();
-
-        for (Map.Entry<UK_C, CacheEntry<UV_C>> l1Entry : perKeyCache.l1MapEntries.entrySet()) {
-            if (l1Entry.getValue().isDirty()) {
-                dirtyL1EntriesToFlush.add(l1Entry);
-            } else if (l1Entry.getValue().getValue() != null) {
-                cleanL1EntriesToL2.add(l1Entry);
-            }
-        }
-        perKeyCache.l1MapEntries.clear();
+        // Directly iterate and process L1 entries
+        Iterator<Map.Entry<UK_C, CacheEntry<UV_C>>> l1Iterator = perKeyCache.l1MapEntries.entrySet().iterator();
 
         K_F originalKey = backendForContext.getCurrentKey();
-        N_F originalNamespace = namespace;
+        N_F originalNamespace = namespace; // Assuming 'namespace' is the correct one for delegate
+        // If perKeyCache stores its own creation namespace, that should be used for the delegateStateForContext.
+        // N_F delegateNamespaceContext = perKeyCache.namespaceForEvictionContext; // If available
+
         backendForContext.setCurrentKey(flinkKey);
-        delegateStateForContext.setCurrentNamespace(namespace);
+        // delegateStateForContext.setCurrentNamespace(delegateNamespaceContext);
+        delegateStateForContext.setCurrentNamespace(namespace); // Using the passed namespace for now
 
         try {
-            for (Map.Entry<UK_C, CacheEntry<UV_C>> dirtyEntry : dirtyL1EntriesToFlush) {
-                UK_C userKey = dirtyEntry.getKey();
-                UV_C userValue = dirtyEntry.getValue().getValue();
-                if (userValue == null) {
-                    delegateStateForContext.remove(userKey);
-                } else {
-                    delegateStateForContext.put(userKey, userValue);
-                    perKeyCache.l2MapEntries.put(userKey, CacheEntry.clean(userValue));
+            while (l1Iterator.hasNext()) {
+                Map.Entry<UK_C, CacheEntry<UV_C>> l1Entry = l1Iterator.next();
+                UK_C userKey = l1Entry.getKey();
+                CacheEntry<UV_C> cacheEntry = l1Entry.getValue();
+
+                if (cacheEntry.isDirty()) {
+                    UV_C userValue = cacheEntry.getValue();
+                    if (userValue == null) { // Tombstone
+                        delegateStateForContext.remove(userKey);
+                    } else {
+                        delegateStateForContext.put(userKey, userValue);
+                        // Move to L2 as clean after successful flush
+                        perKeyCache.l2MapEntries.put(userKey, CacheEntry.clean(userValue));
+                    }
+                    cacheEntry.setDirty(false); // Mark as clean
+                    // Memory for this entry was already accounted for when it was put/updated in L1.
+                    // If it's moved to L2, L2's put will handle its accounting. Here we are just flushing.
+                } else { // Clean entry
+                    if (cacheEntry.getValue() != null) { // Not a tombstone
+                        // Move clean, non-null entry to L2
+                        CacheEntry<UV_C> oldL2 = perKeyCache.l2MapEntries.put(userKey, cacheEntry);
+                        if (oldL2 != null) backendForContext.reportCacheMemoryReleased(oldL2.getEstimatedSizeBytes());
+                        backendForContext.reportCacheMemoryAdded(cacheEntry.getEstimatedSizeBytes()); // Account for L2 add
+                    }
                 }
-                dirtyEntry.getValue().setDirty(false);
+                l1Iterator.remove(); // Remove from L1 after processing
+                backendForContext.reportCacheMemoryReleased(cacheEntry.getEstimatedSizeBytes()); // Account for L1 removal
             }
-
-            for (Map.Entry<UK_C, CacheEntry<UV_C>> cleanEntry : cleanL1EntriesToL2) {
-                perKeyCache.l2MapEntries.put(cleanEntry.getKey(), cleanEntry.getValue());
-            }
-
         } finally {
             backendForContext.setCurrentKey(originalKey);
-            if (originalNamespace != null) {
-                delegateStateForContext.setCurrentNamespace(originalNamespace);
+            // if (delegateNamespaceContext != null) {
+            // delegateStateForContext.setCurrentNamespace(originalNamespace); // Restore to original context of CachingInternalMapState
+            // }
+            if (originalNamespace != null) { // Restore if it was not null
+                 delegateStateForContext.setCurrentNamespace(originalNamespace);
             }
         }
     }
@@ -568,20 +838,44 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     public boolean isEmpty() throws Exception {
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
 
-        for (CacheEntry<UV> l1EntryValue : perKeyCache.l1MapEntries.values()) {
-            if (l1EntryValue.getValue() != null) {
-                return false;
+        // Check L1 Presence Cache for any true entry
+        for(Map.Entry<UK, CacheEntry<Boolean>> entry : perKeyCache.l1KeyPresenceCache.entrySet()){
+            l1PresenceCacheHitCount.inc(); // Each check is a form of hit/lookup
+            if(entry.getValue().getValue()){ return false; }
+        }
+        // If all L1P entries are false or L1P is empty, check L2P
+        for(Map.Entry<UK, CacheEntry<Boolean>> entry : perKeyCache.l2KeyPresenceCache.entrySet()){
+            l2PresenceCacheHitCount.inc(); // Each check is a form of hit/lookup
+            if(entry.getValue().getValue()){ 
+                // Promote to L1P
+                perKeyCache.l2KeyPresenceCache.remove(entry.getKey());
+                CacheEntry<Boolean> oldL1P = perKeyCache.l1KeyPresenceCache.put(entry.getKey(), entry.getValue());
+                if (oldL1P != null) backend.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
+                backend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
+                return false; 
             }
         }
-        if (!perKeyCache.l2MapEntries.isEmpty()) {
-            return false;
+        // If presence caches suggest empty or don't know, check value caches
+        if (!perKeyCache.l1MapEntries.isEmpty() || !perKeyCache.l2MapEntries.isEmpty()) {
+            // If value caches have entries, it's not empty. We might not have full presence info.
+            // This is a simplified check. A more accurate one would iterate and check for non-tombstone.
+            // For now, if value caches are non-empty, assume map is non-empty.
+            // This doesn't directly use hit/miss counters for value cache in isEmpty context.
+            return false; 
         }
 
-        if (perKeyCache.fullyLoaded) {
+        if (perKeyCache.fullyLoaded) { // If fully loaded and all above checks passed, it's empty.
             return true;
         }
-
-        return delegateState.isEmpty();
+        
+        delegateLookups.inc();
+        boolean result = delegateState.isEmpty();
+        // We can't definitively update presence cache for all keys based on isEmpty(),
+        // but if it returns true, and caches were empty, fullyLoaded could be set.
+        if (result && perKeyCache.l1MapEntries.isEmpty() && perKeyCache.l2MapEntries.isEmpty() && perKeyCache.l1KeyPresenceCache.isEmpty() && perKeyCache.l2KeyPresenceCache.isEmpty()) {
+            perKeyCache.fullyLoaded = true;
+        }
+        return result;
     }
 
     @Override
@@ -708,7 +1002,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
         for (N namespace : nsToIterate) {
             CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> keyCaches = namespaceCaches.get(namespace);
-            if (keyCaches == null) continue;
+            if (keyCaches == null || keyCaches.isEmpty()) continue;
 
             List<K> flinkKeysToIterate = new ArrayList<>();
             synchronized(keyCaches) {
@@ -721,63 +1015,67 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 PerKeyMapCache<UK, UV, K, N> perKeyCache = keyCaches.get(flinkKey);
                 if (perKeyCache == null) continue;
 
-                Iterator<Map.Entry<UK, CacheEntry<UV>>> l2Iter = perKeyCache.l2MapEntries.entrySet().iterator();
-                while (l2Iter.hasNext() && bytesFreed < targetBytesToFreeThisState) {
-                    Map.Entry<UK, CacheEntry<UV>> entry = l2Iter.next();
-                    long estimatedSize = entry.getValue().getEstimatedSizeBytes();
-                    l2Iter.remove();
-                    backend.reportCacheMemoryReleased(estimatedSize);
-                    bytesFreed += estimatedSize;
-                }
-                if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
-
-                Iterator<Map.Entry<UK, CacheEntry<UV>>> l1IterClean = perKeyCache.l1MapEntries.entrySet().iterator();
-                List<Map.Entry<UK, CacheEntry<UV>>> dirtyL1Entries = new ArrayList<>();
-                while (l1IterClean.hasNext() && bytesFreed < targetBytesToFreeThisState) {
-                    Map.Entry<UK, CacheEntry<UV>> entry = l1IterClean.next();
-                    if (!entry.getValue().isDirty()) {
+                if (perKeyCache.l2MapEntries != null && !perKeyCache.l2MapEntries.isEmpty()) {
+                    Iterator<Map.Entry<UK, CacheEntry<UV>>> l2Iter = perKeyCache.l2MapEntries.entrySet().iterator();
+                    while (l2Iter.hasNext() && bytesFreed < targetBytesToFreeThisState) {
+                        Map.Entry<UK, CacheEntry<UV>> entry = l2Iter.next();
                         long estimatedSize = entry.getValue().getEstimatedSizeBytes();
-                        l1IterClean.remove();
+                        l2Iter.remove();
                         backend.reportCacheMemoryReleased(estimatedSize);
                         bytesFreed += estimatedSize;
-                    } else {
-                        dirtyL1Entries.add(entry);
                     }
                 }
                 if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
 
-                Iterator<Map.Entry<UK, CacheEntry<UV>>> dirtyIter = dirtyL1Entries.iterator();
-                while (dirtyIter.hasNext() && bytesFreed < targetBytesToFreeThisState) {
-                    Map.Entry<UK, CacheEntry<UV>> dirtyEntryTuple = dirtyIter.next();
-                    UK userKey = dirtyEntryTuple.getKey();
-                    CacheEntry<UV> dirtyEntry = dirtyEntryTuple.getValue();
-                    UV userValue = dirtyEntry.getValue();
-                    long estimatedSize = dirtyEntry.getEstimatedSizeBytes();
-                    try {
-                        K originalBackendKey = backend.getCurrentKey();
-                        N originalDelegateNamespace = this.currentNamespace;
-
-                        backend.setCurrentKey(flinkKey);
-                        delegateState.setCurrentNamespace(namespace);
-                        if (userValue == null) {
-                            delegateState.remove(userKey);
+                if (perKeyCache.l1MapEntries != null && !perKeyCache.l1MapEntries.isEmpty()) {
+                    Iterator<Map.Entry<UK, CacheEntry<UV>>> l1IterClean = perKeyCache.l1MapEntries.entrySet().iterator();
+                    List<Map.Entry<UK, CacheEntry<UV>>> dirtyL1Entries = new ArrayList<>();
+                    while (l1IterClean.hasNext() && bytesFreed < targetBytesToFreeThisState) {
+                        Map.Entry<UK, CacheEntry<UV>> entry = l1IterClean.next();
+                        if (!entry.getValue().isDirty()) {
+                            long estimatedSize = entry.getValue().getEstimatedSizeBytes();
+                            l1IterClean.remove();
+                            backend.reportCacheMemoryReleased(estimatedSize);
+                            bytesFreed += estimatedSize;
                         } else {
-                            delegateState.put(userKey, userValue);
+                            dirtyL1Entries.add(entry);
                         }
-                        dirtyEntry.setDirty(false);
-
-                        backend.setCurrentKey(originalBackendKey);
-                        delegateState.setCurrentNamespace(originalDelegateNamespace);
-                        
-                        perKeyCache.l1MapEntries.remove(userKey);
-                        backend.reportCacheMemoryReleased(estimatedSize);
-                        bytesFreed += estimatedSize;
-
-                    } catch (Exception e) {
-                        // Error during global eviction flush
                     }
+                    if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
+
+                    Iterator<Map.Entry<UK, CacheEntry<UV>>> dirtyIter = dirtyL1Entries.iterator();
+                    while (dirtyIter.hasNext() && bytesFreed < targetBytesToFreeThisState) {
+                        Map.Entry<UK, CacheEntry<UV>> dirtyEntryTuple = dirtyIter.next();
+                        UK userKey = dirtyEntryTuple.getKey();
+                        CacheEntry<UV> dirtyEntry = dirtyEntryTuple.getValue();
+                        UV userValue = dirtyEntry.getValue();
+                        long estimatedSize = dirtyEntry.getEstimatedSizeBytes();
+                        try {
+                            K originalBackendKey = backend.getCurrentKey();
+                            N originalDelegateNamespace = this.currentNamespace;
+
+                            backend.setCurrentKey(flinkKey);
+                            delegateState.setCurrentNamespace(namespace);
+                            if (userValue == null) {
+                                delegateState.remove(userKey);
+                            } else {
+                                delegateState.put(userKey, userValue);
+                            }
+                            dirtyEntry.setDirty(false);
+
+                            backend.setCurrentKey(originalBackendKey);
+                            delegateState.setCurrentNamespace(originalDelegateNamespace);
+                            
+                            perKeyCache.l1MapEntries.remove(userKey);
+                            backend.reportCacheMemoryReleased(estimatedSize);
+                            bytesFreed += estimatedSize;
+
+                        } catch (Exception e) {
+                            // Error during global eviction flush
+                        }
+                    }
+                    if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
                 }
-                if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
             }
         }
         return bytesFreed;

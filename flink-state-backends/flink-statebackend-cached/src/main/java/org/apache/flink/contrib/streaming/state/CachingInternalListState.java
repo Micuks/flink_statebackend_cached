@@ -619,7 +619,7 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
 
         for (N namespace : l2Namespaces) {
             CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = namespaceCachesL2.get(namespace);
-            if (l2Cache == null) continue;
+            if (l2Cache == null || l2Cache.isEmpty()) continue; // Optimization: skip empty L2 caches
             Iterator<Map.Entry<K, CacheEntry<List<V_ELE>>>> l2Iter = l2Cache.entrySet().iterator();
             while (l2Iter.hasNext() && bytesFreed < targetBytesToFreeThisState) {
                 Map.Entry<K, CacheEntry<List<V_ELE>>> entry = l2Iter.next();
@@ -641,7 +641,7 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
 
         for (N namespace : l1Namespaces) {
             CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = namespaceCachesL1.get(namespace);
-            if (l1Cache == null) continue;
+            if (l1Cache == null || l1Cache.isEmpty()) continue; // Optimization: skip empty L1 caches
 
             Iterator<Map.Entry<K, CacheEntry<List<V_ELE>>>> l1IterClean = l1Cache.entrySet().iterator();
             List<Map.Entry<K, CacheEntry<List<V_ELE>>>> dirtyL1EntriesToConsider = new ArrayList<>();

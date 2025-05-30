@@ -48,7 +48,8 @@ import org.apache.flink.util.FileUtils;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.api.io.TempDir;
 
 import javax.annotation.Nonnull;
@@ -69,13 +70,13 @@ import static org.junit.jupiter.api.Assertions.*;
 class CachingRocksDBStateBackendComparativeTest
         extends StateBackendTestBase<CachingStateBackend> {
 
+    private CachingStateBackendFactory.CachePolicyType cachePolicyType;
+
     // Fields for CachingStateBackend (managed by StateBackendTestBase and this class's getStateBackend())
     private org.apache.flink.contrib.streaming.state.RocksDBStateBackend rocksDbDelegateBackend; // Delegate for the CachingStateBackend under test
-    private File cachingDelegateRocksDbInstanceBasePath; // Path for the delegate RocksDB
     protected AbstractKeyedStateBackend<String> keyedStateBackend; // Backend under test
 
     // Fields for the reference RocksDBStateBackend
-    private File referenceRocksDbInstanceBasePath; // Path for the reference RocksDB
     private org.apache.flink.contrib.streaming.state.RocksDBStateBackend referenceRocksDbRawBackend; // The raw reference RocksDBStateBackend
     private AbstractKeyedStateBackend<String> referenceKeyedStateBackend; // Keyed version of reference
     private Environment referenceEnv;
@@ -84,10 +85,12 @@ class CachingRocksDBStateBackendComparativeTest
     private CloseableRegistry cancelStreamRegistryForReference;
     private CloseableRegistry cancelStreamRegistry; // Added for the main backend under test
 
+    // Temporary directories
+    private File cachingDelegateRocksDbInstanceBasePath;
+    private File referenceRocksDbInstanceBasePath;
 
     @TempDir
     public java.nio.file.Path temporaryFolder;
-
 
     private <T> void assertListEquals(Iterable<T> actualIterable, Iterable<T> expectedIterable) {
         List<T> actualList = new ArrayList<>();
@@ -284,29 +287,28 @@ class CachingRocksDBStateBackendComparativeTest
 
     @Override
     protected CachingStateBackend getStateBackend() throws Exception {
-        // Ensure the delegate's base path is unique for each call if tests run concurrently
-        // or if @TempDir is not cleaning up perfectly between parameterized runs.
-        // The error occurs here.
-        cachingDelegateRocksDbInstanceBasePath =
-                new File(temporaryFolder.toFile(), "caching-delegate-rocksdb");
-        FileUtils.deleteDirectory(cachingDelegateRocksDbInstanceBasePath); // Delete if exists
-        Files.createDirectories(cachingDelegateRocksDbInstanceBasePath.toPath()); // Create it
+        // Ensure delegate RocksDB is created first
+        if (rocksDbDelegateBackend == null) {
+            cachingDelegateRocksDbInstanceBasePath = TempDirUtils.newFolder(temporaryFolder);
+            rocksDbDelegateBackend =
+                    new org.apache.flink.contrib.streaming.state.RocksDBStateBackend(
+                            cachingDelegateRocksDbInstanceBasePath.toURI().toString());
+        }
 
-        rocksDbDelegateBackend =
-                new org.apache.flink.contrib.streaming.state.RocksDBStateBackend(
-                        cachingDelegateRocksDbInstanceBasePath.toURI().toString());
-        // Configure the delegate RocksDB backend as needed, e.g., options factory, TTL
-        // settings
+        // Default values for new cache size parameters, align with factory defaults if possible
+        long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
 
-        // Create the CachingStateBackend with the configured delegate
+
         return new CachingStateBackend(
                 rocksDbDelegateBackend,
-                10, // L1 cache size (entries per K/N for Value, per UK for Map)
-                10, // L2 cache size (entries per K/N for Value, per UK for Map)
-                5, // Max active namespaces/Flink keys with caches
-                1, // Max total cache memory in MB
-                CachingStateBackendFactory.CachePolicyType.LRU // Cache policy
-                );
+                128L, // L1 cache size (entries)
+                1024L, // L2 cache size (entries)
+                100L, // Max active namespaces
+                20L, // Max cache memory (MB)
+                this.cachePolicyType, // Set by test parameter
+                mapL1KeyPresenceCacheSize,
+                mapL2KeyPresenceCacheSize);
     }
 
     @BeforeEach
@@ -320,12 +322,39 @@ class CachingRocksDBStateBackendComparativeTest
             throw new IllegalStateException("Environment not initialized by super.before(). Check StateBackendTestBase setup.");
         }
         
-        // Retrieve the CachingStateBackend instance. This will also initialize rocksDbDelegateBackend.
-        CachingStateBackend cachingBackend = this.getStateBackend();
+        // Create temporary directories
+        this.cachingDelegateRocksDbInstanceBasePath =
+            new File(temporaryFolder.toFile(), "caching-delegate-rocksdb-" + cachePolicyType.name());
+        FileUtils.deleteDirectory(cachingDelegateRocksDbInstanceBasePath);
+        Files.createDirectories(cachingDelegateRocksDbInstanceBasePath.toPath());
+        
+        this.referenceRocksDbInstanceBasePath =
+            new File(temporaryFolder.toFile(), "reference-rocksdb");
+        FileUtils.deleteDirectory(referenceRocksDbInstanceBasePath);
+        Files.createDirectories(referenceRocksDbInstanceBasePath.toPath());
+        
+        // Initialize backends with the created directories
+        rocksDbDelegateBackend = new org.apache.flink.contrib.streaming.state.RocksDBStateBackend(
+            cachingDelegateRocksDbInstanceBasePath.toURI().toString()
+        );
+        
+        referenceRocksDbRawBackend = new org.apache.flink.contrib.streaming.state.RocksDBStateBackend(
+            referenceRocksDbInstanceBasePath.toURI().toString()
+        );
+
+        // Create the CachingStateBackend with the configured delegate
+        CachingStateBackend cachingBackend = new CachingStateBackend(
+            rocksDbDelegateBackend,
+            10, // L1 cache size
+            10, // L2 cache size
+            5,  // Max active namespaces
+            1,  // Max total cache memory in MB
+            cachePolicyType
+        );
 
         this.keyedStateBackend = createKeyedStateBackend(
-            cachingBackend, 
-            this.env, 
+            cachingBackend,
+            this.env,
             new JobID(),
             "caching_operator",
             StringSerializer.INSTANCE,
@@ -335,18 +364,14 @@ class CachingRocksDBStateBackendComparativeTest
             TtlTimeProvider.DEFAULT,
             new UnregisteredMetricsGroup(),
             Collections.emptyList(),
-            this.cancelStreamRegistry 
+            this.cancelStreamRegistry
         );
-
-        // Setup for the reference RocksDBStateBackend
-        this.referenceRocksDbInstanceBasePath = TempDirUtils.newFolder(temporaryFolder, "reference-rocksdb");
-        this.referenceRocksDbRawBackend = new org.apache.flink.contrib.streaming.state.RocksDBStateBackend(this.referenceRocksDbInstanceBasePath.toURI());
-        // Configure reference RocksDB if needed (e.g., optionsFactory)
 
         this.referenceEnv = new MockEnvironmentBuilder()
                 .setTaskName("reference-env")
                 .setManagedMemorySize(4 * 1024 * 1024) // 4 MB
                 .setTaskStateManager(new TestTaskStateManager()) // Use a new task state manager
+                .setExecutionConfig(this.env.getExecutionConfig()) // Add execution config
                 .build();
         this.cancelStreamRegistryForReference = new CloseableRegistry();
 
@@ -417,14 +442,32 @@ class CachingRocksDBStateBackendComparativeTest
     @Override
     protected boolean isSerializerPresenceRequiredOnRestore() { return false; }
 
-    @Test
-    void testValueStateComparative() throws Exception {
-        this.keyedStateBackend.setCurrentKey("testKey");
+    @ParameterizedTest
+    @EnumSource(CachingStateBackendFactory.CachePolicyType.class)
+    void testValueStateComparative(CachingStateBackendFactory.CachePolicyType policy) throws Exception {
+        this.cachePolicyType = policy;
+        CachingStateBackend cachingBackend = getStateBackend();
+        AbstractKeyedStateBackend<String> cachingKeyedBackend =
+                createKeyedStateBackend(
+                        cachingBackend,
+                        this.env,
+                        new JobID(),
+                        "caching_operator",
+                        StringSerializer.INSTANCE,
+                        this.env.getExecutionConfig().getParallelism(),
+                        new KeyGroupRange(0, Math.max(0, this.env.getExecutionConfig().getParallelism() - 1)),
+                        this.env.getTaskKvStateRegistry(),
+                        TtlTimeProvider.DEFAULT,
+                        new UnregisteredMetricsGroup(),
+                        Collections.emptyList(),
+                        this.cancelStreamRegistry);
+
+        cachingKeyedBackend.setCurrentKey("testKey");
         this.referenceKeyedStateBackend.setCurrentKey("testKey");
 
         ValueStateDescriptor<String> descriptor = new ValueStateDescriptor<>("valueState", String.class);
         
-        InternalValueState<String, VoidNamespace, String> cachingValueState = this.keyedStateBackend
+        InternalValueState<String, VoidNamespace, String> cachingValueState = cachingKeyedBackend
                 .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor, StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
         InternalValueState<String, VoidNamespace, String> referenceValueState = this.referenceKeyedStateBackend
                 .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor, StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
@@ -443,14 +486,32 @@ class CachingRocksDBStateBackendComparativeTest
         assertNull(cachingValueState.value());
     }
 
-    @Test
-    void testListStateComparativeAndSnapshotRestore() throws Exception {
+    @ParameterizedTest
+    @EnumSource(CachingStateBackendFactory.CachePolicyType.class)
+    void testListStateComparativeAndSnapshotRestore(CachingStateBackendFactory.CachePolicyType policy) throws Exception {
+        this.cachePolicyType = policy;
+        CachingStateBackend cachingBackend = getStateBackend();
+        AbstractKeyedStateBackend<String> cachingKeyedBackend =
+                createKeyedStateBackend(
+                        cachingBackend,
+                        this.env,
+                        new JobID(),
+                        "caching_operator",
+                        StringSerializer.INSTANCE,
+                        this.env.getExecutionConfig().getParallelism(),
+                        new KeyGroupRange(0, Math.max(0, this.env.getExecutionConfig().getParallelism() - 1)),
+                        this.env.getTaskKvStateRegistry(),
+                        TtlTimeProvider.DEFAULT,
+                        new UnregisteredMetricsGroup(),
+                        Collections.emptyList(),
+                        this.cancelStreamRegistry);
+
         String key = "testKeyList";
-        this.keyedStateBackend.setCurrentKey(key);
+        cachingKeyedBackend.setCurrentKey(key);
         this.referenceKeyedStateBackend.setCurrentKey(key);
 
         ListStateDescriptor<String> descriptor = new ListStateDescriptor<>("testListState", String.class);
-        InternalListState<String, VoidNamespace, String> cachingListState = this.keyedStateBackend
+        InternalListState<String, VoidNamespace, String> cachingListState = cachingKeyedBackend
                 .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor, StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
         InternalListState<String, VoidNamespace, String> referenceListState = this.referenceKeyedStateBackend
                 .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor, StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
@@ -511,14 +572,32 @@ class CachingRocksDBStateBackendComparativeTest
     }
 
 
-    @Test
-    void testMapStateComparativeAndSnapshotRestore() throws Exception {
+    @ParameterizedTest
+    @EnumSource(CachingStateBackendFactory.CachePolicyType.class)
+    void testMapStateComparativeAndSnapshotRestore(CachingStateBackendFactory.CachePolicyType policy) throws Exception {
+        this.cachePolicyType = policy;
+        CachingStateBackend cachingBackend = getStateBackend();
+        AbstractKeyedStateBackend<String> cachingKeyedBackend =
+                createKeyedStateBackend(
+                        cachingBackend,
+                        this.env,
+                        new JobID(),
+                        "caching_operator",
+                        StringSerializer.INSTANCE,
+                        this.env.getExecutionConfig().getParallelism(),
+                        new KeyGroupRange(0, Math.max(0, this.env.getExecutionConfig().getParallelism() - 1)),
+                        this.env.getTaskKvStateRegistry(),
+                        TtlTimeProvider.DEFAULT,
+                        new UnregisteredMetricsGroup(),
+                        Collections.emptyList(),
+                        this.cancelStreamRegistry);
+
         String key = "testKeyMap";
-        this.keyedStateBackend.setCurrentKey(key);
+        cachingKeyedBackend.setCurrentKey(key);
         this.referenceKeyedStateBackend.setCurrentKey(key);
 
         MapStateDescriptor<String, String> descriptor = new MapStateDescriptor<>("testMapState", String.class, String.class);
-        InternalMapState<String, VoidNamespace, String, String> cachingMapState = this.keyedStateBackend
+        InternalMapState<String, VoidNamespace, String, String> cachingMapState = cachingKeyedBackend
                 .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor, StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
         InternalMapState<String, VoidNamespace, String, String> referenceMapState = this.referenceKeyedStateBackend
                 .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor, StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
@@ -577,13 +656,31 @@ class CachingRocksDBStateBackendComparativeTest
     }
 
 
-    @Test
-    void testReducingStateComparative() throws Exception {
-        this.keyedStateBackend.setCurrentKey("testKey");
+    @ParameterizedTest
+    @EnumSource(CachingStateBackendFactory.CachePolicyType.class)
+    void testReducingStateComparative(CachingStateBackendFactory.CachePolicyType policy) throws Exception {
+        this.cachePolicyType = policy;
+        CachingStateBackend cachingBackend = getStateBackend();
+        AbstractKeyedStateBackend<String> cachingKeyedBackend =
+                createKeyedStateBackend(
+                        cachingBackend,
+                        this.env,
+                        new JobID(),
+                        "caching_operator",
+                        StringSerializer.INSTANCE,
+                        this.env.getExecutionConfig().getParallelism(),
+                        new KeyGroupRange(0, Math.max(0, this.env.getExecutionConfig().getParallelism() - 1)),
+                        this.env.getTaskKvStateRegistry(),
+                        TtlTimeProvider.DEFAULT,
+                        new UnregisteredMetricsGroup(),
+                        Collections.emptyList(),
+                        this.cancelStreamRegistry);
+
+        cachingKeyedBackend.setCurrentKey("testKey");
         this.referenceKeyedStateBackend.setCurrentKey("testKey");
 
         ReducingStateDescriptor<Integer> descriptor = new ReducingStateDescriptor<>("reducingState", new MyReducingFunction(), IntSerializer.INSTANCE);
-        InternalReducingState<String, VoidNamespace, Integer> cachingState = this.keyedStateBackend
+        InternalReducingState<String, VoidNamespace, Integer> cachingState = cachingKeyedBackend
                 .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor, StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
         InternalReducingState<String, VoidNamespace, Integer> referenceState = this.referenceKeyedStateBackend
                 .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor, StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
@@ -599,15 +696,33 @@ class CachingRocksDBStateBackendComparativeTest
         assertEquals(referenceState.get(), cachingState.get());
     }
 
-    @Test
-    void testAggregatingStateComparative() throws Exception {
-        this.keyedStateBackend.setCurrentKey("testKey");
+    @ParameterizedTest
+    @EnumSource(CachingStateBackendFactory.CachePolicyType.class)
+    void testAggregatingStateComparative(CachingStateBackendFactory.CachePolicyType policy) throws Exception {
+        this.cachePolicyType = policy;
+        CachingStateBackend cachingBackend = getStateBackend();
+        AbstractKeyedStateBackend<String> cachingKeyedBackend =
+                createKeyedStateBackend(
+                        cachingBackend,
+                        this.env,
+                        new JobID(),
+                        "caching_operator",
+                        StringSerializer.INSTANCE,
+                        this.env.getExecutionConfig().getParallelism(),
+                        new KeyGroupRange(0, Math.max(0, this.env.getExecutionConfig().getParallelism() - 1)),
+                        this.env.getTaskKvStateRegistry(),
+                        TtlTimeProvider.DEFAULT,
+                        new UnregisteredMetricsGroup(),
+                        Collections.emptyList(),
+                        this.cancelStreamRegistry);
+
+        cachingKeyedBackend.setCurrentKey("testKey");
         this.referenceKeyedStateBackend.setCurrentKey("testKey");
 
         AggregatingStateDescriptor<Integer, String, String> descriptor =
                 new AggregatingStateDescriptor<>("aggregatingState", new MyAggregateFunction(), StringSerializer.INSTANCE);
         InternalAggregatingState<String, VoidNamespace, Integer, String, String> cachingState =
-                this.keyedStateBackend.createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor, StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
+                cachingKeyedBackend.createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor, StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
         InternalAggregatingState<String, VoidNamespace, Integer, String, String> referenceState =
                 this.referenceKeyedStateBackend.createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor, StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
 
@@ -622,15 +737,33 @@ class CachingRocksDBStateBackendComparativeTest
         assertEquals(referenceState.get(), cachingState.get());
     }
 
-    @Test
-    void testPriorityQueueComparative() throws Exception {
+    @ParameterizedTest
+    @EnumSource(CachingStateBackendFactory.CachePolicyType.class)
+    void testPriorityQueueComparative(CachingStateBackendFactory.CachePolicyType policy) throws Exception {
+        this.cachePolicyType = policy;
+        CachingStateBackend cachingBackend = getStateBackend();
+        AbstractKeyedStateBackend<String> cachingKeyedBackend =
+                createKeyedStateBackend(
+                        cachingBackend,
+                        this.env,
+                        new JobID(),
+                        "caching_operator",
+                        StringSerializer.INSTANCE,
+                        this.env.getExecutionConfig().getParallelism(),
+                        new KeyGroupRange(0, Math.max(0, this.env.getExecutionConfig().getParallelism() - 1)),
+                        this.env.getTaskKvStateRegistry(),
+                        TtlTimeProvider.DEFAULT,
+                        new UnregisteredMetricsGroup(),
+                        Collections.emptyList(),
+                        this.cancelStreamRegistry);
+
         String key = "pqTestKey";
-        this.keyedStateBackend.setCurrentKey(key);
+        cachingKeyedBackend.setCurrentKey(key);
         this.referenceKeyedStateBackend.setCurrentKey(key);
     
         String pqStateName = "testPriorityQueue";
         KeyGroupedInternalPriorityQueue<TestPriorityQueueElement> cachingPQ =
-                this.keyedStateBackend.create(pqStateName, TestPriorityQueueElementSerializer.INSTANCE);
+                cachingKeyedBackend.create(pqStateName, TestPriorityQueueElementSerializer.INSTANCE);
         KeyGroupedInternalPriorityQueue<TestPriorityQueueElement> referencePQ =
                 this.referenceKeyedStateBackend.create(pqStateName, TestPriorityQueueElementSerializer.INSTANCE);
     

@@ -108,6 +108,9 @@ class CachingInternalValueStateTest {
                         new org.apache.flink.runtime.state.heap.InternalKeyContextImpl<>(
                                 keyGroupRange, numberOfKeyGroups));
 
+        long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+
         cachingKeyedStateBackend =
                 new CachingKeyedStateBackend<>(
                         kvStateRegistry,
@@ -122,8 +125,11 @@ class CachingInternalValueStateTest {
                         l1CacheSize,
                         l2CacheSize,
                         maxActiveNamespaces,
-                        10,
-                        currentCachePolicyType);
+                        10L,
+                        currentCachePolicyType,
+                        (int) mapL1KeyPresenceCacheSize,
+                        (int) mapL2KeyPresenceCacheSize
+                        );
         cachingKeyedStateBackend.setCurrentKey(testKey);
 
         lenient().when(mockDelegateState.getKeySerializer()).thenReturn(mockKeySerializer);

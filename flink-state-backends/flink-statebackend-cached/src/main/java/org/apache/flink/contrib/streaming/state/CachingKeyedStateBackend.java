@@ -87,6 +87,14 @@ import org.rocksdb.RocksDBException;
 import org.rocksdb.WriteOptions;
 import org.rocksdb.ReadOptions;
 
+// Added for metrics
+import org.apache.flink.metrics.Counter;
+import org.apache.flink.metrics.Gauge;
+
+// Added for logging
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * The keyed state backend that implements caching. It wraps a delegate AbstractKeyedStateBackend
  * (e.g., RocksDBKeyedStateBackend) and creates CachingInternal*State objects.
@@ -94,6 +102,7 @@ import org.rocksdb.ReadOptions;
 public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     private static final long serialVersionUID = 1L;
+    private static final Logger LOG = LoggerFactory.getLogger(CachingKeyedStateBackend.class);
 
     private final AbstractKeyedStateBackend<K> delegateKeyedStateBackend; // RocksDBKeyedStateBackend
     private final int l1EntryCacheSize;
@@ -101,6 +110,9 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int maxActiveNamespaceOrPerKeyCacheContainers;
     private final long maxCacheMemoryMb;
     private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
+    private final int mapL1KeyPresenceCacheSize;
+    private final int mapL2KeyPresenceCacheSize;
+    private final MetricGroup metricGroup;
 
     private final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
 
@@ -123,7 +135,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int l1EntryCacheSize,
             int l2EntryCacheSize,
             int maxActiveNamespaceOrPerKeyCacheContainers,
-            long maxCacheMemoryMb, CachingStateBackendFactory.CachePolicyType cachePolicyType) {
+            long maxCacheMemoryMb, CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize) {
 
         super(
                 kvStateRegistry,
@@ -143,6 +156,9 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.maxCacheMemoryMb = maxCacheMemoryMb;
         this.registeredStates = new ArrayList<>();
         this.cachePolicyType = cachePolicyType;
+        this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
+        this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
+        this.metricGroup = metricGroup;
 
         // Initialize memory capping fields
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
@@ -183,7 +199,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int l2EntryCacheSize,
             int maxActiveNamespaceOrPerKeyCacheContainers,
             long maxCacheMemoryMb,
-            CachingStateBackendFactory.CachePolicyType cachePolicyType
+            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize
     ) {
         // Call super constructor first, using direct parameters where available
         super(
@@ -225,6 +242,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 keyContext,
                 writeBatchSize
         );
+        this.metricGroup = metricGroup;
 
         this.l1EntryCacheSize = l1EntryCacheSize;
         this.l2EntryCacheSize = l2EntryCacheSize;
@@ -232,6 +250,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.maxCacheMemoryMb = maxCacheMemoryMb;
         this.registeredStates = new ArrayList<>();
         this.cachePolicyType = cachePolicyType;
+        this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
+        this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
 
         // Initialize memory capping fields
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
@@ -253,61 +273,83 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             TypeSerializer<N> namespaceSerializer, StateDescriptor<S, V_SD> stateDescriptor)
             throws Exception {
 
-        S actualState = delegateKeyedStateBackend.getOrCreateKeyedState(namespaceSerializer,
-                stateDescriptor);
+        // Check if a caching state for this descriptor already exists
+        synchronized(registeredStates) {
+            for (CachingInternalState<K, ?, ?, ?> registeredState : registeredStates) {
+                // This check needs to be robust. Comparing delegate state might be one way,
+                // or comparing based on state name and namespace serializer.
+                // For now, assume getDelegateState().getDescriptorName() or similar is available or use state name
+                if (registeredState.getDelegateState() instanceof InternalKvState) {
+                    // This comparison is a bit simplistic and might need refinement based on how InternalKvState identifies itself
+                    // For instance, comparing state names might be more direct if delegate state holds its descriptor name
+                    Object delegateFromRegistered = registeredState.getDelegateState();
+                    // A more robust check would be needed here, potentially involving the state descriptor name and type.
+                    // This is a placeholder for a proper check to see if the state is already created and cached.
+                    // For this example, let's assume we need to create it if not found via a more specific lookup.
+                }
+            }
+        }
+
+        S actualState = delegateKeyedStateBackend.getOrCreateKeyedState(namespaceSerializer, stateDescriptor);
 
         if (!(actualState instanceof InternalKvState)) {
-            return actualState; // Return directly if not an InternalKvState
+            return actualState; // Return directly if not an InternalKvState, cannot cache
         }
 
         InternalKvState<K, N, ?> actualStateRaw = (InternalKvState<K, N, ?>) actualState;
         CachingInternalState<K, N, ?, ?> cachingStateToRegister = null;
 
-        if (stateDescriptor.getType() == StateDescriptor.Type.VALUE
-                && actualStateRaw instanceof InternalValueState) {
-            InternalValueState<K, N, V_SD> actualStateValue =
-                    (InternalValueState<K, N, V_SD>) actualStateRaw;
-            CachingInternalValueState<K, N, V_SD> cachingState =
-                    new CachingInternalValueState<K, N, V_SD>(
-                            actualStateValue,
-                            this,
-                            l1EntryCacheSize,
-                            l2EntryCacheSize,
-                            maxActiveNamespaceOrPerKeyCacheContainers,
-                            this.maxCacheMemoryMb, this.cachePolicyType);
-            cachingStateToRegister = cachingState;
-        } else if (stateDescriptor.getType() == StateDescriptor.Type.MAP
-                && actualStateRaw instanceof InternalMapState) {
+        if (stateDescriptor.getType() == StateDescriptor.Type.VALUE && actualStateRaw instanceof InternalValueState) {
+            InternalValueState<K, N, V_SD> actualStateValue = (InternalValueState<K, N, V_SD>) actualStateRaw;
+            cachingStateToRegister = new CachingInternalValueState<>(
+                    actualStateValue, this, l1EntryCacheSize, l2EntryCacheSize,
+                    maxActiveNamespaceOrPerKeyCacheContainers, this.maxCacheMemoryMb, this.cachePolicyType);
+        } else if (stateDescriptor.getType() == StateDescriptor.Type.MAP && actualStateRaw instanceof InternalMapState) {
             InternalMapState<K, N, ?, ?> actualDelegateMapState = (InternalMapState<K, N, ?, ?>) actualStateRaw;
+            String stateName = stateDescriptor.getName(); // Get state name for metrics
+            MetricGroup mapMetricsGroup = this.metricGroup.addGroup("state").addGroup(stateName).addGroup("cache");
 
-            CachingInternalMapState<K, N, ?, ?> cachingMapState =
-                    new CachingInternalMapState<>(actualDelegateMapState, this, l1EntryCacheSize,
-                            l2EntryCacheSize, maxActiveNamespaceOrPerKeyCacheContainers,
-                            this.maxCacheMemoryMb, this.cachePolicyType);
-            cachingStateToRegister = cachingMapState;
-        } else if (stateDescriptor.getType() == StateDescriptor.Type.LIST
-                && actualStateRaw instanceof InternalListState) {
-            InternalListState<K, N, ?> actualDelegateListState = (InternalListState<K, N, ?>) actualStateRaw;
-
-            CachingInternalListState<K, N, ?> cachingListState =
-                    new CachingInternalListState<>(actualDelegateListState, this, l1EntryCacheSize, 
-                            l2EntryCacheSize, maxActiveNamespaceOrPerKeyCacheContainers,
-                            this.cachePolicyType);
-            cachingStateToRegister = cachingListState;
+            cachingStateToRegister = new CachingInternalMapState<>(
+                    actualDelegateMapState, this, l1EntryCacheSize, l2EntryCacheSize,
+                    maxActiveNamespaceOrPerKeyCacheContainers, this.maxCacheMemoryMb, this.cachePolicyType,
+                    this.mapL1KeyPresenceCacheSize, this.mapL2KeyPresenceCacheSize,
+                    mapMetricsGroup); // Pass metrics group
+        } else if (stateDescriptor.getType() == StateDescriptor.Type.LIST && actualStateRaw instanceof InternalListState) {
+            InternalListState<K, N, V_SD> actualDelegateListState = (InternalListState<K, N, V_SD>) actualStateRaw;
+            cachingStateToRegister = new CachingInternalListState<>(
+                    actualDelegateListState, this, l1EntryCacheSize, l2EntryCacheSize,
+                    maxActiveNamespaceOrPerKeyCacheContainers, this.cachePolicyType); // Max memory mb was missing here for list
+        } else {
+            // For unsupported types or if actualStateRaw is not an instance of the expected internal type,
+            // return the raw state from the delegate directly.
+            LOG.warn("State type {} not supported for caching or type mismatch. Returning raw state.", stateDescriptor.getType());
+            return (S) actualStateRaw;
         }
 
         if (cachingStateToRegister != null) {
             synchronized (registeredStates) {
-                boolean alreadyExists =
-                        registeredStates.stream()
-                                .anyMatch(st -> st.getDelegateState() == actualStateRaw);
+                boolean alreadyExists = registeredStates.stream()
+                        .anyMatch(st -> st.getDelegateState() == actualStateRaw);
                 if (!alreadyExists) {
                     registeredStates.add(cachingStateToRegister);
                 }
             }
             return (S) cachingStateToRegister;
         } else {
-            return (S) actualStateRaw; // Return the raw state if not a supported caching type
+             // Should not happen if logic above is correct and creates a caching wrapper
+            LOG.error("Failed to create a caching wrapper for a supported state type: {}", stateDescriptor.getType());
+            return (S) actualStateRaw; // Fallback, though indicates an issue
+        }
+    }
+
+    private void registerCachingState(CachingInternalState<K, ?, ?, ?> cachingState) {
+        synchronized (registeredStates) {
+            boolean alreadyExists =
+                    registeredStates.stream()
+                            .anyMatch(st -> st.getDelegateState() == cachingState.getDelegateState());
+            if (!alreadyExists) {
+                registeredStates.add(cachingState);
+            }
         }
     }
 

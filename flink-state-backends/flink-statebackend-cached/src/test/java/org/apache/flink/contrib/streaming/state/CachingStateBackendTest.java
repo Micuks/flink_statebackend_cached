@@ -97,8 +97,14 @@ class CachingStateBackendTest {
         delegatePlainBackend = actualDelegateBackend; // Keep a reference to the plain backend for
                                                       // other tests
 
-        cachingStateBackend = new CachingStateBackend(actualDelegateBackend, 10, 10, 10, 10L,
-                        CachingStateBackendFactory.CachePolicyType.LRU);
+        long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+
+        cachingStateBackend = new CachingStateBackend(actualDelegateBackend, 10L, 10L, 10L, 10L,
+                        CachingStateBackendFactory.CachePolicyType.LRU,
+                        mapL1KeyPresenceCacheSize,
+                        mapL2KeyPresenceCacheSize
+                        );
     }
 
     @AfterEach
@@ -133,9 +139,12 @@ class CachingStateBackendTest {
 
     @Test
     void testCreateOperatorStateBackend() throws Exception {
+        long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
         CachingStateBackend cachingBackendWithPlainDelegate =
-                        new CachingStateBackend(delegatePlainBackend, 10, 100, 10, 20L,
-                                        CachingStateBackendFactory.CachePolicyType.LRU);
+                        new CachingStateBackend(delegatePlainBackend, 10L, 100L, 10L, 20L,
+                                        CachingStateBackendFactory.CachePolicyType.LRU,
+                                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize);
 
         assertNotNull(cachingBackendWithPlainDelegate.createOperatorStateBackend(mockEnv,
                 "testOperator", Collections.emptyList(), new CloseableRegistry()));
@@ -145,9 +154,12 @@ class CachingStateBackendTest {
     void testUseManagedMemoryDelegation() {
         AbstractStateBackend mockDelegate = mock(AbstractStateBackend.class);
         when(mockDelegate.useManagedMemory()).thenReturn(true);
+        long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
         CachingStateBackend cachingBackend =
-                        new CachingStateBackend(mockDelegate, 10, 100, 10, 20L,
-                                        CachingStateBackendFactory.CachePolicyType.LRU);
+                        new CachingStateBackend(mockDelegate, 10L, 100L, 10L, 20L,
+                                        CachingStateBackendFactory.CachePolicyType.LRU,
+                                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize);
         assertTrue(cachingBackend.useManagedMemory());
         verify(mockDelegate).useManagedMemory();
     }
@@ -162,10 +174,13 @@ class CachingStateBackendTest {
         String pointer = "testPointer";
         when(((CheckpointStorage) mockDelegate).resolveCheckpoint(pointer))
                 .thenReturn(mockLocation);
+        long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
 
         CachingStateBackend cachingBackend =
-                        new CachingStateBackend(mockDelegate, 10, 100, 10, 20L,
-                                        CachingStateBackendFactory.CachePolicyType.LRU);
+                        new CachingStateBackend(mockDelegate, 10L, 100L, 10L, 20L,
+                                        CachingStateBackendFactory.CachePolicyType.LRU,
+                                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize);
         CompletedCheckpointStorageLocation resolvedLocation =
                 cachingBackend.resolveCheckpoint(pointer);
 
@@ -180,13 +195,16 @@ class CachingStateBackendTest {
                         withSettings().extraInterfaces(CheckpointStorage.class));
         CheckpointStorageAccess mockStorageAccess = mock(CheckpointStorageAccess.class);
         JobID jobID = new JobID();
+        long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
 
         when(((CheckpointStorage) mockDelegate).createCheckpointStorage(jobID))
                 .thenReturn(mockStorageAccess);
 
         CachingStateBackend cachingBackend =
-                        new CachingStateBackend(mockDelegate, 10, 100, 10, 20L,
-                                        CachingStateBackendFactory.CachePolicyType.LRU);
+                        new CachingStateBackend(mockDelegate, 10L, 100L, 10L, 20L,
+                                        CachingStateBackendFactory.CachePolicyType.LRU,
+                                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize);
         CheckpointStorageAccess createdStorageAccess =
                 cachingBackend.createCheckpointStorage(jobID);
 

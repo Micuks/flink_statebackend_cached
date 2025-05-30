@@ -78,6 +78,27 @@ class ValueSizeUtils {
         if (o instanceof String) {
             return ((String) o).length() * STRING_CHAR_SIZE + OBJECT_SHELL_SIZE;
         }
+        if (o instanceof Integer) {
+            return OBJECT_SHELL_SIZE + 4;
+        }
+        if (o instanceof Long) {
+            return OBJECT_SHELL_SIZE + 8;
+        }
+        if (o instanceof Double) {
+            return OBJECT_SHELL_SIZE + 8;
+        }
+        if (o instanceof Float) {
+            return OBJECT_SHELL_SIZE + 4;
+        }
+        if (o instanceof Byte) {
+            return OBJECT_SHELL_SIZE + 1;
+        }
+        if (o instanceof Short) {
+            return OBJECT_SHELL_SIZE + 2;
+        }
+        if (o instanceof Character) {
+            return OBJECT_SHELL_SIZE + 2;
+        }
         if (o instanceof java.util.List) {
             return ((java.util.List) o).size() * AVG_COLLECTION_ELEMENT_SIZE + OBJECT_SHELL_SIZE;
         }
@@ -85,6 +106,9 @@ class ValueSizeUtils {
             long size = OBJECT_SHELL_SIZE;
             size += ((java.util.Map) o).size() * (AVG_COLLECTION_ELEMENT_SIZE + AVG_COLLECTION_ELEMENT_SIZE + MAP_ENTRY_OVERHEAD);
             return size;
+        }
+        if (o instanceof Boolean) {
+            return 4; // Approximate size for a Boolean object
         }
         return AVG_COLLECTION_ELEMENT_SIZE + OBJECT_SHELL_SIZE;
     }

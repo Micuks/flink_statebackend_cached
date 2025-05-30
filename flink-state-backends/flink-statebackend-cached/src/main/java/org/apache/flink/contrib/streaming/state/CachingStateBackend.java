@@ -56,19 +56,24 @@ public class CachingStateBackend extends AbstractStateBackend
     private final long maxActiveNamespaces;
     private final long maxCacheMemoryMb;
     private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
+    private final long mapL1KeyPresenceCacheSize;
+    private final long mapL2KeyPresenceCacheSize;
 
     public CachingStateBackend(
             StateBackend delegateBackend,
             long l1CacheSize,
             long l2CacheSize,
             long maxActiveNamespaces,
-            long maxCacheMemoryMb, CachingStateBackendFactory.CachePolicyType cachePolicyType) {
+            long maxCacheMemoryMb, CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            long mapL1KeyPresenceCacheSize, long mapL2KeyPresenceCacheSize) {
         this.delegateBackend = delegateBackend;
         this.l1CacheSize = l1CacheSize;
         this.l2CacheSize = l2CacheSize;
         this.maxActiveNamespaces = maxActiveNamespaces;
         this.maxCacheMemoryMb = maxCacheMemoryMb;
         this.cachePolicyType = cachePolicyType;
+        this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
+        this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
 
         if (!(delegateBackend instanceof AbstractStateBackend)) {
             System.err.println(
@@ -124,7 +129,8 @@ public class CachingStateBackend extends AbstractStateBackend
                 (int) l1CacheSize,
                 (int) l2CacheSize,
                 (int) maxActiveNamespaces,
-                this.maxCacheMemoryMb, this.cachePolicyType);
+                this.maxCacheMemoryMb, this.cachePolicyType,
+                (int) this.mapL1KeyPresenceCacheSize, (int) this.mapL2KeyPresenceCacheSize);
     }
 
     @Override

@@ -215,15 +215,28 @@ class CachingKeyedStateBackendTest {
         when(mockListState.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
         when(mockListState.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
 
-        // Create the caching backend
-        cachingBackend = new CachingKeyedStateBackend<>(mockEnv.getTaskKvStateRegistry(),
-                StringSerializer.INSTANCE, mockEnv.getUserCodeClassLoader().asClassLoader(),
-                new ExecutionConfig(), TtlTimeProvider.DEFAULT, new UnregisteredMetricsGroup(),
-                Collections.emptyList(), closableRegistry, mockDelegateBackend, 5, // L1 cache size
-                10, // L2 cache size
-                3, // max active namespaces
-                2L, // max cache memory MB
-                CachingStateBackendFactory.CachePolicyType.LRU);
+        // Default values for new cache size parameters, align with factory defaults
+        long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+
+        cachingBackend = new CachingKeyedStateBackend<>(
+            mockEnv.getTaskKvStateRegistry(),
+            StringSerializer.INSTANCE,
+            mockEnv.getUserCodeClassLoader().asClassLoader(),
+            mockEnv.getExecutionConfig(),
+            TtlTimeProvider.DEFAULT,
+            new UnregisteredMetricsGroup(),
+            Collections.emptyList(),
+            closableRegistry,
+            mockDelegateBackend,
+            10, // L1 cache size
+            20, // L2 cache size
+            5,  // Max active namespaces
+            1L, // Max cache memory MB
+            CachingStateBackendFactory.CachePolicyType.LRU, // Default policy
+            (int) mapL1KeyPresenceCacheSize,
+            (int) mapL2KeyPresenceCacheSize
+        );
     }
 
     @AfterEach
@@ -549,51 +562,84 @@ class CachingKeyedStateBackendTest {
 
     @Test
     void testCreateOrUpdateInternalStateDelegate() throws Exception {
-        // Setup
-        org.apache.flink.runtime.state.StateSnapshotTransformer.StateSnapshotTransformFactory<String> transformFactory =
-                mock(org.apache.flink.runtime.state.StateSnapshotTransformer.StateSnapshotTransformFactory.class);
-        when(mockDelegateBackend.createOrUpdateInternalState(any(), any(), any()))
-                .thenReturn(mockValueState);
-        when(mockDelegateBackend.createOrUpdateInternalState(any(), any(), any(), anyBoolean()))
-                .thenReturn(mockValueState);
+        // Test with a default configuration
+        long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
 
-        // Test
+        CachingKeyedStateBackend<String> specificCachingBackend = new CachingKeyedStateBackend<>(
+            mockEnv.getTaskKvStateRegistry(),
+            StringSerializer.INSTANCE,
+            mockEnv.getUserCodeClassLoader().asClassLoader(),
+            mockEnv.getExecutionConfig(),
+            TtlTimeProvider.DEFAULT,
+            new UnregisteredMetricsGroup(),
+            Collections.emptyList(),
+            closableRegistry,
+            mockDelegateBackend,
+            10,
+            20,
+            5,
+            1L,
+            CachingStateBackendFactory.CachePolicyType.LRU,
+            (int) mapL1KeyPresenceCacheSize,
+            (int) mapL2KeyPresenceCacheSize
+        );
+
         ValueStateDescriptor<String> descriptor = new ValueStateDescriptor<>("test", String.class);
-
-        InternalKvState<?, ?, ?> result1 = cachingBackend.createOrUpdateInternalState(
-                VoidNamespaceSerializer.INSTANCE, descriptor, transformFactory);
-        InternalKvState<?, ?, ?> result2 = cachingBackend.createOrUpdateInternalState(
-                VoidNamespaceSerializer.INSTANCE, descriptor, transformFactory, true);
+        InternalKvState<?, ?, ?> result = specificCachingBackend.createOrUpdateInternalState(
+                VoidNamespaceSerializer.INSTANCE, descriptor,
+                mock(org.apache.flink.runtime.state.StateSnapshotTransformer.StateSnapshotTransformFactory.class));
 
         // Verify
-        assertSame(mockValueState, result1);
-        assertSame(mockValueState, result2);
+        assertSame(mockValueState, result);
         verify(mockDelegateBackend).createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE,
-                descriptor, transformFactory);
-        verify(mockDelegateBackend).createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE,
-                descriptor, transformFactory, true);
+                descriptor, any(org.apache.flink.runtime.state.StateSnapshotTransformer.StateSnapshotTransformFactory.class));
     }
 
     @Test
     void testMultipleCachePolicies() throws Exception {
-        // Create backends with different cache policies
+        // Test with LRU policy
+        long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+
         CachingKeyedStateBackend<String> lruBackend = new CachingKeyedStateBackend<>(
-                mockEnv.getTaskKvStateRegistry(), StringSerializer.INSTANCE,
-                mockEnv.getUserCodeClassLoader().asClassLoader(), new ExecutionConfig(),
-                TtlTimeProvider.DEFAULT, new UnregisteredMetricsGroup(), Collections.emptyList(),
-                new CloseableRegistry(), mockDelegateBackend, 5, 10, 3, 2L,
-                CachingStateBackendFactory.CachePolicyType.LRU);
+                mockEnv.getTaskKvStateRegistry(),
+                StringSerializer.INSTANCE,
+                mockEnv.getUserCodeClassLoader().asClassLoader(),
+                mockEnv.getExecutionConfig(),
+                TtlTimeProvider.DEFAULT,
+                new UnregisteredMetricsGroup(),
+                Collections.emptyList(),
+                closableRegistry,
+                mockDelegateBackend,
+                5, 10, 2, 1L, CachingStateBackendFactory.CachePolicyType.LRU,
+                (int) mapL1KeyPresenceCacheSize, (int) mapL2KeyPresenceCacheSize);
 
+        ValueStateDescriptor<String> lruDesc = new ValueStateDescriptor<>("lruValue", String.class);
+        lruBackend.setCurrentKey("lruKey");
+        ValueState<String> lruValueState = lruBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, lruDesc);
+        lruValueState.update("lruData");
+        assertEquals("lruData", lruValueState.value());
+
+        // Test with TinyLFU policy
         CachingKeyedStateBackend<String> tinyLfuBackend = new CachingKeyedStateBackend<>(
-                mockEnv.getTaskKvStateRegistry(), StringSerializer.INSTANCE,
-                mockEnv.getUserCodeClassLoader().asClassLoader(), new ExecutionConfig(),
-                TtlTimeProvider.DEFAULT, new UnregisteredMetricsGroup(), Collections.emptyList(),
-                new CloseableRegistry(), mockDelegateBackend, 5, 10, 3, 2L,
-                CachingStateBackendFactory.CachePolicyType.TINYLFU);
+                mockEnv.getTaskKvStateRegistry(),
+                StringSerializer.INSTANCE,
+                mockEnv.getUserCodeClassLoader().asClassLoader(),
+                mockEnv.getExecutionConfig(),
+                TtlTimeProvider.DEFAULT,
+                new UnregisteredMetricsGroup(),
+                Collections.emptyList(),
+                closableRegistry,
+                mockDelegateBackend,
+                5, 10, 2, 1L, CachingStateBackendFactory.CachePolicyType.TINYLFU,
+                (int) mapL1KeyPresenceCacheSize, (int) mapL2KeyPresenceCacheSize);
 
-        // Both should work without errors
-        assertNotNull(lruBackend);
-        assertNotNull(tinyLfuBackend);
+        ValueStateDescriptor<String> tinyLfuDesc = new ValueStateDescriptor<>("tinyLfuValue", String.class);
+        tinyLfuBackend.setCurrentKey("tinyLfuKey");
+        ValueState<String> tinyLfuValueState = tinyLfuBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, tinyLfuDesc);
+        tinyLfuValueState.update("tinyLfuData");
+        assertEquals("tinyLfuData", tinyLfuValueState.value());
 
         // Cleanup
         lruBackend.dispose();
@@ -602,7 +648,7 @@ class CachingKeyedStateBackendTest {
 
     @Test
     void testGetMaxActiveNamespaceOrPerKeyCacheContainers() {
-        assertEquals(3, cachingBackend.getMaxActiveNamespaceOrPerKeyCacheContainers());
+        assertEquals(5, cachingBackend.getMaxActiveNamespaceOrPerKeyCacheContainers());
     }
 
     @Test

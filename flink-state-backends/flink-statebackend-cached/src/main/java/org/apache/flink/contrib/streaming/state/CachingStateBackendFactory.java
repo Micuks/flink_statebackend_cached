@@ -62,6 +62,20 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .withDescription(
                             "The maximum total memory in megabytes for all caches in this backend instance.");
 
+    public static final ConfigOption<Long> MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG =
+            ConfigOptions.key("state.backend.cached.map.l1.key-presence.size.entries")
+                    .longType()
+                    .defaultValue(2048L) // Default, can be tuned
+                    .withDescription(
+                            "The number of entries for the L1 key presence cache per MapState instance (per Flink key/namespace). Stores boolean presence.");
+
+    public static final ConfigOption<Long> MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG =
+            ConfigOptions.key("state.backend.cached.map.l2.key-presence.size.entries")
+                    .longType()
+                    .defaultValue(8192L) // Default, can be tuned
+                    .withDescription(
+                            "The number of entries for the L2 key presence cache per MapState instance (per Flink key/namespace). Stores boolean presence.");
+
     public enum CachePolicyType {
             LRU, TINYLFU
     }
@@ -115,6 +129,8 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
         long maxActiveNamespaces = config.get(MAX_ACTIVE_NAMESPACES_CONFIG);
         long maxCacheMemoryMb = config.get(MAX_CACHE_MEMORY_MB_CONFIG);
         CachePolicyType cachePolicy = config.get(CACHE_POLICY_CONFIG);
+        long mapL1KeyPresenceCacheSize = config.get(MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG);
+        long mapL2KeyPresenceCacheSize = config.get(MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG);
 
         // Create the delegate backend. Default to RocksDBStateBackend for now.
         // A more flexible approach might allow specifying the delegate factory in config.
@@ -152,6 +168,7 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
         // are already long.
         return new CachingStateBackend(
                         delegateBackend, l1CacheSize, l2CacheSize, maxActiveNamespaces,
-                        maxCacheMemoryMb, cachePolicy);
+                        maxCacheMemoryMb, cachePolicy,
+                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize);
     }
 }
