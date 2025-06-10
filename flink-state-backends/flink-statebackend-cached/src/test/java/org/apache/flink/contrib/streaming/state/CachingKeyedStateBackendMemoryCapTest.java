@@ -151,8 +151,13 @@ class CachingKeyedStateBackendMemoryCapTest {
         // Instantiate the actual backend, pass 1MB to satisfy constructor, we will mock the getter for precise byte cap.
         long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
         long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        double mapCacheHitRateThreshold = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
+        long mapCacheHitRateWindowSize = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
+        long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
+        boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
+        boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
 
-        cachingBackend = new CachingKeyedStateBackend<>(
+        cachingBackend = new CachingKeyedStateBackend<String>(
                 mockEnv.getTaskKvStateRegistry(),
                 StringSerializer.INSTANCE,
                 mockEnv.getUserCodeClassLoader().asClassLoader(),
@@ -168,7 +173,12 @@ class CachingKeyedStateBackendMemoryCapTest {
                 1L, // Pass 1MB to constructor, MUST BE LONG
                 currentCachePolicyType, // Use the current policy type
                 (int) mapL1KeyPresenceCacheSize, // Added
-                (int) mapL2KeyPresenceCacheSize  // Added
+                (int) mapL2KeyPresenceCacheSize,  // Added
+                mapCacheHitRateThreshold, // Added
+                mapCacheHitRateWindowSize, // Added
+                mapCacheMinAccessesForBypassCheck, // Added
+                mapKeyPresenceCacheEnabled, // Added
+                mapBypassEnabled // Added
                 );
         
         // Spy the backend and mock getMaxConfiguredCacheSizeBytesValue to return our precise byte limit

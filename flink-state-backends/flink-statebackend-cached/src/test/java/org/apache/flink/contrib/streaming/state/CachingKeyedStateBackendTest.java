@@ -218,8 +218,13 @@ class CachingKeyedStateBackendTest {
         // Default values for new cache size parameters, align with factory defaults
         long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
         long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        double mapCacheHitRateThreshold = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
+        long mapCacheHitRateWindowSize = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
+        long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
+        boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
+        boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
 
-        cachingBackend = new CachingKeyedStateBackend<>(
+        cachingBackend = new CachingKeyedStateBackend<String>(
             mockEnv.getTaskKvStateRegistry(),
             StringSerializer.INSTANCE,
             mockEnv.getUserCodeClassLoader().asClassLoader(),
@@ -235,7 +240,12 @@ class CachingKeyedStateBackendTest {
             1L, // Max cache memory MB
             CachingStateBackendFactory.CachePolicyType.LRU, // Default policy
             (int) mapL1KeyPresenceCacheSize,
-            (int) mapL2KeyPresenceCacheSize
+            (int) mapL2KeyPresenceCacheSize,
+            mapCacheHitRateThreshold,
+            mapCacheHitRateWindowSize,
+            mapCacheMinAccessesForBypassCheck,
+            mapKeyPresenceCacheEnabled,
+            mapBypassEnabled
         );
     }
 
@@ -565,8 +575,13 @@ class CachingKeyedStateBackendTest {
         // Test with a default configuration
         long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
         long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        double mapCacheHitRateThreshold = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
+        long mapCacheHitRateWindowSize = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
+        long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
+        boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
+        boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
 
-        CachingKeyedStateBackend<String> specificCachingBackend = new CachingKeyedStateBackend<>(
+        CachingKeyedStateBackend<String> specificCachingBackend = new CachingKeyedStateBackend<String>(
             mockEnv.getTaskKvStateRegistry(),
             StringSerializer.INSTANCE,
             mockEnv.getUserCodeClassLoader().asClassLoader(),
@@ -582,13 +597,24 @@ class CachingKeyedStateBackendTest {
             1L,
             CachingStateBackendFactory.CachePolicyType.LRU,
             (int) mapL1KeyPresenceCacheSize,
-            (int) mapL2KeyPresenceCacheSize
+            (int) mapL2KeyPresenceCacheSize,
+            mapCacheHitRateThreshold,
+            mapCacheHitRateWindowSize,
+            mapCacheMinAccessesForBypassCheck,
+            mapKeyPresenceCacheEnabled,
+            mapBypassEnabled
         );
 
         ValueStateDescriptor<String> descriptor = new ValueStateDescriptor<>("test", String.class);
-        InternalKvState<?, ?, ?> result = specificCachingBackend.createOrUpdateInternalState(
-                VoidNamespaceSerializer.INSTANCE, descriptor,
-                mock(org.apache.flink.runtime.state.StateSnapshotTransformer.StateSnapshotTransformFactory.class));
+        when(mockDelegateBackend.createOrUpdateInternalState(
+                eq(VoidNamespaceSerializer.INSTANCE),
+                eq(descriptor),
+                any(org.apache.flink.runtime.state.StateSnapshotTransformer.StateSnapshotTransformFactory.class)))
+            .thenReturn(mockValueState);
+
+        InternalValueState<String, VoidNamespace, String> result = (InternalValueState<String, VoidNamespace, String>) specificCachingBackend.createOrUpdateInternalState(
+                        VoidNamespaceSerializer.INSTANCE, descriptor,
+                        mock(org.apache.flink.runtime.state.StateSnapshotTransformer.StateSnapshotTransformFactory.class));
 
         // Verify
         assertSame(mockValueState, result);
@@ -601,8 +627,13 @@ class CachingKeyedStateBackendTest {
         // Test with LRU policy
         long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
         long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        double mapCacheHitRateThreshold = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
+        long mapCacheHitRateWindowSize = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
+        long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
+        boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
+        boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
 
-        CachingKeyedStateBackend<String> lruBackend = new CachingKeyedStateBackend<>(
+        CachingKeyedStateBackend<String> lruBackend = new CachingKeyedStateBackend<String>(
                 mockEnv.getTaskKvStateRegistry(),
                 StringSerializer.INSTANCE,
                 mockEnv.getUserCodeClassLoader().asClassLoader(),
@@ -613,7 +644,9 @@ class CachingKeyedStateBackendTest {
                 closableRegistry,
                 mockDelegateBackend,
                 5, 10, 2, 1L, CachingStateBackendFactory.CachePolicyType.LRU,
-                (int) mapL1KeyPresenceCacheSize, (int) mapL2KeyPresenceCacheSize);
+                (int) mapL1KeyPresenceCacheSize, (int) mapL2KeyPresenceCacheSize,
+                mapCacheHitRateThreshold, mapCacheHitRateWindowSize, mapCacheMinAccessesForBypassCheck,
+                mapKeyPresenceCacheEnabled, mapBypassEnabled);
 
         ValueStateDescriptor<String> lruDesc = new ValueStateDescriptor<>("lruValue", String.class);
         lruBackend.setCurrentKey("lruKey");
@@ -622,7 +655,12 @@ class CachingKeyedStateBackendTest {
         assertEquals("lruData", lruValueState.value());
 
         // Test with TinyLFU policy
-        CachingKeyedStateBackend<String> tinyLfuBackend = new CachingKeyedStateBackend<>(
+        InternalValueState<String, VoidNamespace, String> mockValueStateTinyLFU = mock(InternalValueState.class);
+        when(mockValueStateTinyLFU.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(mockValueStateTinyLFU.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(mockValueStateTinyLFU.getValueSerializer()).thenReturn(StringSerializer.INSTANCE);
+
+        CachingKeyedStateBackend<String> tinyLfuBackend = new CachingKeyedStateBackend<String>(
                 mockEnv.getTaskKvStateRegistry(),
                 StringSerializer.INSTANCE,
                 mockEnv.getUserCodeClassLoader().asClassLoader(),
@@ -633,11 +671,17 @@ class CachingKeyedStateBackendTest {
                 closableRegistry,
                 mockDelegateBackend,
                 5, 10, 2, 1L, CachingStateBackendFactory.CachePolicyType.TINYLFU,
-                (int) mapL1KeyPresenceCacheSize, (int) mapL2KeyPresenceCacheSize);
+                (int) mapL1KeyPresenceCacheSize, (int) mapL2KeyPresenceCacheSize,
+                mapCacheHitRateThreshold, mapCacheHitRateWindowSize, mapCacheMinAccessesForBypassCheck,
+                mapKeyPresenceCacheEnabled, mapBypassEnabled);
 
         ValueStateDescriptor<String> tinyLfuDesc = new ValueStateDescriptor<>("tinyLfuValue", String.class);
+        when(mockDelegateBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, tinyLfuDesc)).thenReturn(mockValueStateTinyLFU);
         tinyLfuBackend.setCurrentKey("tinyLfuKey");
         ValueState<String> tinyLfuValueState = tinyLfuBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, tinyLfuDesc);
+        when(mockValueStateTinyLFU.value()).thenReturn("tinyLfuData");
+        doNothing().when(mockValueStateTinyLFU).update(anyString());
+
         tinyLfuValueState.update("tinyLfuData");
         assertEquals("tinyLfuData", tinyLfuValueState.value());
 

@@ -15,6 +15,9 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import java.io.IOException;
+import java.util.Collection;
+import javax.annotation.Nonnull;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.IllegalConfigurationException;
@@ -36,10 +39,7 @@ import org.apache.flink.runtime.state.OperatorStateHandle;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 
-import javax.annotation.Nonnull;
 
-import java.io.IOException;
-import java.util.Collection;
 
 /**
  * A state backend that wraps another state backend (e.g., RocksDBStateBackend) to provide an L1/L2
@@ -59,13 +59,22 @@ public class CachingStateBackend extends AbstractStateBackend
     private final long mapL1KeyPresenceCacheSize;
     private final long mapL2KeyPresenceCacheSize;
 
+    private final double mapCacheHitRateThreshold;
+    private final long mapCacheHitRateWindowSize;
+    private final long mapCacheMinAccessesForBypassCheck;
+    private final boolean mapKeyPresenceCacheEnabled;
+    private final boolean mapBypassEnabled;
+
     public CachingStateBackend(
             StateBackend delegateBackend,
             long l1CacheSize,
             long l2CacheSize,
             long maxActiveNamespaces,
             long maxCacheMemoryMb, CachingStateBackendFactory.CachePolicyType cachePolicyType,
-            long mapL1KeyPresenceCacheSize, long mapL2KeyPresenceCacheSize) {
+            long mapL1KeyPresenceCacheSize, long mapL2KeyPresenceCacheSize,
+            double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
+            boolean mapKeyPresenceCacheEnabled,
+            boolean mapBypassEnabled) {
         this.delegateBackend = delegateBackend;
         this.l1CacheSize = l1CacheSize;
         this.l2CacheSize = l2CacheSize;
@@ -74,6 +83,11 @@ public class CachingStateBackend extends AbstractStateBackend
         this.cachePolicyType = cachePolicyType;
         this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
         this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
+        this.mapCacheHitRateThreshold = mapCacheHitRateThreshold;
+        this.mapCacheHitRateWindowSize = mapCacheHitRateWindowSize;
+        this.mapCacheMinAccessesForBypassCheck = mapCacheMinAccessesForBypassCheck;
+        this.mapKeyPresenceCacheEnabled = mapKeyPresenceCacheEnabled;
+        this.mapBypassEnabled = mapBypassEnabled;
 
         if (!(delegateBackend instanceof AbstractStateBackend)) {
             System.err.println(
@@ -130,7 +144,10 @@ public class CachingStateBackend extends AbstractStateBackend
                 (int) l2CacheSize,
                 (int) maxActiveNamespaces,
                 this.maxCacheMemoryMb, this.cachePolicyType,
-                (int) this.mapL1KeyPresenceCacheSize, (int) this.mapL2KeyPresenceCacheSize);
+                (int) this.mapL1KeyPresenceCacheSize, (int) this.mapL2KeyPresenceCacheSize,
+                this.mapCacheHitRateThreshold, this.mapCacheHitRateWindowSize, this.mapCacheMinAccessesForBypassCheck,
+                this.mapKeyPresenceCacheEnabled,
+                this.mapBypassEnabled);
     }
 
     @Override
@@ -173,6 +190,55 @@ public class CachingStateBackend extends AbstractStateBackend
                             + delegateBackend.getClass().getName()
                             + " does not support createCheckpointStorage directly and is not an instance of AbstractStateBackend that formerly provided this.");
         }
+    }
+
+    // Getter methods for cache configuration, useful for testing
+    public long getL1CacheSize() {
+        return l1CacheSize;
+    }
+
+    public long getL2CacheSize() {
+        return l2CacheSize;
+    }
+
+    public long getMaxActiveNamespaces() {
+        return maxActiveNamespaces;
+    }
+
+    public long getMaxCacheMemoryMb() {
+        return maxCacheMemoryMb;
+    }
+
+    public CachingStateBackendFactory.CachePolicyType getCachePolicyType() {
+        return cachePolicyType;
+    }
+
+    public long getMapL1KeyPresenceCacheSize() {
+        return mapL1KeyPresenceCacheSize;
+    }
+
+    public long getMapL2KeyPresenceCacheSize() {
+        return mapL2KeyPresenceCacheSize;
+    }
+
+    public double getMapCacheHitRateThreshold() {
+        return mapCacheHitRateThreshold;
+    }
+
+    public long getMapCacheHitRateWindowSize() {
+        return mapCacheHitRateWindowSize;
+    }
+
+    public long getMapCacheMinAccessesForBypassCheck() {
+        return mapCacheMinAccessesForBypassCheck;
+    }
+
+    public boolean isMapKeyPresenceCacheEnabled() {
+        return mapKeyPresenceCacheEnabled;
+    }
+
+    public boolean isMapBypassEnabled() {
+        return mapBypassEnabled;
     }
 
     @Override

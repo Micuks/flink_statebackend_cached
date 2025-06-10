@@ -19,10 +19,10 @@ import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.contrib.streaming.state.RocksDBStateBackendFactory;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.StateBackendFactory;
 import org.apache.flink.runtime.state.memory.MemoryStateBackendFactory;
-import org.apache.flink.contrib.streaming.state.RocksDBStateBackendFactory;
 
 /**
  * A factory for creating {@link CachingStateBackend} instances. This factory allows configuring the
@@ -85,6 +85,38 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                                     .defaultValue(CachePolicyType.LRU)
                                     .withDescription("The caching policy to use (LRU or TINYLFU).");
 
+    public static final ConfigOption<Double> MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG =
+            ConfigOptions.key("state.backend.cached.map.hit-rate.threshold")
+                    .doubleType()
+                    .defaultValue(0.0) // Disabled by default
+                    .withDescription(
+                            "Hit rate threshold for CachingInternalMapState (0.0 to 1.0). If the hit rate falls below this, the cache is bypassed. 0.0 disables this feature.");
+
+    public static final ConfigOption<Long> MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG =
+            ConfigOptions.key("state.backend.cached.map.hit-rate.window-size")
+                    .longType()
+                    .defaultValue(1000L)
+                    .withDescription(
+                            "Number of accesses (get/contains operations) in CachingInternalMapState to calculate hit rate for bypass decisions.");
+
+    public static final ConfigOption<Long> MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG =
+            ConfigOptions.key("state.backend.cached.map.min-accesses-for-bypass-check")
+                    .longType()
+                    .defaultValue(100L)
+                    .withDescription(
+                            "Minimum number of accesses (get/contains operations) in CachingInternalMapState before the hit rate bypass check becomes active.");
+
+    public static final ConfigOption<Boolean> MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG =
+            ConfigOptions.key("state.backend.cached.map.key-presence.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription("Enable key presence cache for MapState to optimize contains() and get() operations.");
+
+    public static final ConfigOption<Boolean> MAP_BYPASS_ENABLED_CONFIG =
+            ConfigOptions.key("state.backend.cached.map.bypass.enabled")
+                    .booleanType()
+                    .defaultValue(true);
+
     // Potentially, a config for delegate backend factory if it's not hardcoded to RocksDB
     // For now, assumes RocksDBStateBackend is the default delegate and is configured using its own
     // factory/options.
@@ -132,6 +164,12 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
         long mapL1KeyPresenceCacheSize = config.get(MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG);
         long mapL2KeyPresenceCacheSize = config.get(MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG);
 
+        double mapCacheHitRateThreshold = config.get(MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG);
+        long mapCacheHitRateWindowSize = config.get(MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
+        long mapCacheMinAccessesForBypassCheck = config.get(MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
+        boolean mapKeyPresenceCacheEnabled = config.get(MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG);
+        boolean mapBypassEnabled = config.get(MAP_BYPASS_ENABLED_CONFIG);
+
         // Create the delegate backend. Default to RocksDBStateBackend for now.
         // A more flexible approach might allow specifying the delegate factory in config.
         StateBackend delegateBackend;
@@ -169,6 +207,9 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
         return new CachingStateBackend(
                         delegateBackend, l1CacheSize, l2CacheSize, maxActiveNamespaces,
                         maxCacheMemoryMb, cachePolicy,
-                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize);
+                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize,
+                        mapCacheHitRateThreshold, mapCacheHitRateWindowSize, mapCacheMinAccessesForBypassCheck,
+                        mapKeyPresenceCacheEnabled,
+                        mapBypassEnabled);
     }
 }

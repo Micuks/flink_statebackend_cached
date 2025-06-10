@@ -99,11 +99,21 @@ class CachingStateBackendTest {
 
         long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
         long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        double mapCacheHitRateThreshold = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
+        long mapCacheHitRateWindowSize = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
+        long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
+        boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
+        boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
 
         cachingStateBackend = new CachingStateBackend(actualDelegateBackend, 10L, 10L, 10L, 10L,
                         CachingStateBackendFactory.CachePolicyType.LRU,
                         mapL1KeyPresenceCacheSize,
-                        mapL2KeyPresenceCacheSize
+                        mapL2KeyPresenceCacheSize,
+                        mapCacheHitRateThreshold,
+                        mapCacheHitRateWindowSize,
+                        mapCacheMinAccessesForBypassCheck,
+                        mapKeyPresenceCacheEnabled,
+                        mapBypassEnabled
                         );
     }
 
@@ -141,10 +151,20 @@ class CachingStateBackendTest {
     void testCreateOperatorStateBackend() throws Exception {
         long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
         long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        double mapCacheHitRateThreshold = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
+        long mapCacheHitRateWindowSize = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
+        long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
+        boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
+        boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
         CachingStateBackend cachingBackendWithPlainDelegate =
                         new CachingStateBackend(delegatePlainBackend, 10L, 100L, 10L, 20L,
                                         CachingStateBackendFactory.CachePolicyType.LRU,
-                                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize);
+                                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize,
+                                        mapCacheHitRateThreshold,
+                                        mapCacheHitRateWindowSize,
+                                        mapCacheMinAccessesForBypassCheck,
+                                        mapKeyPresenceCacheEnabled,
+                                        mapBypassEnabled);
 
         assertNotNull(cachingBackendWithPlainDelegate.createOperatorStateBackend(mockEnv,
                 "testOperator", Collections.emptyList(), new CloseableRegistry()));
@@ -156,10 +176,20 @@ class CachingStateBackendTest {
         when(mockDelegate.useManagedMemory()).thenReturn(true);
         long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
         long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        double mapCacheHitRateThreshold = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
+        long mapCacheHitRateWindowSize = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
+        long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
+        boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
+        boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
         CachingStateBackend cachingBackend =
                         new CachingStateBackend(mockDelegate, 10L, 100L, 10L, 20L,
                                         CachingStateBackendFactory.CachePolicyType.LRU,
-                                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize);
+                                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize,
+                                        mapCacheHitRateThreshold,
+                                        mapCacheHitRateWindowSize,
+                                        mapCacheMinAccessesForBypassCheck,
+                                        mapKeyPresenceCacheEnabled,
+                                        mapBypassEnabled);
         assertTrue(cachingBackend.useManagedMemory());
         verify(mockDelegate).useManagedMemory();
     }
@@ -176,11 +206,21 @@ class CachingStateBackendTest {
                 .thenReturn(mockLocation);
         long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
         long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        double mapCacheHitRateThreshold = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
+        long mapCacheHitRateWindowSize = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
+        long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
+        boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
+        boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
 
         CachingStateBackend cachingBackend =
                         new CachingStateBackend(mockDelegate, 10L, 100L, 10L, 20L,
                                         CachingStateBackendFactory.CachePolicyType.LRU,
-                                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize);
+                                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize,
+                                        mapCacheHitRateThreshold,
+                                        mapCacheHitRateWindowSize,
+                                        mapCacheMinAccessesForBypassCheck,
+                                        mapKeyPresenceCacheEnabled,
+                                        mapBypassEnabled);
         CompletedCheckpointStorageLocation resolvedLocation =
                 cachingBackend.resolveCheckpoint(pointer);
 
@@ -197,6 +237,11 @@ class CachingStateBackendTest {
         JobID jobID = new JobID();
         long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
         long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        double mapCacheHitRateThreshold = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
+        long mapCacheHitRateWindowSize = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
+        long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
+        boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
+        boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
 
         when(((CheckpointStorage) mockDelegate).createCheckpointStorage(jobID))
                 .thenReturn(mockStorageAccess);
@@ -204,7 +249,12 @@ class CachingStateBackendTest {
         CachingStateBackend cachingBackend =
                         new CachingStateBackend(mockDelegate, 10L, 100L, 10L, 20L,
                                         CachingStateBackendFactory.CachePolicyType.LRU,
-                                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize);
+                                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize,
+                                        mapCacheHitRateThreshold,
+                                        mapCacheHitRateWindowSize,
+                                        mapCacheMinAccessesForBypassCheck,
+                                        mapKeyPresenceCacheEnabled,
+                                        mapBypassEnabled);
         CheckpointStorageAccess createdStorageAccess =
                 cachingBackend.createCheckpointStorage(jobID);
 

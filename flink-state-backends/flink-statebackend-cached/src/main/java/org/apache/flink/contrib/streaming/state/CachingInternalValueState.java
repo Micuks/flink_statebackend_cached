@@ -17,15 +17,21 @@ package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.runtime.state.internal.InternalValueState;
+import org.apache.flink.runtime.state.internal.InternalKvState.StateIncrementalVisitor;
+import org.apache.flink.metrics.Counter;
+import org.apache.flink.metrics.MetricGroup;
 
 import javax.annotation.Nonnull;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.Iterator;
 import java.util.List;
 import java.util.ArrayList;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * An {@link InternalValueState} that uses an L1/L2 cache for its values.
@@ -38,6 +44,7 @@ public class CachingInternalValueState<K, N, V>
         implements InternalValueState<K, N, V>,
                 CachingInternalState<K, N, V, InternalValueState<K, N, V>> {
 
+    private static final Logger LOG = LoggerFactory.getLogger(CachingInternalValueState.class);
     private final InternalValueState<K, N, V> delegateState;
     private final CachingKeyedStateBackend<K> backend; // For accessing current key
     private final CachePolicy<N, CachePolicy<K, CacheEntry<V>>> namespaceCachesL1; // Namespace ->
@@ -54,13 +61,36 @@ public class CachingInternalValueState<K, N, V>
     private N currentNamespace;
     private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
 
+    // Configuration for cache bypass
+    private final double cacheHitRateThreshold;
+    private final long cacheHitRateWindowSize;
+    private final long cacheMinAccessesForBypassCheck;
+
+    // State for cache bypass logic
+    private transient AtomicLong accessesForHitRateWindow;
+    private transient AtomicLong hitsInHitRateWindow;
+    private transient AtomicLong totalAccessesForBypassEligibility;
+    // Metrics
+    private final Counter cacheHits;
+    private final Counter cacheMisses;
+    private final Counter cacheBypassActivations;
+    
+    private volatile boolean bypassCache = false;
+    private final boolean bypassEnabled;
+
     public CachingInternalValueState(
             InternalValueState<K, N, V> delegateState,
             CachingKeyedStateBackend<K> backend,
             int l1CacheSize,
             int l2CacheSize,
             int maxActiveNamespacesInCache,
-            long maxCacheMemoryMb, CachingStateBackendFactory.CachePolicyType cachePolicyType) {
+            long maxCacheMemoryMb, 
+            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            double cacheHitRateThreshold,
+            long cacheHitRateWindowSize,
+            long cacheMinAccessesForBypassCheck,
+            boolean bypassEnabled,
+            MetricGroup metricsGroup) {
         this.delegateState = delegateState;
         this.backend = backend;
         this.l1CacheSizePerKeyPerNamespace = l1CacheSize;
@@ -68,6 +98,40 @@ public class CachingInternalValueState<K, N, V>
         this.maxActiveNamespacesInCache = maxActiveNamespacesInCache;
         this.maxCacheMemoryMb = maxCacheMemoryMb;
         this.cachePolicyType = cachePolicyType;
+
+        this.cacheHitRateThreshold = cacheHitRateThreshold;
+        this.cacheHitRateWindowSize = cacheHitRateWindowSize;
+        this.cacheMinAccessesForBypassCheck = cacheMinAccessesForBypassCheck;
+        this.bypassEnabled = bypassEnabled;
+
+        if (this.bypassEnabled && this.cacheHitRateThreshold > 0.0) {
+            this.accessesForHitRateWindow = new AtomicLong(0);
+            this.hitsInHitRateWindow = new AtomicLong(0);
+            this.totalAccessesForBypassEligibility = new AtomicLong(0);
+        } else {
+            this.accessesForHitRateWindow = null;
+            this.hitsInHitRateWindow = null;
+            this.totalAccessesForBypassEligibility = null;
+        }
+        
+        // Initialize metrics
+        if (metricsGroup != null) {
+            this.cacheHits = metricsGroup.counter("hits");
+            this.cacheMisses = metricsGroup.counter("misses");
+            this.cacheBypassActivations = metricsGroup.counter("bypassActivations");
+        } else {
+            // Create shared dummy counter instance
+            Counter dummyCounter = new Counter() {
+                @Override public void inc() {}
+                @Override public void inc(long n) {}
+                @Override public void dec() {}
+                @Override public void dec(long n) {}
+                @Override public long getCount() { return 0; }
+            };
+            this.cacheHits = dummyCounter;
+            this.cacheMisses = dummyCounter;
+            this.cacheBypassActivations = dummyCounter;
+        }
 
         // Create namespace caches with eviction listeners that flush dirty entries
         this.namespaceCachesL1 = createCachePolicyWithEvictionListener(maxActiveNamespacesInCache,
@@ -140,6 +204,57 @@ public class CachingInternalValueState<K, N, V>
             }
         } catch (IOException e) {
             throw new RuntimeException("Failed to flush dirty entries for evicted namespace: " + namespace, e);
+        }
+    }
+
+    private void updateCacheBypassCondition(boolean resolvedByCache) {
+        if (!bypassEnabled || cacheHitRateThreshold <= 0.0) {
+            this.bypassCache = false;
+            return;
+        }
+
+        if (resolvedByCache) {
+            hitsInHitRateWindow.incrementAndGet();
+        }
+        long currentWindowAccesses = accessesForHitRateWindow.incrementAndGet();
+
+        if (currentWindowAccesses >= this.cacheHitRateWindowSize) {
+            // Once the window is full, we perform the check and update total accesses.
+            // This moves one atomic operation from the hot path to here.
+            long totalAccesses = totalAccessesForBypassEligibility.addAndGet(currentWindowAccesses);
+
+            if (totalAccesses < this.cacheMinAccessesForBypassCheck) {
+                // Not enough total accesses yet to make a decision, but we reset the window.
+                accessesForHitRateWindow.set(0);
+                hitsInHitRateWindow.set(0);
+                this.bypassCache = false; // Ensure bypass is off
+                return;
+            }
+
+            double currentHitRate = (double) hitsInHitRateWindow.get() / currentWindowAccesses;
+            this.bypassCache = currentHitRate < this.cacheHitRateThreshold;
+            if (this.bypassCache) {
+                cacheBypassActivations.inc();
+                LOG.info(
+                        "Cache bypass activated for value state. Hit rate {}% ({} hits / {} accesses) is below threshold {}%. Namespace: {}.",
+                        String.format("%.2f", currentHitRate * 100),
+                        hitsInHitRateWindow.get(),
+                        currentWindowAccesses, // Use the value we have
+                        String.format("%.2f", this.cacheHitRateThreshold * 100),
+                        getCurrentNamespace());
+            } else {
+                LOG.debug(
+                        "Cache bypass check for value state. Hit rate {}% ({} hits / {} accesses) is NOT below threshold {}%. Bypass remains {}. Namespace: {}.",
+                        String.format("%.2f", currentHitRate * 100),
+                        hitsInHitRateWindow.get(),
+                        currentWindowAccesses,
+                        String.format("%.2f", this.cacheHitRateThreshold * 100),
+                        this.bypassCache,
+                        getCurrentNamespace());
+            }
+            // Reset for next window
+            accessesForHitRateWindow.set(0);
+            hitsInHitRateWindow.set(0);
         }
     }
 
@@ -217,10 +332,17 @@ public class CachingInternalValueState<K, N, V>
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
+        if (bypassEnabled && bypassCache) {
+            updateCacheBypassCondition(false);
+            return delegateState.value();
+        }
+
         CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
         CacheEntry<V> l1Entry = l1Cache.get(currentKey);
 
         if (l1Entry != null) {
+            updateCacheBypassCondition(true);
+            cacheHits.inc();
             return l1Entry.getValue();
         }
 
@@ -228,6 +350,8 @@ public class CachingInternalValueState<K, N, V>
         CacheEntry<V> l2Entry = l2Cache.get(currentKey);
 
         if (l2Entry != null) {
+            updateCacheBypassCondition(true);
+            cacheHits.inc();
             // L2 entry is always clean. Remove from L2, put into L1.
             // No memory change reported here as it's a move between caches of the same backend instance.
             // However, if L1.put causes an eviction, that eviction will report a release.
@@ -246,6 +370,8 @@ public class CachingInternalValueState<K, N, V>
             return entryToL1.getValue();
         }
 
+        updateCacheBypassCondition(false);
+        cacheMisses.inc();
         V valueFromDelegate = delegateState.value();
         if (valueFromDelegate != null) { // Only cache non-null
             CacheEntry<V> newEntry = CacheEntry.clean(valueFromDelegate);
@@ -268,6 +394,15 @@ public class CachingInternalValueState<K, N, V>
             return;
         }
 
+        if (bypassEnabled && bypassCache) {
+            updateCacheBypassCondition(true);
+            cacheBypassActivations.inc();
+            delegateState.update(value);
+            return;
+        }
+
+        updateCacheBypassCondition(true);
+        cacheHits.inc();
         CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
         CacheEntry<V> newEntry = CacheEntry.dirty(value);
         CacheEntry<V> oldL1Entry = l1Cache.put(currentKey, newEntry);
@@ -511,5 +646,16 @@ public class CachingInternalValueState<K, N, V>
             if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
         }
         return bytesFreed;
+    }
+
+    // Debug method to get cache statistics
+    public String getCacheStats() {
+        long hits = cacheHits.getCount();
+        long misses = cacheMisses.getCount();
+        long total = hits + misses;
+        double hitRate = total > 0 ? (double) hits / total * 100 : 0.0;
+        
+        return String.format("CacheStats{hits=%d, misses=%d, hitRate=%.2f%%, bypassActivations=%d}",
+                hits, misses, hitRate, cacheBypassActivations.getCount());
     }
 }

@@ -70,7 +70,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class CachingRocksDBStateBackendComparativeTest
         extends StateBackendTestBase<CachingStateBackend> {
 
-    private CachingStateBackendFactory.CachePolicyType cachePolicyType;
+    private CachingStateBackendFactory.CachePolicyType cachePolicyType = CachingStateBackendFactory.CachePolicyType.LRU;
 
     // Fields for CachingStateBackend (managed by StateBackendTestBase and this class's getStateBackend())
     private org.apache.flink.contrib.streaming.state.RocksDBStateBackend rocksDbDelegateBackend; // Delegate for the CachingStateBackend under test
@@ -298,7 +298,11 @@ class CachingRocksDBStateBackendComparativeTest
         // Default values for new cache size parameters, align with factory defaults if possible
         long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
         long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
-
+        double mapCacheHitRateThreshold = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
+        long mapCacheHitRateWindowSize = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
+        long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
+        boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
+        boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
 
         return new CachingStateBackend(
                 rocksDbDelegateBackend,
@@ -308,7 +312,12 @@ class CachingRocksDBStateBackendComparativeTest
                 20L, // Max cache memory (MB)
                 this.cachePolicyType, // Set by test parameter
                 mapL1KeyPresenceCacheSize,
-                mapL2KeyPresenceCacheSize);
+                mapL2KeyPresenceCacheSize,
+                mapCacheHitRateThreshold,
+                mapCacheHitRateWindowSize,
+                mapCacheMinAccessesForBypassCheck,
+                mapKeyPresenceCacheEnabled,
+                mapBypassEnabled);
     }
 
     @BeforeEach
@@ -349,7 +358,14 @@ class CachingRocksDBStateBackendComparativeTest
             10, // L2 cache size
             5,  // Max active namespaces
             1,  // Max total cache memory in MB
-            cachePolicyType
+            CachingStateBackendFactory.CachePolicyType.LRU,
+            0L, // mapL1KeyPresenceCacheSize
+            0L, // mapL2KeyPresenceCacheSize
+            0.0d, // mapCacheHitRateThreshold
+            1000L, // mapCacheHitRateWindowSize
+            100_000L, // mapCacheMinAccessesForBypassCheck
+            true, // mapKeyPresenceCacheEnabled
+            true // mapBypassEnabled
         );
 
         this.keyedStateBackend = createKeyedStateBackend(

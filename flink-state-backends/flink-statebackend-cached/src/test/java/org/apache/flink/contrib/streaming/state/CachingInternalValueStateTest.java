@@ -110,9 +110,14 @@ class CachingInternalValueStateTest {
 
         long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
         long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        double mapCacheHitRateThreshold = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
+        long mapCacheHitRateWindowSize = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
+        long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
+        boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
+        boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
 
         cachingKeyedStateBackend =
-                new CachingKeyedStateBackend<>(
+                new CachingKeyedStateBackend<String>(
                         kvStateRegistry,
                         mockKeySerializer,
                         CachingInternalValueStateTest.class.getClassLoader(),
@@ -128,7 +133,12 @@ class CachingInternalValueStateTest {
                         10L,
                         currentCachePolicyType,
                         (int) mapL1KeyPresenceCacheSize,
-                        (int) mapL2KeyPresenceCacheSize
+                        (int) mapL2KeyPresenceCacheSize,
+                        mapCacheHitRateThreshold,
+                        mapCacheHitRateWindowSize,
+                        mapCacheMinAccessesForBypassCheck,
+                        mapKeyPresenceCacheEnabled,
+                        mapBypassEnabled
                         );
         cachingKeyedStateBackend.setCurrentKey(testKey);
 
@@ -144,7 +154,12 @@ class CachingInternalValueStateTest {
                         l2CacheSize,
                         maxActiveNamespaces,
                         0L,
-                        currentCachePolicyType);
+                        currentCachePolicyType,
+                        mapCacheHitRateThreshold,
+                        mapCacheHitRateWindowSize,
+                        mapCacheMinAccessesForBypassCheck,
+                        mapBypassEnabled,
+                        new UnregisteredMetricsGroup());
         cachingState.setCurrentNamespace(testNamespace);
     }
 
