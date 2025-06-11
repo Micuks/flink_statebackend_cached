@@ -83,6 +83,9 @@ import org.rocksdb.RocksDBException;
 import org.rocksdb.WriteOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.apache.flink.runtime.state.heap.InternalKeyContext;
+import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
+import org.apache.flink.util.FileUtils;
 
 
 
@@ -118,6 +121,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean mapBypassEnabled;
 
     private final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
+    private final List<CachingKeyGroupedInternalPriorityQueue<?>> registeredPqs;
 
     // Added for memory capping
     private transient AtomicLong currentEstimatedCacheSizeBytes;
@@ -174,6 +178,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
         this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
         // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
+
+        this.registeredPqs = new ArrayList<>();
     }
 
     // create a new RocksDB backend
@@ -274,6 +280,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
         this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
         // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
+
+        this.registeredPqs = new ArrayList<>();
     }
 
     public int getMaxActiveNamespaceOrPerKeyCacheContainers() {
@@ -412,6 +420,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         synchronized (registeredStates) {
             registeredStates.clear();
         }
+        registeredPqs.clear();
     }
 
     @Nonnull
@@ -447,74 +456,16 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             KeyGroupedInternalPriorityQueue<T> create(
                     @Nonnull String stateName,
                     @Nonnull TypeSerializer<T> byteOrderedElementSerializer) {
-        KeyGroupedInternalPriorityQueue<T> delegateQueue =
+        final KeyGroupedInternalPriorityQueue<T> delegateQueue =
                 delegateKeyedStateBackend.create(stateName, byteOrderedElementSerializer);
-
-        // Return a proxy that ensures isEmpty() is consistent with poll() operations
-        return new KeyGroupedInternalPriorityQueue<T>() {
-            private int elementCount = 0;
-
-            @Override
-            public T poll() {
-                T result = delegateQueue.poll();
-                if (result != null) {
-                    elementCount--;
-                }
-                return result;
-            }
-
-            @Override
-            public T peek() {
-                return delegateQueue.peek();
-            }
-
-            @Override
-            public boolean add(@Nonnull T toAdd) {
-                boolean result = delegateQueue.add(toAdd);
-                if (result) {
-                    elementCount++;
-                }
-                return result;
-            }
-
-            @Override
-            public boolean remove(@Nonnull T toRemove) {
-                boolean result = delegateQueue.remove(toRemove);
-                if (result) {
-                    elementCount--;
-                }
-                return result;
-            }
-
-            @Override
-            public boolean isEmpty() {
-                return elementCount == 0;
-            }
-
-            @Override
-            public int size() {
-                return elementCount;
-            }
-
-            @Override
-            public void addAll(@Nonnull Collection<? extends T> toAdd) {
-                for (T element : toAdd) {
-                    add(element);
-                }
-            }
-
-            @Nonnull
-            @Override
-            public CloseableIterator<T> iterator() {
-                return delegateQueue.iterator();
-            }
-
-            @Nonnull
-            @Override
-            public Set<T> getSubsetForKeyGroup(int keyGroupId) {
-                return delegateQueue.getSubsetForKeyGroup(keyGroupId);
-            }
-        };
+        final CachingKeyGroupedInternalPriorityQueue<T> cachingPq =
+                new CachingKeyGroupedInternalPriorityQueue<>(
+                        delegateQueue,
+                        getKeyContext(),
+                        this,
+                        byteOrderedElementSerializer);
+        registeredPqs.add(cachingPq);
+        return cachingPq;
     }
 
     @Nonnull
@@ -524,74 +475,17 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             @Nonnull String stateName,
             @Nonnull TypeSerializer<T> byteOrderedElementSerializer,
             boolean allowFutureMetadataUpdates) {
-        KeyGroupedInternalPriorityQueue<T> delegateQueue = delegateKeyedStateBackend
-                .create(stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
-
-        // Return a proxy that ensures isEmpty() is consistent with poll() operations
-        return new KeyGroupedInternalPriorityQueue<T>() {
-            private int elementCount = 0;
-
-            @Override
-            public T poll() {
-                T result = delegateQueue.poll();
-                if (result != null) {
-                    elementCount--;
-                }
-                return result;
-            }
-
-            @Override
-            public T peek() {
-                return delegateQueue.peek();
-            }
-
-            @Override
-            public boolean add(@Nonnull T toAdd) {
-                boolean result = delegateQueue.add(toAdd);
-                if (result) {
-                    elementCount++;
-                }
-                return result;
-            }
-
-            @Override
-            public boolean remove(@Nonnull T toRemove) {
-                boolean result = delegateQueue.remove(toRemove);
-                if (result) {
-                    elementCount--;
-                }
-                return result;
-            }
-
-            @Override
-            public boolean isEmpty() {
-                return elementCount == 0;
-            }
-
-            @Override
-            public int size() {
-                return elementCount;
-            }
-
-            @Override
-            public void addAll(@Nonnull Collection<? extends T> toAdd) {
-                for (T element : toAdd) {
-                    add(element);
-                }
-            }
-
-            @Nonnull
-            @Override
-            public CloseableIterator<T> iterator() {
-                return delegateQueue.iterator();
-            }
-
-            @Nonnull
-            @Override
-            public Set<T> getSubsetForKeyGroup(int keyGroupId) {
-                return delegateQueue.getSubsetForKeyGroup(keyGroupId);
-            }
-        };
+        final KeyGroupedInternalPriorityQueue<T> delegateQueue =
+                delegateKeyedStateBackend.create(
+                        stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
+        final CachingKeyGroupedInternalPriorityQueue<T> cachingPq =
+                new CachingKeyGroupedInternalPriorityQueue<>(
+                        delegateQueue,
+                        getKeyContext(),
+                        this,
+                        byteOrderedElementSerializer);
+        registeredPqs.add(cachingPq);
+        return cachingPq;
     }
 
     @Override
@@ -601,22 +495,17 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             @Nonnull CheckpointStreamFactory streamFactory,
             @Nonnull CheckpointOptions checkpointOptions)
             throws Exception {
-
-        synchronized (registeredStates) {
-            for (CachingInternalState<K, ?, ?, ?> state : registeredStates) {
-                try {
-                    state.flushToUnderlyingState();
-                } catch (IOException e) {
-                    System.err.println(
-                            "Error flushing state "
-                                    + state
-                                    + " during snapshot: "
-                                    + e.getMessage());
-                }
-            }
+        for (CachingKeyGroupedInternalPriorityQueue<?> pq : registeredPqs) {
+            pq.flush();
+        }
+        for (CachingInternalState<K, ?, ?, ?> cachingState : registeredStates) {
+            cachingState.flushToUnderlyingState();
         }
         return delegateKeyedStateBackend.snapshot(
-                checkpointId, timestamp, streamFactory, checkpointOptions);
+                checkpointId,
+                timestamp,
+                streamFactory,
+                checkpointOptions);
     }
 
     // Other delegated methods (many of them, simplified here for brevity)
@@ -708,18 +597,15 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @Override
     public SavepointResources<K> savepoint() throws Exception {
-        synchronized (registeredStates) {
-            for (CachingInternalState<K, ?, ?, ?> state : registeredStates) {
-                try {
-                    state.flushToUnderlyingState();
-                } catch (IOException e) {
-                    System.err.println(
-                            "Error flushing state "
-                                    + state
-                                    + " during savepoint: "
-                                    + e.getMessage());
-                }
-            }
+        // Now, we need to flush cache states to delegate state backend.
+        // TODO: FLINK-13492.
+        // Note: The following code is not thread-safe.
+        // It's caller's responsibility to make sure the call is thread-safe.
+        for (CachingKeyGroupedInternalPriorityQueue<?> pq : registeredPqs) {
+            pq.flush();
+        }
+        for (CachingInternalState<K, ?, ?, ?> cachingState : registeredStates) {
+            cachingState.flushToUnderlyingState();
         }
         return delegateKeyedStateBackend.savepoint();
     }
@@ -737,15 +623,13 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @Override
     public boolean isSafeToReuseKVState(){
-        return true;
+        return delegateKeyedStateBackend.isSafeToReuseKVState();
     }
 
     @VisibleForTesting
     public void compactState(StateDescriptor<?, ?> stateDesc) throws RocksDBException {
         if (delegateKeyedStateBackend instanceof RocksDBKeyedStateBackend) {
-            ((RocksDBKeyedStateBackend<K>) delegateKeyedStateBackend).compactState(stateDesc);
-        } else {
-            throw new UnsupportedOperationException("Delegate is not a RocksDBKeyedStateBackend");
+            ((RocksDBKeyedStateBackend<?>) delegateKeyedStateBackend).compactState(stateDesc);
         }
     }
 
@@ -760,60 +644,54 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @Nonnegative
     long getWriteBatchSize() {
         if (delegateKeyedStateBackend instanceof RocksDBKeyedStateBackend) {
-            return ((RocksDBKeyedStateBackend<K>) delegateKeyedStateBackend).getWriteBatchSize();
+            return ((RocksDBKeyedStateBackend<?>) delegateKeyedStateBackend).getWriteBatchSize();
         }
-        throw new UnsupportedOperationException("Delegate is not a RocksDBKeyedStateBackend");
+        return 0L;
     }
 
     private static LatencyTrackingStateConfig buildLatencyTrackingConfig(
             MetricGroup metricGroup, ExecutionConfig executionConfig) {
-        LatencyTrackingStateConfig.Builder latencyBuilder = LatencyTrackingStateConfig.newBuilder();
-        if (metricGroup != null) {
-            latencyBuilder.setMetricGroup(metricGroup);
-        }
-        return latencyBuilder
-                .setEnabled(executionConfig.getLatencyTrackingInterval() > 0)
+        return LatencyTrackingStateConfig.newBuilder()
+                .setEnabled(
+                        executionConfig.isLatencyTrackingConfigured()
+                                && executionConfig
+                                .getLatencyTrackingInterval() > 0)
+                .setSampleInterval((int) executionConfig.getLatencyTrackingInterval())
+                .setMetricGroup(metricGroup)
                 .build();
     }
 
-    // Added for memory capping: To be called by CachingInternal*State when entries are added
     public void reportCacheMemoryAdded(long sizeBytes) {
-        if (sizeBytes <= 0) return;
-        currentEstimatedCacheSizeBytes.addAndGet(sizeBytes);
-        checkAndTriggerGlobalEviction();
+        if (maxCacheMemoryMb > 0) {
+            long newSize = currentEstimatedCacheSizeBytes.addAndGet(sizeBytes);
+            if (newSize > maxConfiguredCacheSizeBytes) {
+                checkAndTriggerGlobalEviction();
+            }
+        }
     }
 
-    // Added for memory capping: To be called by CachingInternal*State when entries are released
     public void reportCacheMemoryReleased(long sizeBytes) {
-        if (sizeBytes <= 0) return;
-        currentEstimatedCacheSizeBytes.addAndGet(-sizeBytes);
+        if (maxCacheMemoryMb > 0) {
+            currentEstimatedCacheSizeBytes.addAndGet(-sizeBytes);
+            checkAndTriggerGlobalEviction();
+        }
     }
 
     private void checkAndTriggerGlobalEviction() {
-        if (maxConfiguredCacheSizeBytes <= 0) { // Memory capping disabled if limit is zero or negative
-            return;
-        }
-        if (currentEstimatedCacheSizeBytes.get() > maxConfiguredCacheSizeBytes) {
-            long memoryToFree = currentEstimatedCacheSizeBytes.get() - maxConfiguredCacheSizeBytes;
-            if (memoryToFree <= 0) return; // Should not happen if check above is true, but for safety
-
-            // System.out.println("Need to free memory: " + memoryToFree + " bytes. Current: " + currentEstimatedCacheSizeBytes.get());
-
-            synchronized (registeredStates) { // Synchronize access to registeredStates list
-                // Simple strategy: Iterate registered states and ask each to free a proportional amount or just iterate until enough is freed.
-                // This could be made more sophisticated (e.g., based on state sizes, LRU of states etc.)
-                long freedSoFar = 0;
-                for (CachingInternalState<K, ?, ?, ?> state : registeredStates) {
-                    if (freedSoFar >= memoryToFree) {
-                        break;
-                    }
-                    // Ask state to free up to remaining needed, or its fair share
-                    long remainingToFreeThisIteration = memoryToFree - freedSoFar;
-                    // Simple: ask it to free up to the remaining. Could be smarter.
-                    long freedByThisState = state.evictEntriesToFreeMemory(remainingToFreeThisIteration);
-                    freedSoFar += freedByThisState;
+        long currentSize = currentEstimatedCacheSizeBytes.get();
+        if (currentSize > maxConfiguredCacheSizeBytes) {
+            long bytesToFree = currentSize - maxConfiguredCacheSizeBytes;
+            LOG.info(
+                    "Total cache size ({} bytes) exceeds limit ({} bytes). Triggering eviction to free {} bytes.",
+                    currentSize,
+                    maxConfiguredCacheSizeBytes,
+                    bytesToFree);
+            long totalFreed = 0;
+            for (CachingInternalState<K, ?, ?, ?> state : registeredStates) {
+                totalFreed += state.evictEntriesToFreeMemory(bytesToFree - totalFreed);
+                if (totalFreed >= bytesToFree) {
+                    break;
                 }
-                // System.out.println("Freed memory: " + freedSoFar + " bytes. New current: " + currentEstimatedCacheSizeBytes.get());
             }
         }
     }
@@ -844,8 +722,45 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         return mapKeyPresenceCacheEnabled;
     }
 
-    // This is the crucial method needed by CachingInternalMapState
-    CloseableRegistry getCloseableRegistry() {
-        return this.cancelStreamRegistry;
+    /** Utility: calculate key group index for the given key object. */
+    public int getKeyGroupIndexForKey(Object key) {
+        return KeyGroupRangeAssignment.assignToKeyGroup(key, getNumberOfKeyGroups());
+    }
+
+    /**
+     * Groups a collection of {@code Keyed} elements by their key-group index.
+     *
+     * @param elements elements to group
+     * @return map keyGroupId -> elements belonging to that key group
+     */
+    public <T extends Keyed<?>> java.util.Map<Integer, java.util.Collection<? extends T>> groupElementsbyKeyGroup(java.util.Collection<? extends T> elements) {
+        java.util.Map<Integer, java.util.Collection<T>> out = new java.util.HashMap<>();
+        for (T e : elements) {
+            Object k = e.getKey();
+            if (k == null) {
+                k = getCurrentKey();
+            }
+            int kg = getKeyGroupIndexForKey(k);
+            out.computeIfAbsent(kg, idx -> new java.util.ArrayList<>()).add(e);
+        }
+        return (java.util.Map) out;
+    }
+
+    // ---------------------------------------------------------------------
+    //  Mini-batch support
+    // ---------------------------------------------------------------------
+
+    /**
+     * Flushes buffered writes of all registered caching states and priority queues. Operators can
+     * call this once at the end of their mini-batch loop to persist the batch atomically to the
+     * underlying backend (RocksDB). It is <b>cheap</b>; if nothing is dirty nothing is written.
+     */
+    public void flushOnMiniBatchEnd() throws java.io.IOException {
+        for (CachingKeyGroupedInternalPriorityQueue<?> pq : registeredPqs) {
+            pq.flush();
+        }
+        for (CachingInternalState<K, ?, ?, ?> cachingState : registeredStates) {
+            cachingState.flushOnMiniBatchEnd();
+        }
     }
 }

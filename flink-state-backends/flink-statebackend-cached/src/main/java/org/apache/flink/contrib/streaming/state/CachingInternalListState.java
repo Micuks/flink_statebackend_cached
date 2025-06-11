@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 
 /**
  * An {@link InternalListState} that uses an L1/L2 cache for its list values. The entire list is
@@ -54,6 +55,8 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
     private final int maxActiveNamespacesInCache; // Max Namespaces with active caches
     private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
 
+    private final CachePolicy<N, Map<K, List<V_ELE>>> namespaceWriteBuffers;
+
     public CachingInternalListState(InternalListState<K, N, V_ELE> delegateState,
             CachingKeyedStateBackend<K> backend, int l1CacheSize, int l2CacheSize,
             int maxActiveNamespaces, CachingStateBackendFactory.CachePolicyType cachePolicyType) {
@@ -63,6 +66,16 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
         this.l2CacheSizePerNamespace = l2CacheSize; // Max K->List entries in L2 per Namespace
         this.maxActiveNamespacesInCache = maxActiveNamespaces;
         this.cachePolicyType = cachePolicyType;
+
+        this.namespaceWriteBuffers = createCachePolicyWithEvictionListener(this.maxActiveNamespacesInCache,
+                evictedNamespaceL1Entry -> {
+                    try {
+                        flushWriteBufferForNamespace(evictedNamespaceL1Entry.getKey(), evictedNamespaceL1Entry.getValue());
+                    } catch (Exception e) {
+                        throw new RuntimeException(
+                                "Failed to flush/park L1 entries for evicted namespace: " + evictedNamespaceL1Entry.getKey(), e);
+                    }
+                });
 
         this.namespaceCachesL1 = createCachePolicyWithEvictionListener(this.maxActiveNamespacesInCache,
                 evictedNamespaceL1Entry -> {
@@ -109,6 +122,31 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
             case LRU:
             default:
                 return new LRUMap<>(capacity, evictionListener);
+        }
+    }
+
+    private void flushWriteBufferForNamespace(N namespace, Map<K, List<V_ELE>> writeBuffer) throws Exception {
+        if (writeBuffer == null || writeBuffer.isEmpty()) {
+            return;
+        }
+
+        N originalNamespace = getCurrentNamespace();
+        K originalKey = backend.getCurrentKey();
+        boolean keyWasSet = originalKey != null;
+
+        setCurrentNamespace(namespace);
+
+        for (Map.Entry<K, List<V_ELE>> entry : writeBuffer.entrySet()) {
+            backend.setCurrentKey(entry.getKey());
+            doUpdate(entry.getValue());
+        }
+        writeBuffer.clear();
+
+        setCurrentNamespace(originalNamespace);
+        if (keyWasSet) {
+            backend.setCurrentKey(originalKey);
+        } else {
+            backend.setCurrentKey(null);
         }
     }
 
@@ -224,6 +262,12 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
+        Map<K, List<V_ELE>> writeBuffer = namespaceWriteBuffers.get(currentNamespace);
+        if (writeBuffer != null && writeBuffer.containsKey(currentKey)) {
+            List<V_ELE> value = writeBuffer.get(currentKey);
+            return value != null ? new ArrayList<>(value) : null;
+        }
+
         CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
         CacheEntry<List<V_ELE>> l1Entry = l1Cache.get(currentKey);
 
@@ -272,6 +316,13 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
     public void update(List<V_ELE> values) throws Exception {
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
+
+        getWriteBufferForNamespace(currentNamespace).put(currentKey, values != null ? new ArrayList<>(values) : null);
+    }
+
+    private void doUpdate(List<V_ELE> values) throws Exception {
+        K currentKey = backend.getCurrentKey();
+        N currentNamespace = getCurrentNamespace();
         CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
         CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace); // Ensure L2 cache for namespace exists
 
@@ -292,95 +343,58 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
         }
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
-        CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace); // Added for L2 invalidation
+        Map<K, List<V_ELE>> writeBuffer = getWriteBufferForNamespace(currentNamespace);
 
-        List<V_ELE> currentList = null;
-        CacheEntry<List<V_ELE>> l1Entry = l1Cache.get(currentKey);
-        boolean l1HadIt = false;
-
-        if (l1Entry != null && l1Entry.getValue() != null) {
-            currentList = l1Entry.getValue(); 
-            l1HadIt = true;
-        } else {
-            CacheEntry<List<V_ELE>> l2Entry = l2Cache.get(currentKey);
-            if (l2Entry != null && l2Entry.getValue() != null) {
-                currentList = new ArrayList<>(l2Entry.getValue()); 
-                // Report L2 release when its content is read to be modified and moved to L1
-                backend.reportCacheMemoryReleased(l2Entry.getEstimatedSizeBytes());
-                CacheEntry<List<V_ELE>> oldL2 = l2Cache.remove(currentKey);
-                // if (oldL2 != null) backend.reportCacheMemoryReleased(oldL2.getEstimatedSizeBytes()); // Already reported
-            } else {
-                Iterable<V_ELE> iterableFromDelegate = delegateState.get(); 
-                if (iterableFromDelegate != null) {
-                    currentList = new ArrayList<>();
-                    for (V_ELE item : iterableFromDelegate) {
-                        currentList.add(item);
-                    }
-                } else {
-                    currentList = new ArrayList<>();
+        List<V_ELE> currentList = writeBuffer.get(currentKey);
+        if (currentList == null) {
+            // Not in buffer, check caches/delegate
+            Iterable<V_ELE> fromBackend = get();
+            currentList = new ArrayList<>();
+            if (fromBackend != null) {
+                for(V_ELE ele : fromBackend) {
+                    currentList.add(ele);
                 }
             }
         }
+
         currentList.addAll(values);
-        CacheEntry<List<V_ELE>> newEntry = CacheEntry.dirty(currentList);
-        CacheEntry<List<V_ELE>> oldL1 = l1Cache.put(currentKey, newEntry);
-        if (l1HadIt && oldL1 != null) { // Only release if L1 actually had an entry that was replaced
-            backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
-        }
-        backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
-         // If L1 didn't have it, but L2 did (and was removed), its memory release was handled.
-        // If neither had it, then this is a new add to L1.
+        writeBuffer.put(currentKey, currentList);
     }
 
     @Override
     public void add(V_ELE value) throws Exception {
-        if (value == null) { 
+        if (value == null) {
             return;
         }
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
-        CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace);
+        Map<K, List<V_ELE>> writeBuffer = getWriteBufferForNamespace(currentNamespace);
 
-        List<V_ELE> currentList = null;
-        CacheEntry<List<V_ELE>> l1Entry = l1Cache.get(currentKey);
-        boolean l1HadIt = false;
-
-        if (l1Entry != null && l1Entry.getValue() != null) {
-            currentList = l1Entry.getValue();
-            l1HadIt = true;
-        } else {
-            CacheEntry<List<V_ELE>> l2Entry = l2Cache.get(currentKey);
-            if (l2Entry != null && l2Entry.getValue() != null) {
-                currentList = new ArrayList<>(l2Entry.getValue());
-                // Report L2 release
-                backend.reportCacheMemoryReleased(l2Entry.getEstimatedSizeBytes());
-                CacheEntry<List<V_ELE>> oldL2 = l2Cache.remove(currentKey);
-                // if (oldL2 != null) backend.reportCacheMemoryReleased(oldL2.getEstimatedSizeBytes()); // Already reported
-            } else {
-                Iterable<V_ELE> iterableFromDelegate = delegateState.get();
-                if (iterableFromDelegate != null) {
-                    currentList = new ArrayList<>();
-                    for (V_ELE item : iterableFromDelegate) {
-                        currentList.add(item);
-                    }
-                } else {
-                    currentList = new ArrayList<>();
+        List<V_ELE> currentList = writeBuffer.get(currentKey);
+        if (currentList == null) {
+            // Not in buffer, check caches/delegate
+            Iterable<V_ELE> fromBackend = get();
+            currentList = new ArrayList<>();
+            if (fromBackend != null) {
+                for(V_ELE ele : fromBackend) {
+                    currentList.add(ele);
                 }
             }
         }
+
         currentList.add(value);
-        CacheEntry<List<V_ELE>> newEntry = CacheEntry.dirty(currentList);
-        CacheEntry<List<V_ELE>> oldL1 = l1Cache.put(currentKey, newEntry);
-        if (l1HadIt && oldL1 != null) {
-             backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
-        }
-        backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
+        writeBuffer.put(currentKey, currentList);
     }
 
     @Override
     public void clear() {
+        K currentKey = backend.getCurrentKey();
+        N currentNamespace = getCurrentNamespace();
+
+        getWriteBufferForNamespace(currentNamespace).put(currentKey, null);
+    }
+
+    private void doClear() {
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
@@ -397,6 +411,19 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
 
     @Override
     public void flushToUnderlyingState() throws IOException {
+        List<Map.Entry<N, Map<K, List<V_ELE>>>> nsEntries = new ArrayList<>();
+        for (Map.Entry<N, Map<K, List<V_ELE>>> entry : namespaceWriteBuffers.entrySet()) {
+            nsEntries.add(entry);
+        }
+        try {
+            for (Map.Entry<N, Map<K, List<V_ELE>>> nsEntry : nsEntries) {
+                flushWriteBufferForNamespace(nsEntry.getKey(), nsEntry.getValue());
+            }
+        } catch (Exception e) {
+            throw new IOException("Failed to flush write-behind buffers", e);
+        }
+        namespaceWriteBuffers.clear();
+
         for (Map.Entry<N, CachePolicy<K, CacheEntry<List<V_ELE>>>> nsEntry : namespaceCachesL1
                 .entrySet()) {
             N namespace = nsEntry.getKey();
@@ -587,6 +614,11 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
     }
 
     private void clearCacheForNamespace(N namespace) {
+        Map<K, List<V_ELE>> writeBuffer = namespaceWriteBuffers.get(namespace);
+        if (writeBuffer != null) {
+            writeBuffer.clear();
+        }
+
         CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = namespaceCachesL1.get(namespace);
         if (l1Cache != null) {
             l1Cache.clear();
@@ -603,6 +635,7 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
         }
         // Removing from the top-level map ensures the namespace-specific maps are eligible for GC
         // And their eviction listeners (if any on namespaceCachesL1/L2 themselves) would have fired.
+        namespaceWriteBuffers.remove(namespace);
         namespaceCachesL1.remove(namespace);
         namespaceCachesL2.remove(namespace);
     }
@@ -686,5 +719,9 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
             if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
         }
         return bytesFreed;
+    }
+
+    private Map<K, List<V_ELE>> getWriteBufferForNamespace(N namespace) {
+        return namespaceWriteBuffers.computeIfAbsent(namespace, ns -> new LinkedHashMap<>());
     }
 }

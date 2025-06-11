@@ -31,6 +31,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 
 /**
  * An {@link InternalAggregatingState} that uses an L1/L2 cache for its accumulator.
@@ -56,6 +58,8 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
     private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
 
     private N currentNamespace;
+
+    private final CachePolicy<N, Map<K, ACC>> namespaceWriteBuffers;
 
     // Metrics
     private final Counter cacheHits;
@@ -91,6 +95,15 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
             this.cacheMisses = dummyCounter;
         }
 
+        this.namespaceWriteBuffers = createCachePolicyWithEvictionListener(backend.getMaxActiveNamespaceOrPerKeyCacheContainers(),
+                evictedNsEntry -> {
+                    try {
+                        flushWriteBufferForNamespace(evictedNsEntry.getKey(), evictedNsEntry.getValue());
+                    } catch (Exception e) {
+                        throw new RuntimeException("Failed to flush write-behind buffer for evicted namespace: " + evictedNsEntry.getKey(), e);
+                    }
+                });
+
         this.namespaceCachesL1 = createCachePolicyWithEvictionListener(backend.getMaxActiveNamespaceOrPerKeyCacheContainers(),
                 evictedNsEntry -> flushCacheForNamespace(evictedNsEntry.getKey(), evictedNsEntry.getValue()));
         this.namespaceCachesL2 = createCachePolicyWithEvictionListener(backend.getMaxActiveNamespaceOrPerKeyCacheContainers(),
@@ -115,6 +128,31 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
             case LRU:
             default:
                 return new LRUMap<>(capacity, evictionListener);
+        }
+    }
+
+    private void flushWriteBufferForNamespace(N namespace, Map<K, ACC> writeBuffer) throws Exception {
+        if (writeBuffer == null || writeBuffer.isEmpty()) {
+            return;
+        }
+
+        N originalNamespace = getCurrentNamespace();
+        K originalKey = backend.getCurrentKey();
+        boolean keyWasSet = originalKey != null;
+
+        setCurrentNamespace(namespace);
+
+        for (Map.Entry<K, ACC> entry : writeBuffer.entrySet()) {
+            backend.setCurrentKey(entry.getKey());
+            doUpdateInternal(entry.getValue());
+        }
+        writeBuffer.clear();
+
+        setCurrentNamespace(originalNamespace);
+        if (keyWasSet) {
+            backend.setCurrentKey(originalKey);
+        } else {
+            backend.setCurrentKey(null);
         }
     }
 
@@ -171,17 +209,31 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
             return;
         }
 
-        ACC currentAccumulator = getInternal();
+        K currentKey = backend.getCurrentKey();
+        N currentNamespace = getCurrentNamespace();
+        Map<K, ACC> writeBuffer = getWriteBufferForNamespace(currentNamespace);
+
+        ACC currentAccumulator = writeBuffer.get(currentKey);
         if (currentAccumulator == null) {
-            currentAccumulator = aggFunction.createAccumulator();
+            currentAccumulator = getInternal(); // Check caches/delegate
+            if (currentAccumulator == null) {
+                currentAccumulator = aggFunction.createAccumulator();
+            }
         }
-        updateInternal(aggFunction.add(value, currentAccumulator));
+
+        currentAccumulator = aggFunction.add(value, currentAccumulator);
+        writeBuffer.put(currentKey, currentAccumulator);
     }
 
     @Override
     public ACC getInternal() throws Exception {
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
+
+        Map<K, ACC> writeBuffer = namespaceWriteBuffers.get(currentNamespace);
+        if (writeBuffer != null && writeBuffer.containsKey(currentKey)) {
+            return writeBuffer.get(currentKey);
+        }
 
         CachePolicy<K, CacheEntry<ACC>> l1Cache = getL1CacheForNamespace(currentNamespace);
         CacheEntry<ACC> l1Entry = l1Cache.get(currentKey);
@@ -213,6 +265,12 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
     public void updateInternal(ACC valueToStore) throws Exception {
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
+        getWriteBufferForNamespace(currentNamespace).put(currentKey, valueToStore);
+    }
+
+    private void doUpdateInternal(ACC valueToStore) throws Exception {
+        K currentKey = backend.getCurrentKey();
+        N currentNamespace = getCurrentNamespace();
 
         CachePolicy<K, CacheEntry<ACC>> l1Cache = getL1CacheForNamespace(currentNamespace);
         l1Cache.put(currentKey, CacheEntry.dirty(valueToStore));
@@ -223,6 +281,14 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
 
     @Override
     public void clear() {
+        K currentKey = backend.getCurrentKey();
+        N currentNamespace = getCurrentNamespace();
+        Map<K, ACC> writeBuffer = getWriteBufferForNamespace(currentNamespace);
+        writeBuffer.remove(currentKey);
+        doClear();
+    }
+
+    private void doClear() {
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
@@ -252,6 +318,11 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
     }
 
     private void clearCacheForNamespace(N namespace) {
+        Map<K, ACC> writeBuffer = namespaceWriteBuffers.get(namespace);
+        if (writeBuffer != null) {
+            writeBuffer.clear();
+        }
+
         CachePolicy<K, CacheEntry<ACC>> l1Cache = namespaceCachesL1.get(namespace);
         if (l1Cache != null) {
             l1Cache.clear();
@@ -264,6 +335,19 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
 
     @Override
     public void flushToUnderlyingState() throws IOException {
+        List<Map.Entry<N, Map<K, ACC>>> nsEntries = new ArrayList<>();
+        for (Map.Entry<N, Map<K, ACC>> entry : namespaceWriteBuffers.entrySet()) {
+            nsEntries.add(entry);
+        }
+        try {
+            for (Map.Entry<N, Map<K, ACC>> nsEntry : nsEntries) {
+                flushWriteBufferForNamespace(nsEntry.getKey(), nsEntry.getValue());
+            }
+        } catch (Exception e) {
+            throw new IOException("Failed to flush write-behind buffers", e);
+        }
+        namespaceWriteBuffers.clear();
+
         for (Map.Entry<N, CachePolicy<K, CacheEntry<ACC>>> nsEntry : namespaceCachesL1.entrySet()) {
             N namespace = nsEntry.getKey();
             CachePolicy<K, CacheEntry<ACC>> l1Cache = nsEntry.getValue();
@@ -290,6 +374,10 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
                 }
             }
         }
+    }
+
+    private Map<K, ACC> getWriteBufferForNamespace(N namespace) {
+        return namespaceWriteBuffers.computeIfAbsent(namespace, ns -> new LinkedHashMap<>());
     }
 
     @Override

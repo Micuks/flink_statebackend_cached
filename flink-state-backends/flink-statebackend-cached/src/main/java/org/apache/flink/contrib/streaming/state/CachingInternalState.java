@@ -39,4 +39,13 @@ public interface CachingInternalState<K, N, SV, S_DEL extends InternalKvState<K,
     S_DEL getDelegateState();
 
     long evictEntriesToFreeMemory(long targetBytesToFreeThisState);
+
+    /**
+     * Flushes any buffered writes that should be persisted at the end of a user mini-batch. The
+     * default implementation simply delegates to {@link #flushToUnderlyingState()} so existing
+     * state implementations automatically participate.
+     */
+    default void flushOnMiniBatchEnd() throws java.io.IOException {
+        flushToUnderlyingState();
+    }
 }

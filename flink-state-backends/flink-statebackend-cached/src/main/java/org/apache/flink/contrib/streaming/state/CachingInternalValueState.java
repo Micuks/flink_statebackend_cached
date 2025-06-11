@@ -30,6 +30,7 @@ import java.util.function.Consumer;
 import java.util.Iterator;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -77,6 +78,8 @@ public class CachingInternalValueState<K, N, V>
     
     private volatile boolean bypassCache = false;
     private final boolean bypassEnabled;
+
+    private final CachePolicy<N, Map<K, V>> namespaceWriteBuffers;
 
     public CachingInternalValueState(
             InternalValueState<K, N, V> delegateState,
@@ -132,6 +135,15 @@ public class CachingInternalValueState<K, N, V>
             this.cacheMisses = dummyCounter;
             this.cacheBypassActivations = dummyCounter;
         }
+
+        this.namespaceWriteBuffers = createCachePolicyWithEvictionListener(maxActiveNamespacesInCache,
+            evictedNsEntry -> {
+                try {
+                    flushWriteBufferForNamespace(evictedNsEntry.getKey(), evictedNsEntry.getValue());
+                } catch (IOException e) {
+                    throw new RuntimeException("Failed to flush write-behind buffer for evicted namespace: " + evictedNsEntry.getKey(), e);
+                }
+            });
 
         // Create namespace caches with eviction listeners that flush dirty entries
         this.namespaceCachesL1 = createCachePolicyWithEvictionListener(maxActiveNamespacesInCache,
@@ -204,6 +216,35 @@ public class CachingInternalValueState<K, N, V>
             }
         } catch (IOException e) {
             throw new RuntimeException("Failed to flush dirty entries for evicted namespace: " + namespace, e);
+        }
+    }
+
+    private void flushWriteBufferForNamespace(N namespace, Map<K, V> writeBuffer) throws IOException {
+        if (writeBuffer == null || writeBuffer.isEmpty()) {
+            return;
+        }
+
+        N originalNamespace = getCurrentNamespace();
+        K originalKey = backend.getCurrentKey();
+        boolean keyWasSet = originalKey != null;
+
+        setCurrentNamespace(namespace);
+
+        for (Map.Entry<K, V> entry : writeBuffer.entrySet()) {
+            backend.setCurrentKey(entry.getKey());
+            if (entry.getValue() == null) {
+                doClear();
+            } else {
+                doUpdate(entry.getValue());
+            }
+        }
+        writeBuffer.clear();
+
+        setCurrentNamespace(originalNamespace);
+        if (keyWasSet) {
+            backend.setCurrentKey(originalKey);
+        } else {
+            backend.setCurrentKey(null);
         }
     }
 
@@ -332,6 +373,11 @@ public class CachingInternalValueState<K, N, V>
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
+        Map<K, V> writeBuffer = namespaceWriteBuffers.get(currentNamespace);
+        if (writeBuffer != null && writeBuffer.containsKey(currentKey)) {
+            return writeBuffer.get(currentKey);
+        }
+
         if (bypassEnabled && bypassCache) {
             updateCacheBypassCondition(false);
             return delegateState.value();
@@ -389,8 +435,15 @@ public class CachingInternalValueState<K, N, V>
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
+        getWriteBufferForNamespace(currentNamespace).put(currentKey, value);
+    }
+
+    private void doUpdate(V value) throws IOException {
+        K currentKey = backend.getCurrentKey();
+        N currentNamespace = getCurrentNamespace();
+
         if (value == null) { // As per Flink ValueState contract
-            clear(); // clear() will handle memory reporting
+            doClear();
             return;
         }
 
@@ -433,6 +486,13 @@ public class CachingInternalValueState<K, N, V>
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
+        getWriteBufferForNamespace(currentNamespace).put(currentKey, null);
+    }
+
+    private void doClear() {
+        K currentKey = backend.getCurrentKey();
+        N currentNamespace = getCurrentNamespace();
+
         CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
         CacheEntry<V> oldL1Entry = l1Cache.remove(currentKey);
         if (oldL1Entry != null) {
@@ -450,6 +510,17 @@ public class CachingInternalValueState<K, N, V>
 
     @Override
     public void flushToUnderlyingState() throws IOException {
+        // Flush write-behind buffer
+        List<Map.Entry<N, Map<K, V>>> nsEntries = new ArrayList<>();
+        for (Map.Entry<N, Map<K, V>> entry : namespaceWriteBuffers.entrySet()) {
+            nsEntries.add(entry);
+        }
+
+        for (Map.Entry<N, Map<K, V>> nsEntry : nsEntries) {
+            flushWriteBufferForNamespace(nsEntry.getKey(), nsEntry.getValue());
+        }
+        namespaceWriteBuffers.clear();
+
         // Flush L1 caches
         for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL1.entrySet()) {
             N namespace = nsEntry.getKey();
@@ -657,5 +728,9 @@ public class CachingInternalValueState<K, N, V>
         
         return String.format("CacheStats{hits=%d, misses=%d, hitRate=%.2f%%, bypassActivations=%d}",
                 hits, misses, hitRate, cacheBypassActivations.getCount());
+    }
+
+    private Map<K, V> getWriteBufferForNamespace(N namespace) {
+        return namespaceWriteBuffers.computeIfAbsent(namespace, ns -> new LinkedHashMap<>());
     }
 }
