@@ -15,18 +15,16 @@
 
 package org.apache.flink.contrib.streaming.state;
 
-import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.runtime.state.StateSnapshotTransformer;
-import org.apache.flink.runtime.state.internal.InternalListState;
-
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.runtime.state.internal.InternalListState;
+
 
 /**
  * An {@link InternalListState} that uses an L1/L2 cache for its list values. The entire list is

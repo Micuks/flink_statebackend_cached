@@ -18,39 +18,34 @@
 
 package org.apache.flink.contrib.streaming.state;
 
-import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.LinkedHashMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.RunnableFuture;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Function;
 import java.util.stream.Stream;
 import javax.annotation.Nonnegative;
 import javax.annotation.Nonnull;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.state.AggregatingStateDescriptor;
+import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.contrib.streaming.state.RocksDBKeyedStateBackend;
-import org.apache.flink.contrib.streaming.state.RocksDBNativeMetricMonitor;
-import org.apache.flink.contrib.streaming.state.RocksDBResourceContainer;
-import org.apache.flink.contrib.streaming.state.RocksDBWriteBatchWrapper;
-import org.apache.flink.contrib.streaming.state.snapshot.RocksDBSnapshotStrategyBase;
-import org.apache.flink.contrib.streaming.state.ttl.RocksDbTtlCompactFiltersManager;
 import org.apache.flink.core.fs.CloseableRegistry;
-import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.SnapshotType;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
+import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.state.KeyGroupedInternalPriorityQueue;
 import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.KeyedStateHandle;
@@ -61,43 +56,26 @@ import org.apache.flink.runtime.state.SavepointResources;
 import org.apache.flink.runtime.state.SerializedCompositeKeyBuilder;
 import org.apache.flink.runtime.state.SnapshotResult;
 import org.apache.flink.runtime.state.StateSnapshotTransformer;
-import org.apache.flink.runtime.state.StreamCompressionDecorator;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
-import org.apache.flink.runtime.state.heap.HeapPriorityQueueSnapshotRestoreWrapper;
-import org.apache.flink.runtime.state.heap.InternalKeyContext;
-import org.apache.flink.runtime.state.internal.InternalKvState;
+import org.apache.flink.runtime.state.internal.InternalAggregatingState;
 import org.apache.flink.runtime.state.internal.InternalListState;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
-import org.apache.flink.runtime.state.internal.InternalAggregatingState;
-import org.apache.flink.api.common.state.AggregatingStateDescriptor;
 import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
-import org.apache.flink.util.CloseableIterator;
-import org.apache.flink.util.ResourceGuard;
 import org.rocksdb.ColumnFamilyHandle;
-import org.rocksdb.ColumnFamilyOptions;
 import org.rocksdb.ReadOptions;
-import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.WriteOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.apache.flink.runtime.state.heap.InternalKeyContext;
-import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
-import org.apache.flink.util.FileUtils;
-
-
-
-
-
-// Added for metrics
-
-// Added for logging
 
 /**
- * The keyed state backend that implements caching. It wraps a delegate AbstractKeyedStateBackend
- * (e.g., RocksDBKeyedStateBackend) and creates CachingInternal*State objects.
+ * This state backend uses a tiered caching approach for key-value states. It consists of a
+ * RocksDBKeyedStateBackend as the delegate (L3) and one or two in-memory cache layers (L1/L2). The
+ * caching behavior can be configured, for instance, cache size, cache policy (LRU, TinyLFU).
+ *
+ * @param <K> The key by which state is keyed.
  */
 public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
@@ -112,7 +90,6 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
     private final int mapL1KeyPresenceCacheSize;
     private final int mapL2KeyPresenceCacheSize;
-    private final MetricGroup metricGroup;
 
     private final double mapCacheHitRateThreshold;
     private final long mapCacheHitRateWindowSize;
@@ -120,14 +97,17 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean mapKeyPresenceCacheEnabled;
     private final boolean mapBypassEnabled;
 
-    private final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
-    private final List<CachingKeyGroupedInternalPriorityQueue<?>> registeredPqs;
+    private final double valueCacheHitRateThreshold;
+    private final long valueCacheHitRateWindowSize;
+    private final long valueCacheMinAccessesForBypassCheck;
+    private final boolean valueBypassEnabled;
 
-    // Added for memory capping
+    final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
+    private final List<CachingKeyGroupedInternalPriorityQueue<?>> registeredPqs;
+    private final Map<String, State> registeredStatesMap;
+
     private transient AtomicLong currentEstimatedCacheSizeBytes;
     private transient long maxConfiguredCacheSizeBytes;
-    // Using the static ValueSizeUtils for now, but a Function could be injected here
-    // private transient Function<Object, Long> valueSizeEstimator;
 
     public CachingKeyedStateBackend(
             TaskKvStateRegistry kvStateRegistry,
@@ -135,138 +115,39 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             ClassLoader userCodeClassLoader,
             ExecutionConfig executionConfig,
             TtlTimeProvider ttlTimeProvider,
-            MetricGroup metricGroup,
             @Nonnull Collection<KeyedStateHandle> stateHandles,
             @Nonnull CloseableRegistry cancelStreamRegistry,
             AbstractKeyedStateBackend<K> delegateKeyedStateBackend,
             int l1EntryCacheSize,
             int l2EntryCacheSize,
             int maxActiveNamespaceOrPerKeyCacheContainers,
-            long maxCacheMemoryMb, CachingStateBackendFactory.CachePolicyType cachePolicyType,
-            int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
-            double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
-            boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled) {
-
+            long maxCacheMemoryMb,
+            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            int mapL1KeyPresenceCacheSize,
+            int mapL2KeyPresenceCacheSize,
+            double mapCacheHitRateThreshold,
+            long mapCacheHitRateWindowSize,
+            long mapCacheMinAccessesForBypassCheck,
+            boolean mapKeyPresenceCacheEnabled,
+            boolean mapBypassEnabled,
+            double valueCacheHitRateThreshold,
+            long valueCacheHitRateWindowSize,
+            long valueCacheMinAccessesForBypassCheck,
+            boolean valueBypassEnabled) {
         super(
                 kvStateRegistry,
                 keySerializer,
                 userCodeClassLoader,
                 executionConfig,
                 ttlTimeProvider,
-                CachingKeyedStateBackend.buildLatencyTrackingConfig(metricGroup, executionConfig),
+                delegateKeyedStateBackend.getLatencyTrackingStateConfig(),
                 cancelStreamRegistry,
-                delegateKeyedStateBackend.getKeyGroupCompressionDecorator(),
                 delegateKeyedStateBackend.getKeyContext());
-
         this.delegateKeyedStateBackend = delegateKeyedStateBackend;
         this.l1EntryCacheSize = l1EntryCacheSize;
         this.l2EntryCacheSize = l2EntryCacheSize;
         this.maxActiveNamespaceOrPerKeyCacheContainers = maxActiveNamespaceOrPerKeyCacheContainers;
         this.maxCacheMemoryMb = maxCacheMemoryMb;
-        this.registeredStates = new ArrayList<>();
-        this.cachePolicyType = cachePolicyType;
-        this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
-        this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
-        this.metricGroup = metricGroup;
-        this.mapCacheHitRateThreshold = mapCacheHitRateThreshold;
-        this.mapCacheHitRateWindowSize = mapCacheHitRateWindowSize;
-        this.mapCacheMinAccessesForBypassCheck = mapCacheMinAccessesForBypassCheck;
-        this.mapKeyPresenceCacheEnabled = mapKeyPresenceCacheEnabled;
-        this.mapBypassEnabled = mapBypassEnabled;
-
-        // Initialize memory capping fields
-        this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
-        this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
-        // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
-
-        this.registeredPqs = new ArrayList<>();
-    }
-
-    // create a new RocksDB backend
-    public CachingKeyedStateBackend(
-            ClassLoader userCodeClassLoader,
-            File instanceBasePath,
-            RocksDBResourceContainer optionsContainer,
-            Function<String, ColumnFamilyOptions> columnFamilyOptionsFactory,
-            TaskKvStateRegistry kvStateRegistry,
-            TypeSerializer<K> keySerializer,
-            ExecutionConfig executionConfig,
-            TtlTimeProvider ttlTimeProvider,
-            LatencyTrackingStateConfig latencyTrackingStateConfig,
-            RocksDB db,
-            LinkedHashMap<String, RocksDBKeyedStateBackend.RocksDbKvStateInfo> kvStateInformation,
-            Map<String, HeapPriorityQueueSnapshotRestoreWrapper<?>> registeredPQStates,
-            int keyGroupPrefixBytes,
-            CloseableRegistry cancelStreamRegistry,
-            StreamCompressionDecorator keyGroupCompressionDecorator,
-            ResourceGuard rocksDBResourceGuard,
-            RocksDBSnapshotStrategyBase<K, ?> checkpointSnapshotStrategy,
-            RocksDBWriteBatchWrapper writeBatchWrapper,
-            ColumnFamilyHandle defaultColumnFamilyHandle,
-            RocksDBNativeMetricMonitor nativeMetricMonitor,
-            SerializedCompositeKeyBuilder<K> sharedRocksKeyBuilder,
-            PriorityQueueSetFactory priorityQueueFactory,
-            RocksDbTtlCompactFiltersManager ttlCompactFiltersManager,
-            InternalKeyContext<K> keyContext,
-            @Nonnegative long writeBatchSize,
-            MetricGroup metricGroup,
-            @Nonnull Collection<KeyedStateHandle> stateHandles,
-            int l1EntryCacheSize,
-            int l2EntryCacheSize,
-            int maxActiveNamespaceOrPerKeyCacheContainers,
-            long maxCacheMemoryMb,
-            CachingStateBackendFactory.CachePolicyType cachePolicyType,
-            int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
-            double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
-            boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled
-    ) {
-        // Call super constructor first, using direct parameters where available
-        super(
-                kvStateRegistry,
-                keySerializer,
-                userCodeClassLoader, // direct parameter
-                executionConfig,
-                ttlTimeProvider,
-                latencyTrackingStateConfig, // direct parameter
-                cancelStreamRegistry, // direct parameter
-                keyGroupCompressionDecorator, // direct parameter
-                keyContext); // direct parameter
-
-        // Now initialize the delegateKeyedStateBackend
-        this.delegateKeyedStateBackend = new RocksDBKeyedStateBackend<K>(
-                userCodeClassLoader,
-                instanceBasePath,
-                optionsContainer,
-                columnFamilyOptionsFactory,
-                kvStateRegistry,
-                keySerializer,
-                executionConfig,
-                ttlTimeProvider,
-                latencyTrackingStateConfig,
-                db,
-                kvStateInformation,
-                registeredPQStates,
-                keyGroupPrefixBytes,
-                cancelStreamRegistry,
-                keyGroupCompressionDecorator,
-                rocksDBResourceGuard,
-                checkpointSnapshotStrategy,
-                writeBatchWrapper,
-                defaultColumnFamilyHandle,
-                nativeMetricMonitor,
-                sharedRocksKeyBuilder,
-                priorityQueueFactory,
-                ttlCompactFiltersManager,
-                keyContext,
-                writeBatchSize
-        );
-        this.metricGroup = metricGroup;
-
-        this.l1EntryCacheSize = l1EntryCacheSize;
-        this.l2EntryCacheSize = l2EntryCacheSize;
-        this.maxActiveNamespaceOrPerKeyCacheContainers = maxActiveNamespaceOrPerKeyCacheContainers;
-        this.maxCacheMemoryMb = maxCacheMemoryMb;
-        this.registeredStates = new ArrayList<>();
         this.cachePolicyType = cachePolicyType;
         this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
         this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
@@ -275,123 +156,104 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapCacheMinAccessesForBypassCheck = mapCacheMinAccessesForBypassCheck;
         this.mapKeyPresenceCacheEnabled = mapKeyPresenceCacheEnabled;
         this.mapBypassEnabled = mapBypassEnabled;
-
-        // Initialize memory capping fields
-        this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
-        this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
-        // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
-
+        this.valueCacheHitRateThreshold = valueCacheHitRateThreshold;
+        this.valueCacheHitRateWindowSize = valueCacheHitRateWindowSize;
+        this.valueCacheMinAccessesForBypassCheck = valueCacheMinAccessesForBypassCheck;
+        this.valueBypassEnabled = valueBypassEnabled;
+        this.registeredStates = new ArrayList<>();
         this.registeredPqs = new ArrayList<>();
+        this.registeredStatesMap = new HashMap<>();
+        this.currentEstimatedCacheSizeBytes = new AtomicLong(0);
+        this.maxConfiguredCacheSizeBytes = maxCacheMemoryMb * 1024L * 1024L;
     }
 
     public int getMaxActiveNamespaceOrPerKeyCacheContainers() {
         return maxActiveNamespaceOrPerKeyCacheContainers;
     }
 
-    @Nonnull
     @Override
-    @SuppressWarnings({
-        "unchecked",
-        "rawtypes"
-    }) // V_SD is the value in StateDescriptor, UK/UV for Map, V_ELE for List
+    @SuppressWarnings({"unchecked", "rawtypes"}) // V_SD is the value in StateDescriptor, UK/UV for Map, V_ELE for List
     public <N, S extends State, V_SD> S getOrCreateKeyedState(
             TypeSerializer<N> namespaceSerializer, StateDescriptor<S, V_SD> stateDescriptor)
             throws Exception {
-
-        // Check if a caching state for this descriptor already exists
-        synchronized(registeredStates) {
-            for (CachingInternalState<K, ?, ?, ?> registeredState : registeredStates) {
-                // This check needs to be robust. Comparing delegate state might be one way,
-                // or comparing based on state name and namespace serializer.
-                // For now, assume getDelegateState().getDescriptorName() or similar is available or use state name
-                if (registeredState.getDelegateState() instanceof InternalKvState) {
-                    // This comparison is a bit simplistic and might need refinement based on how InternalKvState identifies itself
-                    // For instance, comparing state names might be more direct if delegate state holds its descriptor name
-                    Object delegateFromRegistered = registeredState.getDelegateState();
-                    // A more robust check would be needed here, potentially involving the state descriptor name and type.
-                    // This is a placeholder for a proper check to see if the state is already created and cached.
-                    // For this example, let's assume we need to create it if not found via a more specific lookup.
-                }
-            }
+        State state =
+                registeredStatesMap.get(stateDescriptor.getName()); // Use Flink's StateDescriptor name as unique key for state registration
+        if (state != null) {
+            return (S) state;
         }
-
-        S actualState = delegateKeyedStateBackend.getOrCreateKeyedState(namespaceSerializer, stateDescriptor);
-
-        if (!(actualState instanceof InternalKvState)) {
-            return actualState; // Return directly if not an InternalKvState, cannot cache
-        }
-
-        InternalKvState<K, N, ?> actualStateRaw = (InternalKvState<K, N, ?>) actualState;
-        CachingInternalState<K, N, ?, ?> cachingStateToRegister = null;
-
-        if (stateDescriptor.getType() == StateDescriptor.Type.VALUE && actualStateRaw instanceof InternalValueState) {
-            InternalValueState<K, N, V_SD> actualStateValue = (InternalValueState<K, N, V_SD>) actualStateRaw;
-            cachingStateToRegister = new CachingInternalValueState<>(
-                    actualStateValue, this, l1EntryCacheSize, l2EntryCacheSize,
-                    maxActiveNamespaceOrPerKeyCacheContainers, this.maxCacheMemoryMb, this.cachePolicyType,
-                    0.0, 0, 0, false, this.metricGroup.addGroup("state").addGroup(stateDescriptor.getName()).addGroup("cache"));
-        } else if (stateDescriptor.getType() == StateDescriptor.Type.MAP && actualStateRaw instanceof InternalMapState) {
-            InternalMapState<K, N, ?, ?> actualDelegateMapState = (InternalMapState<K, N, ?, ?>) actualStateRaw;
-            String stateName = stateDescriptor.getName(); // Get state name for metrics
-            MetricGroup mapMetricsGroup = this.metricGroup.addGroup("state").addGroup(stateName).addGroup("cache");
-
-            cachingStateToRegister = new CachingInternalMapState<>(
-                    actualDelegateMapState, this, l1EntryCacheSize, l2EntryCacheSize,
-                    maxActiveNamespaceOrPerKeyCacheContainers, this.maxCacheMemoryMb, this.cachePolicyType,
-                    this.mapL1KeyPresenceCacheSize, this.mapL2KeyPresenceCacheSize,
-                    mapMetricsGroup,
-                    this.mapCacheHitRateThreshold, this.mapCacheHitRateWindowSize, this.mapCacheMinAccessesForBypassCheck,
-                    this.mapKeyPresenceCacheEnabled, this.mapBypassEnabled);
-        } else if (stateDescriptor.getType() == StateDescriptor.Type.LIST && actualStateRaw instanceof InternalListState) {
-            InternalListState<K, N, V_SD> actualDelegateListState = (InternalListState<K, N, V_SD>) actualStateRaw;
-            cachingStateToRegister = new CachingInternalListState<>(
-                    actualDelegateListState, this, l1EntryCacheSize, l2EntryCacheSize,
-                    maxActiveNamespaceOrPerKeyCacheContainers, this.cachePolicyType); // Max memory mb was missing here for list
-        } else if (stateDescriptor.getType() == StateDescriptor.Type.AGGREGATING && actualStateRaw instanceof InternalAggregatingState) {
-            InternalAggregatingState actualDelegateAggState = (InternalAggregatingState) actualStateRaw;
-            AggregatingStateDescriptor aggStateDesc = (AggregatingStateDescriptor) stateDescriptor;
-            String stateName = aggStateDesc.getName();
-            MetricGroup aggMetricsGroup = this.metricGroup.addGroup("state").addGroup(stateName).addGroup("cache");
-            cachingStateToRegister = new CachingInternalAggregatingState(
-                actualDelegateAggState,
-                this,
-                aggStateDesc.getAggregateFunction(),
-                l1EntryCacheSize,
-                l2EntryCacheSize,
-                this.cachePolicyType,
-                aggMetricsGroup);
+        final State createdState;
+        if (stateDescriptor instanceof ValueStateDescriptor) {
+            createdState =
+                    new CachingInternalValueState<>(
+                            (InternalValueState<K, N, V_SD>)
+                                    delegateKeyedStateBackend.getOrCreateKeyedState(
+                                            namespaceSerializer, stateDescriptor),
+                            this,
+                            l1EntryCacheSize,
+                            l2EntryCacheSize,
+                            maxActiveNamespaceOrPerKeyCacheContainers,
+                            maxCacheMemoryMb,
+                            cachePolicyType,
+                            valueCacheHitRateThreshold,
+                            valueCacheHitRateWindowSize,
+                            valueCacheMinAccessesForBypassCheck,
+                            valueBypassEnabled);
+        } else if (stateDescriptor instanceof ListStateDescriptor) {
+            createdState =
+                    new CachingInternalListState<>(
+                            (InternalListState<K, N, V_SD>)
+                                    delegateKeyedStateBackend.getOrCreateKeyedState(
+                                            namespaceSerializer, stateDescriptor),
+                            this,
+                            l1EntryCacheSize,
+                            l2EntryCacheSize,
+                            maxActiveNamespaceOrPerKeyCacheContainers,
+                            cachePolicyType);
+        } else if (stateDescriptor instanceof MapStateDescriptor) {
+            MapStateDescriptor<?, ?> mapStateDescriptor = (MapStateDescriptor<?, ?>) stateDescriptor;
+            createdState =
+                    new CachingInternalMapState<K, N, Object, Object>(
+                            (InternalMapState<K, N, Object, Object>)
+                                    delegateKeyedStateBackend.getOrCreateKeyedState(
+                                            namespaceSerializer, stateDescriptor),
+                            this,
+                            l1EntryCacheSize,
+                            l2EntryCacheSize,
+                            maxActiveNamespaceOrPerKeyCacheContainers,
+                            maxCacheMemoryMb,
+                            cachePolicyType,
+                            mapL1KeyPresenceCacheSize,
+                            mapL2KeyPresenceCacheSize,
+                            mapCacheHitRateThreshold,
+                            mapCacheHitRateWindowSize,
+                            mapCacheMinAccessesForBypassCheck,
+                            mapKeyPresenceCacheEnabled,
+                            mapBypassEnabled);
+        } else if (stateDescriptor instanceof AggregatingStateDescriptor) {
+            createdState =
+                    new CachingInternalAggregatingState<>(
+                            (InternalAggregatingState<K, N, Object, Object, Object>)
+                                    delegateKeyedStateBackend.getOrCreateKeyedState(
+                                            namespaceSerializer, stateDescriptor),
+                            this,
+                            ((AggregatingStateDescriptor) stateDescriptor).getAggregateFunction(),
+                            l1EntryCacheSize,
+                            l2EntryCacheSize,
+                            cachePolicyType);
         } else {
-            // For unsupported types or if actualStateRaw is not an instance of the expected internal type,
-            // return the raw state from the delegate directly.
-            LOG.warn("State type {} not supported for caching or type mismatch. Returning raw state.", stateDescriptor.getType());
-            return (S) actualStateRaw;
+            createdState =
+                    delegateKeyedStateBackend.getOrCreateKeyedState(
+                            namespaceSerializer, stateDescriptor);
         }
-
-        if (cachingStateToRegister != null) {
-            synchronized (registeredStates) {
-                boolean alreadyExists = registeredStates.stream()
-                        .anyMatch(st -> st.getDelegateState() == actualStateRaw);
-                if (!alreadyExists) {
-                    registeredStates.add(cachingStateToRegister);
-                }
-            }
-            return (S) cachingStateToRegister;
-        } else {
-             // Should not happen if logic above is correct and creates a caching wrapper
-            LOG.error("Failed to create a caching wrapper for a supported state type: {}", stateDescriptor.getType());
-            return (S) actualStateRaw; // Fallback, though indicates an issue
+        if (createdState instanceof CachingInternalState) {
+            registerCachingState((CachingInternalState) createdState);
         }
+        registeredStatesMap.put(stateDescriptor.getName(), createdState);
+        return (S) createdState;
     }
 
     private void registerCachingState(CachingInternalState<K, ?, ?, ?> cachingState) {
-        synchronized (registeredStates) {
-            boolean alreadyExists =
-                    registeredStates.stream()
-                            .anyMatch(st -> st.getDelegateState() == cachingState.getDelegateState());
-            if (!alreadyExists) {
-                registeredStates.add(cachingState);
-            }
-        }
+        registeredStates.add(cachingState);
     }
 
     // --- Methods to delegate to underlyingKeyedStateBackend ---
@@ -421,6 +283,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             registeredStates.clear();
         }
         registeredPqs.clear();
+        registeredStatesMap.clear();
     }
 
     @Nonnull
@@ -650,31 +513,24 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     }
 
     private static LatencyTrackingStateConfig buildLatencyTrackingConfig(
-            MetricGroup metricGroup, ExecutionConfig executionConfig) {
+            ExecutionConfig executionConfig) {
         return LatencyTrackingStateConfig.newBuilder()
-                .setEnabled(
-                        executionConfig.isLatencyTrackingConfigured()
-                                && executionConfig
-                                .getLatencyTrackingInterval() > 0)
+                .setEnabled(executionConfig.isLatencyTrackingConfigured())
                 .setSampleInterval((int) executionConfig.getLatencyTrackingInterval())
-                .setMetricGroup(metricGroup)
+                .setHistorySize(128) // default value, not exposed in ExecutionConfig
                 .build();
     }
 
     public void reportCacheMemoryAdded(long sizeBytes) {
-        if (maxCacheMemoryMb > 0) {
-            long newSize = currentEstimatedCacheSizeBytes.addAndGet(sizeBytes);
-            if (newSize > maxConfiguredCacheSizeBytes) {
-                checkAndTriggerGlobalEviction();
-            }
+        long currentSize = currentEstimatedCacheSizeBytes.addAndGet(sizeBytes);
+        if (currentSize > maxConfiguredCacheSizeBytes) {
+            checkAndTriggerGlobalEviction();
         }
     }
 
     public void reportCacheMemoryReleased(long sizeBytes) {
-        if (maxCacheMemoryMb > 0) {
-            currentEstimatedCacheSizeBytes.addAndGet(-sizeBytes);
-            checkAndTriggerGlobalEviction();
-        }
+        currentEstimatedCacheSizeBytes.addAndGet(-sizeBytes);
+        checkAndTriggerGlobalEviction();
     }
 
     private void checkAndTriggerGlobalEviction() {
@@ -755,12 +611,10 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
      * call this once at the end of their mini-batch loop to persist the batch atomically to the
      * underlying backend (RocksDB). It is <b>cheap</b>; if nothing is dirty nothing is written.
      */
-    public void flushOnMiniBatchEnd() throws java.io.IOException {
-        for (CachingKeyGroupedInternalPriorityQueue<?> pq : registeredPqs) {
-            pq.flush();
-        }
-        for (CachingInternalState<K, ?, ?, ?> cachingState : registeredStates) {
-            cachingState.flushOnMiniBatchEnd();
+    public void flushOnMiniBatchEnd() throws Exception {
+        // This is where we flush all buffered writes for registered states.
+        for (CachingInternalState<K, ?, ?, ?> state : registeredStates) {
+            state.flushToUnderlyingState();
         }
     }
 }

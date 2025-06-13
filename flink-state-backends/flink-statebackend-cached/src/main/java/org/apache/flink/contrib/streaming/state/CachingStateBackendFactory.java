@@ -117,6 +117,27 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .booleanType()
                     .defaultValue(true);
 
+    // ---------------- Value cache specific configs -------------------
+    public static final ConfigOption<Double> VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG =
+            ConfigOptions.key("state.backend.cached.value.hit-rate.threshold")
+                    .doubleType()
+                    .defaultValue(0.0);
+
+    public static final ConfigOption<Long> VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG =
+            ConfigOptions.key("state.backend.cached.value.hit-rate.window-size")
+                    .longType()
+                    .defaultValue(1000L);
+
+    public static final ConfigOption<Long> VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG =
+            ConfigOptions.key("state.backend.cached.value.min-accesses-for-bypass-check")
+                    .longType()
+                    .defaultValue(100L);
+
+    public static final ConfigOption<Boolean> VALUE_BYPASS_ENABLED_CONFIG =
+            ConfigOptions.key("state.backend.cached.value.bypass.enabled")
+                    .booleanType()
+                    .defaultValue(true);
+
     // Potentially, a config for delegate backend factory if it's not hardcoded to RocksDB
     // For now, assumes RocksDBStateBackend is the default delegate and is configured using its own
     // factory/options.
@@ -200,16 +221,29 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
         // AbstractKeyedStateBackend.");
         // }
 
-        // Call the CachingStateBackend constructor with matching types (StateBackend, long, long,
-        // long)
-        // delegateBackend is already StateBackend. l1CacheSize, l2CacheSize, maxActiveNamespaces
-        // are already long.
+        // For value-cache related settings, we reuse the map-related ones as sensible defaults unless explicit config options are later added.
+        double valueCacheHitRateThreshold = config.get(VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG);
+        long valueCacheHitRateWindowSize = config.get(VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
+        long valueCacheMinAccessesForBypassCheck = config.get(VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
+        boolean valueBypassEnabled = config.get(VALUE_BYPASS_ENABLED_CONFIG);
+
         return new CachingStateBackend(
-                        delegateBackend, l1CacheSize, l2CacheSize, maxActiveNamespaces,
-                        maxCacheMemoryMb, cachePolicy,
-                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize,
-                        mapCacheHitRateThreshold, mapCacheHitRateWindowSize, mapCacheMinAccessesForBypassCheck,
+                        delegateBackend,
+                        l1CacheSize,
+                        l2CacheSize,
+                        maxActiveNamespaces,
+                        maxCacheMemoryMb,
+                        cachePolicy,
+                        mapL1KeyPresenceCacheSize,
+                        mapL2KeyPresenceCacheSize,
+                        mapCacheHitRateThreshold,
+                        mapCacheHitRateWindowSize,
+                        mapCacheMinAccessesForBypassCheck,
                         mapKeyPresenceCacheEnabled,
-                        mapBypassEnabled);
+                        mapBypassEnabled,
+                        valueCacheHitRateThreshold,
+                        valueCacheHitRateWindowSize,
+                        valueCacheMinAccessesForBypassCheck,
+                        valueBypassEnabled);
     }
 }

@@ -1,5 +1,25 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package org.apache.flink.contrib.streaming.state;
 
+import java.lang.reflect.Field;
+import java.util.*;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
@@ -20,8 +40,6 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.lang.reflect.Field;
-import java.util.*;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -88,7 +106,6 @@ class CachingKeyedStateBackendMiniBatchTest {
                 getClass().getClassLoader(),
                 execConf,
                 ttl,
-                metrics,
                 Collections.emptyList(),
                 cancelReg,
                 mockAbstractDelegateBackend,
@@ -97,10 +114,17 @@ class CachingKeyedStateBackendMiniBatchTest {
                 maxNs,
                 maxMemMb,
                 policy,
-                /* map presence cache sizes */ 2, 2,
-                /* bypass params */0.0, 5, 10,
-                /* presence cache enabled */ false,
-                /* bypass enabled */ false);
+                2,
+                2,
+                0.0,
+                5L,
+                10L,
+                false,
+                false,
+                0.0,
+                5L,
+                10L,
+                false);
 
         cachingBackend.setCurrentKey(KEY);
 
@@ -137,14 +161,13 @@ class CachingKeyedStateBackendMiniBatchTest {
                 cachingBackend,
                 l1Size,
                 l2Size,
-                /* max flink keys per ns*/2,
+                2,
                 maxMemMb,
                 policy,
-                /* presence cache sizes */2,2,
-                stateMetrics,
-                /* bypass params */0.0,5,10,
-                /* presence cache disabled */false,
-                /* bypass disabled */false);
+                2,2,
+                0.0,5,10,
+                false,
+                false);
         cachingMapState.setCurrentNamespace(NAMESPACE);
 
         // Value State
@@ -156,9 +179,8 @@ class CachingKeyedStateBackendMiniBatchTest {
                 maxNs,
                 maxMemMb,
                 policy,
-                /* bypass params */0.0,5,10,
-                /* bypassEnabled */false,
-                stateMetrics);
+                0.0,5,10,
+                false);
         cachingValueState.setCurrentNamespace(NAMESPACE);
 
         // List State
@@ -184,8 +206,7 @@ class CachingKeyedStateBackendMiniBatchTest {
                 aggFn,
                 l1Size,
                 l2Size,
-                policy,
-                stateMetrics);
+                policy);
         cachingAggState.setCurrentNamespace(NAMESPACE);
 
         // ---- Register states with backend via reflection --------------------

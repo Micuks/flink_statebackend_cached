@@ -24,6 +24,7 @@ import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
@@ -40,11 +41,11 @@ import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 
 
-
 /**
  * A state backend that wraps another state backend (e.g., RocksDBStateBackend) to provide an L1/L2
  * caching layer for deserialized objects.
  */
+@SuppressWarnings("deprecation")
 public class CachingStateBackend extends AbstractStateBackend
         implements ConfigurableStateBackend, CheckpointStorage {
 
@@ -65,6 +66,13 @@ public class CachingStateBackend extends AbstractStateBackend
     private final boolean mapKeyPresenceCacheEnabled;
     private final boolean mapBypassEnabled;
 
+    private final double valueCacheHitRateThreshold;
+    private final long valueCacheHitRateWindowSize;
+    private final long valueCacheMinAccessesForBypassCheck;
+    private final boolean valueBypassEnabled;
+
+    private final CheckpointStorage checkpointStorage;
+
     public CachingStateBackend(
             StateBackend delegateBackend,
             long l1CacheSize,
@@ -74,7 +82,17 @@ public class CachingStateBackend extends AbstractStateBackend
             long mapL1KeyPresenceCacheSize, long mapL2KeyPresenceCacheSize,
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
             boolean mapKeyPresenceCacheEnabled,
-            boolean mapBypassEnabled) {
+            boolean mapBypassEnabled,
+            double valueCacheHitRateThreshold,
+            long valueCacheHitRateWindowSize,
+            long valueCacheMinAccessesForBypassCheck,
+            boolean valueBypassEnabled) {
+        if (delegateBackend instanceof CheckpointStorage) {
+            this.checkpointStorage = (CheckpointStorage) delegateBackend;
+        } else {
+            this.checkpointStorage = null;
+        }
+
         this.delegateBackend = delegateBackend;
         this.l1CacheSize = l1CacheSize;
         this.l2CacheSize = l2CacheSize;
@@ -89,65 +107,50 @@ public class CachingStateBackend extends AbstractStateBackend
         this.mapKeyPresenceCacheEnabled = mapKeyPresenceCacheEnabled;
         this.mapBypassEnabled = mapBypassEnabled;
 
+        this.valueCacheHitRateThreshold = valueCacheHitRateThreshold;
+        this.valueCacheHitRateWindowSize = valueCacheHitRateWindowSize;
+        this.valueCacheMinAccessesForBypassCheck = valueCacheMinAccessesForBypassCheck;
+        this.valueBypassEnabled = valueBypassEnabled;
+
         if (!(delegateBackend instanceof AbstractStateBackend)) {
             System.err.println(
                     "Warning: CachingStateBackend delegate is not an AbstractStateBackend. Some features like checkpoint resolution might fail if not overridden by the specific StateBackend implementation.");
         }
     }
 
-    @Override
-    public <K> AbstractKeyedStateBackend<K> createKeyedStateBackend(
-            Environment env,
-            JobID jobID,
-            String operatorIdentifier,
-            TypeSerializer<K> keySerializer,
-            int numberOfKeyGroups,
-            KeyGroupRange keyGroupRange,
-            TaskKvStateRegistry kvStateRegistry,
-            TtlTimeProvider ttlTimeProvider,
-            MetricGroup metricGroup,
-            @Nonnull Collection<KeyedStateHandle> stateHandles,
-            CloseableRegistry cancelStreamRegistry)
-            throws IOException {
-
-        AbstractKeyedStateBackend<K> delegateKeyedStateBackend;
-        try {
-            delegateKeyedStateBackend =
-                    (AbstractKeyedStateBackend<K>)
-                            delegateBackend.createKeyedStateBackend(
-                                    env,
-                                    jobID,
-                                    operatorIdentifier,
-                                    keySerializer,
-                                    numberOfKeyGroups,
-                                    keyGroupRange,
-                                    kvStateRegistry,
-                                    ttlTimeProvider,
-                                    metricGroup,
-                                    stateHandles,
-                                    cancelStreamRegistry);
-        } catch (Exception e) {
-            throw new IOException("Failed to create delegate keyed state backend", e);
-        }
-
-        return new CachingKeyedStateBackend<K>(
-                kvStateRegistry,
-                keySerializer,
-                env.getUserCodeClassLoader().asClassLoader(),
-                env.getExecutionConfig(),
-                ttlTimeProvider,
-                metricGroup,
-                stateHandles,
-                cancelStreamRegistry,
-                delegateKeyedStateBackend,
-                (int) l1CacheSize,
-                (int) l2CacheSize,
-                (int) maxActiveNamespaces,
-                this.maxCacheMemoryMb, this.cachePolicyType,
-                (int) this.mapL1KeyPresenceCacheSize, (int) this.mapL2KeyPresenceCacheSize,
-                this.mapCacheHitRateThreshold, this.mapCacheHitRateWindowSize, this.mapCacheMinAccessesForBypassCheck,
-                this.mapKeyPresenceCacheEnabled,
-                this.mapBypassEnabled);
+    // Backwards-compat constructor (without value-cache specific parameters)
+    public CachingStateBackend(
+            StateBackend delegateBackend,
+            long l1CacheSize,
+            long l2CacheSize,
+            long maxActiveNamespaces,
+            long maxCacheMemoryMb,
+            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            long mapL1KeyPresenceCacheSize,
+            long mapL2KeyPresenceCacheSize,
+            double mapCacheHitRateThreshold,
+            long mapCacheHitRateWindowSize,
+            long mapCacheMinAccessesForBypassCheck,
+            boolean mapKeyPresenceCacheEnabled,
+            boolean mapBypassEnabled) {
+        this(
+                delegateBackend,
+                l1CacheSize,
+                l2CacheSize,
+                maxActiveNamespaces,
+                maxCacheMemoryMb,
+                cachePolicyType,
+                mapL1KeyPresenceCacheSize,
+                mapL2KeyPresenceCacheSize,
+                mapCacheHitRateThreshold,
+                mapCacheHitRateWindowSize,
+                mapCacheMinAccessesForBypassCheck,
+                mapKeyPresenceCacheEnabled,
+                mapBypassEnabled,
+                mapCacheHitRateThreshold, // reuse map settings for value cache
+                mapCacheHitRateWindowSize,
+                mapCacheMinAccessesForBypassCheck,
+                mapBypassEnabled);
     }
 
     @Override
@@ -241,9 +244,104 @@ public class CachingStateBackend extends AbstractStateBackend
         return mapBypassEnabled;
     }
 
+    public double getValueCacheHitRateThreshold() {
+        return valueCacheHitRateThreshold;
+    }
+
+    public long getValueCacheHitRateWindowSize() {
+        return valueCacheHitRateWindowSize;
+    }
+
+    public long getValueCacheMinAccessesForBypassCheck() {
+        return valueCacheMinAccessesForBypassCheck;
+    }
+
+    public boolean isValueBypassEnabled() {
+        return valueBypassEnabled;
+    }
+
     @Override
     public StateBackend configure(ReadableConfig config, ClassLoader classLoader)
             throws IllegalConfigurationException {
-        return this;
+        // This is a bit of a hack to make it configurable, but we need to maintain binary
+        // compatibility.
+        try {
+            return new CachingStateBackendFactory().createFromConfig(config, classLoader);
+        } catch (IOException e) {
+            throw new IllegalConfigurationException(
+                    "Failed to create caching state backend from config.", e);
+        }
     }
-}
+
+    // ------------------------------------------------------------------
+    //  Flink 1.16 Keyed State Backend API
+    // ------------------------------------------------------------------
+
+    @Override
+    public <K> AbstractKeyedStateBackend<K> createKeyedStateBackend(
+            Environment env,
+            JobID jobID,
+            String operatorIdentifier,
+            TypeSerializer<K> keySerializer,
+            int numberOfKeyGroups,
+            KeyGroupRange keyGroupRange,
+            TaskKvStateRegistry kvStateRegistry,
+            TtlTimeProvider ttlTimeProvider,
+            MetricGroup metricGroup,
+            @Nonnull Collection<KeyedStateHandle> stateHandles,
+            CloseableRegistry cancelStreamRegistry)
+            throws IOException {
+        AbstractKeyedStateBackend<K> delegateKeyedStateBackend;
+        if (delegateBackend instanceof AbstractStateBackend) {
+            try {
+                delegateKeyedStateBackend =
+                        ((AbstractStateBackend) delegateBackend)
+                                .createKeyedStateBackend(
+                                        env,
+                                        jobID,
+                                        operatorIdentifier,
+                                        keySerializer,
+                                        numberOfKeyGroups,
+                                        keyGroupRange,
+                                        kvStateRegistry,
+                                        ttlTimeProvider,
+                                        new UnregisteredMetricsGroup(),
+                                        stateHandles,
+                                        cancelStreamRegistry);
+            } catch (Exception e) {
+                throw new IOException("Failed to create delegate keyed state backend.", e);
+            }
+        } else {
+            throw new IllegalStateException(
+                    "Delegate backend of type "
+                            + delegateBackend.getClass().getName()
+                            + " is not an instance of AbstractStateBackend.");
+        }
+
+        return new CachingKeyedStateBackend<>(
+                kvStateRegistry,
+                keySerializer,
+                (ClassLoader) env.getUserCodeClassLoader(),
+                env.getExecutionConfig(),
+                ttlTimeProvider,
+                stateHandles,
+                cancelStreamRegistry,
+                delegateKeyedStateBackend,
+                (int) l1CacheSize,
+                (int) l2CacheSize,
+                (int) maxActiveNamespaces,
+                maxCacheMemoryMb,
+                cachePolicyType,
+                (int) mapL1KeyPresenceCacheSize,
+                (int) mapL2KeyPresenceCacheSize,
+                mapCacheHitRateThreshold,
+                mapCacheHitRateWindowSize,
+                mapCacheMinAccessesForBypassCheck,
+                mapKeyPresenceCacheEnabled,
+                mapBypassEnabled,
+                valueCacheHitRateThreshold,
+                valueCacheHitRateWindowSize,
+                valueCacheMinAccessesForBypassCheck,
+                valueBypassEnabled);
+    }
+} 

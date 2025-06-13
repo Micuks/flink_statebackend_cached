@@ -18,20 +18,14 @@
 
 package org.apache.flink.contrib.streaming.state;
 
-import org.apache.flink.api.common.ExecutionConfig;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.core.fs.CloseableRegistry;
-import org.apache.flink.metrics.MetricGroup;
-import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
-import org.apache.flink.runtime.query.TaskKvStateRegistry;
+import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
-import org.apache.flink.runtime.state.KeyGroupRange;
-import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
-import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
-import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
-
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -39,11 +33,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-
-import java.io.IOException;
-import java.util.Collections;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -57,6 +46,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
+/** Test suite for {@link CachingInternalValueState}. */
 @ExtendWith(MockitoExtension.class)
 class CachingInternalValueStateTest {
 
@@ -81,71 +71,34 @@ class CachingInternalValueStateTest {
     private CachingStateBackendFactory.CachePolicyType currentCachePolicyType;
 
     static Stream<CachingStateBackendFactory.CachePolicyType> cachePolicies() {
-        return Stream.of(CachingStateBackendFactory.CachePolicyType.LRU, CachingStateBackendFactory.CachePolicyType.TINYLFU);
+        return Stream.of(
+                CachingStateBackendFactory.CachePolicyType.LRU,
+                CachingStateBackendFactory.CachePolicyType.TINYLFU);
     }
 
     @BeforeEach
     void setUp() {
-        if (currentCachePolicyType == null) {
-            currentCachePolicyType = CachingStateBackendFactory.CachePolicyType.LRU;
-        }
-        TaskKvStateRegistry kvStateRegistry = mock(TaskKvStateRegistry.class);
-        ExecutionConfig executionConfig = new ExecutionConfig();
-        TtlTimeProvider ttlTimeProvider = TtlTimeProvider.DEFAULT;
-        MetricGroup metricGroup = new UnregisteredMetricsGroup();
-        CloseableRegistry cancelStreamRegistry = new CloseableRegistry();
+        // Default to LRU for tests not needing a specific policy
+        setPolicyAndSetup(CachingStateBackendFactory.CachePolicyType.LRU);
+    }
 
-        lenient().when(mockKeySerializer.duplicate()).thenReturn(mockKeySerializer);
-        lenient()
-                .when(mockAbstractKeyedStateBackendDelegate.getKeySerializer())
-                .thenReturn(mockKeySerializer);
+    private CachingKeyedStateBackend<String> createKeyedStateBackend(
+            AbstractKeyedStateBackend<String> delegate) {
+        Configuration config = new Configuration();
+        config.set(CachingStateBackendFactory.L1_CACHE_SIZE_CONFIG, (long) l1CacheSize);
+        config.set(CachingStateBackendFactory.L2_CACHE_SIZE_CONFIG, (long) l2CacheSize);
+        config.set(
+                CachingStateBackendFactory.MAX_ACTIVE_NAMESPACES_CONFIG,
+                (long) maxActiveNamespaces);
+        config.set(CachingStateBackendFactory.CACHE_POLICY_CONFIG, currentCachePolicyType);
+        return new CachingKeyedStateBackendBuilder<String>(delegate, config).build();
+    }
 
-        KeyGroupRange keyGroupRange = new KeyGroupRange(0, 15);
-        int numberOfKeyGroups = 16;
-        lenient()
-                .when(mockAbstractKeyedStateBackendDelegate.getKeyContext())
-                .thenReturn(
-                        new org.apache.flink.runtime.state.heap.InternalKeyContextImpl<>(
-                                keyGroupRange, numberOfKeyGroups));
-
-        long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
-        long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
-        double mapCacheHitRateThreshold = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
-        long mapCacheHitRateWindowSize = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
-        long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
-        boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
-        boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
-
-        cachingKeyedStateBackend =
-                new CachingKeyedStateBackend<String>(
-                        kvStateRegistry,
-                        mockKeySerializer,
-                        CachingInternalValueStateTest.class.getClassLoader(),
-                        executionConfig,
-                        ttlTimeProvider,
-                        metricGroup,
-                        Collections.<KeyedStateHandle>emptyList(),
-                        cancelStreamRegistry,
-                        mockAbstractKeyedStateBackendDelegate,
-                        l1CacheSize,
-                        l2CacheSize,
-                        maxActiveNamespaces,
-                        10L,
-                        currentCachePolicyType,
-                        (int) mapL1KeyPresenceCacheSize,
-                        (int) mapL2KeyPresenceCacheSize,
-                        mapCacheHitRateThreshold,
-                        mapCacheHitRateWindowSize,
-                        mapCacheMinAccessesForBypassCheck,
-                        mapKeyPresenceCacheEnabled,
-                        mapBypassEnabled
-                        );
-        cachingKeyedStateBackend.setCurrentKey(testKey);
-
-        lenient().when(mockDelegateState.getKeySerializer()).thenReturn(mockKeySerializer);
-        lenient().when(mockDelegateState.getNamespaceSerializer()).thenReturn(mockNamespaceSerializer);
-        lenient().when(mockDelegateState.getValueSerializer()).thenReturn(mockValueSerializer);
-
+    private void setPolicyAndSetup(CachingStateBackendFactory.CachePolicyType policyType) {
+        currentCachePolicyType = policyType;
+        when(mockAbstractKeyedStateBackendDelegate.getKeySerializer())
+                .thenReturn(StringSerializer.INSTANCE);
+        cachingKeyedStateBackend = createKeyedStateBackend(mockAbstractKeyedStateBackendDelegate);
         cachingState =
                 new CachingInternalValueState<>(
                         mockDelegateState,
@@ -153,24 +106,21 @@ class CachingInternalValueStateTest {
                         l1CacheSize,
                         l2CacheSize,
                         maxActiveNamespaces,
-                        0L,
+                        10L,
                         currentCachePolicyType,
-                        mapCacheHitRateThreshold,
-                        mapCacheHitRateWindowSize,
-                        mapCacheMinAccessesForBypassCheck,
-                        mapBypassEnabled,
-                        new UnregisteredMetricsGroup());
-        cachingState.setCurrentNamespace(testNamespace);
-    }
-
-    private void setPolicyAndSetup(CachingStateBackendFactory.CachePolicyType policyType) {
-        this.currentCachePolicyType = policyType;
-        setUp();
+                        0.0,
+                        0L,
+                        0L,
+                        false);
+        when(mockDelegateState.getKeySerializer()).thenReturn(mockKeySerializer);
+        when(mockDelegateState.getNamespaceSerializer()).thenReturn(mockNamespaceSerializer);
+        when(mockDelegateState.getValueSerializer()).thenReturn(mockValueSerializer);
     }
 
     @ParameterizedTest
     @MethodSource("cachePolicies")
-    void testValueGet_cacheMiss_loadFromDelegate_populateL1(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+    void testValueGet_cacheMiss_loadFromDelegate_populateL1(
+            CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
         setPolicyAndSetup(policyType);
         when(mockDelegateState.value()).thenReturn(testValue1);
 

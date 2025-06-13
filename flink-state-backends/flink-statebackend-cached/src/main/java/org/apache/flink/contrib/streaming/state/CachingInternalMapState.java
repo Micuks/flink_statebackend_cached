@@ -19,16 +19,13 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
-import java.util.LinkedHashMap;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
-import org.apache.flink.metrics.Counter;
-import org.apache.flink.metrics.MetricGroup;
-import org.apache.flink.metrics.Gauge;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -84,17 +81,15 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     private volatile boolean bypassCache = false;
 
     // Metrics
-    private final transient MetricGroup metrics;
-    transient Counter l1ValueCacheHitCount;
-    transient Counter l1ValueCacheMissCount;
-    transient Counter l2ValueCacheHitCount;
-    transient Counter l2ValueCacheMissCount;
-    transient Counter l1PresenceCacheHitCount;
-    transient Counter l1PresenceCacheMissCount;
-    transient Counter l2PresenceCacheHitCount;
-    transient Counter l2PresenceCacheMissCount;
-    transient Counter delegateLookups;
-    private transient Gauge<Long> l1MapEntriesGauge;
+    transient AtomicLong l1ValueCacheHitCount;
+    transient AtomicLong l1ValueCacheMissCount;
+    transient AtomicLong l2ValueCacheHitCount;
+    transient AtomicLong l2ValueCacheMissCount;
+    transient AtomicLong l1PresenceCacheHitCount;
+    transient AtomicLong l1PresenceCacheMissCount;
+    transient AtomicLong l2PresenceCacheHitCount;
+    transient AtomicLong l2PresenceCacheMissCount;
+    transient AtomicLong delegateLookups;
 
     // Gauge for cache entries will be registered on a PerKeyMapCache basis if needed,
     // or globally if we aggregate across all PerKeyMapCaches (more complex).
@@ -338,17 +333,6 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         int l1PresenceCacheSize() { return keyPresenceCacheEnabled ? l1KeyPresenceCache.size() : 0; }
         int l2PresenceCacheSize() { return keyPresenceCacheEnabled ? l2KeyPresenceCache.size() : 0; }
 
-        void registerMetrics(MetricGroup group, K_F key, N_F namespace) {
-            String keyStr = key != null ? key.toString() : "nullKey";
-            String nsStr = namespace != null ? namespace.toString() : "nullNamespace";
-            MetricGroup perKeyCacheGroup = group.addGroup("key", keyStr).addGroup("namespace", nsStr);
-
-            perKeyCacheGroup.gauge("l1MapEntries", this::l1MapEntriesSize);
-            perKeyCacheGroup.gauge("l2MapEntries", this::l2MapEntriesSize);
-            perKeyCacheGroup.gauge("l1PresenceCacheEntries", this::l1PresenceCacheSize);
-            perKeyCacheGroup.gauge("l2PresenceCacheEntries", this::l2PresenceCacheSize);
-        }
-
         long getEstimatedMemoryUsageBytes() {
             long totalSize = 0;
             for (CacheEntry<UV_C> entry : l1MapEntries.values()) {
@@ -433,7 +417,6 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             int maxFlinkKeysWithActiveCachesPerNamespace, long maxCacheMemoryMb,
             CachingStateBackendFactory.CachePolicyType cachePolicyType,
             int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
-            MetricGroup metrics,
             double mapCacheHitRateThreshold,
             long mapCacheHitRateWindowSize,
             long mapCacheMinAccessesForBypassCheck,
@@ -527,34 +510,18 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             });
 
         // Metrics
-        this.metrics = metrics;
-        MetricGroup cacheMetrics = metrics.addGroup("cache");
-        this.l1ValueCacheHitCount = cacheMetrics.counter("l1ValueCacheHit");
-        this.l1ValueCacheMissCount = cacheMetrics.counter("l1ValueCacheMiss");
-        this.l2ValueCacheHitCount = cacheMetrics.counter("l2ValueCacheHit");
-        this.l2ValueCacheMissCount = cacheMetrics.counter("l2ValueCacheMiss");
+        this.l1ValueCacheHitCount = new AtomicLong(0);
+        this.l1ValueCacheMissCount = new AtomicLong(0);
+        this.l2ValueCacheHitCount = new AtomicLong(0);
+        this.l2ValueCacheMissCount = new AtomicLong(0);
 
         if (this.keyPresenceCacheEnabled) {
-            this.l1PresenceCacheHitCount = cacheMetrics.counter("l1PresenceCacheHit");
-            this.l1PresenceCacheMissCount = cacheMetrics.counter("l1PresenceCacheMiss");
-            this.l2PresenceCacheHitCount = cacheMetrics.counter("l2PresenceCacheHit");
-            this.l2PresenceCacheMissCount = cacheMetrics.counter("l2PresenceCacheMiss");
-        } else {
-            this.l1PresenceCacheHitCount = new NoOpCounter();
-            this.l1PresenceCacheMissCount = new NoOpCounter();
-            this.l2PresenceCacheHitCount = new NoOpCounter();
-            this.l2PresenceCacheMissCount = new NoOpCounter();
-                }
-        this.delegateLookups = cacheMetrics.counter("delegateLookups");
-
-        cacheMetrics.gauge("bypassActive", () -> bypassCache ? 1 : 0);
-        if (mapCacheHitRateThreshold > 0.0) {
-             cacheMetrics.gauge("currentHitRateForBypass", () -> {
-                 long accesses = accessesForHitRateWindow.get();
-                 long hits = hitsInHitRateWindow.get();
-                 return accesses > 0 ? (double) hits / accesses : 0.0;
-        });
+            this.l1PresenceCacheHitCount = new AtomicLong(0);
+            this.l1PresenceCacheMissCount = new AtomicLong(0);
+            this.l2PresenceCacheHitCount = new AtomicLong(0);
+            this.l2PresenceCacheMissCount = new AtomicLong(0);
         }
+        this.delegateLookups = new AtomicLong(0);
     }
 
     // Helper for non-CacheEntry valued caches (like namespaceCaches, keyCaches)
@@ -626,7 +593,6 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 this.mapL1KeyPresenceCacheSize, this.mapL2KeyPresenceCacheSize,
                 this.keyPresenceCacheEnabled);
             flinkKeyCaches.put(key, perKeyCache);
-            perKeyCache.registerMetrics(this.metrics.addGroup("perKeyCache"), key, getCurrentNamespace());
         }
         return perKeyCache;
     }
@@ -696,7 +662,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
 
         if (bypassEnabled && bypassCache) {
-            delegateLookups.inc();
+            delegateLookups.incrementAndGet();
             UV value = delegateState.get(userKey);
             updateCacheBypassCondition(false);
             return value;
@@ -709,24 +675,24 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         if (!this.keyPresenceCacheEnabled) { // KV Separation DISABLED path
             CacheEntry<UV> l1Entry = perKeyCache.l1MapEntries.get(userKey);
             if (l1Entry != null) {
-                l1ValueCacheHitCount.inc();
+                l1ValueCacheHitCount.incrementAndGet();
                 userValue = l1Entry.getValue(); // Could be null if tombstone
                 resolvedByCache = true;
             } else {
-                l1ValueCacheMissCount.inc();
+                l1ValueCacheMissCount.incrementAndGet();
                 CacheEntry<UV> l2Entry = perKeyCache.l2MapEntries.get(userKey);
                 if (l2Entry != null) {
-                    l2ValueCacheHitCount.inc();
+                    l2ValueCacheHitCount.incrementAndGet();
                     userValue = l2Entry.getValue(); // L2 entries are clean and non-null
                     // Promote L2 to L1. The put to L1MapEntries will handle memory reporting.
                     perKeyCache.l1MapEntries.put(userKey, CacheEntry.clean(userValue));
                     resolvedByCache = true;
                 } else {
-                    l2ValueCacheMissCount.inc();
+                    l2ValueCacheMissCount.incrementAndGet();
                     if (perKeyCache.fullyLoaded) {
                         return null;
                     }
-                    delegateLookups.inc();
+                    delegateLookups.incrementAndGet();
                     userValue = delegateState.get(userKey);
                     if (userValue != null) {
                         // Add to L1. The put to L1MapEntries will handle memory reporting.
@@ -744,7 +710,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         PerKeyMapCache.ValuePresence presence = perKeyCache.getValuePresence(userKey);
 
         if (presence == PerKeyMapCache.ValuePresence.ABSENT_IN_CACHE) {
-            l1PresenceCacheHitCount.inc(); // Hit in presence cache (L1 or promoted L2) indicating absence
+            l1PresenceCacheHitCount.incrementAndGet(); // Hit in presence cache (L1 or promoted L2) indicating absence
             updateCacheBypassCondition(true); // Resolved by cache as definitively absent
                 return null;
             }
@@ -752,41 +718,41 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         // Check L1 Value Cache regardless of initial presence outcome (unless ABSENT_IN_CACHE)
         CacheEntry<UV> l1ValEntry = perKeyCache.l1MapEntries.get(userKey);
         if (l1ValEntry != null) {
-            l1ValueCacheHitCount.inc();
+            l1ValueCacheHitCount.incrementAndGet();
             // If presence was uncertain, this L1 value hit resolves it.
             // If presence said PRESENT_IN_CACHE_CLEAN, this confirms the value part.
-            if (presence == PerKeyMapCache.ValuePresence.ABSENT_MAYBE_IN_VALUE_CACHE) l1PresenceCacheMissCount.inc(); // Count initial presence miss
-            else l1PresenceCacheHitCount.inc(); // Count presence hit that led here
+            if (presence == PerKeyMapCache.ValuePresence.ABSENT_MAYBE_IN_VALUE_CACHE) l1PresenceCacheMissCount.incrementAndGet(); // Count initial presence miss
+            else l1PresenceCacheHitCount.incrementAndGet(); // Count presence hit that led here
 
             userValue = l1ValEntry.getValue(); // Could be null if it's a tombstone
             resolvedByCache = true;
         } else {
-            l1ValueCacheMissCount.inc();
+            l1ValueCacheMissCount.incrementAndGet();
             // If presence cache said PRESENT_IN_CACHE_CLEAN, but L1 value is a miss, this is a slight inconsistency
             // or means it was just evicted from L1 value to L2 value. Log for observation if strict consistency expected.
             if (presence == PerKeyMapCache.ValuePresence.PRESENT_IN_CACHE_CLEAN) {
-                l1PresenceCacheHitCount.inc();
+                l1PresenceCacheHitCount.incrementAndGet();
                  LOG.debug("L1 Presence cache indicated key {} exists, but value not found in L1 value cache. Checking L2 value cache.", userKey);
             } else if (presence == PerKeyMapCache.ValuePresence.ABSENT_MAYBE_IN_VALUE_CACHE) {
-                l1PresenceCacheMissCount.inc(); // Miss in presence, now L1 value also missed.
+                l1PresenceCacheMissCount.incrementAndGet(); // Miss in presence, now L1 value also missed.
             }
 
             // Check L2 Value Cache
             CacheEntry<UV> l2ValEntry = perKeyCache.l2MapEntries.get(userKey);
             if (l2ValEntry != null) {
-                l2ValueCacheHitCount.inc();
+                l2ValueCacheHitCount.incrementAndGet();
                 userValue = l2ValEntry.getValue(); // L2 entries are clean, non-null
                 perKeyCache.l1MapEntries.put(userKey, CacheEntry.clean(userValue)); // Promote L2 value to L1
                 resolvedByCache = true;
         } else {
-                l2ValueCacheMissCount.inc();
+                l2ValueCacheMissCount.incrementAndGet();
                 if (perKeyCache.fullyLoaded) {
                     perKeyCache.updatePresenceCacheOnGet(userKey, false);
                     updateCacheBypassCondition(true);
                     return null;
                 }
                 // Not in L1 value, not in L2 value. Fetch from delegate.
-                delegateLookups.inc();
+                delegateLookups.incrementAndGet();
                 userValue = delegateState.get(userKey);
                 resolvedByCache = false; // From delegate
                 if (userValue != null) {
@@ -1051,7 +1017,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             perKeyCache.l2KeyPresenceCache.clear(); // Will trigger memory release
         }
 
-        delegateLookups.inc();
+        delegateLookups.incrementAndGet();
         Iterable<Map.Entry<UK, UV>> entriesFromDelegate = delegateState.entries();
         if (entriesFromDelegate != null) {
             for (Map.Entry<UK, UV> entry : entriesFromDelegate) {
@@ -1276,10 +1242,6 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     // This method's return value is more of a "did we attempt to free" acknowledgement.
                     // Let's assume for now evictToMeetMemoryLimit inside perKeyCache handles reporting released memory,
                     // and we check current global total in CachingKeyedStateBackend.
-                    // To make this method's return more meaningful, perKeyCache.evictToMeetMemoryLimit should return freed bytes.
-                    // For now, let's just say if we asked it to free, it might have.
-                    // totalFreedBytes += Math.min(targetBytesToFreeThisState - totalFreedBytes, someEstimateIfAvailable);
-                    // This method is tricky. Let's rely on the CachingKeyedStateBackend loop and its check of currentEstimatedCacheSizeBytes.
                     // The main job here is to *trigger* eviction in sub-caches.
                 }
             }
@@ -1398,20 +1360,6 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
     }
 
-    // Static inner class for NoOpCounter
-    private static class NoOpCounter implements Counter {
-        @Override
-        public void inc() {}
-        @Override
-        public void inc(long n) {}
-        @Override
-        public void dec() {}
-        @Override
-        public void dec(long n) {}
-        @Override
-        public long getCount() { return 0; }
-    }
-
     // Add this helper method to log cache metrics
     private void logCacheMetrics() {
         if (LOG.isDebugEnabled()) {
@@ -1427,25 +1375,25 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     "L1 Presence: {}/{}, Hit Rate: {:.2f}% | " +
                     "L2 Presence: {}/{}, Hit Rate: {:.2f}% | " +
                     "Delegate Lookups: {}",
-                l1ValueCacheHitCount.getCount(), 
-                l1ValueCacheHitCount.getCount() + l1ValueCacheMissCount.getCount(),
+                l1ValueCacheHitCount.get(), 
+                l1ValueCacheHitCount.get() + l1ValueCacheMissCount.get(),
                 l1ValueHitRate,
-                l2ValueCacheHitCount.getCount(),
-                l2ValueCacheHitCount.getCount() + l2ValueCacheMissCount.getCount(),
+                l2ValueCacheHitCount.get(),
+                l2ValueCacheHitCount.get() + l2ValueCacheMissCount.get(),
                 l2ValueHitRate,
-                l1PresenceCacheHitCount.getCount(),
-                l1PresenceCacheHitCount.getCount() + l1PresenceCacheMissCount.getCount(),
+                l1PresenceCacheHitCount.get(),
+                l1PresenceCacheHitCount.get() + l1PresenceCacheMissCount.get(),
                 l1PresenceHitRate,
-                l2PresenceCacheHitCount.getCount(),
-                l2PresenceCacheHitCount.getCount() + l2PresenceCacheMissCount.getCount(),
+                l2PresenceCacheHitCount.get(),
+                l2PresenceCacheHitCount.get() + l2PresenceCacheMissCount.get(),
                 l2PresenceHitRate,
-                delegateLookups.getCount());
+                delegateLookups.get());
         }
     }
 
-    private double calculateHitRate(Counter hits, Counter misses) {
-        long total = hits.getCount() + misses.getCount();
-        return total > 0 ? (hits.getCount() * 100.0) / total : 0.0;
+    private double calculateHitRate(AtomicLong hits, AtomicLong misses) {
+        long total = hits.get() + misses.get();
+        return total > 0 ? (hits.get() * 100.0) / total : 0.0;
     }
 }
 

@@ -15,24 +15,23 @@
 
 package org.apache.flink.contrib.streaming.state;
 
-import org.apache.flink.api.common.functions.AggregateFunction;
-import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.metrics.Counter;
-import org.apache.flink.metrics.MetricGroup;
-import org.apache.flink.runtime.state.internal.InternalKvState.StateIncrementalVisitor;
-import org.apache.flink.runtime.state.internal.InternalAggregatingState;
-
-import javax.annotation.Nonnull;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
+import javax.annotation.Nonnull;
+import org.apache.flink.api.common.functions.AggregateFunction;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.runtime.state.internal.InternalAggregatingState;
+import org.apache.flink.runtime.state.internal.InternalKvState.StateIncrementalVisitor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 
 /**
  * An {@link InternalAggregatingState} that uses an L1/L2 cache for its accumulator.
@@ -47,6 +46,7 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
         implements InternalAggregatingState<K, N, IN, ACC, OUT>,
         CachingInternalState<K, N, ACC, InternalAggregatingState<K, N, IN, ACC, OUT>> {
 
+    private static final Logger LOG = LoggerFactory.getLogger(CachingInternalAggregatingState.class);
     private final InternalAggregatingState<K, N, IN, ACC, OUT> delegateState;
     private final CachingKeyedStateBackend<K> backend;
     private final AggregateFunction<IN, ACC, OUT> aggFunction;
@@ -62,8 +62,10 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
     private final CachePolicy<N, Map<K, ACC>> namespaceWriteBuffers;
 
     // Metrics
-    private final Counter cacheHits;
-    private final Counter cacheMisses;
+    private final AtomicLong cacheHits = new AtomicLong(0);
+    private final AtomicLong cacheMisses = new AtomicLong(0);
+    private final AtomicLong accessCount = new AtomicLong(0);
+    private static final long LOG_HIT_RATE_EVERY_N_ACCESSES = 10000;
 
     public CachingInternalAggregatingState(
             InternalAggregatingState<K, N, IN, ACC, OUT> delegateState,
@@ -71,29 +73,13 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
             AggregateFunction<IN, ACC, OUT> aggFunction,
             int l1CacheSize,
             int l2CacheSize,
-            CachingStateBackendFactory.CachePolicyType cachePolicyType,
-            MetricGroup metricsGroup) {
+            CachingStateBackendFactory.CachePolicyType cachePolicyType) {
         this.delegateState = delegateState;
         this.backend = backend;
         this.aggFunction = aggFunction;
         this.l1CacheSizePerKeyPerNamespace = l1CacheSize;
         this.l2CacheSizePerKeyPerNamespace = l2CacheSize;
         this.cachePolicyType = cachePolicyType;
-
-        if (metricsGroup != null) {
-            this.cacheHits = metricsGroup.counter("hits");
-            this.cacheMisses = metricsGroup.counter("misses");
-        } else {
-            Counter dummyCounter = new Counter() {
-                @Override public void inc() {}
-                @Override public void inc(long n) {}
-                @Override public void dec() {}
-                @Override public void dec(long n) {}
-                @Override public long getCount() { return 0; }
-            };
-            this.cacheHits = dummyCounter;
-            this.cacheMisses = dummyCounter;
-        }
 
         this.namespaceWriteBuffers = createCachePolicyWithEvictionListener(backend.getMaxActiveNamespaceOrPerKeyCacheContainers(),
                 evictedNsEntry -> {
@@ -227,6 +213,9 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
 
     @Override
     public ACC getInternal() throws Exception {
+        if (accessCount.incrementAndGet() % LOG_HIT_RATE_EVERY_N_ACCESSES == 0) {
+            logCacheHitRate();
+        }
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
@@ -239,7 +228,7 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
         CacheEntry<ACC> l1Entry = l1Cache.get(currentKey);
 
         if (l1Entry != null) {
-            cacheHits.inc();
+            cacheHits.incrementAndGet();
             return l1Entry.getValue();
         }
 
@@ -247,13 +236,13 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
         CacheEntry<ACC> l2Entry = l2Cache.get(currentKey);
 
         if (l2Entry != null) {
-            cacheHits.inc();
+            cacheHits.incrementAndGet();
             l1Cache.put(currentKey, l2Entry);
             l2Cache.remove(currentKey);
             return l2Entry.getValue();
         }
 
-        cacheMisses.inc();
+        cacheMisses.incrementAndGet();
         ACC valueFromDelegate = delegateState.getInternal();
         if (valueFromDelegate != null) {
             l1Cache.put(currentKey, CacheEntry.clean(valueFromDelegate));
@@ -461,5 +450,15 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
             throw new RuntimeException("Error flushing state before creating visitor.", e);
         }
         return delegateState.getStateIncrementalVisitor(recommendedMaxNumberOfReturnedRecords);
+    }
+
+    private void logCacheHitRate() {
+        long hits = cacheHits.get();
+        long misses = cacheMisses.get();
+        long total = hits + misses;
+        if (total > 0) {
+            LOG.info("AggregatingState Cache Hit Rate: {} (Hits: {}, Misses: {})",
+                    (double) hits / total, hits, misses);
+        }
     }
 } 
