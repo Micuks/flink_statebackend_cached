@@ -17,6 +17,7 @@ package org.apache.flink.contrib.streaming.state;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -312,15 +313,19 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
 
     @Override
     public void update(List<V_ELE> values) throws Exception {
-        K currentKey = backend.getCurrentKey();
-        N currentNamespace = getCurrentNamespace();
-
-        getWriteBufferForNamespace(currentNamespace).put(currentKey, values != null ? new ArrayList<>(values) : null);
+        doUpdate(values);
     }
 
     private void doUpdate(List<V_ELE> values) throws Exception {
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
+
+        // Remove from write buffer if present, as cache is now the source of truth
+        Map<K, List<V_ELE>> writeBuffer = namespaceWriteBuffers.get(currentNamespace);
+        if (writeBuffer != null) {
+            writeBuffer.remove(currentKey);
+        }
+
         CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
         CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace); // Ensure L2 cache for namespace exists
 
@@ -343,53 +348,36 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
         N currentNamespace = getCurrentNamespace();
         Map<K, List<V_ELE>> writeBuffer = getWriteBufferForNamespace(currentNamespace);
 
-        List<V_ELE> currentList = writeBuffer.get(currentKey);
-        if (currentList == null) {
-            // Not in buffer, check caches/delegate
-            Iterable<V_ELE> fromBackend = get();
-            currentList = new ArrayList<>();
-            if (fromBackend != null) {
-                for(V_ELE ele : fromBackend) {
-                    currentList.add(ele);
-                }
+        List<V_ELE> currentList;
+        // Prioritize write buffer for current value
+        if (writeBuffer.containsKey(currentKey)) {
+            currentList = writeBuffer.get(currentKey);
+            if (currentList == null) {
+                currentList = new ArrayList<>();
+            }
+        } else {
+            // getInternal will fetch from cache/delegate
+            currentList = getInternal();
+            if (currentList == null) {
+                currentList = new ArrayList<>();
             }
         }
 
         currentList.addAll(values);
-        writeBuffer.put(currentKey, currentList);
+        updateInternal(currentList); // Uses doUpdate
     }
 
     @Override
     public void add(V_ELE value) throws Exception {
         if (value == null) {
-            return;
+            return; // Or throw an exception, depending on desired behavior for null elements
         }
-        K currentKey = backend.getCurrentKey();
-        N currentNamespace = getCurrentNamespace();
-        Map<K, List<V_ELE>> writeBuffer = getWriteBufferForNamespace(currentNamespace);
-
-        List<V_ELE> currentList = writeBuffer.get(currentKey);
-        if (currentList == null) {
-            // Not in buffer, check caches/delegate
-            Iterable<V_ELE> fromBackend = get();
-            currentList = new ArrayList<>();
-            if (fromBackend != null) {
-                for(V_ELE ele : fromBackend) {
-                    currentList.add(ele);
-                }
-            }
-        }
-
-        currentList.add(value);
-        writeBuffer.put(currentKey, currentList);
+        addAll(Collections.singletonList(value));
     }
 
     @Override
     public void clear() {
-        K currentKey = backend.getCurrentKey();
-        N currentNamespace = getCurrentNamespace();
-
-        getWriteBufferForNamespace(currentNamespace).put(currentKey, null);
+        doClear();
     }
 
     private void doClear() {
