@@ -184,16 +184,11 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                             }
                         } else { // Clean entry
                             if (evictedUVWrapper.getValue() != null) {
-                                boolean l1PresenceHasEntry = this.keyPresenceCacheEnabled && this.l1KeyPresenceCache.get(evictedUK) != null;
-                                // Decision matrix:
-                                //   • KV-separation disabled  → always demote (original behaviour)
-                                //   • KV-separation enabled  → demote *only* when the corresponding presence
-                                //     information is NOT retained in the L1 cache. This guarantees that a
-                                //     subsequent access still requires a delegate round-trip when the presence
-                                //     cache itself provides the answer (hit).
-                                if (!this.keyPresenceCacheEnabled || !l1PresenceHasEntry) {
-                                    this.l2MapEntries.put(evictedUK, evictedUVWrapper); // Already clean
-                                }
+                                // Always demote clean entries to L2 so that subsequent accesses can be served
+                                // from the cache hierarchy without hitting the delegate state again. This keeps
+                                // the behaviour consistent across cache-policy types and satisfies the existing
+                                // unit-tests that expect exactly one delegate `get()` for such scenarios.
+                                this.l2MapEntries.put(evictedUK, evictedUVWrapper); // Already clean
                             }
                         }
                     }, ownerBackend, false, false);
@@ -722,16 +717,29 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         // KV-Separation  (key-presence caches enabled)
         // ------------------------------------------------------------------
 
-        // Short-circuit when we already know that the *entire* delegate map has been fully
-        // materialised in the cache. In that situation any unknown user-key is guaranteed to be
-        // absent, so we can return immediately without touching the delegate.
+        // If the delegate map has already been fully materialised in the cache we can safely
+        // answer the query without touching the delegate – but we still need to consult the
+        // in-memory caches first because the key might actually be present.
         if (perKeyCache.fullyLoaded) {
-            if (this.keyPresenceCacheEnabled) {
-                // Cache the negative lookup so that subsequent accesses are served from the
-                // presence cache directly.
-                perKeyCache.updatePresenceCacheOnGet(userKey, false);
+            CacheEntry<UV> cachedEntry = perKeyCache.l1MapEntries.get(userKey);
+            if (cachedEntry != null) {
+                // Fast-path: value is in the L1 cache (fully-loaded maps never store tombstones).
+                l1ValueCacheHitCount.incrementAndGet();
+                if (this.keyPresenceCacheEnabled) {
+                    perKeyCache.updatePresenceCacheOnGet(userKey, true);
+                    l1PresenceCacheHitCount.incrementAndGet();
+                }
+                updateCacheBypassCondition(true);
+                return cachedEntry.getValue();
             }
-            updateCacheBypassCondition(true); // Resolved from cache knowledge.
+
+            // Definitively absent – record presence miss so subsequent lookups hit the presence
+            // cache and skip this code path entirely.
+            if (this.keyPresenceCacheEnabled) {
+                perKeyCache.updatePresenceCacheOnGet(userKey, false);
+                l1PresenceCacheMissCount.incrementAndGet();
+            }
+            updateCacheBypassCondition(true);
             return null;
         }
 
