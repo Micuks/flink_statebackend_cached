@@ -124,7 +124,8 @@ class CachingKeyedStateBackendMiniBatchTest {
                 0.0,
                 5L,
                 10L,
-                false);
+                false,
+                false); // writeBehindEnabled
 
         cachingBackend.setCurrentKey(KEY);
 

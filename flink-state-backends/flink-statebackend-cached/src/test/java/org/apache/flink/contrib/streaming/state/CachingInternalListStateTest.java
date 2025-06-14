@@ -153,6 +153,7 @@ class CachingInternalListStateTest {
         long valueCacheHitRateWindowSize = CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
         long valueCacheMinAccessesForBypassCheck = CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
         boolean valueBypassEnabled = CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG.defaultValue();
+        boolean writeBehindEnabled = CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG.defaultValue();
 
         cachingKeyedStateBackend = new CachingKeyedStateBackend<String>(
                 kvStateRegistry,
@@ -166,7 +167,7 @@ class CachingInternalListStateTest {
                 l1CacheSize,
                 l2CacheSize,
                 maxActiveNamespaces,
-                10, // maxCacheMemoryMb
+                10L, // maxCacheMemoryMb
                 currentCachePolicyType, // Use the current policy type
                 (int) mapL1KeyPresenceCacheSize, // Added
                 (int) mapL2KeyPresenceCacheSize,  // Added
@@ -178,7 +179,8 @@ class CachingInternalListStateTest {
                 valueCacheHitRateThreshold,
                 valueCacheHitRateWindowSize,
                 valueCacheMinAccessesForBypassCheck,
-                valueBypassEnabled
+                valueBypassEnabled,
+                writeBehindEnabled // writeBehindEnabled
         );
         cachingKeyedStateBackend.setCurrentKey(testKey);
 

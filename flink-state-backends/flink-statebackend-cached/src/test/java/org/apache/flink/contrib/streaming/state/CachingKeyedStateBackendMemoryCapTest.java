@@ -35,6 +35,9 @@ import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRange;
+import org.apache.flink.runtime.state.KeyedStateHandle;
+import org.apache.flink.runtime.query.TaskKvStateRegistry;
+import org.apache.flink.runtime.state.UncompressedStreamCompressionDecorator;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.internal.InternalListState;
@@ -155,6 +158,7 @@ class CachingKeyedStateBackendMemoryCapTest {
         long valueCacheHitRateWindowSize = CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
         long valueCacheMinAccessesForBypassCheck = CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
         boolean valueBypassEnabled = CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG.defaultValue();
+        boolean writeBehindEnabled = CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG.defaultValue();
 
         cachingBackend = new CachingKeyedStateBackend<String>(
                 mockEnv.getTaskKvStateRegistry(),
@@ -180,7 +184,8 @@ class CachingKeyedStateBackendMemoryCapTest {
                 valueCacheHitRateThreshold,
                 valueCacheHitRateWindowSize,
                 valueCacheMinAccessesForBypassCheck,
-                valueBypassEnabled
+                valueBypassEnabled,
+                writeBehindEnabled
                 );
         
         // Spy the backend and mock getMaxConfiguredCacheSizeBytesValue to return our precise byte limit

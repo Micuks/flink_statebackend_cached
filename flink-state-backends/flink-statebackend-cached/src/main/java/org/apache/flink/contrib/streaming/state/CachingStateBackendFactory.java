@@ -138,6 +138,12 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .booleanType()
                     .defaultValue(true);
 
+    public static final ConfigOption<Boolean> WRITE_BEHIND_ENABLED_CONFIG =
+            ConfigOptions.key("state.backend.cached.write-behind.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription("Enable write-behind caching. If false, it uses write-through.");
+
     // Potentially, a config for delegate backend factory if it's not hardcoded to RocksDB
     // For now, assumes RocksDBStateBackend is the default delegate and is configured using its own
     // factory/options.
@@ -226,6 +232,7 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
         long valueCacheHitRateWindowSize = config.get(VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
         long valueCacheMinAccessesForBypassCheck = config.get(VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
         boolean valueBypassEnabled = config.get(VALUE_BYPASS_ENABLED_CONFIG);
+        boolean writeBehindEnabled = config.get(WRITE_BEHIND_ENABLED_CONFIG);
 
         return new CachingStateBackend(
                         delegateBackend,
@@ -244,6 +251,7 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                         valueCacheHitRateThreshold,
                         valueCacheHitRateWindowSize,
                         valueCacheMinAccessesForBypassCheck,
-                        valueBypassEnabled);
+                        valueBypassEnabled,
+                        writeBehindEnabled);
     }
 }

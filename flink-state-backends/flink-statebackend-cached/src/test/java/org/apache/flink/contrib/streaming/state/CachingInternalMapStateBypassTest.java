@@ -148,7 +148,8 @@ class CachingInternalMapStateBypassTest {
             0.0,
             0,
             0,
-            false
+            false,
+            false // writeBehindEnabled
         );
 
         cachingKeyedStateBackend.setCurrentKey(testFlinkKey);

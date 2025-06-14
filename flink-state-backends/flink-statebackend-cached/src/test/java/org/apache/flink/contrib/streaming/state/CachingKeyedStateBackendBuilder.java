@@ -74,6 +74,8 @@ public class CachingKeyedStateBackendBuilder<K> {
         long valueCacheMinAccessesForBypassCheck = configuration.get(CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
         boolean valueBypassEnabled = configuration.get(CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG);
 
+        boolean writeBehindEnabled = configuration.get(CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG);
+
         return new CachingKeyedStateBackend<>(
                 kvStateRegistry,
                 keySerializer,
@@ -98,6 +100,7 @@ public class CachingKeyedStateBackendBuilder<K> {
                 valueCacheHitRateThreshold,
                 valueCacheHitRateWindowSize,
                 valueCacheMinAccessesForBypassCheck,
-                valueBypassEnabled);
+                valueBypassEnabled,
+                writeBehindEnabled);
     }
 } 

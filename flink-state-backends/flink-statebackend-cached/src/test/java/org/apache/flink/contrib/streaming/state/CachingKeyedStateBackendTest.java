@@ -301,6 +301,7 @@ class CachingKeyedStateBackendTest {
         long valueCacheHitRateWindowSize = CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
         long valueCacheMinAccessesForBypassCheck = CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
         boolean valueBypassEnabled = CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG.defaultValue();
+boolean writeBehindEnabled = CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG.defaultValue();
 
         cachingBackend = new CachingKeyedStateBackend<String>(
             mockEnv.getTaskKvStateRegistry(),
@@ -326,7 +327,8 @@ class CachingKeyedStateBackendTest {
             valueCacheHitRateThreshold,
             valueCacheHitRateWindowSize,
             valueCacheMinAccessesForBypassCheck,
-            valueBypassEnabled
+            valueBypassEnabled,
+            writeBehindEnabled // writeBehindEnabled
         );
     }
 
@@ -626,6 +628,7 @@ class CachingKeyedStateBackendTest {
         long valueCacheHitRateWindowSize = CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
         long valueCacheMinAccessesForBypassCheck = CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
         boolean valueBypassEnabled = CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG.defaultValue();
+        boolean writeBehindEnabled = CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG.defaultValue();
 
         return new CachingKeyedStateBackend<String>(
                 mockEnv.getTaskKvStateRegistry(),
@@ -651,7 +654,8 @@ class CachingKeyedStateBackendTest {
                 valueCacheHitRateThreshold,
                 valueCacheHitRateWindowSize,
                 valueCacheMinAccessesForBypassCheck,
-                valueBypassEnabled
+                valueBypassEnabled,
+                writeBehindEnabled // writeBehindEnabled
         );
     }
 

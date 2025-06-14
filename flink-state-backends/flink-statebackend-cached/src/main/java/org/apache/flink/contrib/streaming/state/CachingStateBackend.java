@@ -70,6 +70,7 @@ public class CachingStateBackend extends AbstractStateBackend
     private final long valueCacheHitRateWindowSize;
     private final long valueCacheMinAccessesForBypassCheck;
     private final boolean valueBypassEnabled;
+    private final boolean writeBehindEnabled;
 
     private final CheckpointStorage checkpointStorage;
 
@@ -86,7 +87,8 @@ public class CachingStateBackend extends AbstractStateBackend
             double valueCacheHitRateThreshold,
             long valueCacheHitRateWindowSize,
             long valueCacheMinAccessesForBypassCheck,
-            boolean valueBypassEnabled) {
+            boolean valueBypassEnabled,
+            boolean writeBehindEnabled) {
         if (delegateBackend instanceof CheckpointStorage) {
             this.checkpointStorage = (CheckpointStorage) delegateBackend;
         } else {
@@ -111,6 +113,7 @@ public class CachingStateBackend extends AbstractStateBackend
         this.valueCacheHitRateWindowSize = valueCacheHitRateWindowSize;
         this.valueCacheMinAccessesForBypassCheck = valueCacheMinAccessesForBypassCheck;
         this.valueBypassEnabled = valueBypassEnabled;
+        this.writeBehindEnabled = writeBehindEnabled;
 
         if (!(delegateBackend instanceof AbstractStateBackend)) {
             System.err.println(
@@ -150,7 +153,8 @@ public class CachingStateBackend extends AbstractStateBackend
                 mapCacheHitRateThreshold, // reuse map settings for value cache
                 mapCacheHitRateWindowSize,
                 mapCacheMinAccessesForBypassCheck,
-                mapBypassEnabled);
+                mapBypassEnabled,
+                false); // Backwards compatibility: write-behind is disabled
     }
 
     @Override
@@ -260,6 +264,10 @@ public class CachingStateBackend extends AbstractStateBackend
         return valueBypassEnabled;
     }
 
+    public boolean isWriteBehindEnabled() {
+        return writeBehindEnabled;
+    }
+
     @Override
     public StateBackend configure(ReadableConfig config, ClassLoader classLoader)
             throws IllegalConfigurationException {
@@ -321,7 +329,7 @@ public class CachingStateBackend extends AbstractStateBackend
         return new CachingKeyedStateBackend<>(
                 kvStateRegistry,
                 keySerializer,
-                (ClassLoader) env.getUserCodeClassLoader(),
+                env.getUserCodeClassLoader().asClassLoader(),
                 env.getExecutionConfig(),
                 ttlTimeProvider,
                 stateHandles,
@@ -342,6 +350,7 @@ public class CachingStateBackend extends AbstractStateBackend
                 valueCacheHitRateThreshold,
                 valueCacheHitRateWindowSize,
                 valueCacheMinAccessesForBypassCheck,
-                valueBypassEnabled);
+                valueBypassEnabled,
+                writeBehindEnabled);
     }
 } 

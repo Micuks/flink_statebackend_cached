@@ -73,6 +73,7 @@ public class CachingInternalValueState<K, N, V>
     private final boolean bypassEnabled;
 
     private final CachePolicy<N, Map<K, V>> namespaceWriteBuffers;
+    private transient boolean flushing = false;
 
     public CachingInternalValueState(
             InternalValueState<K, N, V> delegateState,
@@ -212,9 +213,9 @@ public class CachingInternalValueState<K, N, V>
         for (Map.Entry<K, V> entry : writeBuffer.entrySet()) {
             backend.setCurrentKey(entry.getKey());
             if (entry.getValue() == null) {
-                doClear();
+                clear();
             } else {
-                doUpdate(entry.getValue());
+                update(entry.getValue());
             }
         }
         writeBuffer.clear();
@@ -311,7 +312,10 @@ public class CachingInternalValueState<K, N, V>
                                     this.setCurrentNamespace(originalNamespace);
 
                                     CacheEntry<V> entryToL2 = CacheEntry.clean(evictedValue);
-                                    CacheEntry<V> oldL2Entry = l2Cache.put(evictedKey, entryToL2); 
+                                    if (flushing) {
+                                        entryToL2.setDirty(true);
+                                    }
+                                    CacheEntry<V> oldL2Entry = l2Cache.put(evictedKey, entryToL2);
                                     if (oldL2Entry != null) {
                                         backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
                                     }
@@ -393,88 +397,79 @@ public class CachingInternalValueState<K, N, V>
 
     @Override
     public void update(V value) throws IOException {
-        K currentKey = backend.getCurrentKey();
-        N currentNamespace = getCurrentNamespace();
-
         if (value == null) {
             clear();
             return;
         }
-        
-        if (bypassEnabled && bypassCache) {
-            delegateState.update(value);
-            return;
-        }
 
-        getWriteBufferForNamespace(currentNamespace).put(currentKey, value);
+        if (backend.isWriteBehindEnabled()) {
+            getWriteBufferForNamespace(currentNamespace).put(backend.getCurrentKey(), value);
+        }
+        // doUpdate handles cache update and conditionally updates the delegate state.
+        doUpdate(value);
     }
 
     private void doUpdate(V value) throws IOException {
-        K currentKey = backend.getCurrentKey();
-        N currentNamespace = getCurrentNamespace();
-
-        if (value == null) { // As per Flink ValueState contract
-            doClear();
-            return;
-        }
-
         if (bypassEnabled && bypassCache) {
-            updateCacheBypassCondition(true);
-            delegateState.update(value);
+            if (!backend.isWriteBehindEnabled()) {
+                delegateState.update(value);
+            }
+            // Even with write-behind, an update during bypass goes to the buffer but is
+            // considered a 'miss' for hit-rate purposes. The 'hit' is on a read.
+            updateCacheBypassCondition(false);
             return;
         }
 
-        updateCacheBypassCondition(true);
+        K key = backend.getCurrentKey();
         CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        CacheEntry<V> newEntry = CacheEntry.dirty(value);
-        CacheEntry<V> oldL1Entry = l1Cache.put(currentKey, newEntry);
-        if (oldL1Entry != null) {
-            backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
-        }
-        backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
+        CacheEntry<V> entry = l1Cache.get(key);
 
-        // If L2 had this key, it's now stale, remove it.
-        CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
-        CacheEntry<V> oldL2Entry = l2Cache.remove(currentKey);
-        if (oldL2Entry != null) {
-            // L2 entries are implicitly managed by L1 evictions or direct stale removal like here.
-            // Their memory was accounted for when they moved from L1 to L2 (L1 released, L2 added - though we simplified this)
-            // Or when loaded to L2 directly. When removing from L2 here because L1 got an update,
-            // we should report its memory as released if it wasn't already part of L1's old entry.
-            // Simplified: Assume L2 entries are clean and their removal directly translates to released memory
-            // if they weren't the source for the L1 update that just happened.
-            // However, simpler just to let their L1 eviction listener handle the release when they were put there.
-            // The current logic in L1 eviction listener (getL1CacheForNamespace) moves to L2 and L2 doesn't have
-            // an aggressive release reporting on its own removals. This explicit remove should report.
-            backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
+        if (entry != null) {
+            entry.setValue(value);
+            entry.setDirty(true);
+            l1Cache.put(key, entry); // Explicitly put to update eviction policy
+        } else {
+            CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
+            entry = l2Cache.get(key);
+            if (entry != null) {
+                // Found in L2, promote to L1
+                entry.setValue(value);
+                entry.setDirty(true);
+                l1Cache.put(key, entry);
+                l2Cache.remove(key);
+            } else {
+                // Not in cache, create a new dirty entry in L1
+                l1Cache.put(key, new CacheEntry<>(value, true));
+            }
         }
+
+        if (!backend.isWriteBehindEnabled()) {
+            delegateState.update(value);
+        }
+
+        // An update that interacts with the cache is considered a "hit" for bypass purposes.
+        updateCacheBypassCondition(true);
     }
 
     @Override
     public void clear() {
-        K currentKey = backend.getCurrentKey();
-        N currentNamespace = getCurrentNamespace();
+        K key = backend.getCurrentKey();
 
-        getWriteBufferForNamespace(currentNamespace).put(currentKey, null);
-    }
-
-    private void doClear() {
-        K currentKey = backend.getCurrentKey();
-        N currentNamespace = getCurrentNamespace();
-
-        CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        CacheEntry<V> oldL1Entry = l1Cache.remove(currentKey);
-        if (oldL1Entry != null) {
-            backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
+        if (backend.isWriteBehindEnabled()) {
+            // For write-behind, buffer the clear operation by putting null.
+            getWriteBufferForNamespace(currentNamespace).put(key, null);
+        } else {
+            // For write-through, clear the delegate state immediately.
+            delegateState.clear();
         }
 
-        CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
-        CacheEntry<V> oldL2Entry = l2Cache.remove(currentKey);
-        if (oldL2Entry != null) {
-            backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
-        }
+        // Always clear the caches.
+        getL1CacheForNamespace(currentNamespace).remove(key);
+        getL2CacheForNamespace(currentNamespace).remove(key);
 
-        delegateState.clear(); // Clear the underlying state
+        if (bypassEnabled) {
+            updateCacheBypassCondition(!bypassCache);
+        }
     }
 
     @Override
@@ -716,5 +711,88 @@ public class CachingInternalValueState<K, N, V>
 
     private Map<K, V> getWriteBufferForNamespace(N namespace) {
         return namespaceWriteBuffers.computeIfAbsent(namespace, ns -> new LinkedHashMap<>());
+    }
+
+    private void flushCurrentState() throws IOException {
+        // ------------------------------------------------------------------
+        // 1) Flush existing dirty entries in the in-memory caches (L1 & L2).
+        //    so that freshly flushed entries do not get immediately re-flushed.
+        // ------------------------------------------------------------------
+
+        try {
+            flushing = true;
+            // Flush L1 caches
+            for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL1.entrySet()) {
+                N namespace = nsEntry.getKey();
+                CachePolicy<K, CacheEntry<V>> l1Cache = nsEntry.getValue();
+                setCurrentNamespace(namespace);
+
+                // Iterate over a defensive copy of entries to avoid
+                // ConcurrentModificationException
+                java.util.List<Map.Entry<K, CacheEntry<V>>> currentL1Entries = new java.util.ArrayList<>();
+                for (Map.Entry<K, CacheEntry<V>> entry : l1Cache.entrySet()) {
+                    currentL1Entries.add(entry);
+                }
+
+                for (Map.Entry<K, CacheEntry<V>> mapEntry : currentL1Entries) {
+                    K key = mapEntry.getKey();
+                    CacheEntry<V> entry = mapEntry.getValue(); // Use the entry directly from the snapshot
+                    if (entry.isDirty()) { // No need for null check if it came from entrySet
+                        V value = entry.getValue();
+                        if (key != null) { // Guard against null key
+                            backend.setCurrentKey(key);
+                            delegateState.update(value);
+                            entry.setDirty(false);
+                        }
+                    }
+                }
+            }
+
+            // Flush L2 caches
+            for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL2.entrySet()) {
+                N namespace = nsEntry.getKey();
+                CachePolicy<K, CacheEntry<V>> l2Cache = nsEntry.getValue();
+                setCurrentNamespace(namespace);
+
+                // Iterate over a defensive copy of entries to avoid
+                // ConcurrentModificationException
+                java.util.List<Map.Entry<K, CacheEntry<V>>> currentL2Entries = new java.util.ArrayList<>();
+                for (Map.Entry<K, CacheEntry<V>> entry : l2Cache.entrySet()) {
+                    currentL2Entries.add(entry);
+                }
+
+                for (Map.Entry<K, CacheEntry<V>> mapEntry : currentL2Entries) {
+                    K key = mapEntry.getKey();
+                    CacheEntry<V> entry = mapEntry.getValue();
+                    if (entry.isDirty()) { // L2 entries ideally shouldn't be dirty with current logic
+                        V value = entry.getValue();
+                        if (key != null) { // Guard against null key
+                            backend.setCurrentKey(key);
+                            delegateState.update(value);
+                            entry.setDirty(false);
+                        }
+                    }
+                }
+            }
+
+            // ------------------------------------------------------------------
+            // 2) Flush write-behind buffers (write-before-write) **after** the caches.
+            //    This moves buffered updates into the caches as DIRTY entries so that
+            //    they will be flushed later (e.g., on eviction) according to the
+            //    write-behind policy.
+            // ------------------------------------------------------------------
+
+            List<Map.Entry<N, Map<K, V>>> nsEntries = new ArrayList<>();
+            for (Map.Entry<N, Map<K, V>> entry : namespaceWriteBuffers.entrySet()) {
+                nsEntries.add(entry);
+            }
+
+            for (Map.Entry<N, Map<K, V>> nsEntry : nsEntries) {
+                flushWriteBufferForNamespace(nsEntry.getKey(), nsEntry.getValue());
+            }
+            namespaceWriteBuffers.clear();
+        } finally {
+            flushing = false;
+        }
     }
 }

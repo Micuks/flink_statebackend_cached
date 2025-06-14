@@ -101,6 +101,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final long valueCacheHitRateWindowSize;
     private final long valueCacheMinAccessesForBypassCheck;
     private final boolean valueBypassEnabled;
+    private final boolean writeBehindEnabled;
 
     final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
     private final List<CachingKeyGroupedInternalPriorityQueue<?>> registeredPqs;
@@ -133,7 +134,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             double valueCacheHitRateThreshold,
             long valueCacheHitRateWindowSize,
             long valueCacheMinAccessesForBypassCheck,
-            boolean valueBypassEnabled) {
+            boolean valueBypassEnabled,
+            boolean writeBehindEnabled) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -160,11 +162,16 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.valueCacheHitRateWindowSize = valueCacheHitRateWindowSize;
         this.valueCacheMinAccessesForBypassCheck = valueCacheMinAccessesForBypassCheck;
         this.valueBypassEnabled = valueBypassEnabled;
+        this.writeBehindEnabled = writeBehindEnabled;
         this.registeredStates = new ArrayList<>();
         this.registeredPqs = new ArrayList<>();
         this.registeredStatesMap = new HashMap<>();
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0);
         this.maxConfiguredCacheSizeBytes = maxCacheMemoryMb * 1024L * 1024L;
+    }
+
+    public boolean isWriteBehindEnabled() {
+        return writeBehindEnabled;
     }
 
     public int getMaxActiveNamespaceOrPerKeyCacheContainers() {
@@ -211,24 +218,36 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                             cachePolicyType);
         } else if (stateDescriptor instanceof MapStateDescriptor) {
             MapStateDescriptor<?, ?> mapStateDescriptor = (MapStateDescriptor<?, ?>) stateDescriptor;
-            createdState =
-                    new CachingInternalMapState<K, N, Object, Object>(
-                            (InternalMapState<K, N, Object, Object>)
-                                    delegateKeyedStateBackend.getOrCreateKeyedState(
-                                            namespaceSerializer, stateDescriptor),
-                            this,
-                            l1EntryCacheSize,
-                            l2EntryCacheSize,
-                            maxActiveNamespaceOrPerKeyCacheContainers,
-                            maxCacheMemoryMb,
-                            cachePolicyType,
-                            mapL1KeyPresenceCacheSize,
-                            mapL2KeyPresenceCacheSize,
-                            mapCacheHitRateThreshold,
-                            mapCacheHitRateWindowSize,
-                            mapCacheMinAccessesForBypassCheck,
-                            mapKeyPresenceCacheEnabled,
-                            mapBypassEnabled);
+            {
+                CachingInternalMapState<K, N, Object, Object> mapState =
+                        new CachingInternalMapState<>(
+                                (InternalMapState<K, N, Object, Object>)
+                                        delegateKeyedStateBackend.getOrCreateKeyedState(
+                                                namespaceSerializer, stateDescriptor),
+                                this,
+                                l1EntryCacheSize,
+                                l2EntryCacheSize,
+                                maxActiveNamespaceOrPerKeyCacheContainers,
+                                maxCacheMemoryMb,
+                                cachePolicyType,
+                                mapL1KeyPresenceCacheSize,
+                                mapL2KeyPresenceCacheSize,
+                                mapCacheHitRateThreshold,
+                                mapCacheHitRateWindowSize,
+                                mapCacheMinAccessesForBypassCheck,
+                                mapKeyPresenceCacheEnabled,
+                                mapBypassEnabled);
+
+                // Inject the namespace serializer so that getNamespaceSerializer() works even when
+                // the delegate state is a Mockito mock with no default behaviour.
+                mapState.setNamespaceSerializer(namespaceSerializer);
+                // Also inject the (user) key & value serializers from the descriptor – this is
+                // crucial for unit-tests that verify these are properly surfaced even when the
+                // delegate is a Mockito mock.
+                mapState.setUserKeySerializer((TypeSerializer<Object>) ((MapStateDescriptor<?, ?>) stateDescriptor).getKeySerializer());
+                mapState.setUserValueSerializer((TypeSerializer<Object>) ((MapStateDescriptor<?, ?>) stateDescriptor).getValueSerializer());
+                createdState = mapState;
+            }
         } else if (stateDescriptor instanceof AggregatingStateDescriptor) {
             createdState =
                     new CachingInternalAggregatingState<>(
@@ -268,7 +287,11 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             // Explicitly DO NOT call delegateKeyedStateBackend.setCurrentKey(null) here,
             // as AbstractKeyedStateBackend (and thus RocksDBKeyedStateBackend) throws NPE.
         } else {
-            super.setCurrentKey(newKey); // This is for non-null keys, should be safe.
+            // Set the key in our own key context first
+            getKeyContext().setCurrentKey(newKey);
+            // Then call super to ensure parent class state is updated
+            super.setCurrentKey(newKey);
+            // Finally set it in the delegate backend
             if (delegateKeyedStateBackend != null) {
                 delegateKeyedStateBackend.setCurrentKey(newKey);
             }
