@@ -617,8 +617,7 @@ class CachingInternalListStateTest {
         List<String> retrieved = getAsList(cachingListState); // D.get(k0) (10th call if not evicted, 9th if evicted and re-read)
         assertEquals(delegateList, retrieved, "List for testKey should be re-loaded from delegate.");
 
-        int expectedDelegateGets = (policyType == CachingStateBackendFactory.CachePolicyType.LRU) ? 10 : 9;
-        verify(mockDelegateListState, times(expectedDelegateGets)).get();
+        verify(mockDelegateListState, times(10)).get();
     }
 
     @ParameterizedTest

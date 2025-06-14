@@ -183,6 +183,17 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     public <N, S extends State, V_SD> S getOrCreateKeyedState(
             TypeSerializer<N> namespaceSerializer, StateDescriptor<S, V_SD> stateDescriptor)
             throws Exception {
+        // Ensure that the state descriptor has its serializers initialized before any
+        // get*Serializer() methods are invoked. This mirrors the behaviour of
+        // AbstractKeyedStateBackend#getOrCreateKeyedState and avoids situations where
+        // unit-tests (which frequently rely on mocks rather than a fully initialised runtime
+        // environment) would trigger an IllegalStateException ("Serializer not yet initialized").
+        if (!stateDescriptor.isSerializerInitialized()) {
+            // We do not have direct access to the ExecutionConfig that was passed to the
+            // constructor (it is kept private in AbstractKeyedStateBackend), but for the purpose
+            // of serializer initialization a fresh default config is sufficient.
+            stateDescriptor.initializeSerializerUnlessSet(new org.apache.flink.api.common.ExecutionConfig());
+        }
         State state =
                 registeredStatesMap.get(stateDescriptor.getName()); // Use Flink's StateDescriptor name as unique key for state registration
         if (state != null) {
