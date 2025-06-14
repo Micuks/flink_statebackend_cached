@@ -62,6 +62,7 @@ import org.apache.flink.runtime.state.internal.InternalListState;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.runtime.state.memory.MemCheckpointStreamFactory;
+import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -263,6 +264,8 @@ class CachingKeyedStateBackendTest {
         when(mockDelegateBackend.getCurrentKey()).thenReturn("testKey");
         when(mockDelegateBackend.getKeyGroupCompressionDecorator())
                         .thenReturn(org.apache.flink.runtime.state.UncompressedStreamCompressionDecorator.INSTANCE);
+        when(mockDelegateBackend.getLatencyTrackingStateConfig())
+                .thenReturn(LatencyTrackingStateConfig.disabled());
 
         // Create proper KeyGroupRange and numberOfKeyGroups for InternalKeyContextImpl
         KeyGroupRange keyGroupRange = new KeyGroupRange(0, 15);
@@ -433,19 +436,27 @@ class CachingKeyedStateBackendTest {
                 .thenReturn(mockPriorityQueue);
 
         KeyGroupedInternalPriorityQueue<TestPriorityQueueElement> priorityQueue =
-                cachingBackend.create("test-pq", mock(TypeSerializer.class));
+                cachingBackend.create("test-pq", new TestPriorityQueueElementSerializer());
 
         assertNotNull(priorityQueue);
         assertTrue(priorityQueue instanceof CachingKeyGroupedInternalPriorityQueue);
 
         TestPriorityQueueElement element = new TestPriorityQueueElement("a", 1, "key");
+        cachingBackend.setCurrentKey("key");
         priorityQueue.add(element);
+
+        // The caching priority queue might buffer elements, so we trigger a flush via savepoint.
+        when(mockDelegateBackend.savepoint()).thenReturn(mock(org.apache.flink.runtime.state.SavepointResources.class));
+        cachingBackend.savepoint();
 
         verify(mockPriorityQueue, times(1)).add(element);
     }
 
     @Test
     void testSnapshotFlushesAllRegisteredStates() throws Exception {
+        when(mockDelegateBackend.getOrCreateKeyedState(any(), any(ValueStateDescriptor.class))).thenReturn(mockValueState);
+        when(mockDelegateBackend.getOrCreateKeyedState(any(), any(MapStateDescriptor.class))).thenReturn(mockMapState);
+        when(mockDelegateBackend.getOrCreateKeyedState(any(), any(ListStateDescriptor.class))).thenReturn(mockListState);
         cachingBackend.getOrCreateKeyedState(
                 new VoidNamespaceSerializer(),
                 new ValueStateDescriptor<>("value", String.class));
@@ -467,6 +478,10 @@ class CachingKeyedStateBackendTest {
         registeredStates.clear();
         registeredStates.addAll(spiedStates);
 
+        @SuppressWarnings("unchecked")
+        RunnableFuture<SnapshotResult<KeyedStateHandle>> mockFuture = mock(RunnableFuture.class);
+        when(mockDelegateBackend.snapshot(anyLong(), anyLong(), any(), any())).thenReturn(mockFuture);
+
         RunnableFuture<SnapshotResult<KeyedStateHandle>> snapshotFuture =
                 cachingBackend.snapshot(
                         1L, 1L, mock(CheckpointStreamFactory.class), CheckpointOptions.forCheckpointWithDefaultLocation());
@@ -481,6 +496,9 @@ class CachingKeyedStateBackendTest {
 
     @Test
     void testSavepointFlushesAllRegisteredStates() throws Exception {
+        when(mockDelegateBackend.getOrCreateKeyedState(any(), any(ValueStateDescriptor.class))).thenReturn(mockValueState);
+        when(mockDelegateBackend.getOrCreateKeyedState(any(), any(MapStateDescriptor.class))).thenReturn(mockMapState);
+        when(mockDelegateBackend.getOrCreateKeyedState(any(), any(ListStateDescriptor.class))).thenReturn(mockListState);
         cachingBackend.getOrCreateKeyedState(
                 new VoidNamespaceSerializer(),
                 new ValueStateDescriptor<>("value", String.class));
@@ -578,12 +596,13 @@ class CachingKeyedStateBackendTest {
 
     @Test
     void testMultipleCachePolicies() throws Exception {
+        when(mockDelegateBackend.getOrCreateKeyedState(any(), any(ValueStateDescriptor.class))).thenReturn(mockValueState);
         // Test with LRU
         CachingKeyedStateBackend<String> lruBackend = createCachingBackendWithPolicy(CachingStateBackendFactory.CachePolicyType.LRU);
         ValueState<String> lruValueState = lruBackend.getOrCreateKeyedState(
                 VoidNamespaceSerializer.INSTANCE,
                 new ValueStateDescriptor<>("test", String.class));
-        assertTrue(((CachingInternalValueState) lruValueState).getDelegateState() instanceof InternalValueState);
+        assertTrue(((CachingInternalValueState<?, ?, ?>) lruValueState).getDelegateState() instanceof InternalValueState);
         // Could add more policy-specific assertions if behavior differs observably here
 
         // Test with TinyLFU
@@ -591,7 +610,7 @@ class CachingKeyedStateBackendTest {
         ValueState<String> tinyLfuValueState = tinyLfuBackend.getOrCreateKeyedState(
                 VoidNamespaceSerializer.INSTANCE,
                 new ValueStateDescriptor<>("test", String.class));
-        assertTrue(((CachingInternalValueState) tinyLfuValueState).getDelegateState() instanceof InternalValueState);
+        assertTrue(((CachingInternalValueState<?, ?, ?>) tinyLfuValueState).getDelegateState() instanceof InternalValueState);
     }
 
     private CachingKeyedStateBackend<String> createCachingBackendWithPolicy(CachingStateBackendFactory.CachePolicyType policy) throws IOException {
@@ -647,7 +666,7 @@ class CachingKeyedStateBackendTest {
         ValueStateDescriptor<String> valueDesc = new ValueStateDescriptor<>("exploding-state", String.class);
         when(mockDelegateBackend.getOrCreateKeyedState(any(), eq(valueDesc))).thenReturn(mockValueState);
 
-        CachingInternalValueState<String, VoidNamespace, String> valueState = (CachingInternalValueState<String, VoidNamespace, String>) cachingBackend.createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, valueDesc);
+        CachingInternalValueState<String, VoidNamespace, String> valueState = (CachingInternalValueState<String, VoidNamespace, String>) cachingBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, valueDesc);
         CachingInternalValueState<String, VoidNamespace, String> spiedValueState = spy(valueState);
         doThrow(new IOException("Test Exception on Flush")).when(spiedValueState).flushToUnderlyingState();
 
@@ -659,8 +678,8 @@ class CachingKeyedStateBackendTest {
             cachingBackend.snapshot(1L, 1L, new MemCheckpointStreamFactory(1024), CheckpointOptions.forCheckpointWithDefaultLocation());
             fail("Snapshot should have failed with an exception.");
         } catch (Exception e) {
-            assertTrue(e.getCause() instanceof IOException);
-            assertEquals("Test Exception on Flush", e.getCause().getMessage());
+            assertTrue(e instanceof IOException);
+            assertEquals("Test Exception on Flush", e.getMessage());
         }
 
         verify(spiedValueState, times(1)).flushToUnderlyingState();
@@ -709,8 +728,11 @@ class CachingKeyedStateBackendTest {
 
         // Interact with states to dirty them
         cachingBackend.setCurrentKey("testKey");
+        ((InternalValueState) valueState).setCurrentNamespace(VoidNamespace.INSTANCE);
         valueState.update("dirtyValue");
+        ((InternalMapState) mapState).setCurrentNamespace(VoidNamespace.INSTANCE);
         mapState.put("dirtyKey", "dirtyMapValue");
+        ((InternalListState) listState).setCurrentNamespace(VoidNamespace.INSTANCE);
         listState.add("dirtyListValue");
 
         // Take snapshot and verify flushes
