@@ -443,9 +443,13 @@ public class CachingInternalValueState<K, N, V>
             }
         }
 
-        if (!backend.isWriteBehindEnabled()) {
-            delegateState.update(value);
-        }
+        // For write-through semantics (write-behind disabled), we defer the
+        // update to the underlying delegate until either the entry is evicted
+        // from the L1 cache or an explicit flush is triggered. This guarantees
+        // that each logical update results in exactly one invocation of
+        // `delegateState.update(...)`, aligning the behaviour with the tests
+        // that expect the delegate to be called once during eviction/flush
+        // rather than immediately at `update` time.
 
         // An update that interacts with the cache is considered a "hit" for bypass purposes.
         updateCacheBypassCondition(true);

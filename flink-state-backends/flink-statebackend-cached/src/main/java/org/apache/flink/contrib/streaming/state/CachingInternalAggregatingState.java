@@ -351,15 +351,13 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
                 K key = mapEntry.getKey();
                 CacheEntry<ACC> entry = mapEntry.getValue();
                 if (entry.isDirty()) {
-                    if (key != null) {
-                        backend.setCurrentKey(key);
-                        try {
-                            delegateState.updateInternal(entry.getValue());
-                        } catch (Exception e) {
-                            throw new IOException(e);
-                        }
-                        entry.setDirty(false);
+                    backend.setCurrentKey(key);
+                    try {
+                        delegateState.updateInternal(entry.getValue());
+                    } catch (Exception e) {
+                        throw new IOException(e);
                     }
+                    entry.setDirty(false);
                 }
             }
         }

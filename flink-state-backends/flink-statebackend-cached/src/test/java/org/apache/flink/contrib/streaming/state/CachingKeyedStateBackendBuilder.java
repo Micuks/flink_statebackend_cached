@@ -31,6 +31,7 @@ import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 
 
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * A builder for creating {@link CachingKeyedStateBackend} instances for testing.
@@ -54,6 +55,41 @@ public class CachingKeyedStateBackendBuilder<K> {
         TtlTimeProvider ttlTimeProvider = TtlTimeProvider.DEFAULT;
         CloseableRegistry cancelStreamRegistry = new CloseableRegistry();
         Collection<KeyedStateHandle> stateHandles = Collections.emptyList();
+
+        // Ensure that the delegate backend has a non-null key context to avoid NPEs inside
+        // AbstractKeyedStateBackend's constructor when CachingKeyedStateBackend forwards the call
+        // delegateBackend.getKeyContext(). For Mockito based delegates used in tests this would
+        // otherwise return null.
+        try {
+            if (delegateBackend.getKeyContext() == null) {
+                // lazily create and inject a simple mocked InternalKeyContext
+                org.apache.flink.runtime.state.heap.InternalKeyContext<K> mockedKeyContext = mock(org.apache.flink.runtime.state.heap.InternalKeyContext.class);
+                when(mockedKeyContext.getNumberOfKeyGroups()).thenReturn(1);
+                when(mockedKeyContext.getKeyGroupRange()).thenReturn(org.apache.flink.runtime.state.KeyGroupRange.of(0, 0));
+                when(mockedKeyContext.getCurrentKeyGroupIndex()).thenReturn(0);
+                when(delegateBackend.getKeyContext()).thenReturn(mockedKeyContext);
+            }
+        } catch (Exception ignored) {
+            // If delegateBackend is a pure Mockito mock getKeyContext() may throw. In that case we
+            // still inject a mocked context.
+            org.apache.flink.runtime.state.heap.InternalKeyContext<K> mockedKeyContext = mock(org.apache.flink.runtime.state.heap.InternalKeyContext.class);
+            when(mockedKeyContext.getNumberOfKeyGroups()).thenReturn(1);
+            when(mockedKeyContext.getKeyGroupRange()).thenReturn(org.apache.flink.runtime.state.KeyGroupRange.of(0, 0));
+            when(mockedKeyContext.getCurrentKeyGroupIndex()).thenReturn(0);
+            when(delegateBackend.getKeyContext()).thenReturn(mockedKeyContext);
+        }
+
+        // Ensure non-null LatencyTrackingStateConfig
+        try {
+            if (delegateBackend.getLatencyTrackingStateConfig() == null) {
+                when(delegateBackend.getLatencyTrackingStateConfig())
+                        .thenReturn(org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig.disabled());
+            }
+        } catch (Exception ignored) {
+            // in case of pure mock
+            when(delegateBackend.getLatencyTrackingStateConfig())
+                    .thenReturn(org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig.disabled());
+        }
 
         int l1CacheSize = configuration.get(CachingStateBackendFactory.L1_CACHE_SIZE_CONFIG).intValue();
         int l2CacheSize = configuration.get(CachingStateBackendFactory.L2_CACHE_SIZE_CONFIG).intValue();
