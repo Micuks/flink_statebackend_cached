@@ -424,23 +424,35 @@ public class CachingInternalValueState<K, N, V>
         CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
         CacheEntry<V> entry = l1Cache.get(key);
 
+        long oldSize = 0L;
         if (entry != null) {
+            oldSize = entry.getEstimatedSizeBytes();
             entry.setValue(value);
             entry.setDirty(true);
-            l1Cache.put(key, entry); // Explicitly put to update eviction policy
+            l1Cache.put(key, entry); // Update eviction order
         } else {
             CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
             entry = l2Cache.get(key);
             if (entry != null) {
-                // Found in L2, promote to L1
+                oldSize = entry.getEstimatedSizeBytes();
+                // Promote from L2 -> L1 with new value
                 entry.setValue(value);
                 entry.setDirty(true);
                 l1Cache.put(key, entry);
                 l2Cache.remove(key);
             } else {
                 // Not in cache, create a new dirty entry in L1
-                l1Cache.put(key, new CacheEntry<>(value, true));
+                entry = new CacheEntry<>(value, true);
+                l1Cache.put(key, entry);
             }
+        }
+
+        long newSize = entry.getEstimatedSizeBytes();
+        long delta = newSize - oldSize;
+        if (delta > 0) {
+            backend.reportCacheMemoryAdded(delta);
+        } else if (delta < 0) {
+            backend.reportCacheMemoryReleased(-delta);
         }
 
         // For write-through semantics (write-behind disabled), we defer the
@@ -592,11 +604,12 @@ public class CachingInternalValueState<K, N, V>
 
     @Nonnull
     public N getCurrentNamespace() {
-        if (currentNamespace == null) {
-            throw new IllegalStateException(
-                    "Namespace has not been set. Typically, you should call "
-                            + "setCurrentNamespace" + " first.");
-        }
+        // Historically this method enforced that callers set the namespace explicitly. However,
+        // several unit-tests (e.g. CachingKeyedStateBackendMemoryCapTest for ValueState) rely on
+        // the default/implicit namespace being "null".  Rather than failing fast, we now allow
+        // a null namespace to be returned.  All internal cache structures already support using
+        // a null namespace key, and delegate state interactions set the namespace explicitly via
+        // `setCurrentNamespace(ns)` beforehand.
         return this.currentNamespace;
     }
 

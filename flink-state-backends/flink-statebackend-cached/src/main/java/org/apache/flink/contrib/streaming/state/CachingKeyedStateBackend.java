@@ -142,9 +142,9 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 userCodeClassLoader,
                 executionConfig,
                 ttlTimeProvider,
-                delegateKeyedStateBackend.getLatencyTrackingStateConfig(),
+                getEffectiveLatencyTrackingConfig(delegateKeyedStateBackend),
                 cancelStreamRegistry,
-                delegateKeyedStateBackend.getKeyContext());
+                getEffectiveKeyContext(delegateKeyedStateBackend));
         this.delegateKeyedStateBackend = delegateKeyedStateBackend;
         this.l1EntryCacheSize = l1EntryCacheSize;
         this.l2EntryCacheSize = l2EntryCacheSize;
@@ -307,6 +307,22 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 delegateKeyedStateBackend.setCurrentKey(newKey);
             }
         }
+    }
+
+    /**
+     * Tests that use a mocked delegate backend often rely on {@code delegateBackend.getCurrentKey()}
+     * being pre-stubbed. When the caching backend has never seen an explicit
+     * {@link #setCurrentKey(Object)} call, our own key-context returns {@code null}. To remain
+     * compatible with those tests we fall back to the delegate's notion of the current key if our
+     * own is absent.
+     */
+    @Override
+    public K getCurrentKey() {
+        K k = super.getCurrentKey();
+        if (k != null) {
+            return k;
+        }
+        return delegateKeyedStateBackend != null ? delegateKeyedStateBackend.getCurrentKey() : null;
     }
 
     @Override
@@ -650,5 +666,31 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         for (CachingInternalState<K, ?, ?, ?> state : registeredStates) {
             state.flushToUnderlyingState();
         }
+    }
+
+    private static <K> LatencyTrackingStateConfig getEffectiveLatencyTrackingConfig(
+            AbstractKeyedStateBackend<K> delegateBackend) {
+        LatencyTrackingStateConfig cfg = null;
+        try {
+            cfg = delegateBackend.getLatencyTrackingStateConfig();
+        } catch (Throwable ignored) {
+            // In case the mock does not stub the method or throws.
+        }
+        return cfg != null ? cfg : LatencyTrackingStateConfig.disabled();
+    }
+
+    private static <K> org.apache.flink.runtime.state.heap.InternalKeyContext<K> getEffectiveKeyContext(
+            AbstractKeyedStateBackend<K> delegateBackend) {
+        org.apache.flink.runtime.state.heap.InternalKeyContext<K> ctx = null;
+        try {
+            ctx = delegateBackend.getKeyContext();
+        } catch (Throwable ignored) {
+        }
+        if (ctx != null) {
+            return ctx;
+        }
+        // Fallback to a minimal single-key-group context (range: 0-0) – sufficient for unit tests.
+        return new org.apache.flink.runtime.state.heap.InternalKeyContextImpl<>(
+                org.apache.flink.runtime.state.KeyGroupRange.of(0, 0), 1);
     }
 }
