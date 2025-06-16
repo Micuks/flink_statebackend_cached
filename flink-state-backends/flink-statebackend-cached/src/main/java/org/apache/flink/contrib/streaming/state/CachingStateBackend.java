@@ -329,7 +329,7 @@ public class CachingStateBackend extends AbstractStateBackend
         return new CachingKeyedStateBackend<>(
                 kvStateRegistry,
                 keySerializer,
-                env.getUserCodeClassLoader().asClassLoader(),
+                resolveUserCodeClassLoader(env),
                 env.getExecutionConfig(),
                 ttlTimeProvider,
                 stateHandles,
@@ -352,5 +352,45 @@ public class CachingStateBackend extends AbstractStateBackend
                 valueCacheMinAccessesForBypassCheck,
                 valueBypassEnabled,
                 writeBehindEnabled);
+    }
+
+    private ClassLoader resolveUserCodeClassLoader(Environment env) {
+        /*
+         * The return type of Environment#getUserCodeClassLoader changed between
+         * Flink 1.16 (returns a plain java.lang.ClassLoader) and Flink 1.17+
+         * (returns a UserCodeClassLoader that exposes an asClassLoader() method).
+         *
+         * To remain binary-compatible with both versions we determine the
+         * concrete API at runtime via reflection:
+         */
+        Object userCodeClObj = env.getUserCodeClassLoader();
+
+        if (userCodeClObj == null) {
+            // Fallback – highly unlikely, but prevents NPEs.
+            return Thread.currentThread().getContextClassLoader();
+        }
+
+        // Flink ≥ 1.17: UserCodeClassLoader has an asClassLoader() accessor.
+        try {
+            java.lang.reflect.Method m = userCodeClObj.getClass().getMethod("asClassLoader");
+            Object cl = m.invoke(userCodeClObj);
+            if (cl instanceof ClassLoader) {
+                return (ClassLoader) cl;
+            }
+        } catch (NoSuchMethodException ignored) {
+            // Flink ≤ 1.16: env.getUserCodeClassLoader() already returns a ClassLoader.
+        } catch (Throwable t) {
+            // Any unexpected reflection issues – log at debug level and fall through.
+            org.slf4j.LoggerFactory.getLogger(CachingStateBackend.class)
+                    .debug("Failed to reflectively access asClassLoader() on UserCodeClassLoader. Falling back to direct cast.", t);
+        }
+
+        // Direct cast path (1.16.x and earlier)
+        if (userCodeClObj instanceof ClassLoader) {
+            return (ClassLoader) userCodeClObj;
+        }
+
+        // Final safety-net: context CL.
+        return Thread.currentThread().getContextClassLoader();
     }
 } 

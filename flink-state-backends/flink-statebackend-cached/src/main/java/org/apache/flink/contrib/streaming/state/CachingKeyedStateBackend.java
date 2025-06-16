@@ -110,6 +110,14 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private transient AtomicLong currentEstimatedCacheSizeBytes;
     private transient long maxConfiguredCacheSizeBytes;
 
+    /**
+     * Guard to prevent recursive invocations of {@link #checkAndTriggerGlobalEviction()} that
+     * could otherwise happen via eviction listeners calling {@link #reportCacheMemoryReleased(long)}.
+     * Without this guard, we may end up in an infinite recursion that eventually causes a
+     * {@link StackOverflowError} (see FLINK-XXXXX).
+     */
+    private final java.util.concurrent.atomic.AtomicBoolean globalEvictionInProgress = new java.util.concurrent.atomic.AtomicBoolean(false);
+
     public CachingKeyedStateBackend(
             TaskKvStateRegistry kvStateRegistry,
             TypeSerializer<K> keySerializer,
@@ -584,21 +592,31 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     }
 
     private void checkAndTriggerGlobalEviction() {
-        long currentSize = currentEstimatedCacheSizeBytes.get();
-        if (currentSize > maxConfiguredCacheSizeBytes) {
-            long bytesToFree = currentSize - maxConfiguredCacheSizeBytes;
-            LOG.info(
-                    "Total cache size ({} bytes) exceeds limit ({} bytes). Triggering eviction to free {} bytes.",
-                    currentSize,
-                    maxConfiguredCacheSizeBytes,
-                    bytesToFree);
-            long totalFreed = 0;
-            for (CachingInternalState<K, ?, ?, ?> state : registeredStates) {
-                totalFreed += state.evictEntriesToFreeMemory(bytesToFree - totalFreed);
-                if (totalFreed >= bytesToFree) {
-                    break;
+        // Prevent reentrant calls which can lead to infinite recursion and eventually a
+        // StackOverflowError (see stack trace in Nexmark benchmarking).
+        if (!globalEvictionInProgress.compareAndSet(false, true)) {
+            return; // Another eviction round is already running.
+        }
+
+        try {
+            long currentSize = currentEstimatedCacheSizeBytes.get();
+            if (currentSize > maxConfiguredCacheSizeBytes) {
+                long bytesToFree = currentSize - maxConfiguredCacheSizeBytes;
+                LOG.info(
+                        "Total cache size ({} bytes) exceeds limit ({} bytes). Triggering eviction to free {} bytes.",
+                        currentSize,
+                        maxConfiguredCacheSizeBytes,
+                        bytesToFree);
+                long totalFreed = 0;
+                for (CachingInternalState<K, ?, ?, ?> state : registeredStates) {
+                    totalFreed += state.evictEntriesToFreeMemory(bytesToFree - totalFreed);
+                    if (totalFreed >= bytesToFree) {
+                        break;
+                    }
                 }
             }
+        } finally {
+            globalEvictionInProgress.set(false);
         }
     }
 
@@ -655,18 +673,6 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     // ---------------------------------------------------------------------
     //  Mini-batch support
     // ---------------------------------------------------------------------
-
-    /**
-     * Flushes buffered writes of all registered caching states and priority queues. Operators can
-     * call this once at the end of their mini-batch loop to persist the batch atomically to the
-     * underlying backend (RocksDB). It is <b>cheap</b>; if nothing is dirty nothing is written.
-     */
-    public void flushOnMiniBatchEnd() throws Exception {
-        // This is where we flush all buffered writes for registered states.
-        for (CachingInternalState<K, ?, ?, ?> state : registeredStates) {
-            state.flushToUnderlyingState();
-        }
-    }
 
     private static <K> LatencyTrackingStateConfig getEffectiveLatencyTrackingConfig(
             AbstractKeyedStateBackend<K> delegateBackend) {

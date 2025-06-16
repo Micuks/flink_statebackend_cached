@@ -67,6 +67,7 @@ class CachingInternalAggregatingStateTest {
     private final String testNamespace = "testNamespace";
 
     private CachingStateBackendFactory.CachePolicyType currentCachePolicyType;
+    private boolean writeBehindEnabled = true;
 
     static Stream<CachingStateBackendFactory.CachePolicyType> cachePolicies() {
         return Stream.of(
@@ -111,6 +112,7 @@ class CachingInternalAggregatingStateTest {
                 CachingStateBackendFactory.MAX_ACTIVE_NAMESPACES_CONFIG,
                 (long) maxActiveNamespaces);
         config.set(CachingStateBackendFactory.CACHE_POLICY_CONFIG, currentCachePolicyType);
+        config.set(CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG, writeBehindEnabled);
         return new CachingKeyedStateBackendBuilder<String>(delegate, config).build();
     }
 
@@ -151,6 +153,31 @@ class CachingInternalAggregatingStateTest {
         // now flush and verify
         cachingState.flushToUnderlyingState();
         verify(mockDelegateState, times(1)).updateInternal("ab");
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testAddAndGetWithWriteThrough(
+        CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        this.writeBehindEnabled = false;
+        setPolicyAndSetup(policyType);
+        when(mockDelegateState.getInternal()).thenReturn("a");
+        cachingState.setCurrentNamespace(testNamespace);
+        cachingKeyedStateBackend.setCurrentKey(testKey);
+
+        cachingState.add("b");
+
+        // Should read from delegate once, and write back immediately
+        verify(mockDelegateState, times(1)).getInternal();
+        verify(mockDelegateState, times(1)).updateInternal("ab");
+
+        // Next get should be from cache
+        assertEquals("ab", cachingState.get());
+        verify(mockDelegateState, times(1)).getInternal(); // No change
+
+        // Flushing should not write again
+        cachingState.flushToUnderlyingState();
+        verify(mockDelegateState, times(1)).updateInternal("ab"); // No change
     }
 
     @ParameterizedTest

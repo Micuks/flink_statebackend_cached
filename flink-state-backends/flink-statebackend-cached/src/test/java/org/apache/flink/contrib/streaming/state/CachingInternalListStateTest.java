@@ -98,6 +98,7 @@ class CachingInternalListStateTest {
     private List<String> delegateList; // Used for expected values
 
     private CachingStateBackendFactory.CachePolicyType currentCachePolicyType;
+    private boolean writeBehindEnabled = true;
 
     static Stream<CachingStateBackendFactory.CachePolicyType> cachePolicies() {
         return Stream.of(CachingStateBackendFactory.CachePolicyType.LRU, CachingStateBackendFactory.CachePolicyType.TINYLFU);
@@ -332,7 +333,7 @@ class CachingInternalListStateTest {
         verify(mockDelegateListState, times(3)).get();
 
         cachingKeyedStateBackend.setCurrentKey(testKey);
-        List<String> newList = new ArrayList<>(Arrays.asList("new_el1", "new_el2"));
+        final List<String> newList = Arrays.asList(element1, element2, element3);
 
         cachingListState.update(newList);
 
@@ -861,6 +862,52 @@ class CachingInternalListStateTest {
                 cachingListState.getNamespaceSerializer());
         org.junit.jupiter.api.Assertions.assertEquals(mockValueSerializer,
                 cachingListState.getValueSerializer());
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testListUpdate_withWriteThrough_writesToDelegate(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        this.writeBehindEnabled = false;
+        setPolicyAndSetup(policyType);
+        final List<String> newList = Arrays.asList(element1, element2);
+
+        cachingListState.setCurrentNamespace(testNamespace);
+        cachingKeyedStateBackend.setCurrentKey(testKey);
+        cachingListState.update(newList);
+
+        // Verify that update was called on the delegate right away
+        verify(mockDelegateListState, times(1)).update(newList);
+
+        // Verify that the cache contains a clean entry
+        List<String> cachedList = getAsList(cachingListState);
+        assertEquals(newList, cachedList);
+        verify(mockDelegateListState, times(1)).get(); // Should be served from cache, no new delegate interaction
+
+        // Flushing should not cause another write
+        cachingListState.flushToUnderlyingState();
+        verify(mockDelegateListState, times(1)).update(newList);
+    }
+
+    @ParameterizedTest
+    @MethodSource("cachePolicies")
+    void testListAdd_withWriteThrough_writesToDelegate(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+        this.writeBehindEnabled = false;
+        setPolicyAndSetup(policyType);
+
+        cachingListState.setCurrentNamespace(testNamespace);
+        cachingKeyedStateBackend.setCurrentKey(testKey);
+        when(mockDelegateListState.get()).thenReturn(new ArrayList<>(Collections.singletonList(element1)));
+
+        cachingListState.add(element2);
+
+        // In write-through for add, we expect a get and then an update on the delegate.
+        // However, the current implementation in CachingInternalListState for write-through add/addAll
+        // is to call delegate.add/addAll directly.
+        verify(mockDelegateListState, times(1)).add(element2);
+
+        // Flushing should not cause another write
+        cachingListState.flushToUnderlyingState();
+        verify(mockDelegateListState, times(1)).add(element2);
     }
 }
 

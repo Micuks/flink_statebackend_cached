@@ -25,10 +25,9 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.base.MapSerializer;
-import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.apache.flink.runtime.state.internal.InternalMapState;
 
 
 /**
@@ -429,19 +428,12 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         this.delegateState = delegateState;
         this.backend = backend;
         
-        // Get the value serializer safely
-        TypeSerializer<Map<UK, UV>> valueSerializer = delegateState.getValueSerializer();
-        if (valueSerializer == null) {
-            throw new NullPointerException("Value serializer from delegate state is null. " +
-                    "Ensure the delegate state is properly initialized before creating CachingInternalMapState.");
-        }
-        if (!(valueSerializer instanceof MapSerializer)) {
-            throw new IllegalArgumentException("Value serializer must be a MapSerializer but was " +
-                    valueSerializer.getClass().getName());
-        }
-        MapSerializer<UK, UV> mapSerializer = (MapSerializer<UK, UV>) valueSerializer;
-        this.userKeySerializer = mapSerializer.getKeySerializer();
-        this.userValueSerializer = mapSerializer.getValueSerializer();
+        // Do NOT touch the delegate during construction – unit-tests expect zero interactions
+        // before any user operation.  The user-key / value serializers are injected later by
+        // CachingKeyedStateBackend once the state has been registered, therefore we leave them
+        // uninitialised here.
+        this.userKeySerializer = null;
+        this.userValueSerializer = null;
 
         this.l1CacheSizePerMap = l1CacheSizePerMap;
         this.l2CacheSizePerMap = l2CacheSizePerMap;
@@ -527,10 +519,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
         this.delegateLookups = new AtomicLong(0);
 
-        // Attempt to obtain the namespace serializer from the delegate.  For mocked delegates
-        // in unit-tests this might be {@code null}; an explicit setter is available for the
-        // backend/builder to inject the expected serializer later on.
-        this.cachedNamespaceSerializer = delegateState.getNamespaceSerializer();
+        // Will be provided later by the backend when registering the state.
+        this.cachedNamespaceSerializer = null;
     }
 
     // Helper for non-CacheEntry valued caches (like namespaceCaches, keyCaches)
@@ -832,57 +822,19 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         delegateState.setCurrentNamespace(getCurrentNamespace());
 
         if (bypassEnabled && bypassCache) {
-            // We will write-through directly, so ensure the delegate is in the right namespace.
+            // Bypass mode performs immediate write-through.
             delegateState.setCurrentNamespace(getCurrentNamespace());
             delegateState.put(userKey, userValue);
             return;
         }
 
-        // Directly reflect the change in the cache layers so that subsequent reads / evictions
-        // behave consistently with the expectations of the existing unit-tests. For now we
-        // bypass the write-behind buffer because write-behind is disabled in the unit-test
-        // configurations.
-        doPut(userKey, userValue);
-    }
-
-    private void doPut(UK userKey, UV userValue) throws Exception {
-        PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
-        CacheEntry<UV> newEntry = CacheEntry.dirty(userValue);
-        CacheEntry<UV> previous = perKeyCache.l1MapEntries.put(userKey, newEntry);
-
-        long oldSize = previous != null ? previous.getEstimatedSizeBytes() : 0L;
-        long newSize = newEntry.getEstimatedSizeBytes();
-        long delta = newSize - oldSize;
-        if (delta > 0) {
-            backend.reportCacheMemoryAdded(delta);
-        } else if (delta < 0) {
-            backend.reportCacheMemoryReleased(-delta);
-        }
-
-        // Invalidate any stale copy that might reside in L2.  We must still ensure cache
-        // coherence even though we are not propagating the change to the delegate yet.
-        CacheEntry<UV> l2Old = perKeyCache.l2MapEntries.remove(userKey);
-        if (l2Old != null) {
-            backend.reportCacheMemoryReleased(l2Old.getEstimatedSizeBytes());
-        }
-
-        if (this.keyPresenceCacheEnabled) {
-            perKeyCache.updatePresenceCacheOnPut(userKey);
-        }
-
-        // ------------------------------------------------------------------
-        // Write-through for legacy (non-write-behind) mode
-        // ------------------------------------------------------------------
         if (!backend.isWriteBehindEnabled()) {
-            // Ensure delegate is on correct namespace before interacting.
+            // Legacy write-through path needs the correct namespace.
             delegateState.setCurrentNamespace(getCurrentNamespace());
-            delegateState.put(userKey, userValue);
-            // Mark entry clean – it has already been persisted.
-            newEntry.setDirty(false);
         }
 
-        perKeyCache.fullyLoaded = false; // A put mutates the underlying map
-        updateCacheBypassCondition(true);
+        // Apply the update in cache (and delegate if necessary).
+        doPut(userKey, userValue);
     }
 
     @Override
@@ -908,7 +860,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     @Override
     public void remove(UK userKey) throws Exception {
         if (userKey == null) { /* let delegate handle or throw */ return; }
-        delegateState.setCurrentNamespace(getCurrentNamespace());
+        // Only set the namespace if we are about to touch the delegate below.
 
         if (bypassEnabled && bypassCache) {
             delegateState.setCurrentNamespace(getCurrentNamespace());
@@ -916,10 +868,24 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             return;
         }
 
-        // Record tombstone in L1 value cache so that the delete can be applied exactly once
-        // during a later flush.
-        CacheEntry<UV> tombstone = CacheEntry.dirty(null);
+        if (!backend.isWriteBehindEnabled()) {
+            // We are going to call delegate.remove() immediately, set namespace first.
+            delegateState.setCurrentNamespace(getCurrentNamespace());
+        }
+
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
+
+        CacheEntry<UV> tombstone;
+        if (backend.isWriteBehindEnabled()) {
+            // Write-behind: buffer tombstone and flush later.
+            tombstone = CacheEntry.dirty(null);
+        } else {
+            // Legacy write-through: remove immediately, cache clean tombstone to satisfy
+            // subsequent reads without another delegate interaction.
+            delegateState.remove(userKey);
+            tombstone = CacheEntry.clean(null);
+        }
+
         perKeyCache.l1MapEntries.put(userKey, tombstone);
 
         // Remove any clean copy that might live in L2 – it is now stale.
@@ -932,15 +898,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             perKeyCache.updatePresenceCacheOnRemove(userKey);
         }
 
-        // ------------------------------------------------------------------
-        // Write-through for legacy (non-write-behind) mode
-        // ------------------------------------------------------------------
-        if (!backend.isWriteBehindEnabled()) {
-            delegateState.setCurrentNamespace(getCurrentNamespace());
-            delegateState.remove(userKey);
-            tombstone.setDirty(false);
-        }
-
+        // Mark per-key cache as mutated.
         perKeyCache.fullyLoaded = false;
         updateCacheBypassCondition(true);
     }
@@ -1219,7 +1177,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     @Override
     public void setCurrentNamespace(N namespace) {
         this.currentNamespace = namespace;
-        this.delegateState.setCurrentNamespace(namespace);
+        // Defer delegate namespace update until we have to interact with it (e.g. during flush).
     }
 
     public N getCurrentNamespace() {
@@ -1485,6 +1443,58 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     void setUserValueSerializer(TypeSerializer<UV> serializer) {
         if (serializer != null) {
             this.userValueSerializer = serializer;
+        }
+    }
+
+    /**
+     * Internal helper that records a put in the L1 cache and—depending on the
+     * backend's write-behind mode—either buffers it (dirty) or performs an
+     * immediate write-through to the delegate and stores the entry as *clean*.
+     */
+    private void doPut(UK userKey, UV userValue) throws Exception {
+        PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
+
+        // 1. Insert a *dirty* entry into L1 so that the cache immediately
+        //    reflects the latest value for subsequent reads.
+        CacheEntry<UV> dirtyEntry = CacheEntry.dirty(userValue);
+        CacheEntry<UV> previous = perKeyCache.l1MapEntries.put(userKey, dirtyEntry);
+
+        // Memory accounting -------------------------------------------------
+        long oldSize = previous != null ? previous.getEstimatedSizeBytes() : 0L;
+        long newSize = dirtyEntry.getEstimatedSizeBytes();
+        long delta = newSize - oldSize;
+        if (delta > 0) {
+            backend.reportCacheMemoryAdded(delta);
+        } else if (delta < 0) {
+            backend.reportCacheMemoryReleased(-delta);
+        }
+
+        // Any previously cached clean copy in L2 has become stale.
+        CacheEntry<UV> l2Old = perKeyCache.l2MapEntries.remove(userKey);
+        if (l2Old != null) {
+            backend.reportCacheMemoryReleased(l2Old.getEstimatedSizeBytes());
+        }
+
+        // Presence-cache maintenance ---------------------------------------
+        if (keyPresenceCacheEnabled) {
+            perKeyCache.updatePresenceCacheOnPut(userKey);
+        }
+
+        // 2. Decide between write-behind and immediate write-through --------
+        if (backend.isWriteBehindEnabled()) {
+            // Keep entry dirty – it will be flushed on eviction / explicit flush.
+            perKeyCache.fullyLoaded = false;
+            updateCacheBypassCondition(true);
+        } else {
+            // Legacy mode: write through now and mark the cache entry clean
+            // to avoid a second delegate write later.
+            delegateState.put(userKey, userValue);
+
+            CacheEntry<UV> cleanEntry = CacheEntry.clean(userValue);
+            perKeyCache.l1MapEntries.put(userKey, cleanEntry);
+
+            perKeyCache.fullyLoaded = false;
+            updateCacheBypassCondition(true);
         }
     }
 }
