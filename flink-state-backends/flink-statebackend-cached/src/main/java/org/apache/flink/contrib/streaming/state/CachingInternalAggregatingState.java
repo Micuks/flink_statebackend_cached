@@ -22,7 +22,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 import javax.annotation.Nonnull;
 import org.apache.flink.api.common.functions.AggregateFunction;
@@ -68,9 +68,9 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
     private final boolean writeBehindEnabled;
 
     // Metrics
-    private final AtomicLong cacheHits = new AtomicLong(0);
-    private final AtomicLong cacheMisses = new AtomicLong(0);
-    private final AtomicLong accessCount = new AtomicLong(0);
+    private final LongAdder cacheHits = new LongAdder();
+    private final LongAdder cacheMisses = new LongAdder();
+    private final LongAdder accessCount = new LongAdder();
     private static final long LOG_HIT_RATE_EVERY_N_ACCESSES = 10000;
 
     public CachingInternalAggregatingState(
@@ -135,7 +135,7 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
 
         setCurrentNamespace(namespace);
 
-        for (Map.Entry<K, ACC> entry : writeBuffer.entrySet()) {
+        for (Map.Entry<K, ACC> entry : new java.util.ArrayList<>(writeBuffer.entrySet())) {
             backend.setCurrentKey(entry.getKey());
             updateInternal(entry.getValue());
         }
@@ -229,7 +229,8 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
 
     @Override
     public ACC getInternal() throws Exception {
-        if (accessCount.incrementAndGet() % LOG_HIT_RATE_EVERY_N_ACCESSES == 0) {
+        accessCount.increment();
+        if (accessCount.sum() % LOG_HIT_RATE_EVERY_N_ACCESSES == 0) {
             logCacheHitRate();
         }
         K currentKey = backend.getCurrentKey();
@@ -244,7 +245,7 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
         CacheEntry<ACC> l1Entry = l1Cache.get(currentKey);
 
         if (l1Entry != null) {
-            cacheHits.incrementAndGet();
+            cacheHits.increment();
             return l1Entry.getValue();
         }
 
@@ -252,13 +253,13 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
         CacheEntry<ACC> l2Entry = l2Cache.get(currentKey);
 
         if (l2Entry != null) {
-            cacheHits.incrementAndGet();
+            cacheHits.increment();
             l1Cache.put(currentKey, l2Entry);
             l2Cache.remove(currentKey);
             return l2Entry.getValue();
         }
 
-        cacheMisses.incrementAndGet();
+        cacheMisses.increment();
         ACC valueFromDelegate = delegateState.getInternal();
         if (valueFromDelegate != null) {
             l1Cache.put(currentKey, CacheEntry.clean(valueFromDelegate));
@@ -478,8 +479,8 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
     }
 
     private void logCacheHitRate() {
-        long hits = cacheHits.get();
-        long misses = cacheMisses.get();
+        long hits = cacheHits.sum();
+        long misses = cacheMisses.sum();
         long total = hits + misses;
         if (total > 0) {
             LOG.info("AggregatingState Cache Hit Rate: {} (Hits: {}, Misses: {})",

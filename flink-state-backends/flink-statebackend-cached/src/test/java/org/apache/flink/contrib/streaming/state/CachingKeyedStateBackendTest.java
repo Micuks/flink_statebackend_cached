@@ -433,7 +433,7 @@ boolean writeBehindEnabled = CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CON
     }
 
     @Test
-    void testCreatePriorityQueue_ReturnsProxyWithElementCounting() throws Exception {
+    void testCreatePriorityQueue_DelegatesDirectly() throws Exception {
         when(mockDelegateBackend.create(anyString(), any(TypeSerializer.class)))
                 .thenReturn(mockPriorityQueue);
 
@@ -441,16 +441,14 @@ boolean writeBehindEnabled = CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CON
                 cachingBackend.create("test-pq", new TestPriorityQueueElementSerializer());
 
         assertNotNull(priorityQueue);
-        assertTrue(priorityQueue instanceof CachingKeyGroupedInternalPriorityQueue);
+        // The caching layer has been removed – the returned instance should be exactly the delegate's queue.
+        assertSame(mockPriorityQueue, priorityQueue);
 
         TestPriorityQueueElement element = new TestPriorityQueueElement("a", 1, "key");
         cachingBackend.setCurrentKey("key");
         priorityQueue.add(element);
 
-        // The caching priority queue might buffer elements, so we trigger a flush via savepoint.
-        when(mockDelegateBackend.savepoint()).thenReturn(mock(org.apache.flink.runtime.state.SavepointResources.class));
-        cachingBackend.savepoint();
-
+        // Verify the call is forwarded immediately to the delegate queue.
         verify(mockPriorityQueue, times(1)).add(element);
     }
 

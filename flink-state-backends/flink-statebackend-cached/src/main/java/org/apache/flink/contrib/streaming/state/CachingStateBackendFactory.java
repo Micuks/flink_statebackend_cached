@@ -141,8 +141,11 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
     public static final ConfigOption<Boolean> WRITE_BEHIND_ENABLED_CONFIG =
             ConfigOptions.key("state.backend.cached.write-behind.enabled")
                     .booleanType()
-                    .defaultValue(false)
-                    .withDescription("Enable write-behind caching. If false, it uses write-through.");
+                    .defaultValue(true)
+                    .withDescription(
+                            "Enable write-behind caching for ValueState, ListState, and AggregatingState. " +
+                            "When set to false the backend falls back to synchronous write-through. " +
+                            "MapState always uses an internal write-behind buffer independent of this flag.");
 
     // Potentially, a config for delegate backend factory if it's not hardcoded to RocksDB
     // For now, assumes RocksDBStateBackend is the default delegate and is configured using its own

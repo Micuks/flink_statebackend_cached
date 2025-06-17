@@ -143,7 +143,7 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
 
         setCurrentNamespace(namespace);
 
-        for (Map.Entry<K, List<V_ELE>> entry : writeBuffer.entrySet()) {
+        for (Map.Entry<K, List<V_ELE>> entry : new java.util.ArrayList<>(writeBuffer.entrySet())) {
             backend.setCurrentKey(entry.getKey());
             updateInternal(entry.getValue());
         }

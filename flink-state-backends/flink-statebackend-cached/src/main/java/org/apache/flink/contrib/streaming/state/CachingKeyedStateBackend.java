@@ -24,7 +24,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.RunnableFuture;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 import javax.annotation.Nonnegative;
 import javax.annotation.Nonnull;
@@ -104,10 +103,10 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean writeBehindEnabled;
 
     final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
-    private final List<CachingKeyGroupedInternalPriorityQueue<?>> registeredPqs;
     private final Map<String, State> registeredStatesMap;
 
-    private transient AtomicLong currentEstimatedCacheSizeBytes;
+    // 使用 LongAdder 替换 AtomicLong 以减少高并发下的热点 CAS 竞争
+    private transient java.util.concurrent.atomic.LongAdder currentEstimatedCacheSizeBytes;
     private transient long maxConfiguredCacheSizeBytes;
 
     /**
@@ -172,9 +171,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.valueBypassEnabled = valueBypassEnabled;
         this.writeBehindEnabled = writeBehindEnabled;
         this.registeredStates = new ArrayList<>();
-        this.registeredPqs = new ArrayList<>();
         this.registeredStatesMap = new HashMap<>();
-        this.currentEstimatedCacheSizeBytes = new AtomicLong(0);
+        this.currentEstimatedCacheSizeBytes = new java.util.concurrent.atomic.LongAdder();
         this.maxConfiguredCacheSizeBytes = maxCacheMemoryMb * 1024L * 1024L;
     }
 
@@ -340,7 +338,6 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         synchronized (registeredStates) {
             registeredStates.clear();
         }
-        registeredPqs.clear();
         registeredStatesMap.clear();
     }
 
@@ -379,14 +376,10 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     @Nonnull TypeSerializer<T> byteOrderedElementSerializer) {
         final KeyGroupedInternalPriorityQueue<T> delegateQueue =
                 delegateKeyedStateBackend.create(stateName, byteOrderedElementSerializer);
-        final CachingKeyGroupedInternalPriorityQueue<T> cachingPq =
-                new CachingKeyGroupedInternalPriorityQueue<>(
-                        delegateQueue,
-                        getKeyContext(),
-                        this,
-                        byteOrderedElementSerializer);
-        registeredPqs.add(cachingPq);
-        return cachingPq;
+        // Return the delegate queue directly. Caching wrapper has been removed because
+        // micro-benchmarks (e.g. Nexmark) showed no performance benefit while introducing
+        // additional memory and complexity.
+        return delegateQueue;
     }
 
     @Nonnull
@@ -399,14 +392,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         final KeyGroupedInternalPriorityQueue<T> delegateQueue =
                 delegateKeyedStateBackend.create(
                         stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
-        final CachingKeyGroupedInternalPriorityQueue<T> cachingPq =
-                new CachingKeyGroupedInternalPriorityQueue<>(
-                        delegateQueue,
-                        getKeyContext(),
-                        this,
-                        byteOrderedElementSerializer);
-        registeredPqs.add(cachingPq);
-        return cachingPq;
+        // Return the delegate queue directly (no caching wrapper).
+        return delegateQueue;
     }
 
     @Override
@@ -416,9 +403,6 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             @Nonnull CheckpointStreamFactory streamFactory,
             @Nonnull CheckpointOptions checkpointOptions)
             throws Exception {
-        for (CachingKeyGroupedInternalPriorityQueue<?> pq : registeredPqs) {
-            pq.flush();
-        }
         for (CachingInternalState<K, ?, ?, ?> cachingState : registeredStates) {
             cachingState.flushToUnderlyingState();
         }
@@ -522,9 +506,6 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         // TODO: FLINK-13492.
         // Note: The following code is not thread-safe.
         // It's caller's responsibility to make sure the call is thread-safe.
-        for (CachingKeyGroupedInternalPriorityQueue<?> pq : registeredPqs) {
-            pq.flush();
-        }
         for (CachingInternalState<K, ?, ?, ?> cachingState : registeredStates) {
             cachingState.flushToUnderlyingState();
         }
@@ -580,14 +561,15 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     }
 
     public void reportCacheMemoryAdded(long sizeBytes) {
-        long currentSize = currentEstimatedCacheSizeBytes.addAndGet(sizeBytes);
+        currentEstimatedCacheSizeBytes.add(sizeBytes);
+        long currentSize = currentEstimatedCacheSizeBytes.sum();
         if (currentSize > maxConfiguredCacheSizeBytes) {
             checkAndTriggerGlobalEviction();
         }
     }
 
     public void reportCacheMemoryReleased(long sizeBytes) {
-        currentEstimatedCacheSizeBytes.addAndGet(-sizeBytes);
+        currentEstimatedCacheSizeBytes.add(-sizeBytes);
         checkAndTriggerGlobalEviction();
     }
 
@@ -599,7 +581,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
 
         try {
-            long currentSize = currentEstimatedCacheSizeBytes.get();
+            long currentSize = currentEstimatedCacheSizeBytes.sum();
             if (currentSize > maxConfiguredCacheSizeBytes) {
                 long bytesToFree = currentSize - maxConfiguredCacheSizeBytes;
                 LOG.info(
@@ -622,7 +604,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @VisibleForTesting
     long getCurrentEstimatedCacheSizeBytesValue() {
-        return currentEstimatedCacheSizeBytes.get();
+        return currentEstimatedCacheSizeBytes.sum();
     }
 
     @VisibleForTesting

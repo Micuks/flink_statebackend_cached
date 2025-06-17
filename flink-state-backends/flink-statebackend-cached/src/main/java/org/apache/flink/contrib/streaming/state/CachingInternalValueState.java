@@ -21,7 +21,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 import javax.annotation.Nonnull;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
@@ -65,9 +65,9 @@ public class CachingInternalValueState<K, N, V>
     private final long cacheMinAccessesForBypassCheck;
 
     // State for cache bypass logic
-    private transient AtomicLong accessesForHitRateWindow;
-    private transient AtomicLong hitsInHitRateWindow;
-    private transient AtomicLong totalAccessesForBypassEligibility;
+    private transient LongAdder accessesForHitRateWindow;
+    private transient LongAdder hitsInHitRateWindow;
+    private transient LongAdder totalAccessesForBypassEligibility;
 
     private volatile boolean bypassCache = false;
     private final boolean bypassEnabled;
@@ -99,9 +99,9 @@ public class CachingInternalValueState<K, N, V>
             this.cacheHitRateThreshold = cacheHitRateThreshold;
             this.cacheHitRateWindowSize = cacheHitRateWindowSize;
             this.cacheMinAccessesForBypassCheck = cacheMinAccessesForBypassCheck;
-            this.accessesForHitRateWindow = new AtomicLong(0);
-            this.hitsInHitRateWindow = new AtomicLong(0);
-            this.totalAccessesForBypassEligibility = new AtomicLong(0);
+            this.accessesForHitRateWindow = new LongAdder();
+            this.hitsInHitRateWindow = new LongAdder();
+            this.totalAccessesForBypassEligibility = new LongAdder();
         } else {
             this.cacheHitRateThreshold = 0;
             this.cacheHitRateWindowSize = 0;
@@ -234,20 +234,22 @@ public class CachingInternalValueState<K, N, V>
             return;
         }
         
-        if (totalAccessesForBypassEligibility.get() % 1000 == 0) {
+        if (totalAccessesForBypassEligibility.sum() % 1000 == 0) {
             LOG.info(getCacheStats());
         }
 
-        long totalAccesses = totalAccessesForBypassEligibility.incrementAndGet();
+        totalAccessesForBypassEligibility.increment();
+        long totalAccesses = totalAccessesForBypassEligibility.sum();
 
         if (resolvedByCache) {
-            hitsInHitRateWindow.incrementAndGet();
+            hitsInHitRateWindow.increment();
         }
 
-        long currentWindowAccesses = accessesForHitRateWindow.incrementAndGet();
+        accessesForHitRateWindow.increment();
+        long currentWindowAccesses = accessesForHitRateWindow.sum();
 
         if (totalAccesses >= cacheMinAccessesForBypassCheck && currentWindowAccesses >= cacheHitRateWindowSize) {
-            double currentHitRate = (double) hitsInHitRateWindow.get() / currentWindowAccesses;
+            double currentHitRate = (double) hitsInHitRateWindow.sum() / currentWindowAccesses;
             String currentNamespaceForLog = "unavailable";
             try {
                 currentNamespaceForLog = String.valueOf(getCurrentNamespace());
@@ -260,8 +262,8 @@ public class CachingInternalValueState<K, N, V>
                     LOG.info(
                             "Cache bypass activated for value state. Hit rate {}% ({} hits / {} accesses) is below threshold {}%. Namespace: {}.",
                             String.format("%.2f", currentHitRate * 100),
-                            hitsInHitRateWindow.get(),
-                            accessesForHitRateWindow.get(),
+                            hitsInHitRateWindow.sum(),
+                            accessesForHitRateWindow.sum(),
                             String.format("%.2f", this.cacheHitRateThreshold * 100),
                             currentNamespaceForLog);
                 }
@@ -270,13 +272,13 @@ public class CachingInternalValueState<K, N, V>
                 LOG.info(
                         "Cache bypass deactivated for value state. Hit rate {}% ({} hits / {} accesses) is above threshold {}%. Namespace: {}.",
                         String.format("%.2f", currentHitRate * 100),
-                        hitsInHitRateWindow.get(),
-                        accessesForHitRateWindow.get(),
+                        hitsInHitRateWindow.sum(),
+                        accessesForHitRateWindow.sum(),
                         String.format("%.2f", this.cacheHitRateThreshold * 100),
                         currentNamespaceForLog);
             }
-            accessesForHitRateWindow.set(0);
-            hitsInHitRateWindow.set(0);
+            accessesForHitRateWindow.reset();
+            hitsInHitRateWindow.reset();
         }
     }
 
@@ -714,9 +716,9 @@ public class CachingInternalValueState<K, N, V>
         if (!bypassEnabled) {
             return "ValueState Cache: Bypass feature disabled.";
         }
-        long hits = hitsInHitRateWindow != null ? hitsInHitRateWindow.get() : 0;
-        long accesses = accessesForHitRateWindow != null ? accessesForHitRateWindow.get() : 0;
-        long total = totalAccessesForBypassEligibility != null ? totalAccessesForBypassEligibility.get() : 0;
+        long hits = hitsInHitRateWindow.sum();
+        long accesses = accessesForHitRateWindow.sum();
+        long total = totalAccessesForBypassEligibility.sum();
         return String.format(
                 "ValueState Cache Stats: Total Accesses: %d, Window Accesses: %d, Window Hits: %d, Hit Rate: %.2f, Bypassing: %s",
                 total,

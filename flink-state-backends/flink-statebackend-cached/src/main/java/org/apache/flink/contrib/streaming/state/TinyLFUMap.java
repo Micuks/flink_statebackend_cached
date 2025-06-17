@@ -23,7 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 
 /**
@@ -63,7 +63,7 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
     private final int maxCapacity;
 
     // Counter for total number of accesses
-    private final AtomicLong accessCounter;
+    private final LongAdder accessCounter;
 
     // Eviction listener
     private final Consumer<Map.Entry<K, V>> evictionListener;
@@ -85,7 +85,7 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
      */
     public TinyLFUMap(int maxCapacity, Consumer<Map.Entry<K, V>> evictionListener) {
         this.maxCapacity = maxCapacity;
-        this.accessCounter = new AtomicLong();
+        this.accessCounter = new LongAdder();
         this.evictionListener = evictionListener;
 
         // Calculate window cache size (at least 1 element)
@@ -280,7 +280,7 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
         windowLruCache.clear();
         mainLruCache.clear();
         sketch.reset();
-        accessCounter.set(0);
+        accessCounter.reset();
     }
 
     @Override
@@ -332,7 +332,8 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
         sketch.increment(key);
 
         // Check if we need to reset the counters (every maxCapacity * 10 accesses)
-        long count = accessCounter.incrementAndGet();
+        accessCounter.increment();
+        long count = accessCounter.sum();
         if (count % (maxCapacity * 10) == 0) {
             sketch.reset();
         }
