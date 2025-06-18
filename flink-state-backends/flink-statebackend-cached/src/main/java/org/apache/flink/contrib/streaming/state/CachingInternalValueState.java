@@ -15,24 +15,26 @@
 
 package org.apache.flink.contrib.streaming.state;
 
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.atomic.LongAdder;
-import java.util.function.Consumer;
-import javax.annotation.Nonnull;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.runtime.state.internal.InternalKvState.StateIncrementalVisitor;
 import org.apache.flink.runtime.state.internal.InternalValueState;
+import org.apache.flink.runtime.state.internal.InternalKvState.StateIncrementalVisitor;
+import org.apache.flink.metrics.Counter;
+import org.apache.flink.metrics.MetricGroup;
+
+import javax.annotation.Nonnull;
+
+import java.io.IOException;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
+import java.util.Iterator;
+import java.util.List;
+import java.util.ArrayList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-
 /**
- * A {@link InternalValueState} that uses an L1/L2 cache for its value.
+ * An {@link InternalValueState} that uses an L1/L2 cache for its values.
  *
  * @param <K> The type of the key.
  * @param <N> The type of the namespace.
@@ -65,15 +67,16 @@ public class CachingInternalValueState<K, N, V>
     private final long cacheMinAccessesForBypassCheck;
 
     // State for cache bypass logic
-    private transient LongAdder accessesForHitRateWindow;
-    private transient LongAdder hitsInHitRateWindow;
-    private transient LongAdder totalAccessesForBypassEligibility;
-
+    private transient AtomicLong accessesForHitRateWindow;
+    private transient AtomicLong hitsInHitRateWindow;
+    private transient AtomicLong totalAccessesForBypassEligibility;
+    // Metrics
+    private final Counter cacheHits;
+    private final Counter cacheMisses;
+    private final Counter cacheBypassActivations;
+    
     private volatile boolean bypassCache = false;
     private final boolean bypassEnabled;
-
-    private final CachePolicy<N, Map<K, V>> namespaceWriteBuffers;
-    private transient boolean flushing = false;
 
     public CachingInternalValueState(
             InternalValueState<K, N, V> delegateState,
@@ -81,12 +84,13 @@ public class CachingInternalValueState<K, N, V>
             int l1CacheSize,
             int l2CacheSize,
             int maxActiveNamespacesInCache,
-            long maxCacheMemoryMb,
+            long maxCacheMemoryMb, 
             CachingStateBackendFactory.CachePolicyType cachePolicyType,
             double cacheHitRateThreshold,
             long cacheHitRateWindowSize,
             long cacheMinAccessesForBypassCheck,
-            boolean bypassEnabled) {
+            boolean bypassEnabled,
+            MetricGroup metricsGroup) {
         this.delegateState = delegateState;
         this.backend = backend;
         this.l1CacheSizePerKeyPerNamespace = l1CacheSize;
@@ -94,29 +98,40 @@ public class CachingInternalValueState<K, N, V>
         this.maxActiveNamespacesInCache = maxActiveNamespacesInCache;
         this.maxCacheMemoryMb = maxCacheMemoryMb;
         this.cachePolicyType = cachePolicyType;
-        this.bypassEnabled = bypassEnabled;
-        if(this.bypassEnabled) {
-            this.cacheHitRateThreshold = cacheHitRateThreshold;
-            this.cacheHitRateWindowSize = cacheHitRateWindowSize;
-            this.cacheMinAccessesForBypassCheck = cacheMinAccessesForBypassCheck;
-            this.accessesForHitRateWindow = new LongAdder();
-            this.hitsInHitRateWindow = new LongAdder();
-            this.totalAccessesForBypassEligibility = new LongAdder();
-        } else {
-            this.cacheHitRateThreshold = 0;
-            this.cacheHitRateWindowSize = 0;
-            this.cacheMinAccessesForBypassCheck = 0;
-        }
 
-        this.namespaceWriteBuffers = createCachePolicyWithEvictionListener(this.maxActiveNamespacesInCache,
-                evictedNamespaceL1Entry -> {
-                    try {
-                        flushWriteBufferForNamespace(evictedNamespaceL1Entry.getKey(), evictedNamespaceL1Entry.getValue());
-                    } catch (Exception e) {
-                        throw new RuntimeException(
-                                "Failed to flush/park L1 entries for evicted namespace: " + evictedNamespaceL1Entry.getKey(), e);
-                    }
-                });
+        this.cacheHitRateThreshold = cacheHitRateThreshold;
+        this.cacheHitRateWindowSize = cacheHitRateWindowSize;
+        this.cacheMinAccessesForBypassCheck = cacheMinAccessesForBypassCheck;
+        this.bypassEnabled = bypassEnabled;
+
+        if (this.bypassEnabled && this.cacheHitRateThreshold > 0.0) {
+            this.accessesForHitRateWindow = new AtomicLong(0);
+            this.hitsInHitRateWindow = new AtomicLong(0);
+            this.totalAccessesForBypassEligibility = new AtomicLong(0);
+        } else {
+            this.accessesForHitRateWindow = null;
+            this.hitsInHitRateWindow = null;
+            this.totalAccessesForBypassEligibility = null;
+        }
+        
+        // Initialize metrics
+        if (metricsGroup != null) {
+            this.cacheHits = metricsGroup.counter("hits");
+            this.cacheMisses = metricsGroup.counter("misses");
+            this.cacheBypassActivations = metricsGroup.counter("bypassActivations");
+        } else {
+            // Create shared dummy counter instance
+            Counter dummyCounter = new Counter() {
+                @Override public void inc() {}
+                @Override public void inc(long n) {}
+                @Override public void dec() {}
+                @Override public void dec(long n) {}
+                @Override public long getCount() { return 0; }
+            };
+            this.cacheHits = dummyCounter;
+            this.cacheMisses = dummyCounter;
+            this.cacheBypassActivations = dummyCounter;
+        }
 
         // Create namespace caches with eviction listeners that flush dirty entries
         this.namespaceCachesL1 = createCachePolicyWithEvictionListener(maxActiveNamespacesInCache,
@@ -128,17 +143,10 @@ public class CachingInternalValueState<K, N, V>
                 });
         this.namespaceCachesL2 = createCachePolicyWithEvictionListener(maxActiveNamespacesInCache,
                 evictedNsEntry -> {
-                    // Not flushing L2, as it should only contain clean entries.
-                    // Report memory released for the entire evicted L2 cache.
+                    // Flush any dirty entries in the evicted namespace before removing it
                     N evictedNamespace = evictedNsEntry.getKey();
-                    CachePolicy<K, CacheEntry<V>> evictedPerNsL2Cache = evictedNsEntry.getValue();
-                    if (evictedPerNsL2Cache != null) {
-                        for (Map.Entry<K, CacheEntry<V>> entry : evictedPerNsL2Cache.entrySet()) {
-                            if (entry.getValue() != null) {
-                                backend.reportCacheMemoryReleased(entry.getValue().getEstimatedSizeBytes());
-                            }
-                        }
-                    }
+                    CachePolicy<K, CacheEntry<V>> evictedL2Cache = evictedNsEntry.getValue();
+                    flushCacheForNamespace(evictedNamespace, evictedL2Cache);
                 });
     }
 
@@ -199,89 +207,58 @@ public class CachingInternalValueState<K, N, V>
         }
     }
 
-    private void flushWriteBufferForNamespace(N namespace, Map<K, V> writeBuffer) throws IOException {
-        if (writeBuffer == null || writeBuffer.isEmpty()) {
-            return;
-        }
-
-        N originalNamespace = getCurrentNamespace();
-        K originalKey = backend.getCurrentKey();
-        boolean keyWasSet = originalKey != null;
-
-        setCurrentNamespace(namespace);
-
-        for (Map.Entry<K, V> entry : writeBuffer.entrySet()) {
-            backend.setCurrentKey(entry.getKey());
-            if (entry.getValue() == null) {
-                clear();
-            } else {
-                update(entry.getValue());
-            }
-        }
-        writeBuffer.clear();
-
-        setCurrentNamespace(originalNamespace);
-        if (keyWasSet) {
-            backend.setCurrentKey(originalKey);
-        } else {
-            backend.setCurrentKey(null);
-        }
-    }
-
     private void updateCacheBypassCondition(boolean resolvedByCache) {
         if (!bypassEnabled || cacheHitRateThreshold <= 0.0) {
             this.bypassCache = false;
             return;
         }
-        
-        if (totalAccessesForBypassEligibility.sum() % 1000 == 0) {
-            LOG.info(getCacheStats());
-        }
-
-        totalAccessesForBypassEligibility.increment();
-        long totalAccesses = totalAccessesForBypassEligibility.sum();
 
         if (resolvedByCache) {
-            hitsInHitRateWindow.increment();
+            hitsInHitRateWindow.incrementAndGet();
         }
+        long currentWindowAccesses = accessesForHitRateWindow.incrementAndGet();
 
-        accessesForHitRateWindow.increment();
-        long currentWindowAccesses = accessesForHitRateWindow.sum();
+        if (currentWindowAccesses >= this.cacheHitRateWindowSize) {
+            // Once the window is full, we perform the check and update total accesses.
+            // This moves one atomic operation from the hot path to here.
+            long totalAccesses = totalAccessesForBypassEligibility.addAndGet(currentWindowAccesses);
 
-        if (totalAccesses >= cacheMinAccessesForBypassCheck && currentWindowAccesses >= cacheHitRateWindowSize) {
-            double currentHitRate = (double) hitsInHitRateWindow.sum() / currentWindowAccesses;
-            String currentNamespaceForLog = "unavailable";
-            try {
-                currentNamespaceForLog = String.valueOf(getCurrentNamespace());
-            } catch (Exception e) {
-                // Ignore, namespace might not be set in all contexts
+            if (totalAccesses < this.cacheMinAccessesForBypassCheck) {
+                // Not enough total accesses yet to make a decision, but we reset the window.
+                accessesForHitRateWindow.set(0);
+                hitsInHitRateWindow.set(0);
+                this.bypassCache = false; // Ensure bypass is off
+                return;
             }
-            if (currentHitRate < this.cacheHitRateThreshold) {
-                if (!bypassCache) {
-                    bypassCache = true;
-                    LOG.info(
-                            "Cache bypass activated for value state. Hit rate {}% ({} hits / {} accesses) is below threshold {}%. Namespace: {}.",
-                            String.format("%.2f", currentHitRate * 100),
-                            hitsInHitRateWindow.sum(),
-                            accessesForHitRateWindow.sum(),
-                            String.format("%.2f", this.cacheHitRateThreshold * 100),
-                            currentNamespaceForLog);
-                }
-            } else if (bypassCache) {
-                bypassCache = false;
+
+            double currentHitRate = (double) hitsInHitRateWindow.get() / currentWindowAccesses;
+            this.bypassCache = currentHitRate < this.cacheHitRateThreshold;
+            if (this.bypassCache) {
+                cacheBypassActivations.inc();
                 LOG.info(
-                        "Cache bypass deactivated for value state. Hit rate {}% ({} hits / {} accesses) is above threshold {}%. Namespace: {}.",
+                        "Cache bypass activated for value state. Hit rate {}% ({} hits / {} accesses) is below threshold {}%. Namespace: {}.",
                         String.format("%.2f", currentHitRate * 100),
-                        hitsInHitRateWindow.sum(),
-                        accessesForHitRateWindow.sum(),
+                        hitsInHitRateWindow.get(),
+                        currentWindowAccesses, // Use the value we have
                         String.format("%.2f", this.cacheHitRateThreshold * 100),
-                        currentNamespaceForLog);
+                        getCurrentNamespace());
+            } else {
+                LOG.debug(
+                        "Cache bypass check for value state. Hit rate {}% ({} hits / {} accesses) is NOT below threshold {}%. Bypass remains {}. Namespace: {}.",
+                        String.format("%.2f", currentHitRate * 100),
+                        hitsInHitRateWindow.get(),
+                        currentWindowAccesses,
+                        String.format("%.2f", this.cacheHitRateThreshold * 100),
+                        this.bypassCache,
+                        getCurrentNamespace());
             }
-            accessesForHitRateWindow.reset();
-            hitsInHitRateWindow.reset();
+            // Reset for next window
+            accessesForHitRateWindow.set(0);
+            hitsInHitRateWindow.set(0);
         }
     }
 
+    // Method for CachingKeyedStateBackend to access the delegate for registration checks
     @Override
     public InternalValueState<K, N, V> getDelegateState() {
         return delegateState;
@@ -292,13 +269,14 @@ public class CachingInternalValueState<K, N, V>
                 namespace,
                 ns -> createCachePolicyWithEvictionListener(l1CacheSizePerKeyPerNamespace,
                         evictedL1Entry -> {
+                            // This is the L1 eviction listener for a specific key in a specific namespace.
                             CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(ns);
                             K evictedKey = evictedL1Entry.getKey();
                             CacheEntry<V> evictedValueWrapper = evictedL1Entry.getValue();
                             V evictedValue = evictedValueWrapper.getValue();
                             long estimatedSize = evictedValueWrapper.getEstimatedSizeBytes();
 
-                            backend.reportCacheMemoryReleased(estimatedSize);
+                            backend.reportCacheMemoryReleased(estimatedSize); // Report L1 release
 
                             if (evictedValueWrapper.isDirty()) {
                                 try {
@@ -306,35 +284,37 @@ public class CachingInternalValueState<K, N, V>
                                     K originalKey = backend.getCurrentKey();
 
                                     backend.setCurrentKey(evictedKey);
-                                    this.setCurrentNamespace(ns);
+                                    this.setCurrentNamespace(ns); // Set NS for delegate for this op
                                     delegateState.update(evictedValue);
-                                    evictedValueWrapper.setDirty(false);
+                                    evictedValueWrapper.setDirty(false); // Mark as clean
 
+                                    // Restore context
                                     backend.setCurrentKey(originalKey); 
                                     this.setCurrentNamespace(originalNamespace);
 
-                                    CacheEntry<V> entryToL2 = CacheEntry.clean(evictedValue);
-                                    if (flushing) {
-                                        entryToL2.setDirty(true);
-                                    }
-                                    CacheEntry<V> oldL2Entry = l2Cache.put(evictedKey, entryToL2);
-                                    if (oldL2Entry != null) {
+                                    // Move to L2 as clean after successful update
+                                    CacheEntry<V> entryToL2 = CacheEntry.clean(evictedValue); // Re-estimate size if value changed, though it shouldn't for ValueState here
+                                    CacheEntry<V> oldL2Entry = l2Cache.put(evictedKey, entryToL2); 
+                                    if (oldL2Entry != null) { // If L2 already had an entry for this key (should be rare)
                                         backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
                                     }
-                                    backend.reportCacheMemoryAdded(entryToL2.getEstimatedSizeBytes());
+                                    backend.reportCacheMemoryAdded(entryToL2.getEstimatedSizeBytes()); // Report L2 add
 
                                 } catch (IOException e) {
+                                    // Failed to flush, so it's not moved to L2 and L1 release is final.
+                                    // The backend.reportCacheMemoryReleased(estimatedSize) done earlier stands.
                                     throw new RuntimeException(
                                             "Failed to flush L1 entry to delegate on L1 eviction for key: "
                                                     + evictedKey + " in ns: " + ns,
                                             e);
                                 }
                             } else {
-                                CacheEntry<V> oldL2Entry = l2Cache.put(evictedKey, evictedValueWrapper);
+                                // Not dirty, just move to L2 (it's already clean)
+                                CacheEntry<V> oldL2Entry = l2Cache.put(evictedKey, evictedValueWrapper); // Use original wrapper
                                 if (oldL2Entry != null) {
                                     backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
                                 }
-                                backend.reportCacheMemoryAdded(evictedValueWrapper.getEstimatedSizeBytes());
+                                backend.reportCacheMemoryAdded(evictedValueWrapper.getEstimatedSizeBytes()); // Report L2 add
                             }
                         }));
     }
@@ -342,7 +322,9 @@ public class CachingInternalValueState<K, N, V>
     private CachePolicy<K, CacheEntry<V>> getL2CacheForNamespace(N namespace) {
         return namespaceCachesL2.computeIfAbsent(
                 namespace,
-                ns -> createCachePolicy(l2CacheSizePerKeyPerNamespace));
+                ns -> new LRUMap<>(l2CacheSizePerKeyPerNamespace) // L2 is always LRU
+                // L2 eviction doesn't trigger further writes here
+                );
     }
 
     @Override
@@ -355,17 +337,12 @@ public class CachingInternalValueState<K, N, V>
             return delegateState.value();
         }
 
-        Map<K, V> writeBuffer = namespaceWriteBuffers.get(currentNamespace);
-        if (writeBuffer != null && writeBuffer.containsKey(currentKey)) {
-            updateCacheBypassCondition(true);
-            return writeBuffer.get(currentKey);
-        }
-
         CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
         CacheEntry<V> l1Entry = l1Cache.get(currentKey);
 
         if (l1Entry != null) {
             updateCacheBypassCondition(true);
+            cacheHits.inc();
             return l1Entry.getValue();
         }
 
@@ -374,8 +351,17 @@ public class CachingInternalValueState<K, N, V>
 
         if (l2Entry != null) {
             updateCacheBypassCondition(true);
-            l2Cache.remove(currentKey);
-            CacheEntry<V> entryToL1 = CacheEntry.clean(l2Entry.getValue());
+            cacheHits.inc();
+            // L2 entry is always clean. Remove from L2, put into L1.
+            // No memory change reported here as it's a move between caches of the same backend instance.
+            // However, if L1.put causes an eviction, that eviction will report a release.
+            // And this put will report an add.
+            l2Cache.remove(currentKey); // This remove itself doesn't release memory from the CachingKeyedStateBackend's perspective yet
+            // The entry is still "in play" until it's re-added to L1 or discarded.
+            // We don't report release for l2Entry removal & add for l1Cache.put here to avoid double counting
+            // if l1Cache.put evicts something (which would report release) and then adds this (reporting add).
+            // Instead, the L1 put will handle the accounting if it replaces something or just adds.
+            CacheEntry<V> entryToL1 = CacheEntry.clean(l2Entry.getValue()); // Create a new entry for L1 if needed, or use l2Entry if suitable
             CacheEntry<V> oldL1Entry = l1Cache.put(currentKey, entryToL1);
             if (oldL1Entry != null) {
                 backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
@@ -385,11 +371,12 @@ public class CachingInternalValueState<K, N, V>
         }
 
         updateCacheBypassCondition(false);
+        cacheMisses.inc();
         V valueFromDelegate = delegateState.value();
         if (valueFromDelegate != null) { // Only cache non-null
             CacheEntry<V> newEntry = CacheEntry.clean(valueFromDelegate);
             CacheEntry<V> oldL1Entry = l1Cache.put(currentKey, newEntry);
-            if(oldL1Entry != null) {
+            if (oldL1Entry != null) {
                 backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
             }
             backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
@@ -399,110 +386,70 @@ public class CachingInternalValueState<K, N, V>
 
     @Override
     public void update(V value) throws IOException {
-        if (value == null) {
-            clear();
+        K currentKey = backend.getCurrentKey();
+        N currentNamespace = getCurrentNamespace();
+
+        if (value == null) { // As per Flink ValueState contract
+            clear(); // clear() will handle memory reporting
             return;
         }
 
-        if (backend.isWriteBehindEnabled()) {
-            getWriteBufferForNamespace(currentNamespace).put(backend.getCurrentKey(), value);
-        }
-        // doUpdate handles cache update and conditionally updates the delegate state.
-        doUpdate(value);
-    }
-
-    private void doUpdate(V value) throws IOException {
         if (bypassEnabled && bypassCache) {
-            if (!backend.isWriteBehindEnabled()) {
-                delegateState.update(value);
-            }
-            // Even with write-behind, an update during bypass goes to the buffer but is
-            // considered a 'miss' for hit-rate purposes. The 'hit' is on a read.
-            updateCacheBypassCondition(false);
+            updateCacheBypassCondition(true);
+            cacheBypassActivations.inc();
+            delegateState.update(value);
             return;
         }
 
-        K key = backend.getCurrentKey();
-        CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        CacheEntry<V> entry = l1Cache.get(key);
-
-        long oldSize = 0L;
-        if (entry != null) {
-            oldSize = entry.getEstimatedSizeBytes();
-            entry.setValue(value);
-            entry.setDirty(true);
-            l1Cache.put(key, entry); // Update eviction order
-        } else {
-            CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
-            entry = l2Cache.get(key);
-            if (entry != null) {
-                oldSize = entry.getEstimatedSizeBytes();
-                // Promote from L2 -> L1 with new value
-                entry.setValue(value);
-                entry.setDirty(true);
-                l1Cache.put(key, entry);
-                l2Cache.remove(key);
-            } else {
-                // Not in cache, create a new dirty entry in L1
-                entry = new CacheEntry<>(value, true);
-                l1Cache.put(key, entry);
-            }
-        }
-
-        long newSize = entry.getEstimatedSizeBytes();
-        long delta = newSize - oldSize;
-        if (delta > 0) {
-            backend.reportCacheMemoryAdded(delta);
-        } else if (delta < 0) {
-            backend.reportCacheMemoryReleased(-delta);
-        }
-
-        // For write-through semantics (write-behind disabled), we defer the
-        // update to the underlying delegate until either the entry is evicted
-        // from the L1 cache or an explicit flush is triggered. This guarantees
-        // that each logical update results in exactly one invocation of
-        // `delegateState.update(...)`, aligning the behaviour with the tests
-        // that expect the delegate to be called once during eviction/flush
-        // rather than immediately at `update` time.
-
-        // An update that interacts with the cache is considered a "hit" for bypass purposes.
         updateCacheBypassCondition(true);
+        cacheHits.inc();
+        CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
+        CacheEntry<V> newEntry = CacheEntry.dirty(value);
+        CacheEntry<V> oldL1Entry = l1Cache.put(currentKey, newEntry);
+        if (oldL1Entry != null) {
+            backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
+        }
+        backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
+
+        // If L2 had this key, it's now stale, remove it.
+        CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
+        CacheEntry<V> oldL2Entry = l2Cache.remove(currentKey);
+        if (oldL2Entry != null) {
+            // L2 entries are implicitly managed by L1 evictions or direct stale removal like here.
+            // Their memory was accounted for when they moved from L1 to L2 (L1 released, L2 added - though we simplified this)
+            // Or when loaded to L2 directly. When removing from L2 here because L1 got an update,
+            // we should report its memory as released if it wasn't already part of L1's old entry.
+            // Simplified: Assume L2 entries are clean and their removal directly translates to released memory
+            // if they weren't the source for the L1 update that just happened.
+            // However, simpler just to let their L1 eviction listener handle the release when they were put there.
+            // The current logic in L1 eviction listener (getL1CacheForNamespace) moves to L2 and L2 doesn't have
+            // an aggressive release reporting on its own removals. This explicit remove should report.
+            backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
+        }
     }
 
     @Override
     public void clear() {
-        K key = backend.getCurrentKey();
+        K currentKey = backend.getCurrentKey();
+        N currentNamespace = getCurrentNamespace();
 
-        if (backend.isWriteBehindEnabled()) {
-            // For write-behind, buffer the clear operation by putting null.
-            getWriteBufferForNamespace(currentNamespace).put(key, null);
-        } else {
-            // For write-through, clear the delegate state immediately.
-            delegateState.clear();
+        CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
+        CacheEntry<V> oldL1Entry = l1Cache.remove(currentKey);
+        if (oldL1Entry != null) {
+            backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
         }
 
-        // Always clear the caches.
-        getL1CacheForNamespace(currentNamespace).remove(key);
-        getL2CacheForNamespace(currentNamespace).remove(key);
-
-        if (bypassEnabled) {
-            updateCacheBypassCondition(!bypassCache);
+        CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
+        CacheEntry<V> oldL2Entry = l2Cache.remove(currentKey);
+        if (oldL2Entry != null) {
+            backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
         }
+
+        delegateState.clear(); // Clear the underlying state
     }
 
     @Override
     public void flushToUnderlyingState() throws IOException {
-        // Flush write-behind buffer
-        List<Map.Entry<N, Map<K, V>>> nsEntries = new ArrayList<>();
-        for (Map.Entry<N, Map<K, V>> entry : namespaceWriteBuffers.entrySet()) {
-            nsEntries.add(entry);
-        }
-
-        for (Map.Entry<N, Map<K, V>> nsEntry : nsEntries) {
-            flushWriteBufferForNamespace(nsEntry.getKey(), nsEntry.getValue());
-        }
-        namespaceWriteBuffers.clear();
-
         // Flush L1 caches
         for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL1.entrySet()) {
             N namespace = nsEntry.getKey();
@@ -575,6 +522,7 @@ public class CachingInternalValueState<K, N, V>
 
     @Override
     public void setCurrentNamespace(@Nonnull N namespace) {
+        // Set for the delegate, the cache keying already uses the namespace.
         this.currentNamespace = namespace;
         delegateState.setCurrentNamespace(namespace);
     }
@@ -596,22 +544,11 @@ public class CachingInternalValueState<K, N, V>
     @Override
     public StateIncrementalVisitor<K, N, V> getStateIncrementalVisitor(
             int recommendedMaxNumberOfReturnedRecords) {
-        try {
-            flushToUnderlyingState();
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to flush caches before creating state visitor", e);
-        }
         return delegateState.getStateIncrementalVisitor(recommendedMaxNumberOfReturnedRecords);
     }
 
     @Nonnull
     public N getCurrentNamespace() {
-        // Historically this method enforced that callers set the namespace explicitly. However,
-        // several unit-tests (e.g. CachingKeyedStateBackendMemoryCapTest for ValueState) rely on
-        // the default/implicit namespace being "null".  Rather than failing fast, we now allow
-        // a null namespace to be returned.  All internal cache structures already support using
-        // a null namespace key, and delegate state interactions set the namespace explicitly via
-        // `setCurrentNamespace(ns)` beforehand.
         return this.currentNamespace;
     }
 
@@ -627,13 +564,13 @@ public class CachingInternalValueState<K, N, V>
         }
 
         for (N namespace : l2Namespaces) {
-            CachePolicy<K, CacheEntry<V>> l2Cache = namespaceCachesL2.get(namespace);
-            if (l2Cache == null || l2Cache.isEmpty()) continue;
+            CachePolicy<K, CacheEntry<V>> l2Cache = namespaceCachesL2.get(namespace); // Re-fetch, could be removed by another thread
+            if (l2Cache == null || l2Cache.isEmpty()) continue; // Optimization: skip empty L2 caches
 
             Iterator<Map.Entry<K, CacheEntry<V>>> l2Iter = l2Cache.entrySet().iterator();
             while (l2Iter.hasNext() && bytesFreed < targetBytesToFreeThisState) {
                 Map.Entry<K, CacheEntry<V>> entry = l2Iter.next();
-                CacheEntry<V> cacheValue = entry.getValue();
+                CacheEntry<V> cacheValue = entry.getValue(); // L2 entries are always clean
                 long estimatedSize = cacheValue.getEstimatedSizeBytes();
                 l2Iter.remove();
                 backend.reportCacheMemoryReleased(estimatedSize);
@@ -713,105 +650,12 @@ public class CachingInternalValueState<K, N, V>
 
     // Debug method to get cache statistics
     public String getCacheStats() {
-        if (!bypassEnabled) {
-            return "ValueState Cache: Bypass feature disabled.";
-        }
-        long hits = hitsInHitRateWindow.sum();
-        long accesses = accessesForHitRateWindow.sum();
-        long total = totalAccessesForBypassEligibility.sum();
-        return String.format(
-                "ValueState Cache Stats: Total Accesses: %d, Window Accesses: %d, Window Hits: %d, Hit Rate: %.2f, Bypassing: %s",
-                total,
-                accesses,
-                hits,
-                (accesses > 0) ? (double) hits / accesses : 0.0,
-                bypassCache);
-    }
-
-    private Map<K, V> getWriteBufferForNamespace(N namespace) {
-        return namespaceWriteBuffers.computeIfAbsent(namespace, ns -> new LinkedHashMap<>());
-    }
-
-    private void flushCurrentState() throws IOException {
-        // ------------------------------------------------------------------
-        // 1) Flush existing dirty entries in the in-memory caches (L1 & L2).
-        //    so that freshly flushed entries do not get immediately re-flushed.
-        // ------------------------------------------------------------------
-
-        try {
-            flushing = true;
-            // Flush L1 caches
-            for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL1.entrySet()) {
-                N namespace = nsEntry.getKey();
-                CachePolicy<K, CacheEntry<V>> l1Cache = nsEntry.getValue();
-                setCurrentNamespace(namespace);
-
-                // Iterate over a defensive copy of entries to avoid
-                // ConcurrentModificationException
-                java.util.List<Map.Entry<K, CacheEntry<V>>> currentL1Entries = new java.util.ArrayList<>();
-                for (Map.Entry<K, CacheEntry<V>> entry : l1Cache.entrySet()) {
-                    currentL1Entries.add(entry);
-                }
-
-                for (Map.Entry<K, CacheEntry<V>> mapEntry : currentL1Entries) {
-                    K key = mapEntry.getKey();
-                    CacheEntry<V> entry = mapEntry.getValue(); // Use the entry directly from the snapshot
-                    if (entry.isDirty()) { // No need for null check if it came from entrySet
-                        V value = entry.getValue();
-                        if (key != null) { // Guard against null key
-                            backend.setCurrentKey(key);
-                            delegateState.update(value);
-                            entry.setDirty(false);
-                        }
-                    }
-                }
-            }
-
-            // Flush L2 caches
-            for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL2.entrySet()) {
-                N namespace = nsEntry.getKey();
-                CachePolicy<K, CacheEntry<V>> l2Cache = nsEntry.getValue();
-                setCurrentNamespace(namespace);
-
-                // Iterate over a defensive copy of entries to avoid
-                // ConcurrentModificationException
-                java.util.List<Map.Entry<K, CacheEntry<V>>> currentL2Entries = new java.util.ArrayList<>();
-                for (Map.Entry<K, CacheEntry<V>> entry : l2Cache.entrySet()) {
-                    currentL2Entries.add(entry);
-                }
-
-                for (Map.Entry<K, CacheEntry<V>> mapEntry : currentL2Entries) {
-                    K key = mapEntry.getKey();
-                    CacheEntry<V> entry = mapEntry.getValue();
-                    if (entry.isDirty()) { // L2 entries ideally shouldn't be dirty with current logic
-                        V value = entry.getValue();
-                        if (key != null) { // Guard against null key
-                            backend.setCurrentKey(key);
-                            delegateState.update(value);
-                            entry.setDirty(false);
-                        }
-                    }
-                }
-            }
-
-            // ------------------------------------------------------------------
-            // 2) Flush write-behind buffers (write-before-write) **after** the caches.
-            //    This moves buffered updates into the caches as DIRTY entries so that
-            //    they will be flushed later (e.g., on eviction) according to the
-            //    write-behind policy.
-            // ------------------------------------------------------------------
-
-            List<Map.Entry<N, Map<K, V>>> nsEntries = new ArrayList<>();
-            for (Map.Entry<N, Map<K, V>> entry : namespaceWriteBuffers.entrySet()) {
-                nsEntries.add(entry);
-            }
-
-            for (Map.Entry<N, Map<K, V>> nsEntry : nsEntries) {
-                flushWriteBufferForNamespace(nsEntry.getKey(), nsEntry.getValue());
-            }
-            namespaceWriteBuffers.clear();
-        } finally {
-            flushing = false;
-        }
+        long hits = cacheHits.getCount();
+        long misses = cacheMisses.getCount();
+        long total = hits + misses;
+        double hitRate = total > 0 ? (double) hits / total * 100 : 0.0;
+        
+        return String.format("CacheStats{hits=%d, misses=%d, hitRate=%.2f%%, bypassActivations=%d}",
+                hits, misses, hitRate, cacheBypassActivations.getCount());
     }
 }

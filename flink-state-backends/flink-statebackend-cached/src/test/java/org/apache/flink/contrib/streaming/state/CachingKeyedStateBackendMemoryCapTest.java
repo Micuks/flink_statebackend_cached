@@ -18,34 +18,32 @@
 
 package org.apache.flink.contrib.streaming.state;
 
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.stream.Stream;
 import org.apache.flink.api.common.ExecutionConfig;
-import org.apache.flink.api.common.state.ListState;
-import org.apache.flink.api.common.state.ListStateDescriptor;
-import org.apache.flink.api.common.state.MapState;
-import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRange;
-import org.apache.flink.runtime.state.KeyedStateHandle;
-import org.apache.flink.runtime.query.TaskKvStateRegistry;
-import org.apache.flink.runtime.state.UncompressedStreamCompressionDecorator;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
+import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.runtime.state.internal.InternalListState;
 import org.apache.flink.runtime.state.internal.InternalMapState;
-import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
+import org.apache.flink.runtime.state.StateSnapshotTransformer;
+import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
+
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -55,7 +53,11 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
-
+import java.util.Collections;
+import java.util.List;
+import java.util.Arrays;
+import java.util.Map;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -154,11 +156,6 @@ class CachingKeyedStateBackendMemoryCapTest {
         long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
         boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
         boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
-        double valueCacheHitRateThreshold = CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
-        long valueCacheHitRateWindowSize = CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
-        long valueCacheMinAccessesForBypassCheck = CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
-        boolean valueBypassEnabled = CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG.defaultValue();
-        boolean writeBehindEnabled = CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG.defaultValue();
 
         cachingBackend = new CachingKeyedStateBackend<String>(
                 mockEnv.getTaskKvStateRegistry(),
@@ -166,6 +163,7 @@ class CachingKeyedStateBackendMemoryCapTest {
                 mockEnv.getUserCodeClassLoader().asClassLoader(),
                 new ExecutionConfig(),
                 TtlTimeProvider.DEFAULT,
+                new UnregisteredMetricsGroup(),
                 Collections.emptyList(),
                 closableRegistry,
                 mockDelegateBackend,
@@ -180,12 +178,7 @@ class CachingKeyedStateBackendMemoryCapTest {
                 mapCacheHitRateWindowSize, // Added
                 mapCacheMinAccessesForBypassCheck, // Added
                 mapKeyPresenceCacheEnabled, // Added
-                mapBypassEnabled, // Added
-                valueCacheHitRateThreshold,
-                valueCacheHitRateWindowSize,
-                valueCacheMinAccessesForBypassCheck,
-                valueBypassEnabled,
-                writeBehindEnabled
+                mapBypassEnabled // Added
                 );
         
         // Spy the backend and mock getMaxConfiguredCacheSizeBytesValue to return our precise byte limit

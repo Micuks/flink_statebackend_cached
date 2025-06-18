@@ -162,11 +162,8 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
             long candidateFreq = sketch.estimate(key);
             long victimFreq = sketch.estimate(victim.getKey());
 
-            // Admit the candidate if its estimated frequency is at least as high as the
-            // victim's. Using "greater-or-equal" instead of a strict inequality prevents
-            // a stand-off where two equally infrequent entries keep the older one pinned in
-            // the cache forever (which breaks some unit-test expectations around eviction
-            // behaviour).
+            // Admit the candidate if its estimated frequency is at least as high as the victim's
+            // Using ">=" prevents a stand-off where equally infrequent entries pin the older one in cache
             if (candidateFreq >= victimFreq) {
                 it.remove(); // Removes victim from mainLruCache
                 if (evictionListener != null) {

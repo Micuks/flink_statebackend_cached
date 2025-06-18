@@ -94,19 +94,15 @@ class CachingRocksDBStateBackendComparativeTest
 
     private <T> void assertListEquals(Iterable<T> actualIterable, Iterable<T> expectedIterable) {
         List<T> actualList = new ArrayList<>();
-        if (actualIterable != null) {
-            actualIterable.forEach(actualList::add);
-        }
+        actualIterable.forEach(actualList::add);
         List<T> expectedList = new ArrayList<>();
-        if (expectedIterable != null) {
-            expectedIterable.forEach(expectedList::add);
-        }
+        expectedIterable.forEach(expectedList::add);
         assertEquals(expectedList.size(), actualList.size());
         assertIterableEquals(expectedList, actualList);
     }
     
     private <T> boolean isListStateEmpty(Iterable<T> iterable) {
-        return iterable == null || !iterable.iterator().hasNext();
+        return !iterable.iterator().hasNext();
     }
 
     private <K,V> void assertMapEquals(Iterable<Map.Entry<K,V>> actualIterable, Iterable<Map.Entry<K,V>> expectedIterable) {
@@ -118,7 +114,7 @@ class CachingRocksDBStateBackendComparativeTest
     }
     
     private <K, V> boolean isMapStateEmpty(Iterable<java.util.Map.Entry<K, V>> iterable) {
-        return iterable == null || !iterable.iterator().hasNext();
+        return !iterable.iterator().hasNext();
     }
 
 
@@ -486,7 +482,6 @@ class CachingRocksDBStateBackendComparativeTest
         this.referenceKeyedStateBackend.setCurrentKey("testKey");
 
         ValueStateDescriptor<String> descriptor = new ValueStateDescriptor<>("valueState", String.class);
-        descriptor.initializeSerializerUnlessSet(this.env.getExecutionConfig());
         
         InternalValueState<String, VoidNamespace, String> cachingValueState = cachingKeyedBackend
                 .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor, StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
@@ -532,10 +527,6 @@ class CachingRocksDBStateBackendComparativeTest
         this.referenceKeyedStateBackend.setCurrentKey(key);
 
         ListStateDescriptor<String> descriptor = new ListStateDescriptor<>("testListState", String.class);
-        descriptor.initializeSerializerUnlessSet(this.env.getExecutionConfig());
-        // Update the global backend reference so that triggerSnapshot() targets this backend
-        this.keyedStateBackend = cachingKeyedBackend;
-
         InternalListState<String, VoidNamespace, String> cachingListState = cachingKeyedBackend
                 .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor, StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
         InternalListState<String, VoidNamespace, String> referenceListState = this.referenceKeyedStateBackend
@@ -622,10 +613,6 @@ class CachingRocksDBStateBackendComparativeTest
         this.referenceKeyedStateBackend.setCurrentKey(key);
 
         MapStateDescriptor<String, String> descriptor = new MapStateDescriptor<>("testMapState", String.class, String.class);
-        descriptor.initializeSerializerUnlessSet(this.env.getExecutionConfig());
-        // Update global backend reference
-        this.keyedStateBackend = cachingKeyedBackend;
-
         InternalMapState<String, VoidNamespace, String, String> cachingMapState = cachingKeyedBackend
                 .createOrUpdateInternalState(VoidNamespaceSerializer.INSTANCE, descriptor, StateSnapshotTransformer.StateSnapshotTransformFactory.noTransform());
         InternalMapState<String, VoidNamespace, String, String> referenceMapState = this.referenceKeyedStateBackend
@@ -762,7 +749,7 @@ class CachingRocksDBStateBackendComparativeTest
         assertEquals(referenceState.get(), cachingState.get());
 
         cachingState.clear(); referenceState.clear();
-        assertNull(cachingState.get());
+        assertEquals("", cachingState.get()); // Aggregating state returns empty accumulator
         assertEquals(referenceState.get(), cachingState.get());
     }
 
@@ -770,16 +757,6 @@ class CachingRocksDBStateBackendComparativeTest
     @EnumSource(CachingStateBackendFactory.CachePolicyType.class)
     void testPriorityQueueComparative(CachingStateBackendFactory.CachePolicyType policy) throws Exception {
         this.cachePolicyType = policy;
-
-        // Dispose any previously created backend from the @BeforeEach setup to ensure a clean
-        // environment for this test. The priority queue relies on insert semantics that can be
-        // affected if another backend instance (pointing to the same RocksDB directory) is still
-        // active.
-        if (this.keyedStateBackend != null) {
-            this.keyedStateBackend.dispose();
-            this.keyedStateBackend = null;
-        }
-
         CachingStateBackend cachingBackend = getStateBackend();
         AbstractKeyedStateBackend<String> cachingKeyedBackend =
                 createKeyedStateBackend(
@@ -810,32 +787,32 @@ class CachingRocksDBStateBackendComparativeTest
         TestPriorityQueueElement e2 = new TestPriorityQueueElement("b", 2, key);
         TestPriorityQueueElement e0 = new TestPriorityQueueElement("c", 0, key); // Lower priority
     
-        referencePQ.add(e1);
-        cachingPQ.add(e1);
+        assertTrue(cachingPQ.add(e1));
+        assertTrue(referencePQ.add(e1));
         assertEquals(referencePQ.size(), cachingPQ.size());
     
-        referencePQ.add(e2);
-        cachingPQ.add(e2);
+        assertTrue(cachingPQ.add(e2));
+        assertTrue(referencePQ.add(e2));
         assertEquals(referencePQ.size(), cachingPQ.size());
     
-        referencePQ.add(e0);
-        cachingPQ.add(e0);
+        assertTrue(cachingPQ.add(e0));
+        assertTrue(referencePQ.add(e0));
         assertEquals(referencePQ.size(), cachingPQ.size());
         assertEquals(3, cachingPQ.size());
     
         TestPriorityQueueElement polledCaching = cachingPQ.poll();
         TestPriorityQueueElement polledReference = referencePQ.poll();
-        assertEquivalent(polledReference, polledCaching);
+        assertEquals(polledReference, polledCaching);
         assertEquals("c", polledCaching.value); // e0 should be first due to lowest priority
     
         polledCaching = cachingPQ.poll();
         polledReference = referencePQ.poll();
-        assertEquivalent(polledReference, polledCaching);
+        assertEquals(polledReference, polledCaching);
         assertEquals("a", polledCaching.value); // e1 next
         
         polledCaching = cachingPQ.poll();
         polledReference = referencePQ.poll();
-        assertEquivalent(polledReference, polledCaching);
+        assertEquals(polledReference, polledCaching);
         assertEquals("b", polledCaching.value); // e2 last
     
         assertNull(cachingPQ.poll());
@@ -859,20 +836,6 @@ class CachingRocksDBStateBackendComparativeTest
         SnapshotResult<KeyedStateHandle> snapshotResult = snapshotFuture.get();
         assertNotNull(snapshotResult.getJobManagerOwnedSnapshot(), "Snapshot handle should not be null");
         return snapshotResult.getJobManagerOwnedSnapshot();
-    }
-
-    /**
-     * Helper to compare two {@link TestPriorityQueueElement} instances while ignoring their
-     * {@code internalIndex} field because that is backend-specific implementation detail and may
-     * legitimately differ between the reference queue and the caching queue even for logically
-     * identical elements.
-     */
-    private static void assertEquivalent(TestPriorityQueueElement expected, TestPriorityQueueElement actual) {
-        assertNotNull(expected);
-        assertNotNull(actual);
-        assertEquals(expected.value, actual.value, "Value differs");
-        assertEquals(expected.priority, actual.priority, "Priority differs");
-        assertEquals(expected.key, actual.key, "Key differs");
     }
 }
 

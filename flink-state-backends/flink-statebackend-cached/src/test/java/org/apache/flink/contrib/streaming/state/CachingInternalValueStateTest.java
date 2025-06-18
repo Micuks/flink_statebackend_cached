@@ -18,19 +18,20 @@
 
 package org.apache.flink.contrib.streaming.state;
 
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Stream;
-import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.base.StringSerializer;
-import org.apache.flink.configuration.Configuration;
+import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
+import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
+import org.apache.flink.runtime.state.KeyGroupRange;
+import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
-import org.apache.flink.runtime.state.KeyGroupRange;
-import org.apache.flink.runtime.state.heap.InternalKeyContext;
+import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
-import org.apache.flink.runtime.state.UncompressedStreamCompressionDecorator;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -38,12 +39,14 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.mockito.junit.jupiter.MockitoSettings;
-import org.mockito.quality.Strictness;
+
+import java.io.IOException;
+import java.util.Collections;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -54,12 +57,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
-/** Test suite for {@link CachingInternalValueState}. */
 @ExtendWith(MockitoExtension.class)
-@MockitoSettings(strictness = Strictness.LENIENT)
 class CachingInternalValueStateTest {
-
-    private static final String DELEGATE_VALUE_STATE_NAME = "testDelegateValueState";
 
     @Mock private InternalValueState<String, String, String> mockDelegateState;
     private CachingKeyedStateBackend<String> cachingKeyedStateBackend;
@@ -81,74 +80,97 @@ class CachingInternalValueStateTest {
 
     private CachingStateBackendFactory.CachePolicyType currentCachePolicyType;
 
-    // Use a concrete InternalKeyContext implementation so that current key tracking works.
-    private InternalKeyContext<String> internalKeyContext;
-
     static Stream<CachingStateBackendFactory.CachePolicyType> cachePolicies() {
-        return Stream.of(
-                CachingStateBackendFactory.CachePolicyType.LRU,
-                CachingStateBackendFactory.CachePolicyType.TINYLFU);
+        return Stream.of(CachingStateBackendFactory.CachePolicyType.LRU, CachingStateBackendFactory.CachePolicyType.TINYLFU);
     }
 
     @BeforeEach
     void setUp() {
-        when(mockKeySerializer.copy(any())).thenAnswer(i -> i.getArgument(0));
-        when(mockNamespaceSerializer.copy(any())).thenAnswer(i -> i.getArgument(0));
-        when(mockValueSerializer.copy(any())).thenAnswer(i -> i.getArgument(0));
-        when(mockAbstractKeyedStateBackendDelegate.getKeySerializer()).thenReturn(mockKeySerializer);
-        internalKeyContext = new org.apache.flink.runtime.state.heap.InternalKeyContextImpl<>(new KeyGroupRange(0, 0), 1);
-        when(mockAbstractKeyedStateBackendDelegate.getKeyContext()).thenReturn(internalKeyContext);
-        when(mockAbstractKeyedStateBackendDelegate.getLatencyTrackingStateConfig())
-                .thenReturn(LatencyTrackingStateConfig.disabled());
-        when(mockDelegateState.getValueSerializer()).thenReturn(mockValueSerializer);
+        if (currentCachePolicyType == null) {
+            currentCachePolicyType = CachingStateBackendFactory.CachePolicyType.LRU;
+        }
+        TaskKvStateRegistry kvStateRegistry = mock(TaskKvStateRegistry.class);
+        ExecutionConfig executionConfig = new ExecutionConfig();
+        TtlTimeProvider ttlTimeProvider = TtlTimeProvider.DEFAULT;
+        MetricGroup metricGroup = new UnregisteredMetricsGroup();
+        CloseableRegistry cancelStreamRegistry = new CloseableRegistry();
+
+        lenient().when(mockKeySerializer.duplicate()).thenReturn(mockKeySerializer);
+        lenient()
+                .when(mockAbstractKeyedStateBackendDelegate.getKeySerializer())
+                .thenReturn(mockKeySerializer);
+
+        KeyGroupRange keyGroupRange = new KeyGroupRange(0, 15);
+        int numberOfKeyGroups = 16;
+        lenient()
+                .when(mockAbstractKeyedStateBackendDelegate.getKeyContext())
+                .thenReturn(
+                        new org.apache.flink.runtime.state.heap.InternalKeyContextImpl<>(
+                                keyGroupRange, numberOfKeyGroups));
+
+        long mapL1KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        long mapL2KeyPresenceCacheSize = CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue();
+        double mapCacheHitRateThreshold = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
+        long mapCacheHitRateWindowSize = CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
+        long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
+        boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
+        boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
+
+        cachingKeyedStateBackend =
+                new CachingKeyedStateBackend<String>(
+                        kvStateRegistry,
+                        mockKeySerializer,
+                        CachingInternalValueStateTest.class.getClassLoader(),
+                        executionConfig,
+                        ttlTimeProvider,
+                        metricGroup,
+                        Collections.<KeyedStateHandle>emptyList(),
+                        cancelStreamRegistry,
+                        mockAbstractKeyedStateBackendDelegate,
+                        l1CacheSize,
+                        l2CacheSize,
+                        maxActiveNamespaces,
+                        10L,
+                        currentCachePolicyType,
+                        (int) mapL1KeyPresenceCacheSize,
+                        (int) mapL2KeyPresenceCacheSize,
+                        mapCacheHitRateThreshold,
+                        mapCacheHitRateWindowSize,
+                        mapCacheMinAccessesForBypassCheck,
+                        mapKeyPresenceCacheEnabled,
+                        mapBypassEnabled
+                        );
+        cachingKeyedStateBackend.setCurrentKey(testKey);
+
+        lenient().when(mockDelegateState.getKeySerializer()).thenReturn(mockKeySerializer);
+        lenient().when(mockDelegateState.getNamespaceSerializer()).thenReturn(mockNamespaceSerializer);
+        lenient().when(mockDelegateState.getValueSerializer()).thenReturn(mockValueSerializer);
+
+        cachingState =
+                new CachingInternalValueState<>(
+                        mockDelegateState,
+                        cachingKeyedStateBackend,
+                        l1CacheSize,
+                        l2CacheSize,
+                        maxActiveNamespaces,
+                        0L,
+                        currentCachePolicyType,
+                        mapCacheHitRateThreshold,
+                        mapCacheHitRateWindowSize,
+                        mapCacheMinAccessesForBypassCheck,
+                        mapBypassEnabled,
+                        new UnregisteredMetricsGroup());
+        cachingState.setCurrentNamespace(testNamespace);
     }
 
     private void setPolicyAndSetup(CachingStateBackendFactory.CachePolicyType policyType) {
-        currentCachePolicyType = policyType;
-
-        Configuration config = new Configuration();
-        config.set(CachingStateBackendFactory.L1_CACHE_SIZE_CONFIG, (long) l1CacheSize);
-        config.set(CachingStateBackendFactory.L2_CACHE_SIZE_CONFIG, (long) l2CacheSize);
-        config.set(
-                CachingStateBackendFactory.MAX_ACTIVE_NAMESPACES_CONFIG,
-                (long) maxActiveNamespaces);
-        config.set(CachingStateBackendFactory.CACHE_POLICY_CONFIG, policyType);
-        config.set(CachingStateBackendFactory.MAX_CACHE_MEMORY_MB_CONFIG, 10L);
-        config.set(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG, 0.0);
-        config.set(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, 0L);
-        config.set(CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, 0L);
-        config.set(CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG, false);
-        config.set(CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG, false);
-
-        try {
-            cachingKeyedStateBackend =
-                    new CachingKeyedStateBackendBuilder<>(
-                                    mockAbstractKeyedStateBackendDelegate, config)
-                            .build();
-
-            ValueStateDescriptor<String> stateDescriptor =
-                    new ValueStateDescriptor<>(DELEGATE_VALUE_STATE_NAME, mockValueSerializer);
-
-            when(mockAbstractKeyedStateBackendDelegate.getOrCreateKeyedState(
-                            any(), eq(stateDescriptor)))
-                    .thenReturn(mockDelegateState);
-
-            cachingState =
-                    (CachingInternalValueState<String, String, String>)
-                            cachingKeyedStateBackend.getOrCreateKeyedState(
-                                    mockNamespaceSerializer, stateDescriptor);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-
-        cachingKeyedStateBackend.setCurrentKey(testKey);
-        cachingState.setCurrentNamespace(testNamespace);
+        this.currentCachePolicyType = policyType;
+        setUp();
     }
 
     @ParameterizedTest
     @MethodSource("cachePolicies")
-    void testValueGet_cacheMiss_loadFromDelegate_populateL1(
-            CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+    void testValueGet_cacheMiss_loadFromDelegate_populateL1(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
         setPolicyAndSetup(policyType);
         when(mockDelegateState.value()).thenReturn(testValue1);
 
@@ -731,9 +753,6 @@ class CachingInternalValueStateTest {
     @Test
     void testSerializersAreDelegated() {
         setPolicyAndSetup(CachingStateBackendFactory.CachePolicyType.LRU);
-        when(mockDelegateState.getKeySerializer()).thenReturn(mockKeySerializer);
-        when(mockDelegateState.getNamespaceSerializer()).thenReturn(mockNamespaceSerializer);
-        when(mockDelegateState.getValueSerializer()).thenReturn(mockValueSerializer);
         assertEquals(
                 mockKeySerializer,
                 cachingState.getKeySerializer(),
@@ -751,18 +770,29 @@ class CachingInternalValueStateTest {
     @Test
     void testSetCurrentNamespaceIsDelegated() {
         setPolicyAndSetup(CachingStateBackendFactory.CachePolicyType.LRU);
+        // After setUp, mockDelegateState.setCurrentNamespace(testNamespace) was called once.
+        // We reset the mock to only focus on the behavior within this test method's main body.
         reset(mockDelegateState);
 
         String newNamespace = "newTestNamespace";
         cachingState.setCurrentNamespace(newNamespace);
 
+        // Verify that setCurrentNamespace(newNamespace) was called on the delegate.
         verify(mockDelegateState, times(1)).setCurrentNamespace(newNamespace);
+        // Verify that no other interactions happened with setCurrentNamespace on the delegate.
+        verify(mockDelegateState, times(0)).setCurrentNamespace(testNamespace);
         verifyNoMoreInteractions(mockDelegateState);
+
+        assertEquals(
+                newNamespace,
+                cachingState.getCurrentNamespace(),
+                "Caching state should report the new namespace.");
     }
 
     @Test
     void testGetSerializedValueIsDelegated() throws Exception {
         setPolicyAndSetup(CachingStateBackendFactory.CachePolicyType.LRU);
+
         byte[] keyAndNamespace = new byte[] {1, 2, 3};
         byte[] expectedSerializedValue = new byte[] {4, 5, 6};
 
@@ -770,7 +800,8 @@ class CachingInternalValueStateTest {
                         keyAndNamespace,
                         mockKeySerializer,
                         mockNamespaceSerializer,
-                        mockValueSerializer))
+                        mockValueSerializer
+                        ))
                 .thenReturn(expectedSerializedValue);
 
         byte[] actualSerializedValue =
@@ -781,7 +812,10 @@ class CachingInternalValueStateTest {
                         mockValueSerializer);
 
         org.junit.jupiter.api.Assertions.assertArrayEquals(
-                expectedSerializedValue, actualSerializedValue);
+                expectedSerializedValue,
+                actualSerializedValue,
+                "Serialized value should be delegated.");
+
         verify(mockDelegateState, times(1))
                 .getSerializedValue(
                         keyAndNamespace,
@@ -793,6 +827,7 @@ class CachingInternalValueStateTest {
     @Test
     void testGetStateIncrementalVisitorIsDelegated() {
         setPolicyAndSetup(CachingStateBackendFactory.CachePolicyType.LRU);
+
         int recommendedMaxNumberOfReturnedRecords = 100;
         @SuppressWarnings("unchecked")
         InternalKvState.StateIncrementalVisitor<String, String, String> mockVisitor =
@@ -806,6 +841,7 @@ class CachingInternalValueStateTest {
                 cachingState.getStateIncrementalVisitor(recommendedMaxNumberOfReturnedRecords);
 
         assertEquals(mockVisitor, actualVisitor, "StateIncrementalVisitor should be delegated.");
+
         verify(mockDelegateState, times(1))
                 .getStateIncrementalVisitor(recommendedMaxNumberOfReturnedRecords);
     }

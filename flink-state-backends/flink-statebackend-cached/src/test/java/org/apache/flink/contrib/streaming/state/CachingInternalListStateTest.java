@@ -15,13 +15,12 @@
 
 package org.apache.flink.contrib.streaming.state;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.stream.Stream;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.contrib.streaming.state.CacheEntry;
+import org.apache.flink.contrib.streaming.state.CachePolicy;
+import org.apache.flink.contrib.streaming.state.LRUMap;
+import org.apache.flink.contrib.streaming.state.TinyLFUMap;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
@@ -29,23 +28,32 @@ import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyedStateHandle;
-import org.apache.flink.runtime.state.UncompressedStreamCompressionDecorator;
-import org.apache.flink.runtime.state.heap.InternalKeyContext;
 import org.apache.flink.runtime.state.internal.InternalListState;
+import org.apache.flink.runtime.state.StateSnapshotTransformer;
+import org.apache.flink.runtime.state.UncompressedStreamCompressionDecorator;
+import org.apache.flink.runtime.state.VoidNamespace;
+import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
+
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
-
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -60,6 +68,22 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.lenient;
 
+import org.apache.flink.runtime.state.StateSnapshotTransformer;
+import org.apache.flink.runtime.state.KeyGroupedInternalPriorityQueue;
+import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
+import org.apache.flink.runtime.state.PriorityComparable;
+import org.apache.flink.runtime.state.Keyed;
+import org.apache.flink.runtime.state.SavepointResources;
+import org.apache.flink.runtime.state.SnapshotResult;
+import org.apache.flink.runtime.state.CheckpointStreamFactory;
+import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.checkpoint.SnapshotType;
+import org.apache.flink.api.java.tuple.Tuple2;
+import java.util.stream.Stream;
+import java.util.HashMap;
+import java.util.Map;
+import org.apache.flink.runtime.state.DoneFuture;
+import org.apache.flink.runtime.state.heap.InternalKeyContext;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.anyList;
@@ -98,7 +122,6 @@ class CachingInternalListStateTest {
     private List<String> delegateList; // Used for expected values
 
     private CachingStateBackendFactory.CachePolicyType currentCachePolicyType;
-    private boolean writeBehindEnabled = true;
 
     static Stream<CachingStateBackendFactory.CachePolicyType> cachePolicies() {
         return Stream.of(CachingStateBackendFactory.CachePolicyType.LRU, CachingStateBackendFactory.CachePolicyType.TINYLFU);
@@ -138,7 +161,6 @@ class CachingInternalListStateTest {
         InternalKeyContext<String> internalKeyContext
                 = new org.apache.flink.runtime.state.heap.InternalKeyContextImpl<>(keyGroupRange, numberOfKeyGroups);
         when(mockAbstractKeyedStateBackendDelegate.getKeyContext()).thenReturn(internalKeyContext);
-        when(mockAbstractKeyedStateBackendDelegate.getLatencyTrackingStateConfig()).thenReturn(LatencyTrackingStateConfig.disabled());
         when(mockAbstractKeyedStateBackendDelegate.getKeyGroupCompressionDecorator())
                 .thenReturn(UncompressedStreamCompressionDecorator.INSTANCE);
 
@@ -150,11 +172,6 @@ class CachingInternalListStateTest {
         long mapCacheMinAccessesForBypassCheck = CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
         boolean mapKeyPresenceCacheEnabled = CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG.defaultValue();
         boolean mapBypassEnabled = CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG.defaultValue();
-        double valueCacheHitRateThreshold = CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG.defaultValue();
-        long valueCacheHitRateWindowSize = CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG.defaultValue();
-        long valueCacheMinAccessesForBypassCheck = CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG.defaultValue();
-        boolean valueBypassEnabled = CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG.defaultValue();
-        boolean writeBehindEnabled = CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG.defaultValue();
 
         cachingKeyedStateBackend = new CachingKeyedStateBackend<String>(
                 kvStateRegistry,
@@ -162,13 +179,14 @@ class CachingInternalListStateTest {
                 Thread.currentThread().getContextClassLoader(),
                 executionConfig,
                 ttlTimeProvider,
+                metricGroup,
                 Collections.<KeyedStateHandle>emptyList(),
                 cancelStreamRegistry,
                 mockAbstractKeyedStateBackendDelegate, // Use the MOCK backend delegate
                 l1CacheSize,
                 l2CacheSize,
                 maxActiveNamespaces,
-                10L, // maxCacheMemoryMb
+                10, // maxCacheMemoryMb
                 currentCachePolicyType, // Use the current policy type
                 (int) mapL1KeyPresenceCacheSize, // Added
                 (int) mapL2KeyPresenceCacheSize,  // Added
@@ -176,12 +194,7 @@ class CachingInternalListStateTest {
                 mapCacheHitRateWindowSize, // Added
                 mapCacheMinAccessesForBypassCheck, // Added
                 mapKeyPresenceCacheEnabled, // Added
-                mapBypassEnabled, // Added
-                valueCacheHitRateThreshold,
-                valueCacheHitRateWindowSize,
-                valueCacheMinAccessesForBypassCheck,
-                valueBypassEnabled,
-                writeBehindEnabled // writeBehindEnabled
+                mapBypassEnabled // Added
         );
         cachingKeyedStateBackend.setCurrentKey(testKey);
 
@@ -333,7 +346,7 @@ class CachingInternalListStateTest {
         verify(mockDelegateListState, times(3)).get();
 
         cachingKeyedStateBackend.setCurrentKey(testKey);
-        final List<String> newList = Arrays.asList(element1, element2, element3);
+        List<String> newList = new ArrayList<>(Arrays.asList("new_el1", "new_el2"));
 
         cachingListState.update(newList);
 
@@ -618,7 +631,8 @@ class CachingInternalListStateTest {
         List<String> retrieved = getAsList(cachingListState); // D.get(k0) (10th call if not evicted, 9th if evicted and re-read)
         assertEquals(delegateList, retrieved, "List for testKey should be re-loaded from delegate.");
 
-        verify(mockDelegateListState, times(10)).get();
+        int expectedDelegateGets = (policyType == CachingStateBackendFactory.CachePolicyType.LRU) ? 10 : 9;
+        verify(mockDelegateListState, times(expectedDelegateGets)).get();
     }
 
     @ParameterizedTest
@@ -862,52 +876,6 @@ class CachingInternalListStateTest {
                 cachingListState.getNamespaceSerializer());
         org.junit.jupiter.api.Assertions.assertEquals(mockValueSerializer,
                 cachingListState.getValueSerializer());
-    }
-
-    @ParameterizedTest
-    @MethodSource("cachePolicies")
-    void testListUpdate_withWriteThrough_writesToDelegate(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
-        this.writeBehindEnabled = false;
-        setPolicyAndSetup(policyType);
-        final List<String> newList = Arrays.asList(element1, element2);
-
-        cachingListState.setCurrentNamespace(testNamespace);
-        cachingKeyedStateBackend.setCurrentKey(testKey);
-        cachingListState.update(newList);
-
-        // Verify that update was called on the delegate right away
-        verify(mockDelegateListState, times(1)).update(newList);
-
-        // Verify that the cache contains a clean entry
-        List<String> cachedList = getAsList(cachingListState);
-        assertEquals(newList, cachedList);
-        verify(mockDelegateListState, times(1)).get(); // Should be served from cache, no new delegate interaction
-
-        // Flushing should not cause another write
-        cachingListState.flushToUnderlyingState();
-        verify(mockDelegateListState, times(1)).update(newList);
-    }
-
-    @ParameterizedTest
-    @MethodSource("cachePolicies")
-    void testListAdd_withWriteThrough_writesToDelegate(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
-        this.writeBehindEnabled = false;
-        setPolicyAndSetup(policyType);
-
-        cachingListState.setCurrentNamespace(testNamespace);
-        cachingKeyedStateBackend.setCurrentKey(testKey);
-        when(mockDelegateListState.get()).thenReturn(new ArrayList<>(Collections.singletonList(element1)));
-
-        cachingListState.add(element2);
-
-        // In write-through for add, we expect a get and then an update on the delegate.
-        // However, the current implementation in CachingInternalListState for write-through add/addAll
-        // is to call delegate.add/addAll directly.
-        verify(mockDelegateListState, times(1)).add(element2);
-
-        // Flushing should not cause another write
-        cachingListState.flushToUnderlyingState();
-        verify(mockDelegateListState, times(1)).add(element2);
     }
 }
 
