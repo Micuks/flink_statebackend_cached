@@ -321,6 +321,63 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
             }
             if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
         }
+
+        // Additional eviction from L1 caches if needed
+        List<N> l1Namespaces = new ArrayList<>();
+        for (Map.Entry<N, CachePolicy<K, CacheEntry<ACC>>> entry : namespaceCachesL1.entrySet()) {
+            l1Namespaces.add(entry.getKey());
+        }
+
+        for (N namespace : l1Namespaces) {
+            if (bytesFreed >= targetBytesToFreeThisState) break;
+
+            CachePolicy<K, CacheEntry<ACC>> l1Cache = namespaceCachesL1.get(namespace);
+            if (l1Cache == null || l1Cache.isEmpty()) continue;
+
+            Iterator<Map.Entry<K, CacheEntry<ACC>>> iterClean = l1Cache.entrySet().iterator();
+            List<Map.Entry<K, CacheEntry<ACC>>> dirtyEntries = new ArrayList<>();
+
+            while (iterClean.hasNext() && bytesFreed < targetBytesToFreeThisState) {
+                Map.Entry<K, CacheEntry<ACC>> entry = iterClean.next();
+                CacheEntry<ACC> cacheEntry = entry.getValue();
+                if (!cacheEntry.isDirty()) {
+                    long est = cacheEntry.getEstimatedSizeBytes();
+                    iterClean.remove();
+                    backend.reportCacheMemoryReleased(est);
+                    bytesFreed += est;
+                } else {
+                    dirtyEntries.add(entry);
+                }
+            }
+
+            if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
+
+            for (Map.Entry<K, CacheEntry<ACC>> dirtyEntry : dirtyEntries) {
+                if (bytesFreed >= targetBytesToFreeThisState) break;
+                K key = dirtyEntry.getKey();
+                CacheEntry<ACC> cacheEntry = dirtyEntry.getValue();
+                long est = cacheEntry.getEstimatedSizeBytes();
+                try {
+                    K originalKey = backend.getCurrentKey();
+                    N originalNs = getCurrentNamespace();
+
+                    backend.setCurrentKey(key);
+                    setCurrentNamespace(namespace);
+                    delegateState.updateInternal(cacheEntry.getValue());
+                    cacheEntry.setDirty(false);
+
+                    l1Cache.remove(key);
+                    backend.reportCacheMemoryReleased(est);
+                    bytesFreed += est;
+
+                    backend.setCurrentKey(originalKey);
+                    setCurrentNamespace(originalNs);
+                } catch (Exception e) {
+                    // Ignore flush failure during eviction
+                }
+            }
+        }
+
         return bytesFreed;
     }
 

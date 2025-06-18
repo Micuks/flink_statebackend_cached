@@ -360,24 +360,22 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             return totalSize;
         }
 
-         void evictToMeetMemoryLimit(long bytesToFree) {
-            if (bytesToFree <= 0) return;
+         long evictToMeetMemoryLimit(long bytesToFree) {
+            if (bytesToFree <= 0) return 0L;
 
             long freedBytes = 0;
             // Priority 1: Evict from L2 value cache (clean entries)
             freedBytes += evictFromCache(l2MapEntries, bytesToFree - freedBytes, false, keyPresenceCacheEnabled);
-            if (freedBytes >= bytesToFree) return;
-
+            if (freedBytes >= bytesToFree) return freedBytes;
             // Priority 2: Evict from L1 presence cache
             if (keyPresenceCacheEnabled) {
                 freedBytes += evictFromCache(l1KeyPresenceCache, bytesToFree - freedBytes, true, keyPresenceCacheEnabled);
-                 if (freedBytes >= bytesToFree) return;
+                 if (freedBytes >= bytesToFree) return freedBytes;
             }
-
             // Priority 3: Evict from L2 presence cache
             if (keyPresenceCacheEnabled) {
                 freedBytes += evictFromCache(l2KeyPresenceCache, bytesToFree - freedBytes, true, keyPresenceCacheEnabled);
-                if (freedBytes >= bytesToFree) return;
+                if (freedBytes >= bytesToFree) return freedBytes;
             }
             
             // Priority 4: Evict from L1 value cache (may involve write-back if dirty)
@@ -386,6 +384,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             // The existing L1 eviction listener handles flushing dirty entries.
             // For now, rely on natural eviction for L1 values if above didn't suffice.
             // A more aggressive strategy could force L1 value evictions here too.
+
+            return freedBytes;
         }
 
         private <ENTRY_KEY, ENTRY_VAL> long evictFromCache(
@@ -645,26 +645,6 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
             double currentHitRate = (double) hitsInHitRateWindow.get() / currentWindowAccesses;
             this.bypassCache = currentHitRate < this.mapCacheHitRateThreshold;
-            if (this.bypassCache) {
-                LOG.info(
-                        "Cache bypass activated for map state. Hit rate {}% ({} hits / {} accesses) is below threshold {}%. Flink Key: {}, Namespace: {}.",
-                        String.format("%.2f", currentHitRate * 100),
-                        hitsInHitRateWindow.get(),
-                        currentWindowAccesses, // Use the value we have
-                        String.format("%.2f", this.mapCacheHitRateThreshold * 100),
-                        backend.getCurrentKey(),
-                        getCurrentNamespace());
-            } else {
-                LOG.debug(
-                        "Cache bypass check for map state. Hit rate {}% ({} hits / {} accesses) is NOT below threshold {}%. Bypass remains {}. Flink Key: {}, Namespace: {}.",
-                        String.format("%.2f", currentHitRate * 100),
-                        hitsInHitRateWindow.get(),
-                        currentWindowAccesses,
-                        String.format("%.2f", this.mapCacheHitRateThreshold * 100),
-                        this.bypassCache,
-                        backend.getCurrentKey(),
-                        getCurrentNamespace());
-            }
             // Reset for next window
             accessesForHitRateWindow.set(0);
             hitsInHitRateWindow.set(0);
@@ -1196,12 +1176,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     backend.setCurrentKey(perKeyCache.flinkKey); // Set context for this specific key's cache
                     delegateState.setCurrentNamespace(perKeyCache.cacheNamespace);
 
-                    perKeyCache.evictToMeetMemoryLimit(targetBytesToFreeThisState - totalFreedBytes);
-                    // The actual freed amount is managed by reportCacheMemoryReleased calls from within PerKeyMapCache
-                    // For simplicity here, we assume the target passed to evictToMeetMemoryLimit is what we are trying to free from this cache.
-                    // A more accurate way would be for evictToMeetMemoryLimit to return bytes freed.
-                    // However, currentEstimatedCacheSizeBytes is updated globally via reportCacheMemoryReleased.
-                    // So, we just need to trigger eviction. The main job here is to *trigger* eviction in sub-caches.
+                    long freedThisCache = perKeyCache.evictToMeetMemoryLimit(targetBytesToFreeThisState - totalFreedBytes);
+                    totalFreedBytes += freedThisCache;
 
                      // Restore original context
                     if (originalKey != null) backend.setCurrentKey(originalKey); else backend.setCurrentKey(null);
@@ -1225,7 +1201,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
         // The actual amount freed is tracked by CachingKeyedStateBackend's atomic counter.
         // This method signals that an attempt was made.
-        return targetBytesToFreeThisState; // Placeholder, real tracking is via CachingKeyedStateBackend
+        return totalFreedBytes;
     }
 
     @Override

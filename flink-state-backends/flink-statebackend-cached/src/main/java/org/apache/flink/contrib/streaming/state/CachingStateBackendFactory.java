@@ -38,14 +38,14 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
     public static final ConfigOption<Long> L1_CACHE_SIZE_CONFIG =
             ConfigOptions.key("state.backend.cached.l1.size.entries")
                     .longType()
-                    .defaultValue(128L)
+                    .defaultValue(1024L)
                     .withDescription(
                             "The number of entries for the L1 cache per state instance (e.g., per keyed ValueState, or per user key in MapState).");
 
     public static final ConfigOption<Long> L2_CACHE_SIZE_CONFIG =
             ConfigOptions.key("state.backend.cached.l2.size.entries")
                     .longType()
-                    .defaultValue(1024L)
+                    .defaultValue(8192L)
                     .withDescription("The number of entries for the L2 cache per state instance.");
 
     public static final ConfigOption<Long> MAX_ACTIVE_NAMESPACES_CONFIG =

@@ -122,6 +122,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     // Added for memory capping
     private transient AtomicLong currentEstimatedCacheSizeBytes;
     private transient long maxConfiguredCacheSizeBytes;
+    private static final long EVICTION_CHECK_THRESHOLD_BYTES = 10 * 1024 * 1024; // 10MB batching threshold
+    private transient AtomicLong bytesSinceLastEvictionCheck;
     // Using the static ValueSizeUtils for now, but a Function could be injected here
     // private transient Function<Object, Long> valueSizeEstimator;
 
@@ -173,6 +175,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         // Initialize memory capping fields
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
         this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
+        this.bytesSinceLastEvictionCheck = new AtomicLong(0L);
         // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
     }
 
@@ -273,6 +276,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         // Initialize memory capping fields
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
         this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
+        this.bytesSinceLastEvictionCheck = new AtomicLong(0L);
         // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
     }
 
@@ -780,7 +784,11 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     public void reportCacheMemoryAdded(long sizeBytes) {
         if (sizeBytes <= 0) return;
         currentEstimatedCacheSizeBytes.addAndGet(sizeBytes);
-        checkAndTriggerGlobalEviction();
+        long acc = bytesSinceLastEvictionCheck.addAndGet(sizeBytes);
+        if (acc >= EVICTION_CHECK_THRESHOLD_BYTES) {
+            bytesSinceLastEvictionCheck.addAndGet(-acc);
+            checkAndTriggerGlobalEviction();
+        }
     }
 
     // Added for memory capping: To be called by CachingInternal*State when entries are released

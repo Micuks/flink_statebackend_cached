@@ -344,6 +344,12 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
         // Number of hash functions (rows)
         private static final int HASH_COUNT = 4;
 
+        // Maximum number of 4-bit counters we allow for the sketch. Capping this value prevents
+        // the sketch (and its associated CPU work) from growing linearly with very large cache
+        // capacities. With 1,048,576 counters and 4 hash rows we need at most ~1 MiB of memory
+        // (1,048,576 * 4 / 16 * 8 bytes).
+        private static final int MAX_COUNTERS = 1 << 20; // 1 Mi counters → ~1 MiB RAM
+
         // Number of counters per hash function (columns) - must be a power of 2
         private final int counterSize;
 
@@ -362,9 +368,25 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
          * @param capacity Expected number of distinct elements
          */
         public CountMinSketchInternal(int capacity) {
-            // Calculate counter size as next power of 2 >= 4*capacity
+            /*
+             * The original implementation sized the sketch to 4 × the cache capacity, then
+             * rounded up to the next power-of-two. That means a cache that is configured for
+             * millions of entries allocates proportionally huge arrays and touches them on every
+             * access.  In practice we get diminishing returns beyond a certain table size, so we
+             * cap the number of counters at MAX_COUNTERS. This keeps memory usage bounded and
+             * avoids excessive CPU work when we reset() the sketch.
+             */
+
+            // Calculate counter size as next power of 2 ≥ 4 × capacity, then cap it.
             int desiredCounters = Math.max(16, Integer.highestOneBit(capacity * 4 - 1) << 1);
-            this.counterSize = desiredCounters;
+            int effectiveCounters = Math.min(desiredCounters, MAX_COUNTERS);
+
+            // Ensure power-of-two invariant without exceeding the capped value.
+            if ((effectiveCounters & (effectiveCounters - 1)) != 0) { // not already power of two
+                effectiveCounters = Integer.highestOneBit(effectiveCounters);
+            }
+
+            this.counterSize = effectiveCounters;
             this.columnMask = counterSize - 1;
 
             // Each long holds 16 4-bit counters
