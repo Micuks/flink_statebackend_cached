@@ -43,6 +43,32 @@ public class LRUMap<K, V> extends LinkedHashMap<K, V> implements CachePolicy<K, 
     }
 
     @Override
+    public V remove(Object key) {
+        V value = super.remove(key);
+        if (value != null && evictionListener != null) {
+            final K castKey = (K) key;
+            evictionListener.accept(
+                    new Map.Entry<K, V>() {
+                        @Override
+                        public K getKey() {
+                            return castKey;
+                        }
+
+                        @Override
+                        public V getValue() {
+                            return value;
+                        }
+
+                        @Override
+                        public V setValue(V value) {
+                            throw new UnsupportedOperationException("Not supported.");
+                        }
+                    });
+        }
+        return value;
+    }
+
+    @Override
     protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
         boolean remove = size() > maxCapacity;
         if (remove && evictionListener != null) {

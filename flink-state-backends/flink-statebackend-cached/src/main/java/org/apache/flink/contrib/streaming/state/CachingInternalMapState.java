@@ -858,12 +858,20 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 resolvedByCache = true;
             } else {
                 l1ValueCacheMissCount.inc();
-                CacheEntry<UV> l2Entry = perKeyCache.l2MapEntries.get(userKey);
+                CacheEntry<UV> l2Entry = perKeyCache.l2MapEntries.remove(userKey);
                 if (l2Entry != null) {
                     l2ValueCacheHitCount.inc();
-                    userValue = l2Entry.getValue(); // L2 entries are clean and non-null
-                    // Promote L2 to L1. The put to L1MapEntries will handle memory reporting.
-                    perKeyCache.l1MapEntries.put(userKey, CacheEntry.clean(userValue));
+                    // L2 entry removal will trigger the listener to report memory released.
+                    userValue = l2Entry.getValue();
+                    CacheEntry<UV> newL1Entry = CacheEntry.clean(userValue);
+                    CacheEntry<UV> oldL1Entry =
+                            perKeyCache.l1MapEntries.put(userKey, newL1Entry);
+                    if (oldL1Entry != null) {
+                        perKeyCache.ownerBackend.reportCacheMemoryReleased(
+                                oldL1Entry.getEstimatedSizeBytes());
+                    }
+                    perKeyCache.ownerBackend.reportCacheMemoryAdded(
+                            newL1Entry.getEstimatedSizeBytes());
                     resolvedByCache = true;
                 } else {
                     l2ValueCacheMissCount.inc();
@@ -873,8 +881,15 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     delegateLookups.inc();
                     userValue = delegateState.get(userKey);
                     if (userValue != null) {
-                        // Add to L1. The put to L1MapEntries will handle memory reporting.
-                        perKeyCache.l1MapEntries.put(userKey, CacheEntry.clean(userValue));
+                        // Add to L1.
+                        CacheEntry<UV> newEntry = CacheEntry.clean(userValue);
+                        CacheEntry<UV> oldEntry = perKeyCache.l1MapEntries.put(userKey, newEntry);
+                        if (oldEntry != null) {
+                            perKeyCache.ownerBackend.reportCacheMemoryReleased(
+                                    oldEntry.getEstimatedSizeBytes());
+                        }
+                        perKeyCache.ownerBackend.reportCacheMemoryAdded(
+                                newEntry.getEstimatedSizeBytes());
                     }
                     // If userValue is null from delegate, no tombstone is explicitly added to L1
                     // value cache here.
@@ -924,12 +939,17 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             }
 
             // Check L2 Value Cache
-            CacheEntry<UV> l2ValEntry = perKeyCache.l2MapEntries.get(userKey);
+            CacheEntry<UV> l2ValEntry = perKeyCache.l2MapEntries.remove(userKey);
             if (l2ValEntry != null) {
                 l2ValueCacheHitCount.inc();
                 userValue = l2ValEntry.getValue(); // L2 entries are clean, non-null
-                perKeyCache.l1MapEntries.put(userKey, CacheEntry.clean(userValue)); // Promote L2
-                                                                                    // value to L1
+                CacheEntry<UV> newL1Entry = CacheEntry.clean(userValue);
+                CacheEntry<UV> oldL1Entry = perKeyCache.l1MapEntries.put(userKey, newL1Entry);
+                if (oldL1Entry != null) {
+                    perKeyCache.ownerBackend.reportCacheMemoryReleased(
+                            oldL1Entry.getEstimatedSizeBytes());
+                }
+                perKeyCache.ownerBackend.reportCacheMemoryAdded(newL1Entry.getEstimatedSizeBytes());
                 resolvedByCache = true;
             } else {
                 l2ValueCacheMissCount.inc();
@@ -943,7 +963,13 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 userValue = delegateState.get(userKey);
                 resolvedByCache = false; // From delegate
                 if (userValue != null) {
-                    perKeyCache.l1MapEntries.put(userKey, CacheEntry.clean(userValue));
+                    CacheEntry<UV> newEntry = CacheEntry.clean(userValue);
+                    CacheEntry<UV> oldEntry = perKeyCache.l1MapEntries.put(userKey, newEntry);
+                    if (oldEntry != null) {
+                        perKeyCache.ownerBackend.reportCacheMemoryReleased(
+                                oldEntry.getEstimatedSizeBytes());
+                    }
+                    perKeyCache.ownerBackend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
                 }
                 // If userValue is null, a tombstone is not explicitly added to L1 from delegate
                 // here.
@@ -984,7 +1010,12 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         // calls backend.reportCacheMemoryReleased).
         // 2. Calling backend.reportCacheMemoryAdded for the new_entry.getEstimatedSizeBytes() when
         // this new entry is accepted.
-        perKeyCache.l1MapEntries.put(userKey, CacheEntry.dirty(userValue));
+        CacheEntry<UV> newEntry = CacheEntry.dirty(userValue);
+        CacheEntry<UV> oldEntry = perKeyCache.l1MapEntries.put(userKey, newEntry);
+        if (oldEntry != null) {
+            perKeyCache.ownerBackend.reportCacheMemoryReleased(oldEntry.getEstimatedSizeBytes());
+        }
+        perKeyCache.ownerBackend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
 
         // Invalidate L2 if L1 is now dirty. The remove from CachePolicy will trigger memory
         // release.
@@ -1038,7 +1069,12 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
 
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
-        perKeyCache.l1MapEntries.put(userKey, CacheEntry.dirty(null)); // Tombstone
+        CacheEntry<UV> newEntry = CacheEntry.dirty(null); // Tombstone
+        CacheEntry<UV> oldEntry = perKeyCache.l1MapEntries.put(userKey, newEntry);
+        if (oldEntry != null) {
+            perKeyCache.ownerBackend.reportCacheMemoryReleased(oldEntry.getEstimatedSizeBytes());
+        }
+        perKeyCache.ownerBackend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
         // L1's put handles eviction/memory for old, and memory for new tombstone.
 
         perKeyCache.l2MapEntries.remove(userKey); // Invalidate L2.
@@ -1216,8 +1252,15 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             for (Map.Entry<UK, UV> entry : entriesFromDelegate) {
                 if (entry.getValue() != null) { // Don't cache null values from delegate in value
                                                 // cache
-                    perKeyCache.l1MapEntries.put(entry.getKey(),
-                            CacheEntry.clean(entry.getValue()));
+                    CacheEntry<UV> newCacheEntry = CacheEntry.clean(entry.getValue());
+                    CacheEntry<UV> oldCacheEntry = perKeyCache.l1MapEntries.put(entry.getKey(), newCacheEntry);
+                    if (oldCacheEntry != null) {
+                        perKeyCache.ownerBackend.reportCacheMemoryReleased(
+                                oldCacheEntry.getEstimatedSizeBytes());
+                    }
+                    perKeyCache.ownerBackend.reportCacheMemoryAdded(
+                            newCacheEntry.getEstimatedSizeBytes());
+
                     if (this.keyPresenceCacheEnabled) {
                         perKeyCache.updatePresenceCacheOnGet(entry.getKey(), true); // Mark as
                                                                                     // present

@@ -192,12 +192,15 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
         }
 
         CachePolicy<K, CacheEntry<ACC>> l2Cache = getL2CacheForNamespace(currentNamespace);
-        CacheEntry<ACC> l2Entry = l2Cache.get(currentKey);
+        CacheEntry<ACC> l2Entry = l2Cache.remove(currentKey);
 
         if (l2Entry != null) {
             cacheHits.inc();
-            l1Cache.put(currentKey, l2Entry);
-            l2Cache.remove(currentKey);
+            CacheEntry<ACC> oldL1Entry = l1Cache.put(currentKey, l2Entry);
+            if (oldL1Entry != null) {
+                backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
+            }
+            backend.reportCacheMemoryAdded(l2Entry.getEstimatedSizeBytes());
             return l2Entry.getValue();
         }
 
