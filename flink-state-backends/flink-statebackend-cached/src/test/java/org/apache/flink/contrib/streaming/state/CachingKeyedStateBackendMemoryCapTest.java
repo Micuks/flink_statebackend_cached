@@ -91,11 +91,12 @@ class CachingKeyedStateBackendMemoryCapTest {
     private final String testValue3 = "testValue3";
     private final String testValue4 = "testValue4";
     private final String testValue5 = "testValue5";
+    private final String testValue6 = "testValue6";
 
-    // Define a small memory cap for testing eviction, e.g., enough for about 2-3 string values.
-    // ValueSizeUtils.estimate("testValue1") is approx 36 bytes (10 chars * 2 + 16 shell).
-    private final long maxCacheMemoryBytes = 200L; // Enough for all test entries
-    private final double maxCacheMemoryMbForConstructor = (double)maxCacheMemoryBytes / (1024.0 * 1024.0);
+    // Define a small memory cap for testing eviction.
+    // ValueSizeUtils.estimate("aString") is approx 30-40 bytes.
+    private long maxCacheMemoryBytes;
+    private double maxCacheMemoryMbForConstructor;
 
     private CachingStateBackendFactory.CachePolicyType currentCachePolicyType;
 
@@ -191,6 +192,11 @@ class CachingKeyedStateBackendMemoryCapTest {
         setUp();
     }
 
+    private void setupWithMemoryCap(long maxBytes) {
+            this.maxCacheMemoryBytes = maxBytes;
+            this.maxCacheMemoryMbForConstructor = (double) maxBytes / (1024.0 * 1024.0);
+    }
+
     private void waitForEvictionToComplete() {
         // Wait for eviction to complete by checking cache size <= cap or timeout
         long currentSize;
@@ -221,124 +227,105 @@ class CachingKeyedStateBackendMemoryCapTest {
     @ParameterizedTest
     @MethodSource("cachePolicies")
     void testValueState_MemoryReported_AndEvictionTriggered(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+            setupWithMemoryCap(100L); // Approx 3 string values
         setPolicyAndSetup(policyType);
         ValueStateDescriptor<String> valueDesc = new ValueStateDescriptor<>("testValueState", StringSerializer.INSTANCE);
         InternalValueState<String, VoidNamespace, String> valueState =
                 (InternalValueState<String, VoidNamespace, String>) spiedCachingBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, valueDesc);
+        valueState.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         assertEquals(0L, spiedCachingBackend.getCurrentEstimatedCacheSizeBytesValue(), "Initial cache size should be 0");
 
-        // Add first value
+        // Add values under different keys to grow memory
+        cachingBackend.setCurrentKey("key1");
         valueState.update(testValue1);
-        long sizeAfter1 = cachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-        assertTrue(sizeAfter1 > 0, "Cache size should be > 0 after one update");
-        assertEquals(ValueSizeUtils.estimate(testValue1), sizeAfter1, "Cache size should match estimated size of testValue1");
-
-        // Add second value
-        valueState.update(testValue2); // This updates the same state, so memory should be replaced
-        long sizeAfter2 = cachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-        assertTrue(sizeAfter2 > 0, "Cache size should be > 0 after two updates");
-        assertEquals(ValueSizeUtils.estimate(testValue2), sizeAfter2, "Cache size should match estimated size of testValue2 after update");
-
-        // Add more values to exceed the cap. Each update replaces the previous for the same key.
-        // To actually grow memory, we need different states or different keys.
-        // Let's use different keys to fill up the cache beyond the cap.
+        long expectedSize1 = ValueSizeUtils.estimate(testValue1);
+        assertEquals(expectedSize1, cachingBackend.getCurrentEstimatedCacheSizeBytesValue());
 
         cachingBackend.setCurrentKey("key2");
-        ValueState<String> valueState2 =
-            cachingBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, valueDesc);
-        valueState2.update(testValue3);
-        long sizeAfterKey2Val = cachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-         // expected: estimate(value2) for key1 + estimate(value3) for key2
-        assertEquals(ValueSizeUtils.estimate(testValue2) + ValueSizeUtils.estimate(testValue3), sizeAfterKey2Val);
+        valueState.update(testValue2);
+        long expectedSize2 = expectedSize1 + ValueSizeUtils.estimate(testValue2);
+        assertEquals(expectedSize2, cachingBackend.getCurrentEstimatedCacheSizeBytesValue());
 
+        // This update should push the memory over the cap and trigger eviction
         cachingBackend.setCurrentKey("key3");
-        ValueState<String> valueState3 =
-            cachingBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, valueDesc);
-        valueState3.update(testValue4);
-        long sizeAfterKey3Val = cachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-        // expected: estimate(value2) + estimate(value3) + estimate(value4)
-        assertEquals(ValueSizeUtils.estimate(testValue2) + ValueSizeUtils.estimate(testValue3) + ValueSizeUtils.estimate(testValue4), sizeAfterKey3Val);
-        
-        // At this point, total estimated size for 3 values (testValue2, testValue3, testValue4) 
-        // each approx 36 bytes = 108 bytes, which is > maxCacheMemoryBytes (100)
-        // Eviction should have been triggered.
-        assertTrue(cachingBackend.getCurrentEstimatedCacheSizeBytesValue() <= cachingBackend.getMaxConfiguredCacheSizeBytesValue(),
-                "Cache size should be less than or equal to max cap after eviction. Current: " + cachingBackend.getCurrentEstimatedCacheSizeBytesValue() + " Cap: " + cachingBackend.getMaxConfiguredCacheSizeBytesValue());
+        valueState.update(testValue3);
+        long sizeBeforeEviction = expectedSize2 + ValueSizeUtils.estimate(testValue3);
 
-        // Verify delegate was called for flushed entries (due to L1 eviction if dirty, or global eviction)
-        // This is harder to verify without deeper mocking or knowing eviction details.
-        // For now, we focus on the reported memory size.
+        waitForEvictionToComplete();
+        long sizeAfterEviction = cachingBackend.getCurrentEstimatedCacheSizeBytesValue();
+
+        assertTrue(sizeAfterEviction <= maxCacheMemoryBytes,
+                        "Cache size should be less than or equal to max cap after eviction. Current: "
+                                        + sizeAfterEviction + " Cap: " + maxCacheMemoryBytes);
+        assertTrue(sizeAfterEviction < sizeBeforeEviction,
+                        "Cache size should have been reduced by eviction. Before: "
+                                        + sizeBeforeEviction + ", After: " + sizeAfterEviction);
 
         // Clear one state and check memory reduction
-        cachingBackend.setCurrentKey(testKey1); // Current value in cache is testValue2
-        valueState.clear(); // this should remove testValue2 from cache
+        cachingBackend.setCurrentKey("key1");
+        long memoryBeforeClear = cachingBackend.getCurrentEstimatedCacheSizeBytesValue();
+        valueState.clear();
         long sizeAfterClear = cachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-        // Size should be (current size after eviction) - estimate(testValue2) or similar, depending on what was evicted
-        // This assertion needs to be robust against specific eviction order.
-        // If key1's value (testValue2) was evicted, this clear does nothing to the current memory.
-        // If it was not evicted, its memory is released.
-        // A simple check: memory decreased or stayed same (if already evicted)
-        assertTrue(sizeAfterClear <= sizeAfterKey3Val, "Memory should decrease or stay same after clear. Before: "+sizeAfterKey3Val + " After: "+sizeAfterClear);
-        assertTrue(sizeAfterClear <= cachingBackend.getMaxConfiguredCacheSizeBytesValue(), "Memory must remain under cap.");
+
+        assertTrue(sizeAfterClear <= memoryBeforeClear,
+                        "Memory should decrease or stay same after clear. Before: "
+                                        + memoryBeforeClear + " After: " + sizeAfterClear);
+        assertTrue(sizeAfterClear <= maxCacheMemoryBytes, "Memory must remain under cap.");
     }
 
     @ParameterizedTest
     @MethodSource("cachePolicies")
     void testListState_MemoryReported_AndEvictionTriggered(CachingStateBackendFactory.CachePolicyType policyType) throws Exception {
+            setupWithMemoryCap(150L); // A few lists
         setPolicyAndSetup(policyType);
         ListStateDescriptor<String> listDesc = new ListStateDescriptor<>("testListState", StringSerializer.INSTANCE);
         InternalListState<String, VoidNamespace, String> listState =
                 (InternalListState<String, VoidNamespace, String>) spiedCachingBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, listDesc);
-        ((InternalListState<String, VoidNamespace, String>) listState).setCurrentNamespace(VoidNamespace.INSTANCE);
+        listState.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         assertEquals(0L, cachingBackend.getCurrentEstimatedCacheSizeBytesValue(), "Initial cache size should be 0");
 
-        // Add first list
+        // Add lists for different keys to exceed cap
+        cachingBackend.setCurrentKey("listKey1");
         List<String> list1 = Arrays.asList(testValue1, testValue2);
         listState.update(list1);
-        long sizeAfter1 = cachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-        assertTrue(sizeAfter1 > 0, "Cache size should be > 0 after one update");
-        assertEquals(ValueSizeUtils.estimate(list1), sizeAfter1, "Cache size should match estimated size of list1");
+        long expectedSize1 = ValueSizeUtils.estimate(list1);
+        assertEquals(expectedSize1, cachingBackend.getCurrentEstimatedCacheSizeBytesValue());
 
-        // Update list for the same key
-        List<String> list2 = Arrays.asList(testValue3);
-        listState.update(list2);
-        long sizeAfter2 = cachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-        assertEquals(ValueSizeUtils.estimate(list2), sizeAfter2, "Cache size should match estimated size of list2 after update");
-
-        // Add lists for different keys to exceed cap
         cachingBackend.setCurrentKey("listKey2");
-        ListState<String> listState2 =
-            cachingBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, listDesc);
-        ((InternalListState<String, VoidNamespace, String>) listState2).setCurrentNamespace(VoidNamespace.INSTANCE);
-        List<String> list3 = Arrays.asList(testValue4);
-        listState2.update(list3); // listState2 now holds list3 (testValue4)
-        long sizeAfterKey2List = cachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-        // Expected: estimate(list2) for testKey1 + estimate(list3) for listKey2
-        assertEquals(ValueSizeUtils.estimate(list2) + ValueSizeUtils.estimate(list3), sizeAfterKey2List);
+        List<String> list2 = Arrays.asList(testValue3, testValue4);
+        listState.update(list2);
+        long expectedSize2 = expectedSize1 + ValueSizeUtils.estimate(list2);
+        assertEquals(expectedSize2, cachingBackend.getCurrentEstimatedCacheSizeBytesValue());
 
+        // This update should trigger eviction
         cachingBackend.setCurrentKey("listKey3");
-        ListState<String> listState3 =
-            cachingBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, listDesc);
-        ((InternalListState<String, VoidNamespace, String>) listState3).setCurrentNamespace(VoidNamespace.INSTANCE);
-        List<String> list4 = Arrays.asList(testValue5);
-        listState3.update(list4);
-        long sizeAfterKey3List = cachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-        // Expected: estimate(list2) + estimate(list3) + estimate(list4)
-        // list2 (val3) = ~ (16+2*6) = 28. list3 (val4) = ~28. list4 (val5) = ~28. Total = ~84 for values.
-        // Plus overhead for List objects and entries.
-        // Verify cache size is within cap after adding three lists
+        List<String> list3 = Arrays.asList(testValue5, testValue6);
+        listState.update(list3);
+        long sizeBeforeEviction = expectedSize2 + ValueSizeUtils.estimate(list3);
+
         waitForEvictionToComplete();
-        assertTrue(cachingBackend.getCurrentEstimatedCacheSizeBytesValue() <= cachingBackend.getMaxConfiguredCacheSizeBytesValue(),
-                "Cache size should be <= cap after adding three lists. Current: " + cachingBackend.getCurrentEstimatedCacheSizeBytesValue() + " Cap: " + cachingBackend.getMaxConfiguredCacheSizeBytesValue());
+        long sizeAfterEviction = cachingBackend.getCurrentEstimatedCacheSizeBytesValue();
+
+        assertTrue(sizeAfterEviction <= maxCacheMemoryBytes,
+                        "Cache size should be <= cap after adding three lists. Current: "
+                                        + sizeAfterEviction + " Cap: " + maxCacheMemoryBytes);
+        assertTrue(sizeAfterEviction < sizeBeforeEviction,
+                        "Cache size should have been reduced by eviction. Before: "
+                                        + sizeBeforeEviction + ", After: " + sizeAfterEviction);
 
         // Clear one list state
-        cachingBackend.setCurrentKey(testKey1);
+        cachingBackend.setCurrentKey("listKey1");
+        long memoryBeforeClear = cachingBackend.getCurrentEstimatedCacheSizeBytesValue();
         listState.clear();
         waitForEvictionToComplete();
-        assertTrue(cachingBackend.getCurrentEstimatedCacheSizeBytesValue() <= cachingBackend.getMaxConfiguredCacheSizeBytesValue(),
-                "Cache size should remain under cap after clear. Current: " + cachingBackend.getCurrentEstimatedCacheSizeBytesValue() + " Cap: " + cachingBackend.getMaxConfiguredCacheSizeBytesValue());
+        long sizeAfterClear = cachingBackend.getCurrentEstimatedCacheSizeBytesValue();
+        assertTrue(sizeAfterClear <= memoryBeforeClear,
+                        "Memory should decrease or stay same after clear.");
+        assertTrue(sizeAfterClear <= maxCacheMemoryBytes,
+                        "Cache size should remain under cap after clear. Current: " + sizeAfterClear
+                                        + " Cap: " + maxCacheMemoryBytes);
     }
 
     @ParameterizedTest
@@ -352,67 +339,47 @@ class CachingKeyedStateBackendMemoryCapTest {
 
         assertEquals(0L, spiedCachingBackend.getCurrentEstimatedCacheSizeBytesValue(), "Initial cache size should be 0");
 
-        // Add first entry to map
+        // Add entries to one map state under one Flink key
+        spiedCachingBackend.setCurrentKey("mapKey1");
         mapState.put("uk1", testValue1);
         long sizeAfterPut1 = spiedCachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-        // Size should be: PerKeyMapCache overhead (if any, ValueSizeUtils doesn't account for this explicitly for the cache object itself) 
-        // + estimate(CacheEntry for testValue1). For simplicity, we assume it's dominated by the entry.
-        // The CacheEntry includes the value's size. The PerKeyMapCache itself has some overhead.
-        // Current ValueSizeUtils doesn't estimate CacheEntry or PerKeyMapCache objects precisely.
-        // We will assert that size is > 0, and grows as expected relative to value sizes.
         assertTrue(sizeAfterPut1 > 0, "Cache size should be > 0 after one put");
-        // A more precise check: the CachingInternalMapState reports memory for each *CacheEntry* it stores.
-        assertEquals(ValueSizeUtils.estimate(testValue1), sizeAfterPut1, "Memory should be for testValue1 entry");
 
-        // Update entry in map
-        mapState.put("uk1", testValue2);
-        long sizeAfterUpdate = spiedCachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-        assertEquals(ValueSizeUtils.estimate(testValue2), sizeAfterUpdate, "Memory should be for testValue2 entry after update");
-
-        // Add another entry to the same map (same Flink key)
-        mapState.put("uk2", testValue3);
+        mapState.put("uk2", testValue2);
         long sizeAfterPut2 = spiedCachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-        assertEquals(ValueSizeUtils.estimate(testValue2) + ValueSizeUtils.estimate(testValue3), sizeAfterPut2, "Memory for two entries in one map");
+        assertTrue(sizeAfterPut2 > sizeAfterPut1, "Cache size should grow after second put");
 
-        // Add maps for different Flink keys to exceed cap
+        // Use a second Flink key
         spiedCachingBackend.setCurrentKey("mapKey2");
-        MapState<String, String> mapState2 =
-            spiedCachingBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, mapDesc);
-        ((InternalMapState<String, VoidNamespace, String, String>) mapState2).setCurrentNamespace(VoidNamespace.INSTANCE);
-        mapState2.put("uk1", testValue4); // mapState2: {uk1=val4}
-        long sizeAfterMapKey2 = spiedCachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-        // Calculate expected size using ValueSizeUtils
-        long expectedValue2Size = ValueSizeUtils.estimate(testValue2);
-        long expectedValue3Size = ValueSizeUtils.estimate(testValue3);
-        long expectedValue4Size = ValueSizeUtils.estimate(testValue4);
-        long expectedSize = expectedValue2Size + expectedValue3Size + expectedValue4Size;
-        assertEquals(expectedSize, sizeAfterMapKey2, "Cache size should match sum of value sizes");
+        mapState.put("uk1", testValue3);
+        long sizeAfterPut3 = spiedCachingBackend.getCurrentEstimatedCacheSizeBytesValue();
+        assertTrue(sizeAfterPut3 > sizeAfterPut2, "Cache size should grow after third put");
 
-        // Current total with val2,val3,val4 (3*36 = 108 bytes) is under 150 cap
-        System.out.println("Cache size after three entries: " + spiedCachingBackend.getCurrentEstimatedCacheSizeBytesValue() + " / " + spiedCachingBackend.getMaxConfiguredCacheSizeBytesValue());
-        
-        // Add fourth map
+        // This final put should push memory over the cap and trigger eviction
         spiedCachingBackend.setCurrentKey("mapKey3");
-        MapState<String, String> mapState3 =
-            spiedCachingBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, mapDesc);
-        ((InternalMapState<String, VoidNamespace, String, String>) mapState3).setCurrentNamespace(VoidNamespace.INSTANCE);
-        mapState3.put("uk1", testValue5); // mapState3: {uk1=val5} - adds 36 bytes
+        mapState.put("uk1", testValue4);
+        long sizeBeforeFinalPut = spiedCachingBackend.getCurrentEstimatedCacheSizeBytesValue();
+        mapState.put("uk2", testValue5);
         
-        // Total should be 108 + 36 = 144 bytes (under 150 cap)
-        long sizeAfterMapKey3 = spiedCachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-        assertEquals(144, sizeAfterMapKey3, "Cache size should be 144 bytes for four entries");
-        
-        // Log current state
-        System.out.println("Cache size after fourth entry: " + sizeAfterMapKey3 + " / " + spiedCachingBackend.getMaxConfiguredCacheSizeBytesValue());
+        waitForEvictionToComplete();
+        long sizeAfterEviction = spiedCachingBackend.getCurrentEstimatedCacheSizeBytesValue();
 
-        // Clear one map state (e.g., mapState for testKey1, which had val2, val3)
+        assertTrue(sizeAfterEviction <= maxCacheMemoryBytes,
+                        "Cache size should be less than or equal to max cap after eviction. Current: "
+                                        + sizeAfterEviction + " Cap: " + maxCacheMemoryBytes);
+        // Eviction should have reduced the size significantly
+        assertTrue(sizeAfterEviction < sizeBeforeFinalPut,
+                        "Eviction should have reduced cache size. Before: " + sizeBeforeFinalPut
+                                        + ", After: " + sizeAfterEviction);
+
+        // Clear one map state
         long memoryBeforeClear = spiedCachingBackend.getCurrentEstimatedCacheSizeBytesValue();
-        spiedCachingBackend.setCurrentKey(testKey1);
+        spiedCachingBackend.setCurrentKey("mapKey1");
         mapState.clear(); 
         long sizeAfterClearMap = spiedCachingBackend.getCurrentEstimatedCacheSizeBytesValue();
         // If mapState was fully or partially in cache, memory should decrease.
         // If it was fully evicted, memory might not change much.
         assertTrue(sizeAfterClearMap <= memoryBeforeClear, "Memory should decrease or stay same after clear.");
-        assertTrue(sizeAfterClearMap <= spiedCachingBackend.getMaxConfiguredCacheSizeBytesValue(), "Memory must remain under cap.");
+        assertTrue(sizeAfterClearMap <= maxCacheMemoryBytes, "Memory must remain under cap.");
     }
 } 

@@ -176,6 +176,12 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
         this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
         this.bytesSinceLastEvictionCheck = new AtomicLong(0L);
+
+        // Register memory usage gauge
+        if (this.metricGroup != null) {
+            this.metricGroup.gauge("estimatedCacheMemoryBytes",
+                    currentEstimatedCacheSizeBytes::get);
+        }
         // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
     }
 
@@ -277,6 +283,12 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
         this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
         this.bytesSinceLastEvictionCheck = new AtomicLong(0L);
+
+        // Register memory usage gauge
+        if (this.metricGroup != null) {
+            this.metricGroup.gauge("estimatedCacheMemoryBytes",
+                    currentEstimatedCacheSizeBytes::get);
+        }
         // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
     }
 

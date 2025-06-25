@@ -536,7 +536,12 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
 
         if (listFromDelegate != null) {
             // Store as is in L1 (no copy, as it's internal access)
-            l1Cache.put(currentKey, CacheEntry.clean(listFromDelegate));
+            CacheEntry<List<V_ELE>> newEntry = CacheEntry.clean(listFromDelegate);
+            CacheEntry<List<V_ELE>> oldL1 = l1Cache.put(currentKey, newEntry);
+            if (oldL1 != null) {
+                backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
+            }
+            backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
         }
         return listFromDelegate; // Return direct from delegate
     }
@@ -548,10 +553,18 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
 
         CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = getL1CacheForNamespace(currentNamespace);
         // Store the provided list directly, mark dirty
-        l1Cache.put(currentKey, CacheEntry.dirty(valueToStore));
+        CacheEntry<List<V_ELE>> newEntry = CacheEntry.dirty(valueToStore);
+        CacheEntry<List<V_ELE>> oldL1 = l1Cache.put(currentKey, newEntry);
+        if (oldL1 != null) {
+            backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
+        }
+        backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
 
         CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = getL2CacheForNamespace(currentNamespace);
-        l2Cache.remove(currentKey); // Invalidate L2
+        CacheEntry<List<V_ELE>> oldL2 = l2Cache.remove(currentKey); // Invalidate L2
+        if (oldL2 != null) {
+            backend.reportCacheMemoryReleased(oldL2.getEstimatedSizeBytes());
+        }
     }
 
     public N getCurrentNamespace() {
@@ -589,6 +602,11 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
     private void clearCacheForNamespace(N namespace) {
         CachePolicy<K, CacheEntry<List<V_ELE>>> l1Cache = namespaceCachesL1.get(namespace);
         if (l1Cache != null) {
+            for (Map.Entry<K, CacheEntry<List<V_ELE>>> entry : l1Cache.entrySet()) {
+                if (entry.getValue() != null) {
+                    backend.reportCacheMemoryReleased(entry.getValue().getEstimatedSizeBytes());
+                }
+            }
             l1Cache.clear();
         }
         CachePolicy<K, CacheEntry<List<V_ELE>>> l2Cache = namespaceCachesL2.get(namespace);

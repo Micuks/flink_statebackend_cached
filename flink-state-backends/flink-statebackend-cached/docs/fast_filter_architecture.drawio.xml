@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0" version="27.1.6">
+  <diagram name="Page-1" id="gXMMmXj1p8nprstovK6x">
+    <mxGraphModel dx="1683" dy="991" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="cF-I256L66rO3K1TXy2K-1" value="&lt;b&gt;面向键的快速过滤器&lt;/b&gt;&lt;div&gt;&lt;i&gt;检查键是否存在 (布尔值)&lt;/i&gt;&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#666666;fillColor=#f5f5f5;align=center;verticalAlign=top;spacingTop=4;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="80" y="70" width="680" height="420" as="geometry" />
+        </mxCell>
+        <mxCell id="cF-I256L66rO3K1TXy2K-2" value="&lt;b&gt;热键存在集 (L1 Cache)&lt;/b&gt;&lt;div style=&quot;text-align: left; margin-left: 4px;&quot;&gt;- LRU/TinyLFU Map&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#333333;fillColor=#ffffff;align=center;verticalAlign=top;" vertex="1" parent="cF-I256L66rO3K1TXy2K-1">
+          <mxGeometry x="25" y="80" width="180" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="kv-l1-1" value="K1: true" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#eeeeee;strokeColor=#999999;" vertex="1" parent="cF-I256L66rO3K1TXy2K-2">
+          <mxGeometry x="10" y="40" width="75" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="kv-l1-2" value="K2: false" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#cccccc;strokeColor=#666666;" vertex="1" parent="cF-I256L66rO3K1TXy2K-2">
+          <mxGeometry x="95" y="40" width="75" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="kv-l1-3" value="..." style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" parent="cF-I256L66rO3K1TXy2K-2">
+          <mxGeometry x="10" y="75" width="160" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="cF-I256L66rO3K1TXy2K-3" value="&lt;b&gt;温键存在集 (L2 Cache)&lt;/b&gt;&lt;div style=&quot;text-align: left; margin-left: 4px;&quot;&gt;- LRU/TinyLFU Map&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#333333;fillColor=#ffffff;align=center;verticalAlign=top;" vertex="1" parent="cF-I256L66rO3K1TXy2K-1">
+          <mxGeometry x="275" y="80" width="180" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="kv-l2-1" value="K3: true" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#eeeeee;strokeColor=#999999;" vertex="1" parent="cF-I256L66rO3K1TXy2K-3">
+          <mxGeometry x="10" y="40" width="75" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="kv-l2-2" value="K4: true" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#eeeeee;strokeColor=#999999;" vertex="1" parent="cF-I256L66rO3K1TXy2K-3">
+          <mxGeometry x="95" y="40" width="75" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="kv-l2-3" value="..." style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" parent="cF-I256L66rO3K1TXy2K-3">
+          <mxGeometry x="10" y="75" width="160" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="cF-I256L66rO3K1TXy2K-4" value="L1驱逐" style="endArrow=classic;html=1;rounded=0;strokeColor=#666666;strokeWidth=1.5;edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="cF-I256L66rO3K1TXy2K-1" source="cF-I256L66rO3K1TXy2K-2" target="cF-I256L66rO3K1TXy2K-3">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="205" y="145" as="sourcePoint" />
+            <mxPoint x="275" y="145" as="targetPoint" />
+            <Array as="points" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="cF-I256L66rO3K1TXy2K-5" value="L2命中时提升" style="endArrow=classic;html=1;rounded=0;strokeColor=#666666;strokeWidth=1.5;dashed=1;edgeStyle=orthogonalEdgeStyle;exitX=0;exitY=0.75;exitDx=0;exitDy=0;entryX=1;entryY=0.75;entryDx=0;entryDy=0;" edge="1" parent="cF-I256L66rO3K1TXy2K-1" source="cF-I256L66rO3K1TXy2K-3" target="cF-I256L66rO3K1TXy2K-2">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="275" y="177.5" as="sourcePoint" />
+            <mxPoint x="205" y="177.5" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="240" y="177.5" />
+              <mxPoint x="240" y="177.5" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="lookup-entry" value="查询(UserKey)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;strokeColor=#333333;" edge="1" parent="cF-I256L66rO3K1TXy2K-1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="-40" y="145" as="sourcePoint" />
+            <mxPoint x="25" y="145" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l1-miss" value="未命中" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;strokeColor=#333333;" edge="1" parent="cF-I256L66rO3K1TXy2K-1" source="cF-I256L66rO3K1TXy2K-2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="115" y="210" as="sourcePoint" />
+            <mxPoint x="365" y="240" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="115" y="240" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l1-hit" value="命中 (返回 true/false)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;exitX=0;exitY=0.25;exitDx=0;exitDy=0;strokeColor=#333333;" edge="1" parent="cF-I256L66rO3K1TXy2K-1" source="cF-I256L66rO3K1TXy2K-2">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="-40" y="112.5" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l2-check" value="查询L2" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="cF-I256L66rO3K1TXy2K-1">
+          <mxGeometry x="320" y="215" width="50" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="l2-miss" value="未命中" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;strokeColor=#333333;" edge="1" parent="cF-I256L66rO3K1TXy2K-1" source="cF-I256L66rO3K1TXy2K-3">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="365" y="210" as="sourcePoint" />
+            <mxPoint x="575" y="240" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="365" y="240" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="backend-box" value="&lt;b&gt;后备查询&lt;/b&gt;&lt;div&gt;1. 查询值缓存&lt;/div&gt;&lt;div&gt;2. 查询底层状态&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#333333;fillColor=#ffffff;align=center;verticalAlign=top;" vertex="1" parent="cF-I256L66rO3K1TXy2K-1">
+          <mxGeometry x="485" y="80" width="180" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="update-presence-cache" value="更新L1存在缓存" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;dashed=1;strokeColor=#666666;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="cF-I256L66rO3K1TXy2K-1" source="backend-box">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="575" y="210" as="sourcePoint" />
+            <mxPoint x="115" y="320" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="575" y="320" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="backend-result" value="返回值" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;exitX=1;exitY=0.25;exitDx=0;exitDy=0;strokeColor=#333333;" edge="1" parent="cF-I256L66rO3K1TXy2K-1" source="backend-box">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="735" y="112.5" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

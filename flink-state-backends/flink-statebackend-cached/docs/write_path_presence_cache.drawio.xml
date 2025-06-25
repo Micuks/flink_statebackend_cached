@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0" version="27.1.6">
+  <diagram name="Page-1" id="7ZKuR9--FCSc0tz3Y_IH">
+    <mxGraphModel dx="3383" dy="991" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="bihjBh-mrmacpAnKJbcB-88" value="&lt;b&gt;Flink 应用&lt;/b&gt;&lt;br&gt;请求 `map.put(userKey, value)`" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;strokeColor=#1a1a1a;fillColor=#e8f4ff;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="-1235" y="1070" width="250" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-89" value="&lt;b&gt;&amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp;缓存层&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#1a1a1a;fillColor=#fdf7e3;fontSize=12;align=left;verticalAlign=top;spacingLeft=15;spacingTop=10;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="-1260" y="1170" width="300" height="420" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-90" value="&lt;b&gt;面向键的快速过滤器&lt;/b&gt;&lt;div&gt;&lt;i&gt;检查键是否存在 (布尔值)&lt;/i&gt;&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#1a1a1a;fillColor=#fff6d5;align=center;verticalAlign=top;spacingTop=4;fontSize=12;" vertex="1" parent="bihjBh-mrmacpAnKJbcB-89">
+          <mxGeometry x="16.67" y="50" width="263.33" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-91" value="L1 存在" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#1a1a1a;fillColor=#ffffff;" vertex="1" parent="bihjBh-mrmacpAnKJbcB-90">
+          <mxGeometry x="18.809285714285714" y="50" width="94.04642857142859" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-92" value="L2 存在" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#1a1a1a;fillColor=#ffffff;" vertex="1" parent="bihjBh-mrmacpAnKJbcB-90">
+          <mxGeometry x="150.4742857142857" y="50" width="94.04642857142859" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-93" value="淘汰" style="endArrow=classic;html=1;rounded=0;strokeColor=#b87a00;strokeWidth=1.5;exitX=0.686;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;edgeStyle=orthogonalEdgeStyle;entryX=0.25;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="bihjBh-mrmacpAnKJbcB-90" source="bihjBh-mrmacpAnKJbcB-91" target="bihjBh-mrmacpAnKJbcB-92">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="65.8325" y="120" as="sourcePoint" />
+            <mxPoint x="197.49749999999997" y="120" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="83" y="110" />
+              <mxPoint x="174" y="110" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-94" value="提升" style="endArrow=classic;html=1;rounded=0;strokeColor=#2d7641;strokeWidth=1.5;dashed=1;edgeStyle=orthogonalEdgeStyle;entryX=0.25;entryY=1;entryDx=0;entryDy=0;exitX=0.75;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="bihjBh-mrmacpAnKJbcB-90" source="bihjBh-mrmacpAnKJbcB-92" target="bihjBh-mrmacpAnKJbcB-91">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="197.49749999999997" y="110" as="sourcePoint" />
+            <mxPoint x="65.8325" y="110" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="221" y="130" />
+              <mxPoint x="42" y="130" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-95" value="&lt;b&gt;双层缓存&lt;/b&gt;&lt;br&gt;&lt;i&gt;缓存实际值 (反序列化)&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#1a1a1a;fillColor=#dfeedd;align=center;verticalAlign=top;spacingTop=4;fontSize=12;" vertex="1" parent="bihjBh-mrmacpAnKJbcB-89">
+          <mxGeometry x="16.67" y="220" width="263.33" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-96" value="L1 缓存" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#1a1a1a;fillColor=#ffffff;" vertex="1" parent="bihjBh-mrmacpAnKJbcB-89">
+          <mxGeometry x="30" y="275" width="100" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-97" value="L2 缓存" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#1a1a1a;fillColor=#ffffff;" vertex="1" parent="bihjBh-mrmacpAnKJbcB-89">
+          <mxGeometry x="160" y="275" width="97.5" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-98" value="淘汰" style="endArrow=classic;html=1;rounded=0;strokeColor=#b87a00;strokeWidth=1.5;exitX=0.686;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;edgeStyle=orthogonalEdgeStyle;entryX=0.25;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="bihjBh-mrmacpAnKJbcB-89">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="101.5" y="315" as="sourcePoint" />
+            <mxPoint x="192.5" y="315" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="101.5" y="335" />
+              <mxPoint x="192.5" y="335" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-99" value="提升" style="endArrow=classic;html=1;rounded=0;strokeColor=#2d7641;strokeWidth=1.5;dashed=1;edgeStyle=orthogonalEdgeStyle;entryX=0.25;entryY=1;entryDx=0;entryDy=0;exitX=0.75;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="bihjBh-mrmacpAnKJbcB-89">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="239.5" y="315" as="sourcePoint" />
+            <mxPoint x="60.5" y="315" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="239.5" y="355" />
+              <mxPoint x="60.5" y="355" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-100" value="&lt;b&gt;委托状态 (例如, RocksDB)&lt;/b&gt;&lt;br&gt;&lt;i&gt;持久化存储 (序列化)&lt;/i&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;strokeColor=#1a1a1a;fillColor=#f5f5f5;" vertex="1" parent="1">
+          <mxGeometry x="-1235" y="1610" width="250" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-101" value="1a. 将 `value` 放入 L1 (脏)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;strokeColor=#993d35;strokeWidth=1.5;dashed=1;" edge="1" parent="1" source="bihjBh-mrmacpAnKJbcB-88" target="bihjBh-mrmacpAnKJbcB-95">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="-1110" y="1140" as="sourcePoint" />
+            <mxPoint x="-1110" y="1260" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="-1310" y="1100" />
+              <mxPoint x="-1310" y="1465" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-102" value="1b. 在 L1 中设置键 PRESENCE=TRUE" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;strokeColor=#993d35;strokeWidth=1.5;dashed=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="bihjBh-mrmacpAnKJbcB-88" target="bihjBh-mrmacpAnKJbcB-90">
+          <mxGeometry x="-0.5636" y="-2" relative="1" as="geometry">
+            <mxPoint x="-1120" y="1140" as="sourcePoint" />
+            <mxPoint x="-1120" y="1170" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="-1112" y="1160" />
+              <mxPoint x="-1112" y="1160" />
+            </Array>
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-103" value="&lt;b&gt;2. L1 淘汰时: &lt;/b&gt;刷写脏条目" style="rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;strokeColor=#b87a00;strokeWidth=1.5;dashed=0;edgeStyle=orthogonalEdgeStyle;" edge="1" parent="1" source="bihjBh-mrmacpAnKJbcB-95" target="bihjBh-mrmacpAnKJbcB-100">
+          <mxGeometry x="-0.6063" y="2" relative="1" as="geometry">
+            <mxPoint x="-1110" y="1600" as="sourcePoint" />
+            <mxPoint x="-1110" y="1650" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="-1110" y="1570" />
+              <mxPoint x="-1110" y="1570" />
+            </Array>
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-104" value="&lt;b&gt;3. L1 淘汰时: &lt;/b&gt;将干净条目放入 L2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;strokeColor=#2d7641;strokeWidth=1.5;dashed=0;" edge="1" parent="1" source="bihjBh-mrmacpAnKJbcB-100" target="bihjBh-mrmacpAnKJbcB-97">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="-975" y="1680" as="sourcePoint" />
+            <mxPoint x="-920" y="1340" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="-890" y="1650" />
+              <mxPoint x="-890" y="1465" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-105" value="&lt;b&gt;Flink 应用&lt;/b&gt;&lt;br&gt;请求 `map.remove(userKey)`" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;strokeColor=#1a1a1a;fillColor=#e8f4ff;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="-555" y="1070" width="250" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-106" value="&lt;b&gt;&amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp;缓存层&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#1a1a1a;fillColor=#fdf7e3;fontSize=12;align=left;verticalAlign=top;spacingLeft=15;spacingTop=10;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="-580" y="1170" width="300" height="420" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-107" value="&lt;b&gt;面向键的快速过滤器&lt;/b&gt;&lt;div&gt;&lt;i&gt;检查键是否存在 (布尔值)&lt;/i&gt;&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#1a1a1a;fillColor=#fff6d5;align=center;verticalAlign=top;spacingTop=4;fontSize=12;" vertex="1" parent="bihjBh-mrmacpAnKJbcB-106">
+          <mxGeometry x="16.67" y="50" width="263.33" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-108" value="L1 存在" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#1a1a1a;fillColor=#ffffff;" vertex="1" parent="bihjBh-mrmacpAnKJbcB-107">
+          <mxGeometry x="18.809285714285714" y="50" width="94.04642857142859" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-109" value="L2 存在" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#1a1a1a;fillColor=#ffffff;" vertex="1" parent="bihjBh-mrmacpAnKJbcB-107">
+          <mxGeometry x="150.4742857142857" y="50" width="94.04642857142859" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-110" value="淘汰" style="endArrow=classic;html=1;rounded=0;strokeColor=#b87a00;strokeWidth=1.5;exitX=0.686;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;edgeStyle=orthogonalEdgeStyle;entryX=0.25;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="bihjBh-mrmacpAnKJbcB-107" source="bihjBh-mrmacpAnKJbcB-108" target="bihjBh-mrmacpAnKJbcB-109">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="65.8325" y="120" as="sourcePoint" />
+            <mxPoint x="197.49749999999997" y="120" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="83" y="110" />
+              <mxPoint x="174" y="110" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-111" value="提升" style="endArrow=classic;html=1;rounded=0;strokeColor=#2d7641;strokeWidth=1.5;dashed=1;edgeStyle=orthogonalEdgeStyle;entryX=0.25;entryY=1;entryDx=0;entryDy=0;exitX=0.75;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="bihjBh-mrmacpAnKJbcB-107" source="bihjBh-mrmacpAnKJbcB-109" target="bihjBh-mrmacpAnKJbcB-108">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="197.49749999999997" y="110" as="sourcePoint" />
+            <mxPoint x="65.8325" y="110" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="221" y="130" />
+              <mxPoint x="42" y="130" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-112" value="&lt;b&gt;双层缓存&lt;/b&gt;&lt;br&gt;&lt;i&gt;缓存实际值 (反序列化)&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#1a1a1a;fillColor=#dfeedd;align=center;verticalAlign=top;spacingTop=4;fontSize=12;" vertex="1" parent="bihjBh-mrmacpAnKJbcB-106">
+          <mxGeometry x="16.67" y="220" width="263.33" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-113" value="L1 缓存" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#1a1a1a;fillColor=#ffffff;" vertex="1" parent="bihjBh-mrmacpAnKJbcB-106">
+          <mxGeometry x="30" y="275" width="100" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-114" value="L2 缓存" style="rounded=1;whiteSpace=wrap;html=1;strokeColor=#1a1a1a;fillColor=#ffffff;" vertex="1" parent="bihjBh-mrmacpAnKJbcB-106">
+          <mxGeometry x="160" y="275" width="97.5" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-115" value="淘汰" style="endArrow=classic;html=1;rounded=0;strokeColor=#b87a00;strokeWidth=1.5;exitX=0.686;exitY=1;exitDx=0;exitDy=0;exitPerimeter=0;edgeStyle=orthogonalEdgeStyle;entryX=0.25;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="bihjBh-mrmacpAnKJbcB-106">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="101.5" y="315" as="sourcePoint" />
+            <mxPoint x="192.5" y="315" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="101.5" y="335" />
+              <mxPoint x="192.5" y="335" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-116" value="提升" style="endArrow=classic;html=1;rounded=0;strokeColor=#2d7641;strokeWidth=1.5;dashed=1;edgeStyle=orthogonalEdgeStyle;entryX=0.25;entryY=1;entryDx=0;entryDy=0;exitX=0.75;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="bihjBh-mrmacpAnKJbcB-106">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="239.5" y="315" as="sourcePoint" />
+            <mxPoint x="60.5" y="315" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="239.5" y="355" />
+              <mxPoint x="60.5" y="355" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-117" value="&lt;b&gt;委托状态 (例如, RocksDB)&lt;/b&gt;&lt;br&gt;&lt;i&gt;持久化存储 (序列化)&lt;/i&gt;" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;strokeColor=#1a1a1a;fillColor=#f5f5f5;" vertex="1" parent="1">
+          <mxGeometry x="-555" y="1610" width="250" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-118" value="1a. 在 L1 中放入墓碑值&lt;div&gt;并从 L2 中移除&lt;/div&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;strokeColor=#993d35;strokeWidth=1.5;dashed=1;" edge="1" parent="1" source="bihjBh-mrmacpAnKJbcB-105" target="bihjBh-mrmacpAnKJbcB-112">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="-430" y="1140" as="sourcePoint" />
+            <mxPoint x="-430" y="1410" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="-220" y="1100" />
+              <mxPoint x="-220" y="1465" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-119" value="1b. 在 L1 中设置键 PRESENCE=FALSE" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;strokeColor=#993d35;strokeWidth=1.5;dashed=1;" edge="1" parent="1" source="bihjBh-mrmacpAnKJbcB-105" target="bihjBh-mrmacpAnKJbcB-107">
+          <mxGeometry x="-0.5556" relative="1" as="geometry">
+            <mxPoint x="-430" y="1140" as="sourcePoint" />
+            <mxPoint x="-430" y="1230" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="-430" y="1190" />
+              <mxPoint x="-430" y="1190" />
+            </Array>
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bihjBh-mrmacpAnKJbcB-120" value="1c. 从委托状态中移除" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;strokeColor=#993d35;strokeWidth=1.5;dashed=1;" edge="1" parent="1" source="bihjBh-mrmacpAnKJbcB-105" target="bihjBh-mrmacpAnKJbcB-117">
+          <mxGeometry x="-0.6063" y="2" relative="1" as="geometry">
+            <mxPoint x="-430" y="1140" as="sourcePoint" />
+            <mxPoint x="-430" y="1610" as="targetPoint" />
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="-650" y="1100" />
+              <mxPoint x="-650" y="1650" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

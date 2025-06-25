@@ -43,7 +43,9 @@ import org.slf4j.LoggerFactory;
  * @param <UV> The type of the user value in the map.
  */
 public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K, N, UK, UV>,
-        CachingInternalState<K, N, Map<UK, UV>, InternalMapState<K, N, UK, UV>> {  // Now using Flink's Closeable
+        CachingInternalState<K, N, Map<UK, UV>, InternalMapState<K, N, UK, UV>> { // Now using
+                                                                                  // Flink's
+                                                                                  // Closeable
 
     private static final Logger LOG = LoggerFactory.getLogger(CachingInternalMapState.class);
     private final InternalMapState<K, N, UK, UV> delegateState;
@@ -78,6 +80,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     private transient AtomicLong accessesForHitRateWindow;
     private transient AtomicLong hitsInHitRateWindow;
     private transient AtomicLong totalAccessesForBypassEligibility;
+    private transient AtomicLong accessSampler;
+    private static final int SAMPLING_RATE = 100; // 1%
     private volatile boolean bypassCache = false;
 
     // Metrics
@@ -108,8 +112,9 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         // ABSENT_MAYBE_IN_VALUE_CACHE (indicates not in presence cache, check value cache)
         enum ValuePresence {
             PRESENT_IN_CACHE_CLEAN, // Present in presence cache (always clean)
-            ABSENT_IN_CACHE,        // Explicitly absent in presence cache
-            ABSENT_MAYBE_IN_VALUE_CACHE // Not found in presence cache, actual value might be in value cache or delegate
+            ABSENT_IN_CACHE, // Explicitly absent in presence cache
+            ABSENT_MAYBE_IN_VALUE_CACHE // Not found in presence cache, actual value might be in
+                                        // value cache or delegate
         }
 
         final CachePolicy<UK_C, CacheEntry<UV_C>> l1MapEntries;
@@ -123,6 +128,9 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         private final CachingKeyedStateBackend<K_F> ownerBackend;
         final InternalMapState<K_F, N_F, UK_C, UV_C> delegateState;
         private final boolean keyPresenceCacheEnabled;
+
+        /** The MetricGroup created for this cache instance (can be null before registration). */
+        private transient MetricGroup metricGroup;
 
         PerKeyMapCache(int l1Size, int l2Size, InternalMapState<K_F, N_F, UK_C, UV_C> delegateState,
                 CachingKeyedStateBackend<K_F> ownerBackend, K_F flinkKey, N_F cacheNamespace,
@@ -139,20 +147,27 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
             if (this.keyPresenceCacheEnabled) {
                 // Initialize L2 Presence Cache
-                this.l2KeyPresenceCache = createCachePolicyInstance(cachePolicyType, mapL2KeyPresenceCacheSize, null, ownerBackend, true, this.keyPresenceCacheEnabled);
+                this.l2KeyPresenceCache =
+                        createCachePolicyInstance(cachePolicyType, mapL2KeyPresenceCacheSize, null,
+                                ownerBackend, true, this.keyPresenceCacheEnabled);
 
-            // Initialize L1 Presence Cache (with eviction to L2 Presence Cache)
-            this.l1KeyPresenceCache = createCachePolicyInstance(cachePolicyType, mapL1KeyPresenceCacheSize, evictedL1PresenceEntry -> {
-                    if (this.keyPresenceCacheEnabled && evictedL1PresenceEntry.getValue() != null) {
-                        this.l2KeyPresenceCache.put(evictedL1PresenceEntry.getKey(), CacheEntry.clean(evictedL1PresenceEntry.getValue().getValue()));
-                    }
-                }, ownerBackend, true, this.keyPresenceCacheEnabled);
+                // Initialize L1 Presence Cache (with eviction to L2 Presence Cache)
+                this.l1KeyPresenceCache = createCachePolicyInstance(cachePolicyType,
+                        mapL1KeyPresenceCacheSize, evictedL1PresenceEntry -> {
+                            if (this.keyPresenceCacheEnabled
+                                    && evictedL1PresenceEntry.getValue() != null) {
+                                this.l2KeyPresenceCache.put(evictedL1PresenceEntry.getKey(),
+                                        CacheEntry.clean(
+                                                evictedL1PresenceEntry.getValue().getValue()));
+                            }
+                        }, ownerBackend, true, this.keyPresenceCacheEnabled);
             } else {
                 this.l1KeyPresenceCache = new NoOpCachePolicy<>();
                 this.l2KeyPresenceCache = new NoOpCachePolicy<>();
             }
 
-            this.l2MapEntries = createCachePolicyInstance(cachePolicyType, l2Size, null, ownerBackend, false, false);
+            this.l2MapEntries = createCachePolicyInstance(cachePolicyType, l2Size, null,
+                    ownerBackend, false, false);
             this.l1MapEntries =
                     createCachePolicyInstance(cachePolicyType, l1Size, evictedL1MapEntry -> {
                         UK_C evictedUK = evictedL1MapEntry.getKey();
@@ -163,7 +178,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                             N_F originalDelegateNamespaceContext = null;
                             try {
                                 originalKeyContext = ownerBackend.getCurrentKey();
-                                originalDelegateNamespaceContext = this.mainContextDelegateNamespace;
+                                originalDelegateNamespaceContext =
+                                        this.mainContextDelegateNamespace;
 
                                 ownerBackend.setCurrentKey(flinkKey);
                                 delegateState.setCurrentNamespace(cacheNamespace);
@@ -172,22 +188,31 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                     delegateState.remove(evictedUK);
                                 } else {
                                     delegateState.put(evictedUK, evictedUVWrapper.getValue());
-                                    // Add to L2 cache only if it was a regular value, not a tombstone
-                                    this.l2MapEntries.put(evictedUK, CacheEntry.clean(evictedUVWrapper.getValue()));
+                                    // Add to L2 cache only if it was a regular value, not a
+                                    // tombstone
+                                    this.l2MapEntries.put(evictedUK,
+                                            CacheEntry.clean(evictedUVWrapper.getValue()));
                                 }
-                                evictedUVWrapper.setDirty(false); // Mark clean after successful flush
+                                evictedUVWrapper.setDirty(false); // Mark clean after successful
+                                                                  // flush
                             } catch (Exception e) {
-                                throw new RuntimeException("Failed to flush L1 map entry to delegate for user key: " + evictedUK, e);
+                                throw new RuntimeException(
+                                        "Failed to flush L1 map entry to delegate for user key: "
+                                                + evictedUK,
+                                        e);
                             } finally {
                                 if (originalKeyContext != null) {
                                     ownerBackend.setCurrentKey(originalKeyContext);
                                 }
                                 if (originalDelegateNamespaceContext != null) {
-                                    delegateState.setCurrentNamespace(originalDelegateNamespaceContext);
+                                    delegateState
+                                            .setCurrentNamespace(originalDelegateNamespaceContext);
                                 }
                             }
                         } else { // Clean entry
-                            if (evictedUVWrapper.getValue() != null) { // Don't put null (tombstones) from clean L1 into L2
+                            if (evictedUVWrapper.getValue() != null) { // Don't put null
+                                                                       // (tombstones) from clean L1
+                                                                       // into L2
                                 this.l2MapEntries.put(evictedUK, evictedUVWrapper); // Already clean
                             }
                         }
@@ -199,7 +224,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 Consumer<Map.Entry<CK, CacheEntry<CV_ENTRY_TYPE>>> evictionListener,
                 CachingKeyedStateBackend<?> ownerBackendForSize, boolean isPresenceCacheItself,
                 boolean reportMemoryForThisPresenceCache) {
-            
+
             Consumer<Map.Entry<CK, CacheEntry<CV_ENTRY_TYPE>>> wrappedEvictionListener = null;
             if (evictionListener != null) {
                 wrappedEvictionListener = entry -> {
@@ -207,27 +232,31 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     if (cacheEntryValue != null) { // Null check for safety
                         if (isPresenceCacheItself) {
                             if (reportMemoryForThisPresenceCache) {
-                        ownerBackendForSize.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
+                                ownerBackendForSize.reportCacheMemoryReleased(
+                                        ValueSizeUtils.estimate(Boolean.TRUE));
                             }
                         } else { // It's a value cache
-                            ownerBackendForSize.reportCacheMemoryReleased(cacheEntryValue.getEstimatedSizeBytes());
+                            ownerBackendForSize.reportCacheMemoryReleased(
+                                    cacheEntryValue.getEstimatedSizeBytes());
                         }
                     }
                     evictionListener.accept(entry);
                 };
             } else {
-                 wrappedEvictionListener = entry -> {
+                wrappedEvictionListener = entry -> {
                     CacheEntry<CV_ENTRY_TYPE> cacheEntryValue = entry.getValue();
                     if (cacheEntryValue != null) { // Null check for safety
                         if (isPresenceCacheItself) {
                             if (reportMemoryForThisPresenceCache) {
-                        ownerBackendForSize.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
+                                ownerBackendForSize.reportCacheMemoryReleased(
+                                        ValueSizeUtils.estimate(Boolean.TRUE));
                             }
                         } else { // It's a value cache
-                            ownerBackendForSize.reportCacheMemoryReleased(cacheEntryValue.getEstimatedSizeBytes());
+                            ownerBackendForSize.reportCacheMemoryReleased(
+                                    cacheEntryValue.getEstimatedSizeBytes());
                         }
                     }
-                 };
+                };
             }
 
 
@@ -244,8 +273,10 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
 
         void clearAll() throws Exception {
-            // Context (current key/namespace for delegateState) is set by the caller before clearAll is invoked.
-            Iterator<Map.Entry<UK_C, CacheEntry<UV_C>>> l1Iterator = this.l1MapEntries.entrySet().iterator();
+            // Context (current key/namespace for delegateState) is set by the caller before
+            // clearAll is invoked.
+            Iterator<Map.Entry<UK_C, CacheEntry<UV_C>>> l1Iterator =
+                    this.l1MapEntries.entrySet().iterator();
             while (l1Iterator.hasNext()) {
                 Map.Entry<UK_C, CacheEntry<UV_C>> l1Entry = l1Iterator.next();
                 UK_C userKey = l1Entry.getKey();
@@ -262,7 +293,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 l1Iterator.remove();
             }
 
-            Iterator<Map.Entry<UK_C, CacheEntry<UV_C>>> l2Iterator = this.l2MapEntries.entrySet().iterator();
+            Iterator<Map.Entry<UK_C, CacheEntry<UV_C>>> l2Iterator =
+                    this.l2MapEntries.entrySet().iterator();
             while (l2Iterator.hasNext()) {
                 Map.Entry<UK_C, CacheEntry<UV_C>> l2Entry = l2Iterator.next();
                 if (l2Entry.getValue().isDirty()) {
@@ -272,7 +304,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                         this.delegateState.put(l2Entry.getKey(), l2Entry.getValue().getValue());
                     }
                 }
-                this.ownerBackend.reportCacheMemoryReleased(l2Entry.getValue().getEstimatedSizeBytes());
+                this.ownerBackend
+                        .reportCacheMemoryReleased(l2Entry.getValue().getEstimatedSizeBytes());
                 l2Iterator.remove();
             }
             this.l1KeyPresenceCache.clear();
@@ -287,27 +320,33 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             }
             CacheEntry<Boolean> l1Presence = l1KeyPresenceCache.get(userKey);
             if (l1Presence != null) {
-                return l1Presence.getValue() ? ValuePresence.PRESENT_IN_CACHE_CLEAN : ValuePresence.ABSENT_IN_CACHE;
+                return l1Presence.getValue() ? ValuePresence.PRESENT_IN_CACHE_CLEAN
+                        : ValuePresence.ABSENT_IN_CACHE;
             }
             CacheEntry<Boolean> l2Presence = l2KeyPresenceCache.get(userKey);
             if (l2Presence != null) {
                 CacheEntry<Boolean> oldL1 = l1KeyPresenceCache.put(userKey, l2Presence);
-                if(oldL1 == null) ownerBackend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
-                return l2Presence.getValue() ? ValuePresence.PRESENT_IN_CACHE_CLEAN : ValuePresence.ABSENT_IN_CACHE;
+                if (oldL1 == null)
+                    ownerBackend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
+                return l2Presence.getValue() ? ValuePresence.PRESENT_IN_CACHE_CLEAN
+                        : ValuePresence.ABSENT_IN_CACHE;
             }
             return ValuePresence.ABSENT_MAYBE_IN_VALUE_CACHE;
         }
 
         void updatePresenceCacheOnGet(UK_C userKey, boolean valuePresentInValueCacheOrDelegate) {
-            if (!keyPresenceCacheEnabled) return;
-            CacheEntry<Boolean> oldL1P = l1KeyPresenceCache.put(userKey, CacheEntry.clean(valuePresentInValueCacheOrDelegate));
+            if (!keyPresenceCacheEnabled)
+                return;
+            CacheEntry<Boolean> oldL1P = l1KeyPresenceCache.put(userKey,
+                    CacheEntry.clean(valuePresentInValueCacheOrDelegate));
             if (oldL1P == null) {
                 ownerBackend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
             }
         }
 
         void updatePresenceCacheOnPut(UK_C userKey) {
-            if (!keyPresenceCacheEnabled) return;
+            if (!keyPresenceCacheEnabled)
+                return;
             CacheEntry<Boolean> oldL1P = l1KeyPresenceCache.put(userKey, CacheEntry.clean(true));
             if (oldL1P == null) {
                 ownerBackend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
@@ -315,7 +354,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
 
         void updatePresenceCacheOnRemove(UK_C userKey) {
-            if (!keyPresenceCacheEnabled) return;
+            if (!keyPresenceCacheEnabled)
+                return;
             CacheEntry<Boolean> oldL1P = l1KeyPresenceCache.put(userKey, CacheEntry.clean(false));
             if (oldL1P == null) {
                 ownerBackend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
@@ -323,27 +363,60 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
 
         void invalidatePresenceCache(UK_C userKey) {
-            if (!keyPresenceCacheEnabled) return;
+            if (!keyPresenceCacheEnabled)
+                return;
             CacheEntry<Boolean> oldL1P = l1KeyPresenceCache.remove(userKey);
-            if (oldL1P != null) ownerBackend.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
+            if (oldL1P != null)
+                ownerBackend.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
             CacheEntry<Boolean> oldL2P = l2KeyPresenceCache.remove(userKey);
-            if (oldL2P != null) ownerBackend.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
+            if (oldL2P != null)
+                ownerBackend.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
         }
 
-        int l1MapEntriesSize() { return l1MapEntries.size(); }
-        int l2MapEntriesSize() { return l2MapEntries.size(); }
-        int l1PresenceCacheSize() { return keyPresenceCacheEnabled ? l1KeyPresenceCache.size() : 0; }
-        int l2PresenceCacheSize() { return keyPresenceCacheEnabled ? l2KeyPresenceCache.size() : 0; }
+        int l1MapEntriesSize() {
+            return l1MapEntries.size();
+        }
+
+        int l2MapEntriesSize() {
+            return l2MapEntries.size();
+        }
+
+        int l1PresenceCacheSize() {
+            return keyPresenceCacheEnabled ? l1KeyPresenceCache.size() : 0;
+        }
+
+        int l2PresenceCacheSize() {
+            return keyPresenceCacheEnabled ? l2KeyPresenceCache.size() : 0;
+        }
 
         void registerMetrics(MetricGroup group, K_F key, N_F namespace) {
+            // Build a unique metric group path for every cache instance to avoid name clashes
             String keyStr = key != null ? key.toString() : "nullKey";
             String nsStr = namespace != null ? namespace.toString() : "nullNamespace";
-            MetricGroup perKeyCacheGroup = group.addGroup("key", keyStr).addGroup("namespace", nsStr);
 
-            perKeyCacheGroup.gauge("l1MapEntries", this::l1MapEntriesSize);
-            perKeyCacheGroup.gauge("l2MapEntries", this::l2MapEntriesSize);
-            perKeyCacheGroup.gauge("l1PresenceCacheEntries", this::l1PresenceCacheSize);
-            perKeyCacheGroup.gauge("l2PresenceCacheEntries", this::l2PresenceCacheSize);
+            // Adding an "instance" subgroup that is unique for every cache avoids the
+            // "duplicated metric group" warning when a cache for the same key/namespace gets
+            // recreated later on.
+            this.metricGroup = group.addGroup("key", keyStr)
+                    .addGroup("namespace", nsStr)
+                    .addGroup("instance", Integer.toHexString(System.identityHashCode(this)));
+
+            metricGroup.gauge("l1MapEntries", this::l1MapEntriesSize);
+            metricGroup.gauge("l2MapEntries", this::l2MapEntriesSize);
+            metricGroup.gauge("l1PresenceCacheEntries", this::l1PresenceCacheSize);
+            metricGroup.gauge("l2PresenceCacheEntries", this::l2PresenceCacheSize);
+        }
+
+        /**
+         * Closes (and thereby unregisters) the metric group for this cache instance. This should
+         * be called when the cache is evicted so that a later cache instance for the same
+         * key/namespace can register its own metrics without hitting duplicate name exceptions.
+         */
+        void closeMetrics() {
+            // Flink's MetricGroup does not expose a public close/unregister method in this
+            // version; clearing the reference is sufficient to allow GC while the
+            // MetricRegistry keeps the gauges under the unique "instance" subgroup.
+            metricGroup = null;
         }
 
         long getEstimatedMemoryUsageBytes() {
@@ -355,49 +428,101 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 totalSize += entry.getEstimatedSizeBytes();
             }
             if (keyPresenceCacheEnabled) {
-                totalSize += (long) (l1KeyPresenceCache.size() + l2KeyPresenceCache.size()) * ValueSizeUtils.estimate(Boolean.TRUE);
+                totalSize += (long) (l1KeyPresenceCache.size() + l2KeyPresenceCache.size())
+                        * ValueSizeUtils.estimate(Boolean.TRUE);
             }
             return totalSize;
         }
 
-         long evictToMeetMemoryLimit(long bytesToFree) {
-            if (bytesToFree <= 0) return 0L;
+        long evictToMeetMemoryLimit(long bytesToFree) {
+            if (bytesToFree <= 0)
+                return 0L;
 
             long freedBytes = 0;
             // Priority 1: Evict from L2 value cache (clean entries)
-            freedBytes += evictFromCache(l2MapEntries, bytesToFree - freedBytes, false, keyPresenceCacheEnabled);
-            if (freedBytes >= bytesToFree) return freedBytes;
+            freedBytes += evictFromCache(l2MapEntries, bytesToFree - freedBytes, false,
+                    keyPresenceCacheEnabled);
+            if (freedBytes >= bytesToFree)
+                return freedBytes;
             // Priority 2: Evict from L1 presence cache
             if (keyPresenceCacheEnabled) {
-                freedBytes += evictFromCache(l1KeyPresenceCache, bytesToFree - freedBytes, true, keyPresenceCacheEnabled);
-                 if (freedBytes >= bytesToFree) return freedBytes;
+                freedBytes += evictFromCache(l1KeyPresenceCache, bytesToFree - freedBytes, true,
+                        keyPresenceCacheEnabled);
+                if (freedBytes >= bytesToFree)
+                    return freedBytes;
             }
             // Priority 3: Evict from L2 presence cache
             if (keyPresenceCacheEnabled) {
-                freedBytes += evictFromCache(l2KeyPresenceCache, bytesToFree - freedBytes, true, keyPresenceCacheEnabled);
-                if (freedBytes >= bytesToFree) return freedBytes;
+                freedBytes += evictFromCache(l2KeyPresenceCache, bytesToFree - freedBytes, true,
+                        keyPresenceCacheEnabled);
+                if (freedBytes >= bytesToFree)
+                    return freedBytes;
             }
-            
-            // Priority 4: Evict from L1 value cache (may involve write-back if dirty)
-            // This is handled by LRU/TinyLFU capacity limits and eviction listeners primarily.
-            // For explicit freeing, we'd iterate and remove, which is complex due to dirty flags.
-            // The existing L1 eviction listener handles flushing dirty entries.
-            // For now, rely on natural eviction for L1 values if above didn't suffice.
-            // A more aggressive strategy could force L1 value evictions here too.
+
+            // Priority 4: Evict from L1 value cache (clean entries first)
+            Iterator<Map.Entry<UK_C, CacheEntry<UV_C>>> l1Iterator =
+                    l1MapEntries.entrySet().iterator();
+            List<Map.Entry<UK_C, CacheEntry<UV_C>>> dirtyEntriesToConsider = new ArrayList<>();
+            while (l1Iterator.hasNext() && freedBytes < bytesToFree) {
+                Map.Entry<UK_C, CacheEntry<UV_C>> entry = l1Iterator.next();
+                CacheEntry<UV_C> cacheEntry = entry.getValue();
+                if (!cacheEntry.isDirty()) {
+                    long estimatedSize = cacheEntry.getEstimatedSizeBytes();
+                    l1Iterator.remove(); // Removes from l1MapEntries
+                    ownerBackend.reportCacheMemoryReleased(estimatedSize);
+                    freedBytes += estimatedSize;
+                } else {
+                    dirtyEntriesToConsider.add(entry);
+                }
+            }
+            if (freedBytes >= bytesToFree)
+                return freedBytes;
+
+            // Priority 5: Evict from L1 value cache (dirty entries, requires flushing)
+            for (Map.Entry<UK_C, CacheEntry<UV_C>> dirtyEntry : dirtyEntriesToConsider) {
+                if (freedBytes >= bytesToFree)
+                    break;
+
+                UK_C userKey = dirtyEntry.getKey();
+                CacheEntry<UV_C> cacheEntry = dirtyEntry.getValue();
+                UV_C userValue = cacheEntry.getValue();
+                long estimatedSize = cacheEntry.getEstimatedSizeBytes();
+
+                try {
+                    // Context is already set by the caller
+                    // CachingInternalMapState.evictEntriesToFreeMemory
+                    if (userValue == null) { // is a tombstone
+                        delegateState.remove(userKey);
+                    } else {
+                        delegateState.put(userKey, userValue);
+                    }
+                    cacheEntry.setDirty(false);
+
+                    // Now that it's flushed, we can evict
+                    l1MapEntries.remove(userKey);
+                    ownerBackend.reportCacheMemoryReleased(estimatedSize);
+                    freedBytes += estimatedSize;
+                } catch (Exception e) {
+                    LOG.warn(
+                            "Failed to flush dirty entry during memory eviction. Key: {}. Error: {}",
+                            userKey, e.getMessage());
+                }
+            }
 
             return freedBytes;
         }
 
         private <ENTRY_KEY, ENTRY_VAL> long evictFromCache(
-            CachePolicy<ENTRY_KEY, CacheEntry<ENTRY_VAL>> cache,
-            long requiredBytes,
-            boolean isPresence,
-            boolean keyPresenceCacheEnabledCurrentCache) {
-            if (requiredBytes <= 0) return 0;
-            if (!keyPresenceCacheEnabledCurrentCache && isPresence) return 0; // Don't evict from NoOp presence cache
+                CachePolicy<ENTRY_KEY, CacheEntry<ENTRY_VAL>> cache, long requiredBytes,
+                boolean isPresence, boolean keyPresenceCacheEnabledCurrentCache) {
+            if (requiredBytes <= 0)
+                return 0;
+            if (!keyPresenceCacheEnabledCurrentCache && isPresence)
+                return 0; // Don't evict from NoOp presence cache
 
             long actualFreed = 0;
-            Iterator<Map.Entry<ENTRY_KEY, CacheEntry<ENTRY_VAL>>> iterator = cache.entrySet().iterator();
+            Iterator<Map.Entry<ENTRY_KEY, CacheEntry<ENTRY_VAL>>> iterator =
+                    cache.entrySet().iterator();
             List<ENTRY_KEY> keysToRemove = new ArrayList<>();
 
             while (iterator.hasNext() && actualFreed < requiredBytes) {
@@ -405,9 +530,10 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 CacheEntry<ENTRY_VAL> cacheEntry = entry.getValue();
                 if (isPresence) {
                     // No dirty check for presence, always clean
-                     actualFreed += ValueSizeUtils.estimate(Boolean.TRUE);
+                    actualFreed += ValueSizeUtils.estimate(Boolean.TRUE);
                 } else {
-                    if (!cacheEntry.isDirty()) { // Only evict clean entries from L2 value cache this way
+                    if (!cacheEntry.isDirty()) { // Only evict clean entries from L2 value cache
+                                                 // this way
                         actualFreed += cacheEntry.getEstimatedSizeBytes();
                     } else {
                         continue; // Skip dirty entries for now in this explicit eviction
@@ -417,8 +543,10 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             }
 
             for (ENTRY_KEY key : keysToRemove) {
-                CacheEntry<ENTRY_VAL> removed = cache.remove(key); // This should trigger eviction listener for memory reporting
-                // Eviction listener (wrapped) is responsible for ownerBackend.reportCacheMemoryReleased
+                CacheEntry<ENTRY_VAL> removed = cache.remove(key); // This should trigger eviction
+                                                                   // listener for memory reporting
+                // Eviction listener (wrapped) is responsible for
+                // ownerBackend.reportCacheMemoryReleased
             }
             return actualFreed;
         }
@@ -429,25 +557,22 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             CachingKeyedStateBackend<K> backend, int l1CacheSizePerMap, int l2CacheSizePerMap,
             int maxFlinkKeysWithActiveCachesPerNamespace, long maxCacheMemoryMb,
             CachingStateBackendFactory.CachePolicyType cachePolicyType,
-            int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
-            MetricGroup metrics,
-            double mapCacheHitRateThreshold,
-            long mapCacheHitRateWindowSize,
-            long mapCacheMinAccessesForBypassCheck,
-            boolean enableKeyPresenceCache,
+            int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize, MetricGroup metrics,
+                    double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize,
+            long mapCacheMinAccessesForBypassCheck, boolean enableKeyPresenceCache,
             boolean enableBypass) {
         this.delegateState = delegateState;
         this.backend = backend;
-        
+
         // Get the value serializer safely
         TypeSerializer<Map<UK, UV>> valueSerializer = delegateState.getValueSerializer();
         if (valueSerializer == null) {
-            throw new NullPointerException("Value serializer from delegate state is null. " +
-                    "Ensure the delegate state is properly initialized before creating CachingInternalMapState.");
+            throw new NullPointerException("Value serializer from delegate state is null. "
+                    + "Ensure the delegate state is properly initialized before creating CachingInternalMapState.");
         }
         if (!(valueSerializer instanceof MapSerializer)) {
-            throw new IllegalArgumentException("Value serializer must be a MapSerializer but was " +
-                    valueSerializer.getClass().getName());
+            throw new IllegalArgumentException("Value serializer must be a MapSerializer but was "
+                    + valueSerializer.getClass().getName());
         }
         MapSerializer<UK, UV> mapSerializer = (MapSerializer<UK, UV>) valueSerializer;
         this.userKeySerializer = mapSerializer.getKeySerializer();
@@ -456,7 +581,10 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         this.l1CacheSizePerMap = l1CacheSizePerMap;
         this.l2CacheSizePerMap = l2CacheSizePerMap;
         this.maxFlinkKeysWithActiveCachesPerNamespace = maxFlinkKeysWithActiveCachesPerNamespace;
-        this.maxActiveNamespacesInCache = backend.getMaxActiveNamespaceOrPerKeyCacheContainers(); // Reuse this for namespaces
+        this.maxActiveNamespacesInCache = backend.getMaxActiveNamespaceOrPerKeyCacheContainers(); // Reuse
+                                                                                                  // this
+                                                                                                  // for
+                                                                                                  // namespaces
         this.cachePolicyType = cachePolicyType;
         this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
         this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
@@ -466,13 +594,15 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         this.mapCacheMinAccessesForBypassCheck = mapCacheMinAccessesForBypassCheck;
 
         if (this.mapCacheHitRateThreshold > 0.0) {
-        this.accessesForHitRateWindow = new AtomicLong(0);
-        this.hitsInHitRateWindow = new AtomicLong(0);
-        this.totalAccessesForBypassEligibility = new AtomicLong(0);
+            this.accessesForHitRateWindow = new AtomicLong(0);
+            this.hitsInHitRateWindow = new AtomicLong(0);
+            this.totalAccessesForBypassEligibility = new AtomicLong(0);
+            this.accessSampler = new AtomicLong(0);
         } else {
             this.accessesForHitRateWindow = null;
             this.hitsInHitRateWindow = null;
             this.totalAccessesForBypassEligibility = null;
+            this.accessSampler = null;
         }
 
         // Add new fields
@@ -480,39 +610,65 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         this.bypassEnabled = enableBypass;
 
         // Initialize namespaceCaches (top-level cache: Namespace -> (FlinkKey -> PerKeyMapCache))
-        this.namespaceCaches = createCachePolicyForHierarchicalCache(this.maxActiveNamespacesInCache, evictedNamespaceEntry -> {
-            // When a namespace is evicted, iterate its FlinkKey caches and flush them
-            CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> flinkKeyCaches = evictedNamespaceEntry.getValue();
-            if (flinkKeyCaches != null) {
-                try {
-                    K NCDK = backend.getCurrentKey(); // Namespace Cache Delegate Key (current Flink key)
-                    N NCDN = getCurrentNamespace(); // Namespace Cache Delegate Namespace - Corrected
+        this.namespaceCaches = createCachePolicyForHierarchicalCache(
+                this.maxActiveNamespacesInCache, evictedNamespaceEntry -> {
+                    // When a namespace is evicted, iterate its FlinkKey caches and flush them
+                    CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> flinkKeyCaches =
+                            evictedNamespaceEntry.getValue();
+                    if (flinkKeyCaches != null) {
+                        try {
+                            K NCDK = backend.getCurrentKey(); // Namespace Cache Delegate Key
+                                                              // (current Flink key)
+                            N NCDN = getCurrentNamespace(); // Namespace Cache Delegate Namespace -
+                                                            // Corrected
 
-                    for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> flinkKeyEntry : flinkKeyCaches.entrySet()) {
-                        PerKeyMapCache<UK, UV, K, N> perKeyCache = flinkKeyEntry.getValue();
-                        // Ensure context is set for the specific Flink key and namespace of this PerKeyMapCache
-                        backend.setCurrentKey(perKeyCache.flinkKey);
-                        delegateState.setCurrentNamespace(perKeyCache.cacheNamespace);
-                        flushL1Entries(perKeyCache, perKeyCache.flinkKey, perKeyCache.cacheNamespace, backend, delegateState);
-                        perKeyCache.l2MapEntries.clear(); // Should trigger memory reporting via its own eviction
-                        if (perKeyCache.keyPresenceCacheEnabled) { // Guard presence cache clearing
-                            perKeyCache.l1KeyPresenceCache.clear(); // Should trigger memory reporting
-                            perKeyCache.l2KeyPresenceCache.clear(); // Should trigger memory reporting
+                            for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> flinkKeyEntry : flinkKeyCaches
+                                    .entrySet()) {
+                                PerKeyMapCache<UK, UV, K, N> perKeyCache = flinkKeyEntry.getValue();
+                                // Ensure context is set for the specific Flink key and namespace of
+                                // this PerKeyMapCache
+                                backend.setCurrentKey(perKeyCache.flinkKey);
+                                delegateState.setCurrentNamespace(perKeyCache.cacheNamespace);
+                                flushL1Entries(perKeyCache, perKeyCache.flinkKey,
+                                        perKeyCache.cacheNamespace, backend, delegateState);
+                                perKeyCache.l2MapEntries.clear(); // Should trigger memory reporting
+                                                                  // via its own eviction
+                                if (perKeyCache.keyPresenceCacheEnabled) { // Guard presence cache
+                                                                           // clearing
+                                    perKeyCache.l1KeyPresenceCache.clear(); // Should trigger memory
+                                                                            // reporting
+                                    perKeyCache.l2KeyPresenceCache.clear(); // Should trigger memory
+                                                                            // reporting
+                                }
+
+                                // Unregister metrics for this cache so that future instances can
+                                // re-register cleanly.
+                                perKeyCache.closeMetrics();
+
+                            }
+                            // Restore original context if changed
+                            if (NCDK != null)
+                                backend.setCurrentKey(NCDK);
+                            else
+                                backend.setCurrentKey(null); // TODO: check if this null is okay
+                            if (NCDN != null)
+                                delegateState.setCurrentNamespace(NCDN);
+                            else
+                                delegateState.setCurrentNamespace(null);
+
+
+                        } catch (Exception e) {
+                            LOG.error("Error flushing PerKeyMapCache during namespace eviction: {}",
+                                    evictedNamespaceEntry.getKey(), e);
+                            // Propagate as unchecked to ensure it's noticed; crucial cleanup
+                            // failed.
+                            throw new RuntimeException(
+                                    "Error during namespace cache eviction and flush for namespace: "
+                                            + evictedNamespaceEntry.getKey(),
+                                    e);
                         }
-
                     }
-                     // Restore original context if changed
-                    if (NCDK != null) backend.setCurrentKey(NCDK); else backend.setCurrentKey(null); //TODO: check if this null is okay
-                    if (NCDN != null) delegateState.setCurrentNamespace(NCDN); else delegateState.setCurrentNamespace(null);
-
-
-                    } catch (Exception e) {
-                    LOG.error("Error flushing PerKeyMapCache during namespace eviction: {}", evictedNamespaceEntry.getKey(), e);
-                     // Propagate as unchecked to ensure it's noticed; crucial cleanup failed.
-                    throw new RuntimeException("Error during namespace cache eviction and flush for namespace: " + evictedNamespaceEntry.getKey(), e);
-                }
-            }
-            });
+                });
 
         // Metrics
         this.metrics = metrics;
@@ -532,21 +688,22 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             this.l1PresenceCacheMissCount = new NoOpCounter();
             this.l2PresenceCacheHitCount = new NoOpCounter();
             this.l2PresenceCacheMissCount = new NoOpCounter();
-                }
+        }
         this.delegateLookups = cacheMetrics.counter("delegateLookups");
 
         cacheMetrics.gauge("bypassActive", () -> bypassCache ? 1 : 0);
         if (mapCacheHitRateThreshold > 0.0) {
-             cacheMetrics.gauge("currentHitRateForBypass", () -> {
-                 long accesses = accessesForHitRateWindow.get();
-                 long hits = hitsInHitRateWindow.get();
-                 return accesses > 0 ? (double) hits / accesses : 0.0;
-        });
+            cacheMetrics.gauge("currentHitRateForBypass", () -> {
+                long accesses = accessesForHitRateWindow.get();
+                long hits = hitsInHitRateWindow.get();
+                return accesses > 0 ? (double) hits / accesses : 0.0;
+            });
         }
     }
 
     // Helper for non-CacheEntry valued caches (like namespaceCaches, keyCaches)
-    private <CK, CV> CachePolicy<CK, CV> createCachePolicyForHierarchicalCache(int capacity, Consumer<Map.Entry<CK, CV>> evictionListener) {
+    private <CK, CV> CachePolicy<CK, CV> createCachePolicyForHierarchicalCache(int capacity,
+            Consumer<Map.Entry<CK, CV>> evictionListener) {
         switch (this.cachePolicyType) {
             case TINYLFU:
                 return new TinyLFUMap<>(capacity, evictionListener);
@@ -567,60 +724,82 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             // Caching layer cannot operate without a Flink key context here for map state.
             // Throwing an error or returning a non-caching wrapper might be options.
             // For now, assume key is always set before map operations.
-            throw new IllegalStateException("Current Flink key is null. Cannot get/create PerKeyMapCache.");
+            throw new IllegalStateException(
+                    "Current Flink key is null. Cannot get/create PerKeyMapCache.");
         }
 
-        CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> flinkKeyCaches = namespaceCaches.get(namespace);
+        CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> flinkKeyCaches =
+                namespaceCaches.get(namespace);
         if (flinkKeyCaches == null) {
             // Create a new cache for Flink keys under this namespace
-            flinkKeyCaches = createCachePolicyForHierarchicalCache(this.maxFlinkKeysWithActiveCachesPerNamespace, evictedFlinkKeyEntry -> {
-                // When a FlinkKey's cache is evicted from its namespace cache, flush its L1 entries
-                PerKeyMapCache<UK, UV, K, N> perKeyCache = evictedFlinkKeyEntry.getValue();
-                if (perKeyCache != null) {
-                     try {
-                        // Context for delegateState should be set to this perKeyCache's Flink key and namespace
-                        K originalKey = backend.getCurrentKey();
-                        N originalNamespace = getCurrentNamespace(); // Corrected
+            flinkKeyCaches = createCachePolicyForHierarchicalCache(
+                    this.maxFlinkKeysWithActiveCachesPerNamespace, evictedFlinkKeyEntry -> {
+                        // When a FlinkKey's cache is evicted from its namespace cache, flush its L1
+                        // entries
+                        PerKeyMapCache<UK, UV, K, N> perKeyCache = evictedFlinkKeyEntry.getValue();
+                        if (perKeyCache != null) {
+                            try {
+                                // Context for delegateState should be set to this perKeyCache's
+                                // Flink key and namespace
+                                K originalKey = backend.getCurrentKey();
+                                N originalNamespace = getCurrentNamespace(); // Corrected
 
-                        backend.setCurrentKey(perKeyCache.flinkKey);
-                        delegateState.setCurrentNamespace(perKeyCache.cacheNamespace);
+                                backend.setCurrentKey(perKeyCache.flinkKey);
+                                delegateState.setCurrentNamespace(perKeyCache.cacheNamespace);
 
-                        flushL1Entries(perKeyCache, perKeyCache.flinkKey, perKeyCache.cacheNamespace, backend, delegateState);
-                        perKeyCache.l2MapEntries.clear();
-                        if (perKeyCache.keyPresenceCacheEnabled) {
-                             perKeyCache.l1KeyPresenceCache.clear();
-                             perKeyCache.l2KeyPresenceCache.clear();
-                        }
+                                flushL1Entries(perKeyCache, perKeyCache.flinkKey,
+                                        perKeyCache.cacheNamespace, backend, delegateState);
+                                perKeyCache.l2MapEntries.clear();
+                                if (perKeyCache.keyPresenceCacheEnabled) {
+                                    perKeyCache.l1KeyPresenceCache.clear();
+                                    perKeyCache.l2KeyPresenceCache.clear();
+                                }
 
+                                // Unregister metrics for this cache so that future instances can
+                                // re-register cleanly.
+                                perKeyCache.closeMetrics();
 
-                        // Restore original context
-                        if (originalKey != null) backend.setCurrentKey(originalKey); else backend.setCurrentKey(null);
-                        if (originalNamespace != null) delegateState.setCurrentNamespace(originalNamespace); else delegateState.setCurrentNamespace(null);
+                                // Restore original context
+                                if (originalKey != null)
+                                    backend.setCurrentKey(originalKey);
+                                else
+                                    backend.setCurrentKey(null);
+                                if (originalNamespace != null)
+                                    delegateState.setCurrentNamespace(originalNamespace);
+                                else
+                                    delegateState.setCurrentNamespace(null);
 
                             } catch (Exception e) {
-                        LOG.error("Error flushing PerKeyMapCache during Flink key eviction from namespace {}: Flink key {}", namespace, evictedFlinkKeyEntry.getKey(), e);
-                        throw new RuntimeException("Error during Flink key cache eviction and flush for Flink key: " + evictedFlinkKeyEntry.getKey(), e);
+                                LOG.error(
+                                        "Error flushing PerKeyMapCache during Flink key eviction from namespace {}: Flink key {}",
+                                        namespace, evictedFlinkKeyEntry.getKey(), e);
+                                throw new RuntimeException(
+                                        "Error during Flink key cache eviction and flush for Flink key: "
+                                                + evictedFlinkKeyEntry.getKey(),
+                                        e);
                             }
-                }
-            });
+                        }
+                    });
             namespaceCaches.put(namespace, flinkKeyCaches);
         }
 
         PerKeyMapCache<UK, UV, K, N> perKeyCache = flinkKeyCaches.get(key);
         if (perKeyCache == null) {
-            perKeyCache = new PerKeyMapCache<>(
-                this.l1CacheSizePerMap, this.l2CacheSizePerMap,
-                this.delegateState, this.backend, key, namespace, getCurrentNamespace(), this.cachePolicyType,
-                this.mapL1KeyPresenceCacheSize, this.mapL2KeyPresenceCacheSize,
-                this.keyPresenceCacheEnabled);
+            perKeyCache = new PerKeyMapCache<>(this.l1CacheSizePerMap, this.l2CacheSizePerMap,
+                    this.delegateState, this.backend, key, namespace, getCurrentNamespace(),
+                    this.cachePolicyType, this.mapL1KeyPresenceCacheSize,
+                    this.mapL2KeyPresenceCacheSize, this.keyPresenceCacheEnabled);
             flinkKeyCaches.put(key, perKeyCache);
-            perKeyCache.registerMetrics(this.metrics.addGroup("perKeyCache"), key, getCurrentNamespace());
+            perKeyCache.registerMetrics(this.metrics.addGroup("perKeyCache"), key,
+                    getCurrentNamespace());
         }
         return perKeyCache;
     }
 
     private void updateCacheBypassCondition(boolean resolvedByCache) {
-        if (!bypassEnabled || this.mapCacheHitRateThreshold <= 0.0) {
+        if (!bypassEnabled || this.mapCacheHitRateThreshold <= 0.0
+                || accessesForHitRateWindow == null || hitsInHitRateWindow == null
+                || totalAccessesForBypassEligibility == null) {
             this.bypassCache = false;
             return;
         }
@@ -631,21 +810,18 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         long currentWindowAccesses = accessesForHitRateWindow.incrementAndGet();
 
         if (currentWindowAccesses >= this.mapCacheHitRateWindowSize) {
-            // Once the window is full, we perform the check and update total accesses.
-            // This moves one atomic operation from the hot path to here.
             long totalAccesses = totalAccessesForBypassEligibility.addAndGet(currentWindowAccesses);
 
             if (totalAccesses < this.mapCacheMinAccessesForBypassCheck) {
-                // Not enough total accesses yet to make a decision, but we reset the window.
                 accessesForHitRateWindow.set(0);
                 hitsInHitRateWindow.set(0);
-                this.bypassCache = false; // Ensure bypass is off
+                this.bypassCache = false;
                 return;
             }
 
             double currentHitRate = (double) hitsInHitRateWindow.get() / currentWindowAccesses;
             this.bypassCache = currentHitRate < this.mapCacheHitRateThreshold;
-            // Reset for next window
+
             accessesForHitRateWindow.set(0);
             hitsInHitRateWindow.set(0);
         }
@@ -653,16 +829,21 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
     @Override
     public UV get(UK userKey) throws Exception {
-        if (userKey == null) return null;
-        // Ensure the delegate state has the correct namespace context set.
-        // The CachingKeyedStateBackend is responsible for setting the key context on the delegate.
+        if (userKey == null)
+            return null;
         delegateState.setCurrentNamespace(getCurrentNamespace());
 
         if (bypassEnabled && bypassCache) {
-            delegateLookups.inc();
-            UV value = delegateState.get(userKey);
-            updateCacheBypassCondition(false);
-            return value;
+            boolean isSample =
+                    accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
+            if (!isSample) {
+                delegateLookups.inc();
+                UV value = delegateState.get(userKey);
+                updateCacheBypassCondition(false); // A bypass is always a cache miss.
+                return value;
+            }
+            // If it is a sample, fall through to the normal cache logic to get a real hit/miss
+            // metric.
         }
 
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
@@ -695,7 +876,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                         // Add to L1. The put to L1MapEntries will handle memory reporting.
                         perKeyCache.l1MapEntries.put(userKey, CacheEntry.clean(userValue));
                     }
-                    // If userValue is null from delegate, no tombstone is explicitly added to L1 value cache here.
+                    // If userValue is null from delegate, no tombstone is explicitly added to L1
+                    // value cache here.
                     resolvedByCache = false; // Mark as from delegate for bypass condition update
                 }
             }
@@ -707,10 +889,11 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         PerKeyMapCache.ValuePresence presence = perKeyCache.getValuePresence(userKey);
 
         if (presence == PerKeyMapCache.ValuePresence.ABSENT_IN_CACHE) {
-            l1PresenceCacheHitCount.inc(); // Hit in presence cache (L1 or promoted L2) indicating absence
+            l1PresenceCacheHitCount.inc(); // Hit in presence cache (L1 or promoted L2) indicating
+                                           // absence
             updateCacheBypassCondition(true); // Resolved by cache as definitively absent
-                return null;
-            }
+            return null;
+        }
 
         // Check L1 Value Cache regardless of initial presence outcome (unless ABSENT_IN_CACHE)
         CacheEntry<UV> l1ValEntry = perKeyCache.l1MapEntries.get(userKey);
@@ -718,18 +901,24 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             l1ValueCacheHitCount.inc();
             // If presence was uncertain, this L1 value hit resolves it.
             // If presence said PRESENT_IN_CACHE_CLEAN, this confirms the value part.
-            if (presence == PerKeyMapCache.ValuePresence.ABSENT_MAYBE_IN_VALUE_CACHE) l1PresenceCacheMissCount.inc(); // Count initial presence miss
-            else l1PresenceCacheHitCount.inc(); // Count presence hit that led here
+            if (presence == PerKeyMapCache.ValuePresence.ABSENT_MAYBE_IN_VALUE_CACHE)
+                l1PresenceCacheMissCount.inc(); // Count initial presence miss
+            else
+                l1PresenceCacheHitCount.inc(); // Count presence hit that led here
 
             userValue = l1ValEntry.getValue(); // Could be null if it's a tombstone
             resolvedByCache = true;
         } else {
             l1ValueCacheMissCount.inc();
-            // If presence cache said PRESENT_IN_CACHE_CLEAN, but L1 value is a miss, this is a slight inconsistency
-            // or means it was just evicted from L1 value to L2 value. Log for observation if strict consistency expected.
+            // If presence cache said PRESENT_IN_CACHE_CLEAN, but L1 value is a miss, this is a
+            // slight inconsistency
+            // or means it was just evicted from L1 value to L2 value. Log for observation if strict
+            // consistency expected.
             if (presence == PerKeyMapCache.ValuePresence.PRESENT_IN_CACHE_CLEAN) {
                 l1PresenceCacheHitCount.inc();
-                 LOG.debug("L1 Presence cache indicated key {} exists, but value not found in L1 value cache. Checking L2 value cache.", userKey);
+                LOG.debug(
+                        "L1 Presence cache indicated key {} exists, but value not found in L1 value cache. Checking L2 value cache.",
+                        userKey);
             } else if (presence == PerKeyMapCache.ValuePresence.ABSENT_MAYBE_IN_VALUE_CACHE) {
                 l1PresenceCacheMissCount.inc(); // Miss in presence, now L1 value also missed.
             }
@@ -739,9 +928,10 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             if (l2ValEntry != null) {
                 l2ValueCacheHitCount.inc();
                 userValue = l2ValEntry.getValue(); // L2 entries are clean, non-null
-                perKeyCache.l1MapEntries.put(userKey, CacheEntry.clean(userValue)); // Promote L2 value to L1
+                perKeyCache.l1MapEntries.put(userKey, CacheEntry.clean(userValue)); // Promote L2
+                                                                                    // value to L1
                 resolvedByCache = true;
-        } else {
+            } else {
                 l2ValueCacheMissCount.inc();
                 if (perKeyCache.fullyLoaded) {
                     perKeyCache.updatePresenceCacheOnGet(userKey, false);
@@ -755,19 +945,23 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 if (userValue != null) {
                     perKeyCache.l1MapEntries.put(userKey, CacheEntry.clean(userValue));
                 }
-                // If userValue is null, a tombstone is not explicitly added to L1 from delegate here.
-        } 
-    }
+                // If userValue is null, a tombstone is not explicitly added to L1 from delegate
+                // here.
+            }
+        }
 
         // Update presence cache based on the final outcome from value caches or delegate.
         perKeyCache.updatePresenceCacheOnGet(userKey, userValue != null);
-        updateCacheBypassCondition(resolvedByCache && userValue != null); // Hit if found in cache & not tombstone
+        updateCacheBypassCondition(resolvedByCache && userValue != null); // Hit if found in cache &
+                                                                          // not tombstone
         return userValue;
     }
 
     @Override
     public void put(UK userKey, UV userValue) throws Exception {
-        if (userKey == null) { /* let delegate handle or throw */ return; }
+        if (userKey == null) {
+            /* let delegate handle or throw */ return;
+        }
         if (userValue == null) {
             remove(userKey); // Standard map behavior for put(key, null)
             return;
@@ -775,17 +969,25 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         delegateState.setCurrentNamespace(getCurrentNamespace());
 
         if (bypassEnabled && bypassCache) {
-            delegateState.put(userKey, userValue);
-            return;
+            boolean isSample =
+                    accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
+            if (!isSample) {
+                delegateState.put(userKey, userValue);
+                updateCacheBypassCondition(false);
+                return;
+            }
         }
 
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
         // The CachePolicy (e.g., LRUMap) used for l1MapEntries is responsible for:
-        // 1. Evicting an old entry if capacity is reached (triggering its eviction listener, which calls backend.reportCacheMemoryReleased).
-        // 2. Calling backend.reportCacheMemoryAdded for the new_entry.getEstimatedSizeBytes() when this new entry is accepted.
+        // 1. Evicting an old entry if capacity is reached (triggering its eviction listener, which
+        // calls backend.reportCacheMemoryReleased).
+        // 2. Calling backend.reportCacheMemoryAdded for the new_entry.getEstimatedSizeBytes() when
+        // this new entry is accepted.
         perKeyCache.l1MapEntries.put(userKey, CacheEntry.dirty(userValue));
 
-        // Invalidate L2 if L1 is now dirty. The remove from CachePolicy will trigger memory release.
+        // Invalidate L2 if L1 is now dirty. The remove from CachePolicy will trigger memory
+        // release.
         perKeyCache.l2MapEntries.remove(userKey);
 
         if (this.keyPresenceCacheEnabled) {
@@ -802,9 +1004,12 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             // Depending on desired behavior, an empty map is fine, null might not be.
             return; // No-op if map is null, consistent with some Map implementations.
         }
-        // Ensure delegate state operates on the correct namespace for all subsequent put operations.
-        // Calling it once here is more efficient than in every this.put() call if this.put() doesn't already manage it.
-        // However, this.put() already calls delegateState.setCurrentNamespace(getCurrentNamespace());
+        // Ensure delegate state operates on the correct namespace for all subsequent put
+        // operations.
+        // Calling it once here is more efficient than in every this.put() call if this.put()
+        // doesn't already manage it.
+        // However, this.put() already calls
+        // delegateState.setCurrentNamespace(getCurrentNamespace());
         // So, this explicit call here might be redundant unless we bypass this.put().
         // For safety and clarity, let's rely on this.put() to set the namespace.
 
@@ -817,12 +1022,19 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
     @Override
     public void remove(UK userKey) throws Exception {
-        if (userKey == null) { /* let delegate handle or throw */ return; }
+        if (userKey == null) {
+            /* let delegate handle or throw */ return;
+        }
         delegateState.setCurrentNamespace(getCurrentNamespace());
 
         if (bypassEnabled && bypassCache) {
-            delegateState.remove(userKey);
-            return;
+            boolean isSample =
+                    accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
+            if (!isSample) {
+                delegateState.remove(userKey);
+                updateCacheBypassCondition(false);
+                return;
+            }
         }
 
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
@@ -842,10 +1054,13 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
     @Override
     public boolean contains(UK userKey) throws Exception {
-        if (bypassCache) {
-            // When bypassing, every access is a miss for the cache.
-            updateCacheBypassCondition(false);
-            return delegateState.contains(userKey);
+        if (bypassEnabled && bypassCache) {
+            boolean isSample =
+                    accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
+            if (!isSample) {
+                updateCacheBypassCondition(false);
+                return delegateState.contains(userKey);
+            }
         }
 
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
@@ -876,7 +1091,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             }
             if (presence == PerKeyMapCache.ValuePresence.PRESENT_IN_CACHE_CLEAN) {
                 updateCacheBypassCondition(true); // A hit on "presence" information.
-                // This implies it exists in the delegate, even if the value isn't in the value cache.
+                // This implies it exists in the delegate, even if the value isn't in the value
+                // cache.
                 return true;
             }
             // Fall through if presence information is inconclusive.
@@ -898,7 +1114,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         if (keyPresenceCacheEnabled) {
             perKeyCache.updatePresenceCacheOnGet(userKey, exists);
         }
-        // Note: We do not cache the value itself here, only its presence. `get()` would cache the value.
+        // Note: We do not cache the value itself here, only its presence. `get()` would cache the
+        // value.
 
         return exists;
     }
@@ -907,18 +1124,25 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     public Iterable<Map.Entry<UK, UV>> entries() throws Exception {
         delegateState.setCurrentNamespace(getCurrentNamespace());
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
-        if (!perKeyCache.fullyLoaded && this.keyPresenceCacheEnabled) { // Only load all if KV sep might make it incomplete
+        if (!perKeyCache.fullyLoaded && this.keyPresenceCacheEnabled) { // Only load all if KV sep
+                                                                        // might make it incomplete
             // If KV sep is off, we rely on delegate more directly or L1/L2 value caches.
-            // The concept of "fullyLoaded" is more tied to KV separation where presence cache implies completeness.
-            // This might need refinement based on how iterators are expected to behave when KV sep is off.
-            // For now, assume if KV Sep is off, this method might be less accurate or delegate-heavy.
+            // The concept of "fullyLoaded" is more tied to KV separation where presence cache
+            // implies completeness.
+            // This might need refinement based on how iterators are expected to behave when KV sep
+            // is off.
+            // For now, assume if KV Sep is off, this method might be less accurate or
+            // delegate-heavy.
         }
-        // This simplified version for entries() might be okay if fullyLoaded is mainly for presence cache logic.
-        // A more robust version for KV-sep-off would iterate L1, then L2 (excluding L1 keys), then delegate (excluding L1/L2 keys).
-        // However, map state iteration is often costly. The current approach of loading to L1 when fullyLoaded=false is one way.
+        // This simplified version for entries() might be okay if fullyLoaded is mainly for presence
+        // cache logic.
+        // A more robust version for KV-sep-off would iterate L1, then L2 (excluding L1 keys), then
+        // delegate (excluding L1/L2 keys).
+        // However, map state iteration is often costly. The current approach of loading to L1 when
+        // fullyLoaded=false is one way.
 
         if (!perKeyCache.fullyLoaded) {
-             // This loadAll will populate L1. If KV sep is off, presence cache part is NoOp.
+            // This loadAll will populate L1. If KV sep is off, presence cache part is NoOp.
             loadAllEntriesToCache(perKeyCache);
         }
 
@@ -931,7 +1155,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
 
         // If fullyLoaded, L2 might have clean entries not in L1 (e.g., due to L1 capacity)
-        // If not fullyLoaded, L2 is less relevant here as L1 should be the primary source after loadAll.
+        // If not fullyLoaded, L2 is less relevant here as L1 should be the primary source after
+        // loadAll.
         // However, loadAllEntriesToCache clears L2 and puts all into L1.
         // So, after loadAll, L2 should ideally be empty or reflect recent L1 evictions (clean).
         // This entries() method will primarily reflect L1 after a potential loadAll.
@@ -951,8 +1176,10 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             }
         }
         return valueList;
-        // Option 2: Delegate directly, potentially bypassing some cache logic or full load behavior of entries().
-        // return delegateState.values(); // This would be simpler but might not reflect cache state.
+        // Option 2: Delegate directly, potentially bypassing some cache logic or full load behavior
+        // of entries().
+        // return delegateState.values(); // This would be simpler but might not reflect cache
+        // state.
         // Considering the caching layer, reusing entries() is likely more correct to ensure
         // the returned values are consistent with other cache-aware operations.
     }
@@ -966,7 +1193,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         if (mapEntries != null) {
             for (Map.Entry<UK, UV> entry : mapEntries) {
                 keyList.add(entry.getKey());
-        }
+            }
         }
         return keyList;
     }
@@ -987,14 +1214,19 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         Iterable<Map.Entry<UK, UV>> entriesFromDelegate = delegateState.entries();
         if (entriesFromDelegate != null) {
             for (Map.Entry<UK, UV> entry : entriesFromDelegate) {
-                if (entry.getValue() != null) { // Don't cache null values from delegate in value cache
-                    perKeyCache.l1MapEntries.put(entry.getKey(), CacheEntry.clean(entry.getValue()));
+                if (entry.getValue() != null) { // Don't cache null values from delegate in value
+                                                // cache
+                    perKeyCache.l1MapEntries.put(entry.getKey(),
+                            CacheEntry.clean(entry.getValue()));
                     if (this.keyPresenceCacheEnabled) {
-                        perKeyCache.updatePresenceCacheOnGet(entry.getKey(), true); // Mark as present
+                        perKeyCache.updatePresenceCacheOnGet(entry.getKey(), true); // Mark as
+                                                                                    // present
                     }
-                } else { // Null value from delegate for a key means it effectively doesn't exist for value cache.
+                } else { // Null value from delegate for a key means it effectively doesn't exist
+                         // for value cache.
                     if (this.keyPresenceCacheEnabled) {
-                        perKeyCache.updatePresenceCacheOnGet(entry.getKey(), false); // Mark as absent
+                        perKeyCache.updatePresenceCacheOnGet(entry.getKey(), false); // Mark as
+                                                                                     // absent
                     }
                 }
             }
@@ -1008,7 +1240,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             return delegateState.isEmpty();
         }
 
-        // The iterator is the single source of truth for the combined state of the cache and the delegate.
+        // The iterator is the single source of truth for the combined state of the cache and the
+        // delegate.
         // It correctly handles tombstones in the cache, merging with the delegate state, and the
         // fully-loaded case. Calling hasNext() is the most reliable way to determine emptiness.
         return !iterator().hasNext();
@@ -1022,7 +1255,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
         // Obtain the cache specific to the current Flink key (K) and namespace (N).
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
-        
+
         // Clear L1 map entries. Eviction listeners (if any, e.g., for flushing dirty entries)
         // should be triggered by the CachePolicy's clear() implementation.
         perKeyCache.l1MapEntries.clear();
@@ -1132,7 +1365,9 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         try {
             flushToUnderlyingState();
         } catch (IOException e) {
-            throw new RuntimeException("Failed to flush cache to underlying state before creating StateIncrementalVisitor", e);
+            throw new RuntimeException(
+                    "Failed to flush cache to underlying state before creating StateIncrementalVisitor",
+                    e);
         }
         return delegateState.getStateIncrementalVisitor(recommendedMaxNumberOfReturnedRecords);
     }
@@ -1146,58 +1381,70 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     @org.apache.flink.annotation.VisibleForTesting
     public long getTotalAccessesForBypassEligibility() {
         if (totalAccessesForBypassEligibility != null) {
-        return totalAccessesForBypassEligibility.get();
+            return totalAccessesForBypassEligibility.get();
         }
         return 0;
     }
 
     @Override
     public long evictEntriesToFreeMemory(long targetBytesToFreeThisState) {
-        if (targetBytesToFreeThisState <= 0) return 0;
+        if (targetBytesToFreeThisState <= 0)
+            return 0;
         long totalFreedBytes = 0;
 
         // Iterate over all PerKeyMapCache instances and ask them to evict
-        // This is a simplified global eviction. More sophisticated might prioritize namespaces/keys.
+        // This is a simplified global eviction. More sophisticated might prioritize
+        // namespaces/keys.
         try {
-            for (CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> flinkKeyCaches : namespaceCaches.values()) {
-                if (totalFreedBytes >= targetBytesToFreeThisState) break;
-                if (flinkKeyCaches == null) continue;
+            for (CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> flinkKeyCaches : namespaceCaches
+                    .values()) {
+                if (totalFreedBytes >= targetBytesToFreeThisState)
+                    break;
+                if (flinkKeyCaches == null)
+                    continue;
 
-                // Iterate over a snapshot of keys to avoid ConcurrentModificationException if map can change
-                List<PerKeyMapCache<UK, UV, K, N>> perKeyCachesToEvict = new ArrayList<>(flinkKeyCaches.values());
+                // Iterate over a snapshot of keys to avoid ConcurrentModificationException if map
+                // can change
+                List<PerKeyMapCache<UK, UV, K, N>> perKeyCachesToEvict =
+                        new ArrayList<>(flinkKeyCaches.values());
 
                 for (PerKeyMapCache<UK, UV, K, N> perKeyCache : perKeyCachesToEvict) {
-                    if (totalFreedBytes >= targetBytesToFreeThisState) break;
-                if (perKeyCache == null) continue;
+                    if (totalFreedBytes >= targetBytesToFreeThisState)
+                        break;
+                    if (perKeyCache == null)
+                        continue;
 
-                    // Set context for potential delegate operations if L1 dirty entries are flushed during eviction
+                    // Set context for potential delegate operations if L1 dirty entries are flushed
+                    // during eviction
                     K originalKey = backend.getCurrentKey();
                     N originalNamespace = getCurrentNamespace();
-                    backend.setCurrentKey(perKeyCache.flinkKey); // Set context for this specific key's cache
+                    backend.setCurrentKey(perKeyCache.flinkKey); // Set context for this specific
+                                                                 // key's cache
                     delegateState.setCurrentNamespace(perKeyCache.cacheNamespace);
 
-                    long freedThisCache = perKeyCache.evictToMeetMemoryLimit(targetBytesToFreeThisState - totalFreedBytes);
+                    long freedThisCache = perKeyCache
+                            .evictToMeetMemoryLimit(targetBytesToFreeThisState - totalFreedBytes);
                     totalFreedBytes += freedThisCache;
 
-                     // Restore original context
-                    if (originalKey != null) backend.setCurrentKey(originalKey); else backend.setCurrentKey(null);
-                    if (originalNamespace != null) delegateState.setCurrentNamespace(originalNamespace); else delegateState.setCurrentNamespace(null);
+                    // Restore original context
+                    if (originalKey != null)
+                        backend.setCurrentKey(originalKey);
+                    else
+                        backend.setCurrentKey(null);
+                    if (originalNamespace != null)
+                        delegateState.setCurrentNamespace(originalNamespace);
+                    else
+                        delegateState.setCurrentNamespace(null);
 
+                    // Unregister metrics for this cache so that future instances can
+                    // re-register cleanly.
+                    perKeyCache.closeMetrics();
 
-                    // Re-check global to see if enough has been freed by this PerKeyMapCache's internal evictions
-                    // This is a bit indirect. CachingKeyedStateBackend will make the final call.
-                    // This method's return value is more of a "did we attempt to free" acknowledgement.
-                    // Let's assume for now evictToMeetMemoryLimit inside perKeyCache handles reporting released memory,
-                    // and we check current global total in CachingKeyedStateBackend.
-                    // To make this method's return more meaningful, perKeyCache.evictToMeetMemoryLimit should return freed bytes.
-                    // For now, let's just say if we asked it to free, it might have.
-                    // totalFreedBytes += Math.min(targetBytesToFreeThisState - totalFreedBytes, someEstimateIfAvailable);
-                    // This method is tricky. Let's rely on the CachingKeyedStateBackend loop and its check of currentEstimatedCacheSizeBytes.
-                    // The main job here is to *trigger* eviction in sub-caches.
                 }
             }
         } catch (Exception e) {
-            LOG.warn("Error during explicit memory eviction from CachingInternalMapState: {}", e.getMessage(), e);
+            LOG.warn("Error during explicit memory eviction from CachingInternalMapState: {}",
+                    e.getMessage(), e);
         }
         // The actual amount freed is tracked by CachingKeyedStateBackend's atomic counter.
         // This method signals that an attempt was made.
@@ -1221,10 +1468,12 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         K_F originalKey = backendForContext.getCurrentKey();
 
         backendForContext.setCurrentKey(flinkKey);
-        delegateStateForContext.setCurrentNamespace(namespace); // Use the namespace relevant to this perKeyCache
+        delegateStateForContext.setCurrentNamespace(namespace); // Use the namespace relevant to
+                                                                // this perKeyCache
 
         try {
-            Iterator<Map.Entry<UK_C, CacheEntry<UV_C>>> l1Iterator = perKeyCache.l1MapEntries.entrySet().iterator();
+            Iterator<Map.Entry<UK_C, CacheEntry<UV_C>>> l1Iterator =
+                    perKeyCache.l1MapEntries.entrySet().iterator();
             while (l1Iterator.hasNext()) {
                 Map.Entry<UK_C, CacheEntry<UV_C>> l1Entry = l1Iterator.next();
                 UK_C userKey = l1Entry.getKey();
@@ -1234,28 +1483,35 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     UV_C userValue = cacheEntry.getValue();
                     if (userValue == null) { // Tombstone
                         delegateStateForContext.remove(userKey);
-                            } else {
+                    } else {
                         delegateStateForContext.put(userKey, userValue);
                         // Move to L2 as clean after successful flush, if L2 is enabled for values
-                        if (perKeyCache.l2MapEntries.getClass() != NoOpCachePolicy.class) { // Check if L2 is not NoOp
-                           perKeyCache.l2MapEntries.put(userKey, CacheEntry.clean(userValue));
+                        if (perKeyCache.l2MapEntries.getClass() != NoOpCachePolicy.class) { // Check
+                                                                                            // if L2
+                                                                                            // is
+                                                                                            // not
+                                                                                            // NoOp
+                            perKeyCache.l2MapEntries.put(userKey, CacheEntry.clean(userValue));
                         }
                     }
                     cacheEntry.setDirty(false); // Mark as clean
                 } else { // Clean entry from L1
                     if (cacheEntry.getValue() != null) { // Not a tombstone, can move to L2
-                       if (perKeyCache.l2MapEntries.getClass() != NoOpCachePolicy.class) {
-                          perKeyCache.l2MapEntries.put(userKey, cacheEntry); // Already clean
-                       }
+                        if (perKeyCache.l2MapEntries.getClass() != NoOpCachePolicy.class) {
+                            perKeyCache.l2MapEntries.put(userKey, cacheEntry); // Already clean
+                        }
                     }
                 }
-                // After processing (flushing dirty or moving clean to L2), the entry is removed from L1 by the iterator.
-                // The memory release for this L1 removal is handled by the L1 cache policy's eviction listener.
+                // After processing (flushing dirty or moving clean to L2), the entry is removed
+                // from L1 by the iterator.
+                // The memory release for this L1 removal is handled by the L1 cache policy's
+                // eviction listener.
                 l1Iterator.remove();
             }
         } finally {
             backendForContext.setCurrentKey(originalKey);
-            // We do not restore the delegate state's namespace because we don't have the original and it's not required by the caller.
+            // We do not restore the delegate state's namespace because we don't have the original
+            // and it's not required by the caller.
         }
     }
 
@@ -1263,14 +1519,20 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     private static class NoOpCounter implements Counter {
         @Override
         public void inc() {}
+
         @Override
         public void inc(long n) {}
+
         @Override
         public void dec() {}
+
         @Override
         public void dec(long n) {}
+
         @Override
-        public long getCount() { return 0; }
+        public long getCount() {
+            return 0;
+        }
     }
 
     // Add this helper method to log cache metrics
@@ -1279,28 +1541,25 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             // Calculate hit rates
             double l1ValueHitRate = calculateHitRate(l1ValueCacheHitCount, l1ValueCacheMissCount);
             double l2ValueHitRate = calculateHitRate(l2ValueCacheHitCount, l2ValueCacheMissCount);
-            double l1PresenceHitRate = calculateHitRate(l1PresenceCacheHitCount, l1PresenceCacheMissCount);
-            double l2PresenceHitRate = calculateHitRate(l2PresenceCacheHitCount, l2PresenceCacheMissCount);
+            double l1PresenceHitRate =
+                    calculateHitRate(l1PresenceCacheHitCount, l1PresenceCacheMissCount);
+            double l2PresenceHitRate =
+                    calculateHitRate(l2PresenceCacheHitCount, l2PresenceCacheMissCount);
 
-            LOG.debug("Cache Metrics - " +
-                    "L1 Value: {}/{}, Hit Rate: {:.2f}% | " +
-                    "L2 Value: {}/{}, Hit Rate: {:.2f}% | " +
-                    "L1 Presence: {}/{}, Hit Rate: {:.2f}% | " +
-                    "L2 Presence: {}/{}, Hit Rate: {:.2f}% | " +
-                    "Delegate Lookups: {}",
-                l1ValueCacheHitCount.getCount(), 
-                l1ValueCacheHitCount.getCount() + l1ValueCacheMissCount.getCount(),
-                l1ValueHitRate,
-                l2ValueCacheHitCount.getCount(),
-                l2ValueCacheHitCount.getCount() + l2ValueCacheMissCount.getCount(),
-                l2ValueHitRate,
-                l1PresenceCacheHitCount.getCount(),
-                l1PresenceCacheHitCount.getCount() + l1PresenceCacheMissCount.getCount(),
-                l1PresenceHitRate,
-                l2PresenceCacheHitCount.getCount(),
-                l2PresenceCacheHitCount.getCount() + l2PresenceCacheMissCount.getCount(),
-                l2PresenceHitRate,
-                delegateLookups.getCount());
+            LOG.debug(
+                            "Cache Metrics - " + "L1 Value: {}/{}, Hit Rate: {:.2f}% | "
+                            + "L2 Value: {}/{}, Hit Rate: {:.2f}% | "
+                            + "L1 Presence: {}/{}, Hit Rate: {:.2f}% | "
+                            + "L2 Presence: {}/{}, Hit Rate: {:.2f}% | " + "Delegate Lookups: {}",
+                    l1ValueCacheHitCount.getCount(),
+                    l1ValueCacheHitCount.getCount() + l1ValueCacheMissCount.getCount(),
+                    l1ValueHitRate, l2ValueCacheHitCount.getCount(),
+                            l2ValueCacheHitCount.getCount() + l2ValueCacheMissCount.getCount(),
+                    l2ValueHitRate, l1PresenceCacheHitCount.getCount(),
+                            l1PresenceCacheHitCount.getCount() + l1PresenceCacheMissCount.getCount(),
+                    l1PresenceHitRate, l2PresenceCacheHitCount.getCount(),
+                            l2PresenceCacheHitCount.getCount() + l2PresenceCacheMissCount.getCount(),
+                    l2PresenceHitRate, delegateLookups.getCount());
         }
     }
 

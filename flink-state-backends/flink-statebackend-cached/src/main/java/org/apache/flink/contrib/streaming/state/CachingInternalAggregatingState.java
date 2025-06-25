@@ -204,7 +204,12 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
         cacheMisses.inc();
         ACC valueFromDelegate = delegateState.getInternal();
         if (valueFromDelegate != null) {
-            l1Cache.put(currentKey, CacheEntry.clean(valueFromDelegate));
+            CacheEntry<ACC> newEntry = CacheEntry.clean(valueFromDelegate);
+            CacheEntry<ACC> oldL1Entry = l1Cache.put(currentKey, newEntry);
+            if (oldL1Entry != null) {
+                backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
+            }
+            backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
         }
         return valueFromDelegate;
     }
@@ -215,7 +220,12 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
         N currentNamespace = getCurrentNamespace();
 
         CachePolicy<K, CacheEntry<ACC>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        l1Cache.put(currentKey, CacheEntry.dirty(valueToStore));
+        CacheEntry<ACC> newEntry = CacheEntry.dirty(valueToStore);
+        CacheEntry<ACC> oldL1Entry = l1Cache.put(currentKey, newEntry);
+        if (oldL1Entry != null) {
+            backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
+        }
+        backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
 
         CachePolicy<K, CacheEntry<ACC>> l2Cache = getL2CacheForNamespace(currentNamespace);
         l2Cache.remove(currentKey);
@@ -227,10 +237,16 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
         N currentNamespace = getCurrentNamespace();
 
         CachePolicy<K, CacheEntry<ACC>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        l1Cache.remove(currentKey);
+        CacheEntry<ACC> oldL1Entry = l1Cache.remove(currentKey);
+        if (oldL1Entry != null) {
+            backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
+        }
 
         CachePolicy<K, CacheEntry<ACC>> l2Cache = getL2CacheForNamespace(currentNamespace);
-        l2Cache.remove(currentKey);
+        CacheEntry<ACC> oldL2Entry = l2Cache.remove(currentKey);
+        if (oldL2Entry != null) {
+            backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
+        }
 
         delegateState.clear();
     }
@@ -254,10 +270,20 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
     private void clearCacheForNamespace(N namespace) {
         CachePolicy<K, CacheEntry<ACC>> l1Cache = namespaceCachesL1.get(namespace);
         if (l1Cache != null) {
+            for (Map.Entry<K, CacheEntry<ACC>> entry : l1Cache.entrySet()) {
+                if (entry.getValue() != null) {
+                    backend.reportCacheMemoryReleased(entry.getValue().getEstimatedSizeBytes());
+                }
+            }
             l1Cache.clear();
         }
         CachePolicy<K, CacheEntry<ACC>> l2Cache = namespaceCachesL2.get(namespace);
         if (l2Cache != null) {
+            for (Map.Entry<K, CacheEntry<ACC>> entry : l2Cache.entrySet()) {
+                if (entry.getValue() != null) {
+                    backend.reportCacheMemoryReleased(entry.getValue().getEstimatedSizeBytes());
+                }
+            }
             l2Cache.clear();
         }
     }
