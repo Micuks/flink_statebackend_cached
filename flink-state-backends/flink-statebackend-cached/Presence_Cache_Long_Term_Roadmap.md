@@ -17,6 +17,8 @@ Phases & Estimates
 *Files*: `OffHeapKVStore.java`, JNI-free, built on `MemorySegment` slices  
 *Lines*: **~600** (new) + 40 integration points per state → **~200 modified**
 
+**Update:** An on-heap version using a primitive `long -> byte` map (`fastutil`) has now been implemented. This serves as a critical first step, reducing heap object churn by 3-4x. The next step is to replace this on-heap map with a true off-heap implementation using managed memory as originally planned.
+
 ### 3. Off-Heap Boolean Store (for presence)
 *Files*: `OffHeapBitSetStore.java`  
 *Lines*: **~250** (new) + 60 modifications in `PerKeyMapCache`

@@ -116,6 +116,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final long mapCacheMinAccessesForBypassCheck;
     private final boolean mapKeyPresenceCacheEnabled;
     private final boolean mapBypassEnabled;
+    private final CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl;
 
     private final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
 
@@ -143,7 +144,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             long maxCacheMemoryMb, CachingStateBackendFactory.CachePolicyType cachePolicyType,
             int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
-            boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled) {
+            boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl) {
 
         super(
                 kvStateRegistry,
@@ -171,6 +172,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapCacheMinAccessesForBypassCheck = mapCacheMinAccessesForBypassCheck;
         this.mapKeyPresenceCacheEnabled = mapKeyPresenceCacheEnabled;
         this.mapBypassEnabled = mapBypassEnabled;
+        this.mapPresenceCacheImpl = mapPresenceCacheImpl;
 
         // Initialize memory capping fields
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
@@ -221,7 +223,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             CachingStateBackendFactory.CachePolicyType cachePolicyType,
             int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
-            boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled
+            boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl
     ) {
         // Call super constructor first, using direct parameters where available
         super(
@@ -278,6 +280,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapCacheMinAccessesForBypassCheck = mapCacheMinAccessesForBypassCheck;
         this.mapKeyPresenceCacheEnabled = mapKeyPresenceCacheEnabled;
         this.mapBypassEnabled = mapBypassEnabled;
+        this.mapPresenceCacheImpl = mapPresenceCacheImpl;
 
         // Initialize memory capping fields
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
@@ -349,7 +352,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     this.mapL1KeyPresenceCacheSize, this.mapL2KeyPresenceCacheSize,
                     mapMetricsGroup,
                     this.mapCacheHitRateThreshold, this.mapCacheHitRateWindowSize, this.mapCacheMinAccessesForBypassCheck,
-                    this.mapKeyPresenceCacheEnabled, this.mapBypassEnabled);
+                    this.mapKeyPresenceCacheEnabled, this.mapBypassEnabled, this.mapPresenceCacheImpl);
         } else if (stateDescriptor.getType() == StateDescriptor.Type.LIST && actualStateRaw instanceof InternalListState) {
             InternalListState<K, N, V_SD> actualDelegateListState = (InternalListState<K, N, V_SD>) actualStateRaw;
             cachingStateToRegister = new CachingInternalListState<>(

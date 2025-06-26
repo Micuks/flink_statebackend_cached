@@ -117,6 +117,17 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .booleanType()
                     .defaultValue(true);
 
+    public enum PresenceCacheImplementation {
+        DEFAULT,
+        PRIMITIVE_MAP
+    }
+
+    public static final ConfigOption<PresenceCacheImplementation> MAP_PRESENCE_CACHE_IMPL =
+            ConfigOptions.key("state.backend.cached.map.presence.impl")
+                    .enumType(PresenceCacheImplementation.class)
+                    .defaultValue(PresenceCacheImplementation.DEFAULT)
+                    .withDescription("Implementation for MapState key presence cache. PRIMITIVE_MAP uses a more memory-efficient implementation.");
+
     // Potentially, a config for delegate backend factory if it's not hardcoded to RocksDB
     // For now, assumes RocksDBStateBackend is the default delegate and is configured using its own
     // factory/options.
@@ -169,6 +180,7 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
         long mapCacheMinAccessesForBypassCheck = config.get(MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
         boolean mapKeyPresenceCacheEnabled = config.get(MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG);
         boolean mapBypassEnabled = config.get(MAP_BYPASS_ENABLED_CONFIG);
+        PresenceCacheImplementation mapPresenceCacheImpl = config.get(MAP_PRESENCE_CACHE_IMPL);
 
         // Create the delegate backend. Default to RocksDBStateBackend for now.
         // A more flexible approach might allow specifying the delegate factory in config.
@@ -210,6 +222,7 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                         mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize,
                         mapCacheHitRateThreshold, mapCacheHitRateWindowSize, mapCacheMinAccessesForBypassCheck,
                         mapKeyPresenceCacheEnabled,
-                        mapBypassEnabled);
+                        mapBypassEnabled,
+                        mapPresenceCacheImpl);
     }
 }

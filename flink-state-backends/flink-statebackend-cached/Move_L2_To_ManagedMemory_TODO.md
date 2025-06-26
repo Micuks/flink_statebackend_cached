@@ -31,10 +31,8 @@ Task break-down
 - [ ] 6. Memory accounting hooks: on put → `backend.reportCacheMemoryAdded(pageSize)` when new page allocated; on evict/remove → `backend.reportCacheMemoryReleased(bytes)`.
 - [ ] 7. Eviction policy: keep TinyLFU/LRU meta on-heap but store payload off-heap.
 - [ ] 8. Add config knobs
-      * `state.backend.cached.l2.managed.enable: boolean` (default false)
+      * `state.backend.cached.l2.managed.enable: boolean` (default true)
       * `state.backend.cached.l2.page-size: 32kb` etc.
-- [ ] 9. Metrics: gauge current off-heap L2 bytes, counter (de)serialisation ops.
-- [ ] 10. Unit tests: correctness (put/get/remove), stress memory cap, recovery from snapshot.
 - [ ] 11. Benchmark with Nexmark Q3/Q5 on 1JM+8TMs (8 GB, 3 GB managed). Expect:
       * No GC-overhead OOM
       * <5 % CPU delta

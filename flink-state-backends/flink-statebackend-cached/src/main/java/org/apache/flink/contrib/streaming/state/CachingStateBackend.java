@@ -64,6 +64,7 @@ public class CachingStateBackend extends AbstractStateBackend
     private final long mapCacheMinAccessesForBypassCheck;
     private final boolean mapKeyPresenceCacheEnabled;
     private final boolean mapBypassEnabled;
+    private final CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl;
 
     public CachingStateBackend(
             StateBackend delegateBackend,
@@ -74,7 +75,8 @@ public class CachingStateBackend extends AbstractStateBackend
             long mapL1KeyPresenceCacheSize, long mapL2KeyPresenceCacheSize,
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
             boolean mapKeyPresenceCacheEnabled,
-            boolean mapBypassEnabled) {
+            boolean mapBypassEnabled,
+            CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl) {
         this.delegateBackend = delegateBackend;
         this.l1CacheSize = l1CacheSize;
         this.l2CacheSize = l2CacheSize;
@@ -88,6 +90,7 @@ public class CachingStateBackend extends AbstractStateBackend
         this.mapCacheMinAccessesForBypassCheck = mapCacheMinAccessesForBypassCheck;
         this.mapKeyPresenceCacheEnabled = mapKeyPresenceCacheEnabled;
         this.mapBypassEnabled = mapBypassEnabled;
+        this.mapPresenceCacheImpl = mapPresenceCacheImpl;
 
         if (!(delegateBackend instanceof AbstractStateBackend)) {
             System.err.println(
@@ -147,7 +150,8 @@ public class CachingStateBackend extends AbstractStateBackend
                 (int) this.mapL1KeyPresenceCacheSize, (int) this.mapL2KeyPresenceCacheSize,
                 this.mapCacheHitRateThreshold, this.mapCacheHitRateWindowSize, this.mapCacheMinAccessesForBypassCheck,
                 this.mapKeyPresenceCacheEnabled,
-                this.mapBypassEnabled);
+                this.mapBypassEnabled,
+                this.mapPresenceCacheImpl);
     }
 
     @Override

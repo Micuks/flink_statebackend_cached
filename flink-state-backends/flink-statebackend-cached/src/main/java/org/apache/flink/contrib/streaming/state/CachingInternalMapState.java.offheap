@@ -26,14 +26,15 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
+import org.apache.flink.core.memory.DataInputDeserializer;
 import org.apache.flink.core.memory.DataOutputSerializer;
-import org.apache.flink.contrib.streaming.state.MurmurHash3;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.apache.flink.contrib.streaming.state.MurmurHash3;
 
 
 /**
@@ -122,16 +123,22 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
 
         final CachePolicy<UK_C, CacheEntry<UV_C>> l1MapEntries;
-        final CachePolicy<UK_C, CacheEntry<UV_C>> l2MapEntries; // Should only hold clean entries
+        final CachePolicy l2MapEntries; // Can be CacheEntry<UV_C> or OffHeapPointer
         final CachePolicy<UK_C, CacheEntry<Boolean>> l1KeyPresenceCache;
-        final CachePolicy<UK_C, CacheEntry<Boolean>> l2KeyPresenceCache;
+        final CachePolicy l2KeyPresenceCache; // Can be CacheEntry<Boolean> or OffHeapPointer
 
         // new primitive presence caches
         final CachePolicy<Long, Byte> l1PrimitivePresenceCache;
-        final CachePolicy<Long, Byte> l2PrimitivePresenceCache;
+        final CachePolicy l2PrimitivePresenceCache; // Can be Byte or OffHeapPointer
+        private final OffHeapKVStore offHeapL2Store;
+        private final boolean l2ManagedMemoryEnabled;
         private final CachingStateBackendFactory.PresenceCacheImplementation presenceCacheImpl;
         private final TypeSerializer<UK_C> userKeySerializer;
+        private final TypeSerializer<UV_C> userValueSerializer;
         private transient ThreadLocal<DataOutputSerializer> userKeySerializerView;
+        private transient ThreadLocal<DataOutputSerializer> userValueSerializerView;
+        
+        private static final int RECORD_HEADER_SIZE = 8;
 
         boolean fullyLoaded = false;
         private final N_F mainContextDelegateNamespace;
@@ -151,68 +158,103 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
                 boolean keyPresenceCacheEnabled,
                 CachingStateBackendFactory.PresenceCacheImplementation presenceCacheImpl,
-                TypeSerializer<UK_C> userKeySerializer) {
+                TypeSerializer<UK_C> userKeySerializer,
+                TypeSerializer<UV_C> userValueSerializer,
+                boolean l2ManagedMemoryEnabled) {
             this.mainContextDelegateNamespace = mainContextDelegateNamespace;
             this.flinkKey = flinkKey;
             this.cacheNamespace = cacheNamespace;
             this.delegateState = delegateState;
             this.ownerBackend = ownerBackend;
             this.keyPresenceCacheEnabled = keyPresenceCacheEnabled;
+            this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
             this.presenceCacheImpl = presenceCacheImpl;
             this.userKeySerializer = userKeySerializer;
+            this.userValueSerializer = userValueSerializer;
+            this.offHeapL2Store = l2ManagedMemoryEnabled ? new OffHeapKVStore(ownerBackend.getManagedPagePool()) : null;
 
-            if (this.presenceCacheImpl == CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP) {
+            if (this.presenceCacheImpl == CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP && l2ManagedMemoryEnabled) {
                 this.userKeySerializerView = ThreadLocal.withInitial(() -> new DataOutputSerializer(32));
+                this.userValueSerializerView = ThreadLocal.withInitial(() -> new DataOutputSerializer(128));
             } else {
                 this.userKeySerializerView = null;
+                this.userValueSerializerView = null;
             }
 
-            if (this.keyPresenceCacheEnabled) {
-                if (presenceCacheImpl == CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP) {
-                    // L2 primitive cache
-                    this.l2PrimitivePresenceCache = new PrimitivePresenceCache(mapL2KeyPresenceCacheSize,
-                            evicted -> ownerBackend.reportCacheMemoryReleased(16L));
-
-                    // L1 primitive cache
-                    this.l1PrimitivePresenceCache = new PrimitivePresenceCache(mapL1KeyPresenceCacheSize,
-                            evictedL1 -> {
-                                this.l2PrimitivePresenceCache.put(evictedL1.getKey(), evictedL1.getValue());
-                                // Eviction from L1 means release, but put to L2 means add. Net effect on total memory is 0.
-                                // Eliminate both reports.
-                            });
-
-                    // Init old caches to NoOp
+            if (l2ManagedMemoryEnabled) {
+                // Off-heap L2 cache logic
+                if (this.keyPresenceCacheEnabled) {
+                    if (presenceCacheImpl == CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP) {
+                        this.l2PrimitivePresenceCache = createCachePolicyForOffHeap(cachePolicyType, mapL2KeyPresenceCacheSize);
+                        this.l1PrimitivePresenceCache = new PrimitivePresenceCache(mapL1KeyPresenceCacheSize,
+                                evictedL1 -> {
+                                    try {
+                                        byte[] keyBytes = serializePrimitiveKey(evictedL1.getKey());
+                                        byte[] valBytes = serializePrimitiveValue(evictedL1.getValue());
+                                        OffHeapPointer pointer = this.offHeapL2Store.put(keyBytes, valBytes);
+                                        this.l2PrimitivePresenceCache.put(evictedL1.getKey(), pointer);
+                                    } catch (IOException e) {
+                                        LOG.error("Failed to move primitive presence entry to off-heap L2", e);
+                                    }
+                                });
+                        this.l1KeyPresenceCache = new NoOpCachePolicy<>();
+                        this.l2KeyPresenceCache = new NoOpCachePolicy<>();
+                    } else {
+                        this.l2KeyPresenceCache = createCachePolicyForOffHeap(cachePolicyType, mapL2KeyPresenceCacheSize);
+                        this.l1KeyPresenceCache = createCachePolicyInstance(cachePolicyType,
+                                mapL1KeyPresenceCacheSize, evictedL1 -> {
+                                    if (evictedL1.getValue() != null) {
+                                        try {
+                                            byte[] keyBytes = serializeKey(evictedL1.getKey());
+                                            byte[] valBytes = serializeBoolean(evictedL1.getValue().getValue());
+                                            OffHeapPointer pointer = this.offHeapL2Store.put(keyBytes, valBytes);
+                                            this.l2KeyPresenceCache.put(evictedL1.getKey(), pointer);
+                                        } catch (IOException e) {
+                                            LOG.error("Failed to move presence entry to off-heap L2", e);
+                                        }
+                                    }
+                                }, ownerBackend, true, true);
+                        this.l1PrimitivePresenceCache = new NoOpCachePolicy<>();
+                        this.l2PrimitivePresenceCache = new NoOpCachePolicy<>();
+                    }
+                } else {
                     this.l1KeyPresenceCache = new NoOpCachePolicy<>();
                     this.l2KeyPresenceCache = new NoOpCachePolicy<>();
-                } else {
-                    // Initialize L2 Presence Cache
-                    this.l2KeyPresenceCache =
-                            createCachePolicyInstance(cachePolicyType, mapL2KeyPresenceCacheSize, null,
-                                    ownerBackend, true, this.keyPresenceCacheEnabled);
-
-                    // Initialize L1 Presence Cache (with eviction to L2 Presence Cache)
-                    this.l1KeyPresenceCache = createCachePolicyInstance(cachePolicyType,
-                            mapL1KeyPresenceCacheSize, evictedL1PresenceEntry -> {
-                                if (this.keyPresenceCacheEnabled
-                                        && evictedL1PresenceEntry.getValue() != null) {
-                                    this.l2KeyPresenceCache.put(evictedL1PresenceEntry.getKey(),
-                                            CacheEntry.clean(
-                                                    evictedL1PresenceEntry.getValue().getValue()));
-                                }
-                            }, ownerBackend, true, this.keyPresenceCacheEnabled);
-                    // Init primitive caches to NoOp
                     this.l1PrimitivePresenceCache = new NoOpCachePolicy<>();
                     this.l2PrimitivePresenceCache = new NoOpCachePolicy<>();
                 }
+                this.l2MapEntries = createCachePolicyForOffHeap(cachePolicyType, l2Size);
             } else {
-                this.l1KeyPresenceCache = new NoOpCachePolicy<>();
-                this.l2KeyPresenceCache = new NoOpCachePolicy<>();
-                this.l1PrimitivePresenceCache = new NoOpCachePolicy<>();
-                this.l2PrimitivePresenceCache = new NoOpCachePolicy<>();
+                // Original on-heap L2 cache logic
+                this.l2MapEntries = createCachePolicyInstance(cachePolicyType, l2Size, null, ownerBackend, false, false);
+                if (this.keyPresenceCacheEnabled) {
+                     if (presenceCacheImpl == CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP) {
+                        this.l2PrimitivePresenceCache = new PrimitivePresenceCache(mapL2KeyPresenceCacheSize, evicted -> ownerBackend.reportCacheMemoryReleased(16L));
+                        this.l1PrimitivePresenceCache = new PrimitivePresenceCache(mapL1KeyPresenceCacheSize,
+                                evictedL1 -> {
+                                    ((CachePolicy<Long, Byte>) this.l2PrimitivePresenceCache).put(evictedL1.getKey(), evictedL1.getValue());
+                                });
+                        this.l1KeyPresenceCache = new NoOpCachePolicy<>();
+                        this.l2KeyPresenceCache = new NoOpCachePolicy<>();
+                     } else {
+                        this.l2KeyPresenceCache = createCachePolicyInstance(cachePolicyType, mapL2KeyPresenceCacheSize, null, ownerBackend, true, this.keyPresenceCacheEnabled);
+                        this.l1KeyPresenceCache = createCachePolicyInstance(cachePolicyType,
+                                mapL1KeyPresenceCacheSize, evictedL1 -> {
+                                    if (evictedL1.getValue() != null) {
+                                        ((CachePolicy<UK_C, CacheEntry<Boolean>>) this.l2KeyPresenceCache).put(evictedL1.getKey(), CacheEntry.clean(evictedL1.getValue().getValue()));
+                                    }
+                                }, ownerBackend, true, this.keyPresenceCacheEnabled);
+                        this.l1PrimitivePresenceCache = new NoOpCachePolicy<>();
+                        this.l2PrimitivePresenceCache = new NoOpCachePolicy<>();
+                     }
+                } else {
+                    this.l1KeyPresenceCache = new NoOpCachePolicy<>();
+                    this.l2KeyPresenceCache = new NoOpCachePolicy<>();
+                    this.l1PrimitivePresenceCache = new NoOpCachePolicy<>();
+                    this.l2PrimitivePresenceCache = new NoOpCachePolicy<>();
+                }
             }
 
-            this.l2MapEntries = createCachePolicyInstance(cachePolicyType, l2Size, null,
-                    ownerBackend, false, false);
             this.l1MapEntries =
                     createCachePolicyInstance(cachePolicyType, l1Size, evictedL1MapEntry -> {
                         UK_C evictedUK = evictedL1MapEntry.getKey();
@@ -233,13 +275,17 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                     delegateState.remove(evictedUK);
                                 } else {
                                     delegateState.put(evictedUK, evictedUVWrapper.getValue());
-                                    // Add to L2 cache only if it was a regular value, not a
-                                    // tombstone
-                                    this.l2MapEntries.put(evictedUK,
-                                            CacheEntry.clean(evictedUVWrapper.getValue()));
+                                    // Add to L2 cache only if it was a regular value, not a tombstone
+                                    if (l2ManagedMemoryEnabled) {
+                                        byte[] keyBytes = serializeKey(evictedUK);
+                                        byte[] valBytes = serializeValue(evictedUVWrapper.getValue());
+                                        OffHeapPointer pointer = this.offHeapL2Store.put(keyBytes, valBytes);
+                                        ((CachePolicy<UK_C, OffHeapPointer>) this.l2MapEntries).put(evictedUK, pointer);
+                                    } else {
+                                        ((CachePolicy<UK_C, CacheEntry<UV_C>>) this.l2MapEntries).put(evictedUK, CacheEntry.clean(evictedUVWrapper.getValue()));
+                                    }
                                 }
-                                evictedUVWrapper.setDirty(false); // Mark clean after successful
-                                                                  // flush
+                                evictedUVWrapper.setDirty(false); // Mark clean after successful flush
                             } catch (Exception e) {
                                 throw new RuntimeException(
                                         "Failed to flush L1 map entry to delegate for user key: "
@@ -255,13 +301,80 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                 }
                             }
                         } else { // Clean entry
-                            if (evictedUVWrapper.getValue() != null) { // Don't put null
-                                                                       // (tombstones) from clean L1
-                                                                       // into L2
-                                this.l2MapEntries.put(evictedUK, evictedUVWrapper); // Already clean
+                            if (evictedUVWrapper.getValue() != null) { // Don't put null (tombstones) from clean L1 into L2
+                                if (l2ManagedMemoryEnabled) {
+                                    try {
+                                        byte[] keyBytes = serializeKey(evictedUK);
+                                        byte[] valBytes = serializeValue(evictedUVWrapper.getValue());
+                                        OffHeapPointer pointer = this.offHeapL2Store.put(keyBytes, valBytes);
+                                        ((CachePolicy<UK_C, OffHeapPointer>) this.l2MapEntries).put(evictedUK, pointer);
+                                    } catch (IOException e) {
+                                        LOG.error("Failed to move clean entry to off-heap L2", e);
+                                    }
+                                } else {
+                                    ((CachePolicy<UK_C, CacheEntry<UV_C>>) this.l2MapEntries).put(evictedUK, evictedUVWrapper);
+                                }
                             }
                         }
                     }, ownerBackend, false, false);
+        }
+
+        private <CK> CachePolicy<CK, OffHeapPointer> createCachePolicyForOffHeap(
+            CachingStateBackendFactory.CachePolicyType policyType, int capacity) {
+            Consumer<Map.Entry<CK, OffHeapPointer>> evictionListener = entry -> {
+                if (entry.getValue() != null && offHeapL2Store != null) {
+                    this.offHeapL2Store.remove(entry.getValue());
+                }
+            };
+            switch (policyType) {
+                case TINYLFU:
+                    return new TinyLFUMap<>(capacity, evictionListener);
+                case LRU:
+                default:
+                    return new LRUMap<>(capacity, evictionListener);
+            }
+        }
+        
+        private byte[] serializeValue(UV_C value) throws IOException {
+            DataOutputSerializer dos = userValueSerializerView.get();
+            dos.clear();
+            userValueSerializer.serialize(value, dos);
+            return dos.getCopyOfBuffer();
+        }
+
+        private UV_C deserializeValue(byte[] bytes) throws IOException {
+            if (bytes == null) return null;
+            DataInputDeserializer dis = new DataInputDeserializer(bytes);
+            return userValueSerializer.deserialize(dis);
+        }
+
+        private byte[] serializeKey(UK_C key) throws IOException {
+            DataOutputSerializer dos = userKeySerializerView.get();
+            dos.clear();
+            userKeySerializer.serialize(key, dos);
+            return dos.getCopyOfBuffer();
+        }
+
+        private byte[] serializePrimitiveKey(Long key) throws IOException {
+            byte[] bytes = new byte[8];
+            ByteBuffer.wrap(bytes).putLong(key);
+            return bytes;
+        }
+
+        private byte[] serializePrimitiveValue(Byte value) throws IOException {
+            return new byte[]{value};
+        }
+        
+        private byte deserializePrimitiveValue(byte[] bytes) {
+            return bytes[0];
+        }
+
+        private byte[] serializeBoolean(boolean b) {
+            return new byte[]{(byte) (b ? 1 : 0)};
+        }
+        
+        private boolean deserializeBoolean(byte[] bytes) {
+            return bytes[0] == 1;
         }
 
         private static <CK, CV_ENTRY_TYPE> CachePolicy<CK, CacheEntry<CV_ENTRY_TYPE>> createCachePolicyInstance(
@@ -349,6 +462,15 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                         this.delegateState.put(l2Entry.getKey(), l2Entry.getValue().getValue());
                     }
                 }
+                // L2 entries are now pointers, so we need to remove from the off-heap store
+                Iterator<Map.Entry<UK_C, OffHeapPointer>> offHeapL2Iterator = this.l2MapEntries.entrySet().iterator();
+                while (offHeapL2Iterator.hasNext()) {
+                    Map.Entry<UK_C, OffHeapPointer> pointerEntry = offHeapL2Iterator.next();
+                    this.offHeapL2Store.remove(pointerEntry.getValue());
+                    offHeapL2Iterator.remove();
+                }
+
+                this.offHeapL2Store.close();
                 this.ownerBackend
                         .reportCacheMemoryReleased(l2Entry.getValue().getEstimatedSizeBytes());
                 l2Iterator.remove();
@@ -393,13 +515,21 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     return l1Presence == PrimitivePresenceCache.PRESENT ? ValuePresence.PRESENT_IN_CACHE_CLEAN
                             : ValuePresence.ABSENT_IN_CACHE;
                 }
-                Byte l2Presence = l2PrimitivePresenceCache.get(fp);
-                if (l2Presence != null) {
-                    Byte oldL1 = l1PrimitivePresenceCache.put(fp, l2Presence);
-                    if (oldL1 == null)
-                        ownerBackend.reportCacheMemoryAdded(16L); // New entry in L1
-                    return l2Presence == PrimitivePresenceCache.PRESENT ? ValuePresence.PRESENT_IN_CACHE_CLEAN
-                            : ValuePresence.ABSENT_IN_CACHE;
+                OffHeapPointer pointer = l2PrimitivePresenceCache.get(fp);
+                if (pointer != null) {
+                    try {
+                        byte[] valBytes = offHeapL2Store.get(pointer, false);
+                        byte presence = deserializePrimitiveValue(valBytes);
+                        Byte oldL1 = l1PrimitivePresenceCache.put(fp, presence);
+                        if (oldL1 == null)
+                            ownerBackend.reportCacheMemoryAdded(16L); // New entry in L1
+                        return presence == PrimitivePresenceCache.PRESENT ? ValuePresence.PRESENT_IN_CACHE_CLEAN
+                                : ValuePresence.ABSENT_IN_CACHE;
+                    } catch (IOException e) {
+                        LOG.error("Failed to read primitive presence from off-heap L2", e);
+                        l2PrimitivePresenceCache.remove(fp);
+                        offHeapL2Store.remove(pointer);
+                    }
                 }
                 return ValuePresence.ABSENT_MAYBE_IN_VALUE_CACHE;
 
@@ -409,13 +539,21 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     return l1Presence.getValue() ? ValuePresence.PRESENT_IN_CACHE_CLEAN
                             : ValuePresence.ABSENT_IN_CACHE;
                 }
-                CacheEntry<Boolean> l2Presence = l2KeyPresenceCache.get(userKey);
-                if (l2Presence != null) {
-                    CacheEntry<Boolean> oldL1 = l1KeyPresenceCache.put(userKey, l2Presence);
-                    if (oldL1 == null)
-                        ownerBackend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
-                    return l2Presence.getValue() ? ValuePresence.PRESENT_IN_CACHE_CLEAN
-                            : ValuePresence.ABSENT_IN_CACHE;
+                OffHeapPointer pointer = l2KeyPresenceCache.get(userKey);
+                if (pointer != null) {
+                    try {
+                        byte[] valBytes = offHeapL2Store.get(pointer, false);
+                        boolean presence = deserializeBoolean(valBytes);
+                        CacheEntry<Boolean> oldL1 = l1KeyPresenceCache.put(userKey, CacheEntry.clean(presence));
+                        if (oldL1 == null)
+                            ownerBackend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
+                        return presence ? ValuePresence.PRESENT_IN_CACHE_CLEAN
+                                : ValuePresence.ABSENT_IN_CACHE;
+                    } catch (IOException e) {
+                         LOG.error("Failed to read presence from off-heap L2", e);
+                         l2KeyPresenceCache.remove(userKey);
+                         offHeapL2Store.remove(pointer);
+                    }
                 }
                 return ValuePresence.ABSENT_MAYBE_IN_VALUE_CACHE;
             }
@@ -477,14 +615,18 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             if (presenceCacheImpl == CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP) {
                 long fp = fingerprint(userKey);
                 l1PrimitivePresenceCache.remove(fp);
-                l2PrimitivePresenceCache.remove(fp);
+                if (l2ManagedMemoryEnabled) {
+                    ((CachePolicy<Long, OffHeapPointer>) l2PrimitivePresenceCache).remove(fp);
+                } else {
+                    ((CachePolicy<Long, Byte>) l2PrimitivePresenceCache).remove(fp);
+                }
             } else {
-                CacheEntry<Boolean> oldL1P = l1KeyPresenceCache.remove(userKey);
-                if (oldL1P != null)
-                    ownerBackend.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
-                CacheEntry<Boolean> oldL2P = l2KeyPresenceCache.remove(userKey);
-                if (oldL2P != null)
-                    ownerBackend.reportCacheMemoryReleased(ValueSizeUtils.estimate(Boolean.TRUE));
+                l1KeyPresenceCache.remove(userKey);
+                if (l2ManagedMemoryEnabled) {
+                    ((CachePolicy<UK_C, OffHeapPointer>) l2KeyPresenceCache).remove(userKey);
+                } else {
+                    ((CachePolicy<UK_C, CacheEntry<Boolean>>) l2KeyPresenceCache).remove(userKey);
+                }
             }
         }
 
@@ -547,14 +689,14 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             for (CacheEntry<UV_C> entry : l1MapEntries.values()) {
                 totalSize += entry.getEstimatedSizeBytes();
             }
-            for (CacheEntry<UV_C> entry : l2MapEntries.values()) {
-                totalSize += entry.getEstimatedSizeBytes();
-            }
+            // For L2, memory is off-heap and managed by OffHeapKVStore/ManagedPagePool.
+            // A more accurate accounting would query the page pool usage for this PerKeyMapCache.
+            // This is a simplification.
             if (keyPresenceCacheEnabled) {
                 if (presenceCacheImpl == CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP) {
-                    totalSize += (long) (l1PrimitivePresenceCache.size() + l2PrimitivePresenceCache.size()) * 16L; // Approx. size per entry
+                    totalSize += (long) (l1PrimitivePresenceCache.size()) * 16L; // Approx. size per entry
                 } else {
-                    totalSize += (long) (l1KeyPresenceCache.size() + l2KeyPresenceCache.size())
+                    totalSize += (long) (l1KeyPresenceCache.size())
                             * ValueSizeUtils.estimate(Boolean.TRUE);
                 }
             }
@@ -566,22 +708,32 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 return 0L;
 
             long freedBytes = 0;
-            // Priority 1: Evict from L2 value cache (clean entries)
-            freedBytes += evictFromCache(l2MapEntries, bytesToFree - freedBytes, false,
-                    keyPresenceCacheEnabled);
-            if (freedBytes >= bytesToFree)
-                return freedBytes;
+            if (l2ManagedMemoryEnabled) {
+                // Priority 1: Evict from L2 value cache (off-heap)
+                freedBytes += evictFromOffHeapCache((CachePolicy<UK_C, OffHeapPointer>)l2MapEntries, bytesToFree - freedBytes);
+                if (freedBytes >= bytesToFree) return freedBytes;
 
-            // Priority 2: Evict from L2 presence cache
-            if (keyPresenceCacheEnabled) {
-                if (presenceCacheImpl == CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP) {
-                    freedBytes += evictFromPrimitiveCache(l2PrimitivePresenceCache, bytesToFree - freedBytes);
-                } else {
-                    freedBytes += evictFromCache(l2KeyPresenceCache, bytesToFree - freedBytes, true,
-                            keyPresenceCacheEnabled);
+                // Priority 2: Evict from L2 presence cache (off-heap)
+                if (keyPresenceCacheEnabled) {
+                    if (presenceCacheImpl == CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP) {
+                        freedBytes += evictFromOffHeapCache((CachePolicy<Long, OffHeapPointer>)l2PrimitivePresenceCache, bytesToFree - freedBytes);
+                    } else {
+                        freedBytes += evictFromOffHeapCache((CachePolicy<UK_C, OffHeapPointer>)l2KeyPresenceCache, bytesToFree - freedBytes);
+                    }
+                    if (freedBytes >= bytesToFree) return freedBytes;
                 }
-                if (freedBytes >= bytesToFree)
-                    return freedBytes;
+            } else {
+                // On-heap eviction logic
+                freedBytes += evictFromCache((CachePolicy<UK_C, CacheEntry<UV_C>>)l2MapEntries, bytesToFree - freedBytes, false, keyPresenceCacheEnabled);
+                 if (freedBytes >= bytesToFree) return freedBytes;
+                if (keyPresenceCacheEnabled) {
+                    if (presenceCacheImpl == CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP) {
+                        freedBytes += evictFromPrimitiveCache((CachePolicy<Long, Byte>)l2PrimitivePresenceCache, bytesToFree - freedBytes);
+                    } else {
+                        freedBytes += evictFromCache((CachePolicy<UK_C, CacheEntry<Boolean>>)l2KeyPresenceCache, bytesToFree - freedBytes, true, keyPresenceCacheEnabled);
+                    }
+                    if (freedBytes >= bytesToFree) return freedBytes;
+                }
             }
 
             // Priority 3: Evict from L1 presence cache
@@ -672,6 +824,29 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             return 0L;
         }
 
+        private <ENTRY_KEY> long evictFromOffHeapCache(
+            CachePolicy<ENTRY_KEY, OffHeapPointer> cache, long requiredBytes) {
+            if (requiredBytes <= 0) return 0;
+            long actualFreed = 0;
+            Iterator<Map.Entry<ENTRY_KEY, OffHeapPointer>> iterator = cache.entrySet().iterator();
+            List<ENTRY_KEY> keysToRemove = new ArrayList<>();
+
+            while (iterator.hasNext() && actualFreed < requiredBytes) {
+                Map.Entry<ENTRY_KEY, OffHeapPointer> entry = iterator.next();
+                OffHeapPointer pointer = entry.getValue();
+                if (pointer != null) {
+                    actualFreed += pointer.keyLength + pointer.valueLength + RECORD_HEADER_SIZE;
+                    offHeapL2Store.remove(pointer); // Mark for removal
+                }
+                keysToRemove.add(entry.getKey());
+            }
+
+            for (ENTRY_KEY key : keysToRemove) {
+                cache.remove(key);
+            }
+            ownerBackend.reportCacheMemoryReleased(actualFreed);
+            return actualFreed;
+        }
 
         private <ENTRY_KEY, ENTRY_VAL> long evictFromCache(
                 CachePolicy<ENTRY_KEY, CacheEntry<ENTRY_VAL>> cache, long requiredBytes,
@@ -722,7 +897,9 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize,
             long mapCacheMinAccessesForBypassCheck, boolean enableKeyPresenceCache,
             boolean enableBypass,
-            CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl) {
+            CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
+            boolean l2ManagedMemoryEnabled,
+            String l2PageSize) {
         this.delegateState = delegateState;
         this.backend = backend;
 
@@ -771,6 +948,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         this.keyPresenceCacheEnabled = enableKeyPresenceCache;
         this.bypassEnabled = enableBypass;
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
+        this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
+        this.l2PageSize = l2PageSize;
 
         // Initialize namespaceCaches (top-level cache: Namespace -> (FlinkKey -> PerKeyMapCache))
         this.namespaceCaches = createCachePolicyForHierarchicalCache(
@@ -802,6 +981,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                                                             // reporting
                                     perKeyCache.l2KeyPresenceCache.clear(); // Should trigger memory
                                                                             // reporting
+                                    perKeyCache.l2PrimitivePresenceCache.clear();
                                 }
 
                                 // Unregister metrics for this cache so that future instances can
@@ -854,14 +1034,14 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
         this.delegateLookups = cacheMetrics.counter("delegateLookups");
 
-        // cacheMetrics.gauge("bypassActive", () -> bypassCache ? 1 : 0);
-        // if (mapCacheHitRateThreshold > 0.0) {
-        //     cacheMetrics.gauge("currentHitRateForBypass", () -> {
-        //         long accesses = accessesForHitRateWindow.get();
-        //         long hits = hitsInHitRateWindow.get();
-        //         return accesses > 0 ? (double) hits / accesses : 0.0;
-        //     });
-        // }
+        cacheMetrics.gauge("bypassActive", () -> bypassCache ? 1 : 0);
+        if (mapCacheHitRateThreshold > 0.0) {
+            cacheMetrics.gauge("currentHitRateForBypass", () -> {
+                long accesses = accessesForHitRateWindow.get();
+                long hits = hitsInHitRateWindow.get();
+                return accesses > 0 ? (double) hits / accesses : 0.0;
+            });
+        }
     }
 
     // Helper for non-CacheEntry valued caches (like namespaceCaches, keyCaches)
@@ -916,11 +1096,12 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                 if (perKeyCache.keyPresenceCacheEnabled) {
                                     perKeyCache.l1KeyPresenceCache.clear();
                                     perKeyCache.l2KeyPresenceCache.clear();
+                                    perKeyCache.l2PrimitivePresenceCache.clear();
                                 }
 
                                 // Unregister metrics for this cache so that future instances can
                                 // re-register cleanly.
-                                // perKeyCache.closeMetrics();
+                                perKeyCache.closeMetrics();
 
                                 // Restore original context
                                 if (originalKey != null)
@@ -952,10 +1133,11 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     this.delegateState, this.backend, key, namespace, getCurrentNamespace(),
                     this.cachePolicyType, this.mapL1KeyPresenceCacheSize,
                     this.mapL2KeyPresenceCacheSize, this.keyPresenceCacheEnabled,
-                    this.mapPresenceCacheImpl, this.userKeySerializer);
+                    this.mapPresenceCacheImpl, this.userKeySerializer, this.userValueSerializer,
+                    this.l2ManagedMemoryEnabled);
             flinkKeyCaches.put(key, perKeyCache);
-            // perKeyCache.registerMetrics(this.metrics.addGroup("perKeyCache"), key,
-            //         getCurrentNamespace());
+            perKeyCache.registerMetrics(this.metrics.addGroup("perKeyCache"), key,
+                    getCurrentNamespace());
         }
         return perKeyCache;
     }
@@ -1022,21 +1204,27 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 resolvedByCache = true;
             } else {
                 l1ValueCacheMissCount.inc();
-                CacheEntry<UV> l2Entry = perKeyCache.l2MapEntries.remove(userKey);
-                if (l2Entry != null) {
+                OffHeapPointer pointer = perKeyCache.l2MapEntries.remove(userKey);
+                if (pointer != null) {
                     l2ValueCacheHitCount.inc();
-                    // L2 entry removal will trigger the listener to report memory released.
-                    userValue = l2Entry.getValue();
-                    CacheEntry<UV> newL1Entry = CacheEntry.clean(userValue);
-                    CacheEntry<UV> oldL1Entry =
-                            perKeyCache.l1MapEntries.put(userKey, newL1Entry);
-                    if (oldL1Entry != null) {
-                        perKeyCache.ownerBackend.reportCacheMemoryReleased(
-                                oldL1Entry.getEstimatedSizeBytes());
+                    try {
+                        byte[] valueBytes = perKeyCache.offHeapL2Store.get(pointer, false);
+                        userValue = perKeyCache.deserializeValue(valueBytes);
+                        perKeyCache.offHeapL2Store.remove(pointer); // Invalidate L2 entry after promotion
+                    } catch (IOException e) {
+                        LOG.error("Failed to read from off-heap L2, treating as miss.", e);
+                        userValue = null;
                     }
-                    perKeyCache.ownerBackend.reportCacheMemoryAdded(
-                            newL1Entry.getEstimatedSizeBytes());
-                    resolvedByCache = true;
+
+                    if (userValue != null) {
+                        CacheEntry<UV> newL1Entry = CacheEntry.clean(userValue);
+                        CacheEntry<UV> oldL1Entry = perKeyCache.l1MapEntries.put(userKey, newL1Entry);
+                        if (oldL1Entry != null) {
+                            perKeyCache.ownerBackend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
+                        }
+                        perKeyCache.ownerBackend.reportCacheMemoryAdded(newL1Entry.getEstimatedSizeBytes());
+                        resolvedByCache = true;
+                    }
                 } else {
                     l2ValueCacheMissCount.inc();
                     if (perKeyCache.fullyLoaded) {
@@ -1103,18 +1291,26 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             }
 
             // Check L2 Value Cache
-            CacheEntry<UV> l2ValEntry = perKeyCache.l2MapEntries.remove(userKey);
-            if (l2ValEntry != null) {
+            OffHeapPointer pointer = perKeyCache.l2MapEntries.remove(userKey);
+            if (pointer != null) {
                 l2ValueCacheHitCount.inc();
-                userValue = l2ValEntry.getValue(); // L2 entries are clean, non-null
-                CacheEntry<UV> newL1Entry = CacheEntry.clean(userValue);
-                CacheEntry<UV> oldL1Entry = perKeyCache.l1MapEntries.put(userKey, newL1Entry);
-                if (oldL1Entry != null) {
-                    perKeyCache.ownerBackend.reportCacheMemoryReleased(
-                            oldL1Entry.getEstimatedSizeBytes());
+                try {
+                    userValue = perKeyCache.deserializeValue(perKeyCache.offHeapL2Store.get(pointer, false));
+                    perKeyCache.offHeapL2Store.remove(pointer);
+                } catch (IOException e) {
+                    LOG.error("Failed to read from off-heap L2, treating as miss.", e);
+                    userValue = null;
                 }
-                perKeyCache.ownerBackend.reportCacheMemoryAdded(newL1Entry.getEstimatedSizeBytes());
-                resolvedByCache = true;
+                if (userValue != null) {
+                    CacheEntry<UV> newL1Entry = CacheEntry.clean(userValue);
+                    CacheEntry<UV> oldL1Entry = perKeyCache.l1MapEntries.put(userKey, newL1Entry);
+                    if (oldL1Entry != null) {
+                        perKeyCache.ownerBackend.reportCacheMemoryReleased(
+                                oldL1Entry.getEstimatedSizeBytes());
+                    }
+                    perKeyCache.ownerBackend.reportCacheMemoryAdded(newL1Entry.getEstimatedSizeBytes());
+                    resolvedByCache = true;
+                }
             } else {
                 l2ValueCacheMissCount.inc();
                 if (perKeyCache.fullyLoaded) {
@@ -1183,7 +1379,10 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
         // Invalidate L2 if L1 is now dirty. The remove from CachePolicy will trigger memory
         // release.
-        perKeyCache.l2MapEntries.remove(userKey);
+        OffHeapPointer pointer = perKeyCache.l2MapEntries.remove(userKey);
+        if (pointer != null) {
+            perKeyCache.offHeapL2Store.remove(pointer);
+        }
 
         if (this.keyPresenceCacheEnabled) {
             perKeyCache.updatePresenceCacheOnPut(userKey);
@@ -1241,7 +1440,10 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         perKeyCache.ownerBackend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
         // L1's put handles eviction/memory for old, and memory for new tombstone.
 
-        perKeyCache.l2MapEntries.remove(userKey); // Invalidate L2.
+        OffHeapPointer pointer = perKeyCache.l2MapEntries.remove(userKey);
+        if (pointer != null) {
+            perKeyCache.offHeapL2Store.remove(pointer);
+        }
         // LRUMap.remove should trigger eviction listener for memory reporting.
 
         if (this.keyPresenceCacheEnabled) {
@@ -1275,9 +1477,9 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         // 2. If fully loaded, the cache is the source of truth. If not in L1, check L2.
         if (perKeyCache.fullyLoaded) {
             updateCacheBypassCondition(true); // Resolved from cache, even if absent.
-            CacheEntry<UV> l2Entry = perKeyCache.l2MapEntries.get(userKey);
+            OffHeapPointer pointer = perKeyCache.l2MapEntries.get(userKey);
             // L2 should not contain tombstones, so a non-null entry means it exists.
-            return l2Entry != null;
+            return pointer != null;
         }
 
         // --- Not fully loaded and not in L1 ---
@@ -1299,10 +1501,16 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
 
         // 4. Check L2 value cache.
-        CacheEntry<UV> l2Entry = perKeyCache.l2MapEntries.get(userKey);
-        if (l2Entry != null) {
+        OffHeapPointer pointer = perKeyCache.l2MapEntries.get(userKey);
+        if (pointer != null) {
             updateCacheBypassCondition(true); // L2 hit.
-            perKeyCache.l1MapEntries.put(userKey, l2Entry); // Promote to L1.
+            try {
+                UV_C value = perKeyCache.deserializeValue(perKeyCache.offHeapL2Store.get(pointer, false));
+                perKeyCache.l1MapEntries.put(userKey, CacheEntry.clean(value)); // Promote to L1.
+            } catch (IOException e) {
+                LOG.error("Failed to read from off-heap L2 during contains check, treating as miss.", e);
+                return false; // Could also re-query delegate
+            }
             return true;
         }
 
@@ -1408,6 +1616,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         if (this.keyPresenceCacheEnabled) {
             perKeyCache.l1KeyPresenceCache.clear(); // Will trigger memory release
             perKeyCache.l2KeyPresenceCache.clear(); // Will trigger memory release
+            perKeyCache.l2PrimitivePresenceCache.clear();
         }
 
         delegateLookups.inc();
@@ -1474,6 +1683,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         if (this.keyPresenceCacheEnabled) {
             perKeyCache.l1KeyPresenceCache.clear();
             perKeyCache.l2KeyPresenceCache.clear();
+            perKeyCache.l2PrimitivePresenceCache.clear();
         }
 
         // After clearing the caches, clear the entries in the underlying delegate state
@@ -1645,7 +1855,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
                     // Unregister metrics for this cache so that future instances can
                     // re-register cleanly.
-                    // perKeyCache.closeMetrics();
+                    perKeyCache.closeMetrics();
 
                 }
             }
