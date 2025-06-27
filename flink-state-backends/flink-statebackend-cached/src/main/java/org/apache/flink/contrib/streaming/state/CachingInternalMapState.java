@@ -1705,6 +1705,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
     private class MergingIterator implements Iterator<Map.Entry<UK, UV>>, AutoCloseable {
 
+        private final PerKeyMapCache<UK, UV, K, N> perKeyCache;
         private final Iterator<Map.Entry<UK, CacheEntry<UV>>> l1Iterator;
         private final Iterator<Map.Entry<UK, CacheEntry<UV>>> l2Iterator;
         private final Iterator<Map.Entry<UK, UV>> delegateIterator;
@@ -1717,11 +1718,13 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         MergingIterator(
                 PerKeyMapCache<UK, UV, K, N> perKeyCache,
                 Iterable<Map.Entry<UK, UV>> delegateEntries) {
+            this.perKeyCache = perKeyCache;
             this.l1Iterator = perKeyCache.l1MapEntries.entrySet().iterator();
             this.l2Iterator = perKeyCache.l2MapEntries.entrySet().iterator();
             this.delegateIterator =
                     delegateEntries != null ? delegateEntries.iterator() : Collections.emptyIterator();
-            this.processedKeys = new HashSet<>();
+            this.processedKeys = new HashSet<>(
+                    perKeyCache.l1MapEntries.size() + perKeyCache.l2MapEntries.size());
             this.currentState = MergingIteratorState.L1;
             advance();
         }
@@ -1791,6 +1794,25 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 UK key = delegateEntry.getKey();
                 if (processedKeys.add(key)) { // If not already processed from L1 or L2
                     this.nextEntry = delegateEntry;
+                    UV value = delegateEntry.getValue();
+
+                    // Warm up cache: Add the fetched entry to L1.
+                    // This is best-effort and respects cache size limits via eviction.
+                    if (value != null) {
+                        CacheEntry<UV> newCacheEntry = CacheEntry.clean(value);
+                        CacheEntry<UV> oldCacheEntry = perKeyCache.l1MapEntries.put(key, newCacheEntry);
+
+                        if (oldCacheEntry != null) {
+                            perKeyCache.ownerBackend.reportCacheMemoryReleased(
+                                    oldCacheEntry.getEstimatedSizeBytes());
+                        }
+                        perKeyCache.ownerBackend.reportCacheMemoryAdded(
+                                newCacheEntry.getEstimatedSizeBytes());
+                    }
+
+                    if (perKeyCache.keyPresenceCacheEnabled) {
+                        perKeyCache.updatePresenceCacheOnGet(key, value != null);
+                    }
                     return;
                 }
             }
