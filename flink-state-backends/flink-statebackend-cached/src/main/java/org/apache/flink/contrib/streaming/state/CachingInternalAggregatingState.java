@@ -119,22 +119,24 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
     }
 
     private void flushCacheForNamespace(N namespace, CachePolicy<K, CacheEntry<ACC>> cache) {
+        K originalKey = backend.getCurrentKey();
+        N originalNamespace = getCurrentNamespace();
         try {
-            N originalNamespace = getCurrentNamespace();
-            K originalKey = backend.getCurrentKey();
-
             setCurrentNamespace(namespace);
             for (Map.Entry<K, CacheEntry<ACC>> entry : cache.entrySet()) {
                 if (entry.getValue().isDirty()) {
                     backend.setCurrentKey(entry.getKey());
-                    delegateState.updateInternal(entry.getValue().getValue());
-                    entry.getValue().setDirty(false);
+                    try {
+                        delegateState.updateInternal(entry.getValue().getValue());
+                        entry.getValue().setDirty(false);
+                    } catch (Exception e) {
+                        throw new RuntimeException("Failed to flush dirty entry: " + entry.getKey(), e);
+                    }
                 }
             }
+        } finally {
             setCurrentNamespace(originalNamespace);
             backend.setCurrentKey(originalKey);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to flush dirty entries for evicted namespace: " + namespace, e);
         }
     }
 
@@ -143,6 +145,8 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
                 createCachePolicyWithEvictionListener(l1CacheSizePerKeyPerNamespace, evictedL1Entry -> {
                     CachePolicy<K, CacheEntry<ACC>> l2Cache = getL2CacheForNamespace(ns);
                     if (evictedL1Entry.getValue().isDirty()) {
+                        K originalKey = backend.getCurrentKey();
+                        N originalNamespace = getCurrentNamespace();
                         try {
                             backend.setCurrentKey(evictedL1Entry.getKey());
                             delegateState.setCurrentNamespace(ns);
@@ -150,6 +154,9 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
                             evictedL1Entry.getValue().setDirty(false);
                         } catch (Exception e) {
                             throw new RuntimeException("Failed to flush L1 entry to delegate on eviction", e);
+                        } finally {
+                            backend.setCurrentKey(originalKey);
+                            setCurrentNamespace(originalNamespace);
                         }
                     }
                     l2Cache.put(evictedL1Entry.getKey(), evictedL1Entry.getValue());
@@ -293,31 +300,38 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
 
     @Override
     public void flushToUnderlyingState() throws IOException {
-        for (Map.Entry<N, CachePolicy<K, CacheEntry<ACC>>> nsEntry : namespaceCachesL1.entrySet()) {
-            N namespace = nsEntry.getKey();
-            CachePolicy<K, CacheEntry<ACC>> l1Cache = nsEntry.getValue();
-            setCurrentNamespace(namespace);
+        K originalKey = backend.getCurrentKey();
+        N originalNamespace = getCurrentNamespace();
+        try {
+            for (Map.Entry<N, CachePolicy<K, CacheEntry<ACC>>> nsEntry : namespaceCachesL1.entrySet()) {
+                N namespace = nsEntry.getKey();
+                CachePolicy<K, CacheEntry<ACC>> l1Cache = nsEntry.getValue();
+                setCurrentNamespace(namespace);
 
-            List<Map.Entry<K, CacheEntry<ACC>>> currentL1Entries = new ArrayList<>();
-            for (Map.Entry<K, CacheEntry<ACC>> entry : l1Cache.entrySet()) {
-                currentL1Entries.add(entry);
-            }
+                List<Map.Entry<K, CacheEntry<ACC>>> currentL1Entries = new ArrayList<>();
+                for (Map.Entry<K, CacheEntry<ACC>> e : l1Cache.entrySet()) {
+                    currentL1Entries.add(e);
+                }
 
-            for (Map.Entry<K, CacheEntry<ACC>> mapEntry : currentL1Entries) {
-                K key = mapEntry.getKey();
-                CacheEntry<ACC> entry = mapEntry.getValue();
-                if (entry.isDirty()) {
-                    if (key != null) {
-                        backend.setCurrentKey(key);
-                        try {
-                            delegateState.updateInternal(entry.getValue());
-                        } catch (Exception e) {
-                            throw new IOException(e);
+                for (Map.Entry<K, CacheEntry<ACC>> mapEntry : currentL1Entries) {
+                    K key = mapEntry.getKey();
+                    CacheEntry<ACC> entry = mapEntry.getValue();
+                    if (entry.isDirty()) {
+                        if (key != null) {
+                            backend.setCurrentKey(key);
+                            try {
+                                delegateState.updateInternal(entry.getValue());
+                                entry.setDirty(false);
+                            } catch (Exception e) {
+                                throw new IOException("Failed to flush entry for key: " + key, e);
+                            }
                         }
-                        entry.setDirty(false);
                     }
                 }
             }
+        } finally {
+            backend.setCurrentKey(originalKey);
+            setCurrentNamespace(originalNamespace);
         }
     }
 
@@ -386,10 +400,9 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
                 K key = dirtyEntry.getKey();
                 CacheEntry<ACC> cacheEntry = dirtyEntry.getValue();
                 long est = cacheEntry.getEstimatedSizeBytes();
+                K originalKey = backend.getCurrentKey();
+                N originalNs = getCurrentNamespace();
                 try {
-                    K originalKey = backend.getCurrentKey();
-                    N originalNs = getCurrentNamespace();
-
                     backend.setCurrentKey(key);
                     setCurrentNamespace(namespace);
                     delegateState.updateInternal(cacheEntry.getValue());
@@ -399,10 +412,11 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
                     backend.reportCacheMemoryReleased(est);
                     bytesFreed += est;
 
-                    backend.setCurrentKey(originalKey);
-                    setCurrentNamespace(originalNs);
                 } catch (Exception e) {
                     // Ignore flush failure during eviction
+                } finally {
+                    backend.setCurrentKey(originalKey);
+                    setCurrentNamespace(originalNs);
                 }
             }
         }
