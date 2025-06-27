@@ -24,6 +24,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.AbstractMap;
+import java.util.HashSet;
+import java.util.NoSuchElementException;
+import java.util.Set;
+import java.util.Collections;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
 import org.apache.flink.core.memory.DataOutputSerializer;
@@ -1248,7 +1253,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             perKeyCache.updatePresenceCacheOnRemove(userKey);
         }
         // Delegate remove must happen for actual data removal
-        delegateState.remove(userKey); // Ensure delegate is also updated
+        // delegateState.remove(userKey); // This is incorrect for a write-back cache. Defer to
+        // flush.
         perKeyCache.fullyLoaded = false;
     }
 
@@ -1322,80 +1328,58 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
     @Override
     public Iterable<Map.Entry<UK, UV>> entries() throws Exception {
-        delegateState.setCurrentNamespace(getCurrentNamespace());
-        PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
-        if (!perKeyCache.fullyLoaded && this.keyPresenceCacheEnabled) { // Only load all if KV sep
-                                                                        // might make it incomplete
-            // If KV sep is off, we rely on delegate more directly or L1/L2 value caches.
-            // The concept of "fullyLoaded" is more tied to KV separation where presence cache
-            // implies completeness.
-            // This might need refinement based on how iterators are expected to behave when KV sep
-            // is off.
-            // For now, assume if KV Sep is off, this method might be less accurate or
-            // delegate-heavy.
-        }
-        // This simplified version for entries() might be okay if fullyLoaded is mainly for presence
-        // cache logic.
-        // A more robust version for KV-sep-off would iterate L1, then L2 (excluding L1 keys), then
-        // delegate (excluding L1/L2 keys).
-        // However, map state iteration is often costly. The current approach of loading to L1 when
-        // fullyLoaded=false is one way.
-
-        if (!perKeyCache.fullyLoaded) {
-            // This loadAll will populate L1. If KV sep is off, presence cache part is NoOp.
-            loadAllEntriesToCache(perKeyCache);
-        }
-
-        Map<UK, UV> allEntriesMap = new HashMap<>();
-        // L1 has the most up-to-date view (dirty entries, tombstones)
-        for (Map.Entry<UK, CacheEntry<UV>> l1Entry : perKeyCache.l1MapEntries.entrySet()) {
-            if (l1Entry.getValue().getValue() != null) { // Exclude tombstones
-                allEntriesMap.put(l1Entry.getKey(), l1Entry.getValue().getValue());
+        // This iterable will produce a new MergingIterator on each call to iterator().
+        return () -> {
+            try {
+                return iterator();
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to create map state iterator", e);
             }
-        }
-
-        // If fullyLoaded, L2 might have clean entries not in L1 (e.g., due to L1 capacity)
-        // If not fullyLoaded, L2 is less relevant here as L1 should be the primary source after
-        // loadAll.
-        // However, loadAllEntriesToCache clears L2 and puts all into L1.
-        // So, after loadAll, L2 should ideally be empty or reflect recent L1 evictions (clean).
-        // This entries() method will primarily reflect L1 after a potential loadAll.
-        return allEntriesMap.entrySet();
+        };
     }
 
     @Override
     public Iterable<UV> values() throws Exception {
-        delegateState.setCurrentNamespace(getCurrentNamespace());
-        // Option 1: Reuse entries() logic which tries to load all and use cache.
-        // This ensures consistency with what entries() would return.
-        Iterable<Map.Entry<UK, UV>> mapEntries = entries();
-        List<UV> valueList = new ArrayList<>();
-        if (mapEntries != null) {
-            for (Map.Entry<UK, UV> entry : mapEntries) {
-                valueList.add(entry.getValue());
+        return () -> {
+            try {
+                final Iterator<Map.Entry<UK, UV>> entryIterator = iterator();
+                return new Iterator<UV>() {
+                    @Override
+                    public boolean hasNext() {
+                        return entryIterator.hasNext();
+                    }
+
+                    @Override
+                    public UV next() {
+                        return entryIterator.next().getValue();
+                    }
+                };
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to create map state values iterator", e);
             }
-        }
-        return valueList;
-        // Option 2: Delegate directly, potentially bypassing some cache logic or full load behavior
-        // of entries().
-        // return delegateState.values(); // This would be simpler but might not reflect cache
-        // state.
-        // Considering the caching layer, reusing entries() is likely more correct to ensure
-        // the returned values are consistent with other cache-aware operations.
+        };
     }
 
     @Override
     public Iterable<UK> keys() throws Exception {
-        delegateState.setCurrentNamespace(getCurrentNamespace());
-        // Reuse entries() logic to ensure consistency.
-        Iterable<Map.Entry<UK, UV>> mapEntries = entries();
-        List<UK> keyList = new ArrayList<>();
-        if (mapEntries != null) {
-            for (Map.Entry<UK, UV> entry : mapEntries) {
-                keyList.add(entry.getKey());
+        return () -> {
+            try {
+                final Iterator<Map.Entry<UK, UV>> entryIterator = iterator();
+                return new Iterator<UK>() {
+                    @Override
+                    public boolean hasNext() {
+                        return entryIterator.hasNext();
+                    }
+
+                    @Override
+                    public UK next() {
+                        return entryIterator.next().getKey();
+                    }
+                };
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to create map state keys iterator", e);
             }
-        }
-        return keyList;
+        };
     }
 
     private void loadAllEntriesToCache(PerKeyMapCache<UK, UV, K, N> perKeyCache) throws Exception {
@@ -1447,11 +1431,41 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             return delegateState.isEmpty();
         }
 
-        // The iterator is the single source of truth for the combined state of the cache and the
-        // delegate.
-        // It correctly handles tombstones in the cache, merging with the delegate state, and the
-        // fully-loaded case. Calling hasNext() is the most reliable way to determine emptiness.
-        return !iterator().hasNext();
+        final PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
+
+        // Check L1 for any non-tombstone entry
+        for (CacheEntry<UV> l1Entry : perKeyCache.l1MapEntries.values()) {
+            if (l1Entry.getValue() != null) {
+                return false; // Found a valid entry
+            }
+        }
+
+        // If fully loaded, the cache is the source of truth.
+        // We already checked L1. Now check L2. L2 only has valid entries.
+        if (perKeyCache.fullyLoaded) {
+            return perKeyCache.l2MapEntries.isEmpty();
+        }
+
+        // Not fully loaded. Check L2 for an entry not covered by an L1 tombstone.
+        for (Map.Entry<UK, CacheEntry<UV>> l2Entry : perKeyCache.l2MapEntries.entrySet()) {
+            if (!perKeyCache.l1MapEntries.containsKey(l2Entry.getKey())) {
+                return false; // Found a valid L2 entry not marked as removed in L1
+            }
+        }
+
+        // Cache checks are inconclusive. Check the delegate, considering tombstones from L1.
+        if (perKeyCache.l1MapEntries.isEmpty()) {
+            // No tombstones, so if L2 is also empty, delegate's state is accurate.
+            return delegateState.isEmpty();
+        } else {
+            // There are tombstones. We must iterate the delegate to see if any of its
+            // entries are not covered by a tombstone.
+            final Iterable<Map.Entry<UK, UV>> delegateEntries =
+                    perKeyCache.fullyLoaded ? null : delegateState.entries();
+            try (MergingIterator it = new MergingIterator(perKeyCache, delegateEntries)) {
+                return !it.hasNext();
+            }
+        }
     }
 
     @Override
@@ -1660,7 +1674,122 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
     @Override
     public Iterator<Map.Entry<UK, UV>> iterator() throws Exception {
-        return entries().iterator();
+        delegateState.setCurrentNamespace(getCurrentNamespace());
+        final PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
+
+        // If we must consult the delegate, we need its entries.
+        // This is the only place that should request a full iterator from the delegate state.
+        final Iterable<Map.Entry<UK, UV>> delegateEntries =
+                perKeyCache.fullyLoaded ? null : delegateState.entries();
+
+        return new MergingIterator(perKeyCache, delegateEntries);
+    }
+
+    private enum MergingIteratorState {
+        L1,
+        L2,
+        DELEGATE,
+        DONE
+    }
+
+    private class MergingIterator implements Iterator<Map.Entry<UK, UV>>, AutoCloseable {
+
+        private final Iterator<Map.Entry<UK, CacheEntry<UV>>> l1Iterator;
+        private final Iterator<Map.Entry<UK, CacheEntry<UV>>> l2Iterator;
+        private final Iterator<Map.Entry<UK, UV>> delegateIterator;
+        private final Set<UK> processedKeys; // To track keys from L1 and L2
+
+        private Map.Entry<UK, UV> nextEntry;
+
+        private MergingIteratorState currentState;
+
+        MergingIterator(
+                PerKeyMapCache<UK, UV, K, N> perKeyCache,
+                Iterable<Map.Entry<UK, UV>> delegateEntries) {
+            this.l1Iterator = perKeyCache.l1MapEntries.entrySet().iterator();
+            this.l2Iterator = perKeyCache.l2MapEntries.entrySet().iterator();
+            this.delegateIterator =
+                    delegateEntries != null ? delegateEntries.iterator() : Collections.emptyIterator();
+            this.processedKeys = new HashSet<>();
+            this.currentState = MergingIteratorState.L1;
+            advance();
+        }
+
+        @Override
+        public boolean hasNext() {
+            return nextEntry != null;
+        }
+
+        @Override
+        public Map.Entry<UK, UV> next() {
+            if (!hasNext()) {
+                throw new NoSuchElementException();
+            }
+            Map.Entry<UK, UV> current = nextEntry;
+            advance();
+            return current;
+        }
+
+        private void advance() {
+            this.nextEntry = null;
+            while (this.nextEntry == null && currentState != MergingIteratorState.DONE) {
+                switch (currentState) {
+                    case L1:
+                        processL1();
+                        break;
+                    case L2:
+                        processL2();
+                        break;
+                    case DELEGATE:
+                        processDelegate();
+                        break;
+                }
+            }
+        }
+
+        private void processL1() {
+            while (l1Iterator.hasNext()) {
+                Map.Entry<UK, CacheEntry<UV>> l1Entry = l1Iterator.next();
+                processedKeys.add(l1Entry.getKey()); // Track key
+                if (l1Entry.getValue().getValue() != null) { // Not a tombstone
+                    this.nextEntry = new AbstractMap.SimpleEntry<>(
+                            l1Entry.getKey(), l1Entry.getValue().getValue());
+                    return;
+                }
+            }
+            currentState = MergingIteratorState.L2;
+        }
+
+        private void processL2() {
+            while (l2Iterator.hasNext()) {
+                Map.Entry<UK, CacheEntry<UV>> l2Entry = l2Iterator.next();
+                UK key = l2Entry.getKey();
+                if (processedKeys.add(key)) { // If not already processed from L1
+                    // L2 entries are always clean and non-null
+                    this.nextEntry = new AbstractMap.SimpleEntry<>(
+                            key, l2Entry.getValue().getValue());
+                    return;
+                }
+            }
+            currentState = MergingIteratorState.DELEGATE;
+        }
+
+        private void processDelegate() {
+            while (delegateIterator.hasNext()) {
+                Map.Entry<UK, UV> delegateEntry = delegateIterator.next();
+                UK key = delegateEntry.getKey();
+                if (processedKeys.add(key)) { // If not already processed from L1 or L2
+                    this.nextEntry = delegateEntry;
+                    return;
+                }
+            }
+            currentState = MergingIteratorState.DONE;
+        }
+
+        @Override
+        public void close() throws Exception {
+            // No resources to close in this specific iterator implementation
+        }
     }
 
     private static <K_F, N_F, UK_C, UV_C> void flushL1Entries(
