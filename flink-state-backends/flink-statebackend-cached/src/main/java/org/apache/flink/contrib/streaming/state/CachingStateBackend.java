@@ -98,6 +98,23 @@ public class CachingStateBackend extends AbstractStateBackend
         }
     }
 
+    public CachingStateBackend(StateBackend delegateBackend, ReadableConfig config) {
+        this.delegateBackend = delegateBackend;
+        this.l1CacheSize = config.get(CachingStateBackendFactory.L1_CACHE_SIZE_CONFIG);
+        this.l2CacheSize = config.get(CachingStateBackendFactory.L2_CACHE_SIZE_CONFIG);
+        this.maxActiveNamespaces = config.get(CachingStateBackendFactory.MAX_ACTIVE_NAMESPACES_CONFIG);
+        this.maxCacheMemoryMb = config.get(CachingStateBackendFactory.MAX_CACHE_MEMORY_MB_CONFIG);
+        this.cachePolicyType = config.get(CachingStateBackendFactory.CACHE_POLICY_CONFIG);
+        this.mapL1KeyPresenceCacheSize = config.get(CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG);
+        this.mapL2KeyPresenceCacheSize = config.get(CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG);
+        this.mapCacheHitRateThreshold = config.get(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG);
+        this.mapCacheHitRateWindowSize = config.get(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
+        this.mapCacheMinAccessesForBypassCheck = config.get(CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
+        this.mapKeyPresenceCacheEnabled = config.get(CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG);
+        this.mapBypassEnabled = config.get(CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG);
+        this.mapPresenceCacheImpl = config.get(CachingStateBackendFactory.MAP_PRESENCE_CACHE_IMPL);
+    }
+
     @Override
     public <K> AbstractKeyedStateBackend<K> createKeyedStateBackend(
             Environment env,
@@ -248,6 +265,11 @@ public class CachingStateBackend extends AbstractStateBackend
     @Override
     public StateBackend configure(ReadableConfig config, ClassLoader classLoader)
             throws IllegalConfigurationException {
-        return this;
+
+        if (delegateBackend instanceof ConfigurableStateBackend) {
+            return new CachingStateBackend(((ConfigurableStateBackend) delegateBackend).configure(config, classLoader), config);
+        } else {
+            return new CachingStateBackend(delegateBackend, config);
+        }
     }
 }

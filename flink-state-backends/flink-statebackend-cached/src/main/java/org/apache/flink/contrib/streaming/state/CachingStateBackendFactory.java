@@ -135,52 +135,7 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
     @Override
     public CachingStateBackend createFromConfig(ReadableConfig config, ClassLoader classLoader)
             throws IllegalStateException, java.io.IOException {
-        long l1CacheSize =
-                config.getOptional(L1_CACHE_SIZE_CONFIG)
-                        .orElseGet(
-                                () -> {
-                                    if (config instanceof Configuration) {
-                                        return ((Configuration) config)
-                                                .getLong(
-                                                        L1_CACHE_SIZE_KEY_OLD_STRING,
-                                                        L1_CACHE_SIZE_CONFIG.defaultValue());
-                                    } else {
-                                        System.err.println(
-                                                "Warning: Could not read old L1 cache size key '"
-                                                        + L1_CACHE_SIZE_KEY_OLD_STRING
-                                                        + "' from non-Configuration ReadableConfig. Using default.");
-                                        return L1_CACHE_SIZE_CONFIG.defaultValue();
-                                    }
-                                });
-        long l2CacheSize =
-                config.getOptional(L2_CACHE_SIZE_CONFIG)
-                        .orElseGet(
-                                () -> {
-                                    if (config instanceof Configuration) {
-                                        return ((Configuration) config)
-                                                .getLong(
-                                                        L2_CACHE_SIZE_KEY_OLD_STRING,
-                                                        L2_CACHE_SIZE_CONFIG.defaultValue());
-                                    } else {
-                                        System.err.println(
-                                                "Warning: Could not read old L2 cache size key '"
-                                                        + L2_CACHE_SIZE_KEY_OLD_STRING
-                                                        + "' from non-Configuration ReadableConfig. Using default.");
-                                        return L2_CACHE_SIZE_CONFIG.defaultValue();
-                                    }
-                                });
-        long maxActiveNamespaces = config.get(MAX_ACTIVE_NAMESPACES_CONFIG);
-        long maxCacheMemoryMb = config.get(MAX_CACHE_MEMORY_MB_CONFIG);
-        CachePolicyType cachePolicy = config.get(CACHE_POLICY_CONFIG);
-        long mapL1KeyPresenceCacheSize = config.get(MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG);
-        long mapL2KeyPresenceCacheSize = config.get(MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG);
-
-        double mapCacheHitRateThreshold = config.get(MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG);
-        long mapCacheHitRateWindowSize = config.get(MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
-        long mapCacheMinAccessesForBypassCheck = config.get(MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
-        boolean mapKeyPresenceCacheEnabled = config.get(MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG);
-        boolean mapBypassEnabled = config.get(MAP_BYPASS_ENABLED_CONFIG);
-        PresenceCacheImplementation mapPresenceCacheImpl = config.get(MAP_PRESENCE_CACHE_IMPL);
+        
 
         // Create the delegate backend. Default to RocksDBStateBackend for now.
         // A more flexible approach might allow specifying the delegate factory in config.
@@ -216,13 +171,6 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
         // long)
         // delegateBackend is already StateBackend. l1CacheSize, l2CacheSize, maxActiveNamespaces
         // are already long.
-        return new CachingStateBackend(
-                        delegateBackend, l1CacheSize, l2CacheSize, maxActiveNamespaces,
-                        maxCacheMemoryMb, cachePolicy,
-                        mapL1KeyPresenceCacheSize, mapL2KeyPresenceCacheSize,
-                        mapCacheHitRateThreshold, mapCacheHitRateWindowSize, mapCacheMinAccessesForBypassCheck,
-                        mapKeyPresenceCacheEnabled,
-                        mapBypassEnabled,
-                        mapPresenceCacheImpl);
+        return new CachingStateBackend(delegateBackend, config);
     }
 }

@@ -228,27 +228,10 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                             N_F originalDelegateNamespaceContext = null;
                             try {
                                 originalKeyContext = ownerBackend.getCurrentKey();
-                                // Capture the actual current namespace from the backend's perspective.
-                                // The CachingInternalState holds this. Since PerKeyMapCache is static,
-                                // we assume the backend provides a way to get the state object.
-                                // Here, we'll assume a method on the backend can give us the current Caching state
-                                // and from there the namespace.
-                                // For now, we'll assume there is a way to get the current namespace of the state object.
-                                // The main issue is that `this.mainContextDelegateNamespace` is stale.
-                                // A pragmatic fix is to have the backend hold the current namespace.
-                                // Let's assume the backend has a method like `getCurrentStateNamespace`
-                                // If not, we need to refactor to pass it down.
-                                // Given the existing code, `this.mainContextDelegateNamespace` is what's available
-                                // but it's likely incorrect. Let's trust the user's report and fix with what we have.
-                                // The issue is that the outer class holds the namespace, and this static inner class can't access it.
-                                // The 'mainContextDelegateNamespace' is a flawed attempt to pass it.
-                                // A proper fix involves more refactoring. A minimal fix is to ensure at least key is restored.
-                                // Let's assume the user wants a more correct fix.
-                                // The passed `delegateState` is an `InternalMapState`. Let's see if we can get the namespace from the `backend`.
-                                // The `backend` is a `CachingKeyedStateBackend`. Let's assume it has a method to get the current namespace.
-                                // Looking at the context, we can see `mainContextDelegateNamespace` is passed from `getOrCreatePerKeyMapCache` which calls `getCurrentNamespace()`
-                                // So let's stick to fixing the logic with a proper try-finally and correct restoration.
                                 originalDelegateNamespaceContext = this.mainContextDelegateNamespace;
+                                LOG.debug("L1-Evict-Flush: CONTEXT SWITCH. Original(key={}, ns={}). Setting to(key={}, ns={}) for UK {}",
+                                        originalKeyContext, originalDelegateNamespaceContext,
+                                        flinkKey, cacheNamespace, evictedL1MapEntry.getKey());
 
                                 ownerBackend.setCurrentKey(flinkKey);
                                 delegateState.setCurrentNamespace(cacheNamespace);
@@ -270,6 +253,11 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                                 + evictedUK,
                                         e);
                             } finally {
+                                K_F keyAfter = ownerBackend.getCurrentKey();
+                                // We cannot get the namespace from the delegate, so we log what it was set to.
+                                LOG.debug("L1-Evict-Flush: CONTEXT RESTORE. Before restore(key={}, ns={}). Restored to(key={}, ns={}). For UK {}",
+                                        keyAfter, cacheNamespace,
+                                        originalKeyContext, originalDelegateNamespaceContext, evictedL1MapEntry.getKey());
                                 ownerBackend.setCurrentKey(originalKeyContext);
                                 delegateState.setCurrentNamespace(originalDelegateNamespaceContext);
                             }
@@ -389,9 +377,10 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 DataOutputSerializer dos = userKeySerializerView.get();
                 dos.clear();
                 userKeySerializer.serialize(userKey, dos);
-                byte[] bytes = dos.getCopyOfBuffer();
+                byte[] bytes = dos.getSharedBuffer();
+                int len = dos.length();
                 MurmurHash3.LongPair out = new MurmurHash3.LongPair();
-                MurmurHash3.murmurhash3_x64_128(bytes, 0, bytes.length, 0, out);
+                MurmurHash3.murmurhash3_x64_128(bytes, 0, len, 0, out);
                 return out.val1;
             } catch (IOException e) {
                 // Should not happen with in-memory DataOutputSerializer
@@ -675,20 +664,36 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             }
             long bytesPerEntry = 16L;
             long numToEvict = (requiredBytes + bytesPerEntry - 1) / bytesPerEntry;
+            long freedBytes = 0;
 
-            List<Long> keysToRemove = new ArrayList<>();
+            List<Map.Entry<Long, Byte>> keysToRemove = new ArrayList<>();
             Iterator<Map.Entry<Long, Byte>> iter = cache.entrySet().iterator();
             while (iter.hasNext() && keysToRemove.size() < numToEvict) {
-                keysToRemove.add(iter.next().getKey());
+                keysToRemove.add(iter.next());
             }
 
-            for (Long key : keysToRemove) {
-                cache.remove(key);
+            for (Map.Entry<Long, Byte> entry : keysToRemove) {
+                Long key = entry.getKey();
+                Byte value = entry.getValue();
+
+                if (cache.remove(key) != null) {
+                    if (cache == l1PrimitivePresenceCache) {
+                        // Manually trigger the L1 eviction logic: demote to L2
+                        l2PrimitivePresenceCache.put(key, value);
+                        // The net memory change is 0, as an L1 entry is removed and an L2 entry is added.
+                        // The ownerBackend's memory counter is correctly unchanged.
+                        // We don't count this as "freed" bytes from the perspective of the caller,
+                        // as the goal is to reduce total memory, which this action alone doesn't do.
+                        // However, the `put` to L2 might evict an entry from L2, which *will* free memory
+                        // and be reported by L2's eviction listener.
+                    } else { // It is the l2PrimitivePresenceCache
+                        // Manually trigger the L2 eviction logic
+                        ownerBackend.reportCacheMemoryReleased(bytesPerEntry);
+                        freedBytes += bytesPerEntry;
+                    }
+                }
             }
-            // Memory reporting is handled by the eviction listeners on the primitive cache.
-            // We can't know exactly how much was freed (e.g., L1 evict to L2 is net 0),
-            // so we return 0 and rely on the global counter being correct.
-            return 0L;
+            return freedBytes;
         }
 
 
@@ -812,7 +817,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                 backend.setCurrentKey(perKeyCache.flinkKey);
                                 delegateState.setCurrentNamespace(perKeyCache.cacheNamespace);
                                 flushL1Entries(perKeyCache, perKeyCache.flinkKey,
-                                        perKeyCache.cacheNamespace, backend, delegateState);
+                                        perKeyCache.cacheNamespace, backend, delegateState, NCDN);
                                 perKeyCache.l2MapEntries.clear(); // Should trigger memory reporting
                                                                   // via its own eviction
                                 if (perKeyCache.keyPresenceCacheEnabled) { // Guard presence cache
@@ -911,72 +916,95 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
 
         CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> flinkKeyCaches =
-                namespaceCaches.get(namespace);
-        if (flinkKeyCaches == null) {
-            // Create a new cache for Flink keys under this namespace
-            flinkKeyCaches = createCachePolicyForHierarchicalCache(
-                    this.maxFlinkKeysWithActiveCachesPerNamespace, evictedFlinkKeyEntry -> {
-                        // When a FlinkKey's cache is evicted from its namespace cache, flush its L1
-                        // entries
-                        PerKeyMapCache<UK, UV, K, N> perKeyCache = evictedFlinkKeyEntry.getValue();
-                        if (perKeyCache != null) {
-                            try {
-                                // Context for delegateState should be set to this perKeyCache's
-                                // Flink key and namespace
-                                K originalKey = backend.getCurrentKey();
-                                N originalNamespace = getCurrentNamespace(); // Corrected
+                namespaceCaches.computeIfAbsent(
+                        namespace,
+                        n -> {
+                            // Create a new cache for Flink keys under this namespace
+                            return createCachePolicyForHierarchicalCache(
+                                    this.maxFlinkKeysWithActiveCachesPerNamespace,
+                                    evictedFlinkKeyEntry -> {
+                                        // When a FlinkKey's cache is evicted from its namespace
+                                        // cache, flush its L1
+                                        // entries
+                                        PerKeyMapCache<UK, UV, K, N> perKeyCache =
+                                                evictedFlinkKeyEntry.getValue();
+                                        if (perKeyCache != null) {
+                                            try {
+                                                // Context for delegateState should be set to this
+                                                // perKeyCache's
+                                                // Flink key and namespace
+                                                K originalKey = backend.getCurrentKey();
+                                                N originalNamespace =
+                                                        getCurrentNamespace(); // Corrected
 
-                                backend.setCurrentKey(perKeyCache.flinkKey);
-                                delegateState.setCurrentNamespace(perKeyCache.cacheNamespace);
+                                                backend.setCurrentKey(perKeyCache.flinkKey);
+                                                delegateState.setCurrentNamespace(
+                                                        perKeyCache.cacheNamespace);
 
-                                flushL1Entries(perKeyCache, perKeyCache.flinkKey,
-                                        perKeyCache.cacheNamespace, backend, delegateState);
-                                perKeyCache.l2MapEntries.clear();
-                                if (perKeyCache.keyPresenceCacheEnabled) {
-                                    perKeyCache.l1KeyPresenceCache.clear();
-                                    perKeyCache.l2KeyPresenceCache.clear();
-                                }
+                                                flushL1Entries(
+                                                        perKeyCache,
+                                                        perKeyCache.flinkKey,
+                                                        perKeyCache.cacheNamespace,
+                                                        backend,
+                                                        delegateState,
+                                                        originalNamespace);
+                                                perKeyCache.l2MapEntries.clear();
+                                                if (perKeyCache.keyPresenceCacheEnabled) {
+                                                    perKeyCache.l1KeyPresenceCache.clear();
+                                                    perKeyCache.l2KeyPresenceCache.clear();
+                                                }
 
-                                // Unregister metrics for this cache so that future instances can
-                                // re-register cleanly.
-                                // perKeyCache.closeMetrics();
+                                                // Unregister metrics for this cache so that future
+                                                // instances can
+                                                // re-register cleanly.
+                                                // perKeyCache.closeMetrics();
 
-                                // Restore original context
-                                if (originalKey != null)
-                                    backend.setCurrentKey(originalKey);
-                                else
-                                    backend.setCurrentKey(null);
-                                if (originalNamespace != null)
-                                    delegateState.setCurrentNamespace(originalNamespace);
-                                else
-                                    delegateState.setCurrentNamespace(null);
+                                                // Restore original context
+                                                if (originalKey != null)
+                                                    backend.setCurrentKey(originalKey);
+                                                else backend.setCurrentKey(null);
+                                                if (originalNamespace != null)
+                                                    delegateState.setCurrentNamespace(
+                                                            originalNamespace);
+                                                else delegateState.setCurrentNamespace(null);
 
-                            } catch (Exception e) {
-                                LOG.error(
-                                        "Error flushing PerKeyMapCache during Flink key eviction from namespace {}: Flink key {}",
-                                        namespace, evictedFlinkKeyEntry.getKey(), e);
-                                throw new RuntimeException(
-                                        "Error during Flink key cache eviction and flush for Flink key: "
-                                                + evictedFlinkKeyEntry.getKey(),
-                                        e);
-                            }
-                        }
-                    });
-            namespaceCaches.put(namespace, flinkKeyCaches);
-        }
+                                            } catch (Exception e) {
+                                                LOG.error(
+                                                        "Error flushing PerKeyMapCache during Flink key eviction from namespace {}: Flink key {}",
+                                                        n,
+                                                        evictedFlinkKeyEntry.getKey(),
+                                                        e);
+                                                throw new RuntimeException(
+                                                        "Error during Flink key cache eviction and flush for Flink key: "
+                                                                + evictedFlinkKeyEntry.getKey(),
+                                                        e);
+                                            }
+                                        }
+                                    });
+                        });
 
-        PerKeyMapCache<UK, UV, K, N> perKeyCache = flinkKeyCaches.get(key);
-        if (perKeyCache == null) {
-            perKeyCache = new PerKeyMapCache<>(this.l1CacheSizePerMap, this.l2CacheSizePerMap,
-                    this.delegateState, this.backend, key, namespace, getCurrentNamespace(),
-                    this.cachePolicyType, this.mapL1KeyPresenceCacheSize,
-                    this.mapL2KeyPresenceCacheSize, this.keyPresenceCacheEnabled,
-                    this.mapPresenceCacheImpl, this.userKeySerializer);
-            flinkKeyCaches.put(key, perKeyCache);
-            // perKeyCache.registerMetrics(this.metrics.addGroup("perKeyCache"), key,
-            //         getCurrentNamespace());
-        }
-        return perKeyCache;
+        return flinkKeyCaches.computeIfAbsent(
+                key,
+                k -> {
+                    PerKeyMapCache<UK, UV, K, N> perKeyCache =
+                            new PerKeyMapCache<>(
+                                    this.l1CacheSizePerMap,
+                                    this.l2CacheSizePerMap,
+                                    this.delegateState,
+                                    this.backend,
+                                    k,
+                                    namespace,
+                                    getCurrentNamespace(),
+                                    this.cachePolicyType,
+                                    this.mapL1KeyPresenceCacheSize,
+                                    this.mapL2KeyPresenceCacheSize,
+                                    this.keyPresenceCacheEnabled,
+                                    this.mapPresenceCacheImpl,
+                                    this.userKeySerializer);
+                    // perKeyCache.registerMetrics(this.metrics.addGroup("perKeyCache"), k,
+                    //         getCurrentNamespace());
+                    return perKeyCache;
+                });
     }
 
     private void updateCacheBypassCondition(boolean resolvedByCache) {
@@ -1515,30 +1543,49 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
     @Override
     public void flushToUnderlyingState() throws IOException {
-        for (Map.Entry<N, CachePolicy<K, PerKeyMapCache<UK, UV, K, N>>> nsEntry : namespaceCaches
-                .entrySet()) {
-            N namespace = nsEntry.getKey();
-            CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> keyCaches = nsEntry.getValue();
+        K originalKey = backend.getCurrentKey();
+        N originalNamespace = getCurrentNamespace();
+        try {
+            for (Map.Entry<N, CachePolicy<K, PerKeyMapCache<UK, UV, K, N>>> nsEntry : namespaceCaches
+                    .entrySet()) {
+                N namespace = nsEntry.getKey();
+                CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> keyCaches = nsEntry.getValue();
 
-            List<K> flinkKeysInCache = new ArrayList<>();
-            for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> keyEntry : keyCaches.entrySet()) {
-                flinkKeysInCache.add(keyEntry.getKey());
-            }
-
-            for (K flinkKey : flinkKeysInCache) {
-                PerKeyMapCache<UK, UV, K, N> perKeyCache = keyCaches.get(flinkKey);
-                if (perKeyCache != null) {
-                    try {
-                        if (flinkKey != null) {
-                            flushL1Entries(perKeyCache, flinkKey, namespace, this.backend,
-                                    this.delegateState);
+                // To avoid ConcurrentModificationException, we iterate over a copy of the entries.
+                // This is safer and more efficient than iterating over keys and then looking up
+                // the values, which might change cache order (e.g., in an LRU cache).
+                List<Map.Entry<K, PerKeyMapCache<UK, UV, K, N>>> keyEntries = new ArrayList<>();
+                for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> entry : keyCaches.entrySet()) {
+                    keyEntries.add(entry);
+                }
+                for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> keyEntry : keyEntries) {
+                    K flinkKey = keyEntry.getKey();
+                    PerKeyMapCache<UK, UV, K, N> perKeyCache = keyEntry.getValue();
+                    if (perKeyCache != null) {
+                        try {
+                            if (flinkKey != null) {
+                                flushL1Entries(
+                                        perKeyCache,
+                                        flinkKey,
+                                        namespace,
+                                        this.backend,
+                                        this.delegateState,
+                                        originalNamespace);
+                            }
+                        } catch (Exception e) {
+                            throw new IOException(
+                                    "Failed to flush map entries for Flink key: "
+                                            + flinkKey
+                                            + " in namespace: "
+                                            + namespace,
+                                    e);
                         }
-                    } catch (Exception e) {
-                        throw new IOException("Failed to flush map entries for Flink key: "
-                                + flinkKey + " in namespace: " + namespace, e);
                     }
                 }
             }
+        } finally {
+            backend.setCurrentKey(originalKey);
+            setCurrentNamespace(originalNamespace);
         }
     }
 
@@ -1654,6 +1701,9 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     K originalKey = backend.getCurrentKey();
                     N originalNamespace = getCurrentNamespace();
                     try {
+                        LOG.debug("evictEntriesToFreeMemory: CONTEXT SWITCH for per-key eviction. Original(key={}, ns={}). Setting to(key={}, ns={}).",
+                                originalKey, originalNamespace,
+                                perKeyCache.flinkKey, perKeyCache.cacheNamespace);
                         backend.setCurrentKey(perKeyCache.flinkKey); // Set context for this specific
                                                                      // key's cache
                         delegateState.setCurrentNamespace(perKeyCache.cacheNamespace);
@@ -1662,9 +1712,14 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                 .evictToMeetMemoryLimit(targetBytesToFreeThisState - totalFreedBytes);
                         totalFreedBytes += freedThisCache;
                     } finally {
+                        K keyAfter = backend.getCurrentKey();
+                        N nsAfter = getCurrentNamespace();
                         // Restore original context
                         backend.setCurrentKey(originalKey);
                         delegateState.setCurrentNamespace(originalNamespace);
+                        LOG.debug("evictEntriesToFreeMemory: CONTEXT RESTORE. Before restore(key={}, ns={}). Restored to(key={}, ns={}).",
+                                keyAfter, nsAfter,
+                                originalKey, originalNamespace);
                     }
 
 
@@ -1828,14 +1883,18 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     private static <K_F, N_F, UK_C, UV_C> void flushL1Entries(
             PerKeyMapCache<UK_C, UV_C, K_F, N_F> perKeyCache, K_F flinkKey, N_F namespace,
             CachingKeyedStateBackend<K_F> backendForContext,
-            InternalMapState<K_F, N_F, UK_C, UV_C> delegateStateForContext) throws Exception {
+            InternalMapState<K_F, N_F, UK_C, UV_C> delegateStateForContext,
+            N_F originalNamespaceToRestore) throws Exception {
 
         if (flinkKey == null || perKeyCache == null || perKeyCache.l1MapEntries == null) {
             return;
         }
 
         K_F originalKey = backendForContext.getCurrentKey();
-        N_F originalNamespace = namespace;
+        LOG.debug(
+                "flushL1Entries: CONTEXT SWITCH. Original(key={}, ns={}). Setting to(key={}, ns={}).",
+                originalKey, originalNamespaceToRestore,
+                flinkKey, namespace);
 
         backendForContext.setCurrentKey(flinkKey);
         delegateStateForContext.setCurrentNamespace(namespace); // Use the namespace relevant to
@@ -1879,8 +1938,14 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 l1Iterator.remove();
             }
         } finally {
+            K_F keyAfter = backendForContext.getCurrentKey();
+            // We cannot read the namespace from the delegate, so we log what it was set to.
+            LOG.debug(
+                    "flushL1Entries: CONTEXT RESTORE. Before restore(key={}, ns={}). Restored to(key={}, ns={}).",
+                    keyAfter, namespace,
+                    originalKey, originalNamespaceToRestore);
             backendForContext.setCurrentKey(originalKey);
-            delegateStateForContext.setCurrentNamespace(originalNamespace);
+            delegateStateForContext.setCurrentNamespace(originalNamespaceToRestore);
         }
     }
 
