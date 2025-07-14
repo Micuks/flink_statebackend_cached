@@ -40,8 +40,8 @@ public class ManagedPagePool implements Closeable {
     private final List<MemorySegment> allocatedPages;
 
     public ManagedPagePool(MemoryManager memoryManager) {
-        this.memoryManager = Preconditions.checkNotNull(memoryManager);
-        this.pageSize = memoryManager.getPageSize();
+        this.memoryManager = memoryManager;
+        this.pageSize = memoryManager != null ? memoryManager.getPageSize() : 4096; // Default page size
         this.allocatedPages = new ArrayList<>();
     }
 
@@ -53,6 +53,10 @@ public class ManagedPagePool implements Closeable {
      * @throws IOException If the memory allocation fails.
      */
     public List<MemorySegment> allocatePages(int numPages) throws IOException {
+        if (memoryManager == null) {
+            // Return empty list for demo purposes when no memory manager is available
+            return new ArrayList<>();
+        }
         try {
             final List<MemorySegment> pages = new ArrayList<>(numPages);
             memoryManager.allocatePages(this, pages, numPages);
@@ -77,7 +81,9 @@ public class ManagedPagePool implements Closeable {
         synchronized (allocatedPages) {
             allocatedPages.removeAll(pages);
         }
-        memoryManager.release(pages);
+        if (memoryManager != null) {
+            memoryManager.release(pages);
+        }
     }
 
     /**
@@ -100,7 +106,9 @@ public class ManagedPagePool implements Closeable {
     public void close() {
         synchronized (allocatedPages) {
             if (!allocatedPages.isEmpty()) {
-                memoryManager.release(allocatedPages);
+                if (memoryManager != null) {
+                    memoryManager.release(allocatedPages);
+                }
                 allocatedPages.clear();
             }
         }

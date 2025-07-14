@@ -65,6 +65,7 @@ public class CachingStateBackend extends AbstractStateBackend
     private final boolean mapKeyPresenceCacheEnabled;
     private final boolean mapBypassEnabled;
     private final CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl;
+    private final boolean l2ManagedMemoryEnabled;
 
     public CachingStateBackend(
             StateBackend delegateBackend,
@@ -76,7 +77,8 @@ public class CachingStateBackend extends AbstractStateBackend
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
             boolean mapKeyPresenceCacheEnabled,
             boolean mapBypassEnabled,
-            CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl) {
+            CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
+            boolean l2ManagedMemoryEnabled) {
         this.delegateBackend = delegateBackend;
         this.l1CacheSize = l1CacheSize;
         this.l2CacheSize = l2CacheSize;
@@ -91,6 +93,7 @@ public class CachingStateBackend extends AbstractStateBackend
         this.mapKeyPresenceCacheEnabled = mapKeyPresenceCacheEnabled;
         this.mapBypassEnabled = mapBypassEnabled;
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
+        this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
 
         if (!(delegateBackend instanceof AbstractStateBackend)) {
             System.err.println(
@@ -113,6 +116,7 @@ public class CachingStateBackend extends AbstractStateBackend
         this.mapKeyPresenceCacheEnabled = config.get(CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG);
         this.mapBypassEnabled = config.get(CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG);
         this.mapPresenceCacheImpl = config.get(CachingStateBackendFactory.MAP_PRESENCE_CACHE_IMPL);
+        this.l2ManagedMemoryEnabled = config.get(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG);
     }
 
     @Override
@@ -168,7 +172,8 @@ public class CachingStateBackend extends AbstractStateBackend
                 this.mapCacheHitRateThreshold, this.mapCacheHitRateWindowSize, this.mapCacheMinAccessesForBypassCheck,
                 this.mapKeyPresenceCacheEnabled,
                 this.mapBypassEnabled,
-                this.mapPresenceCacheImpl);
+                this.mapPresenceCacheImpl,
+                this.l2ManagedMemoryEnabled);
     }
 
     @Override
@@ -260,6 +265,10 @@ public class CachingStateBackend extends AbstractStateBackend
 
     public boolean isMapBypassEnabled() {
         return mapBypassEnabled;
+    }
+
+    public boolean isL2ManagedMemoryEnabled() {
+        return l2ManagedMemoryEnabled;
     }
 
     @Override

@@ -24,7 +24,11 @@ import org.apache.flink.util.Preconditions;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
 /**
  * A key-value store that stores its data in off-heap memory pages managed by a {@link ManagedPagePool}.
@@ -35,6 +39,10 @@ public class OffHeapKVStore implements Closeable {
     private final ManagedPagePool pagePool;
     private final List<MemorySegment> pages;
     private final int pageSize;
+    
+    // Map from key hash to pointer for efficient lookups
+    private final Map<ByteArrayWrapper, OffHeapPointer> keyIndex;
+    private int entryCount = 0;
 
     private static final int PAGE_HEADER_SIZE = 4; // Stores the next free offset
     private static final int FREE_POINTER_OFFSET = 0;
@@ -47,6 +55,7 @@ public class OffHeapKVStore implements Closeable {
         this.pagePool = Preconditions.checkNotNull(pagePool);
         this.pages = new ArrayList<>();
         this.pageSize = pagePool.getPageSize();
+        this.keyIndex = new HashMap<>();
     }
 
     /**
@@ -60,6 +69,15 @@ public class OffHeapKVStore implements Closeable {
     public OffHeapPointer put(byte[] key, byte[] value) throws IOException {
         Preconditions.checkNotNull(key);
         Preconditions.checkNotNull(value);
+
+        ByteArrayWrapper keyWrapper = new ByteArrayWrapper(key);
+        
+        // Remove old entry if it exists
+        OffHeapPointer oldPointer = keyIndex.remove(keyWrapper);
+        if (oldPointer != null) {
+            remove(oldPointer);
+            entryCount--;
+        }
 
         int requiredSize = RECORD_HEADER_SIZE + key.length + value.length;
         if (requiredSize > pageSize - PAGE_HEADER_SIZE) {
@@ -79,7 +97,103 @@ public class OffHeapKVStore implements Closeable {
 
         page.putInt(FREE_POINTER_OFFSET, freeOffset + requiredSize);
 
-        return new OffHeapPointer(pageId, freeOffset, key.length, value.length);
+        OffHeapPointer pointer = new OffHeapPointer(pageId, freeOffset, key.length, value.length);
+        keyIndex.put(keyWrapper, pointer);
+        entryCount++;
+        
+        return pointer;
+    }
+    
+    /**
+     * Gets the value for a given key.
+     *
+     * @param key The key to look up.
+     * @return The value as a byte array, or null if the key is not found.
+     */
+    public byte[] get(byte[] key) {
+        ByteArrayWrapper keyWrapper = new ByteArrayWrapper(key);
+        OffHeapPointer pointer = keyIndex.get(keyWrapper);
+        if (pointer == null) {
+            return null;
+        }
+        return get(pointer, false); // false = get value, not key
+    }
+    
+    /**
+     * Removes an entry by key.
+     *
+     * @param key The key to remove.
+     * @return The removed value, or null if the key was not found.
+     */
+    public byte[] remove(byte[] key) {
+        ByteArrayWrapper keyWrapper = new ByteArrayWrapper(key);
+        OffHeapPointer pointer = keyIndex.remove(keyWrapper);
+        if (pointer == null) {
+            return null;
+        }
+        
+        byte[] value = get(pointer, false);
+        remove(pointer);
+        entryCount--;
+        return value;
+    }
+    
+    /**
+     * Returns true if this store contains no entries.
+     */
+    public boolean isEmpty() {
+        return entryCount == 0;
+    }
+    
+    /**
+     * Returns the number of entries in this store.
+     */
+    public int size() {
+        return entryCount;
+    }
+    
+    /**
+     * Returns an iterator over the keys in this store.
+     */
+    public Iterator<byte[]> keyIterator() {
+        return keyIndex.keySet().stream().map(wrapper -> wrapper.data).iterator();
+    }
+    
+    /**
+     * Clears all entries from this store.
+     */
+    public void clear() {
+        keyIndex.clear();
+        entryCount = 0;
+        // Reset free pointers in all pages
+        for (MemorySegment page : pages) {
+            page.putInt(FREE_POINTER_OFFSET, PAGE_HEADER_SIZE);
+        }
+    }
+    
+    /**
+     * Evicts approximately the specified number of bytes from the store.
+     * This is a simple implementation that just clears pages from the end.
+     * 
+     * @param targetBytes The target number of bytes to free.
+     * @return The actual number of bytes freed.
+     */
+    public long evict(long targetBytes) {
+        if (targetBytes <= 0 || pages.isEmpty()) {
+            return 0;
+        }
+        
+        // Simple eviction: clear everything if requested
+        long freedBytes = getEstimatedMemoryUsageBytes();
+        clear();
+        return Math.min(freedBytes, targetBytes);
+    }
+    
+    /**
+     * Returns an estimate of the memory usage in bytes.
+     */
+    public long getEstimatedMemoryUsageBytes() {
+        return (long) pages.size() * pageSize;
     }
 
     /**
@@ -133,9 +247,35 @@ public class OffHeapKVStore implements Closeable {
 
     @Override
     public void close() {
+        keyIndex.clear();
         if (pagePool != null && pages != null && !pages.isEmpty()) {
             pagePool.freePages(pages);
             pages.clear();
+        }
+    }
+    
+    /**
+     * Wrapper class for byte arrays to use as keys in HashMap.
+     */
+    private static final class ByteArrayWrapper {
+        final byte[] data;
+        private final int hash;
+        
+        ByteArrayWrapper(byte[] data) {
+            this.data = data;
+            this.hash = Arrays.hashCode(data);
+        }
+        
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj) return true;
+            if (!(obj instanceof ByteArrayWrapper)) return false;
+            return Arrays.equals(data, ((ByteArrayWrapper) obj).data);
+        }
+        
+        @Override
+        public int hashCode() {
+            return hash;
         }
     }
 } 

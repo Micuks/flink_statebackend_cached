@@ -117,6 +117,12 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .booleanType()
                     .defaultValue(true);
 
+    public static final ConfigOption<Boolean> L2_MANAGED_MEMORY_ENABLED_CONFIG =
+            ConfigOptions.key("state.backend.cached.l2.managed.enable")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription("Enable managed memory for L2 cache.");
+
     public enum PresenceCacheImplementation {
         DEFAULT,
         PRIMITIVE_MAP

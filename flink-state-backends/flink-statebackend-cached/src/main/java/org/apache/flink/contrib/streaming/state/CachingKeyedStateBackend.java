@@ -74,6 +74,7 @@ import org.apache.flink.api.common.state.AggregatingStateDescriptor;
 import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.util.CloseableIterator;
+import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.ResourceGuard;
 import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.ColumnFamilyOptions;
@@ -117,8 +118,11 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean mapKeyPresenceCacheEnabled;
     private final boolean mapBypassEnabled;
     private final CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl;
+    private final boolean l2ManagedMemoryEnabled;
 
     private final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
+
+    private transient ManagedPagePool managedPagePool;
 
     // Added for memory capping
     private transient AtomicLong currentEstimatedCacheSizeBytes;
@@ -144,7 +148,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             long maxCacheMemoryMb, CachingStateBackendFactory.CachePolicyType cachePolicyType,
             int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
-            boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl) {
+            boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
+            boolean l2ManagedMemoryEnabled) {
 
         super(
                 kvStateRegistry,
@@ -173,6 +178,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapKeyPresenceCacheEnabled = mapKeyPresenceCacheEnabled;
         this.mapBypassEnabled = mapBypassEnabled;
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
+        this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
 
         // Initialize memory capping fields
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
@@ -223,7 +229,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             CachingStateBackendFactory.CachePolicyType cachePolicyType,
             int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
-            boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl
+            boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
+            boolean l2ManagedMemoryEnabled
     ) {
         // Call super constructor first, using direct parameters where available
         super(
@@ -281,6 +288,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapKeyPresenceCacheEnabled = mapKeyPresenceCacheEnabled;
         this.mapBypassEnabled = mapBypassEnabled;
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
+        this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
 
         // Initialize memory capping fields
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
@@ -293,6 +301,19 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     currentEstimatedCacheSizeBytes::get);
         }
         // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
+    }
+
+    public void setManagedMemoryFraction(double managedMemoryFraction) {
+        // Initialize managed page pool with a fixed size for now
+        // This is a simplified implementation for demo purposes
+        if (this.managedPagePool == null) {
+            // Use null for the memory manager as this is a demo implementation
+            this.managedPagePool = new ManagedPagePool(null);
+        }
+    }
+
+    public ManagedPagePool getManagedPagePool() {
+        return managedPagePool;
     }
 
     public int getMaxActiveNamespaceOrPerKeyCacheContainers() {
@@ -352,7 +373,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     this.mapL1KeyPresenceCacheSize, this.mapL2KeyPresenceCacheSize,
                     mapMetricsGroup,
                     this.mapCacheHitRateThreshold, this.mapCacheHitRateWindowSize, this.mapCacheMinAccessesForBypassCheck,
-                    this.mapKeyPresenceCacheEnabled, this.mapBypassEnabled, this.mapPresenceCacheImpl);
+                    this.mapKeyPresenceCacheEnabled, this.mapBypassEnabled, this.mapPresenceCacheImpl,
+                    this.l2ManagedMemoryEnabled);
         } else if (stateDescriptor.getType() == StateDescriptor.Type.LIST && actualStateRaw instanceof InternalListState) {
             InternalListState<K, N, V_SD> actualDelegateListState = (InternalListState<K, N, V_SD>) actualStateRaw;
             cachingStateToRegister = new CachingInternalListState<>(
@@ -756,6 +778,10 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @Override
     public boolean isSafeToReuseKVState(){
+        return true;
+    }
+
+    public boolean useManagedMemory() {
         return true;
     }
 

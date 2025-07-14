@@ -172,7 +172,8 @@ class CachingInternalMapStateTest {
                 hitRateWindowSize, // USE PARAMETER
                 minAccessesForBypass, // USE PARAMETER
                 enableKeyPresenceCache, // mapKeyPresenceCacheEnabled
-                enableBypass // mapBypassEnabled
+                enableBypass, // mapBypassEnabled
+                CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP // mapPresenceCacheImpl
         ));
 
         MetricGroup mapMetrics = new UnregisteredMetricsGroup().addGroup("testState");
