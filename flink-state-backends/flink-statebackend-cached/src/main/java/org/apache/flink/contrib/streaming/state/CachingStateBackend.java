@@ -173,7 +173,8 @@ public class CachingStateBackend extends AbstractStateBackend
                 this.mapKeyPresenceCacheEnabled,
                 this.mapBypassEnabled,
                 this.mapPresenceCacheImpl,
-                this.l2ManagedMemoryEnabled);
+                this.l2ManagedMemoryEnabled,
+                env.getMemoryManager());
     }
 
     @Override

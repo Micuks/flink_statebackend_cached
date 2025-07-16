@@ -179,48 +179,70 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             this.userValueSerializer = userValueSerializer;
             this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
 
-            this.userValueSerializerView = ThreadLocal.withInitial(() -> new DataOutputSerializer(128));
-            this.userValueDeserializerView = ThreadLocal.withInitial(DataInputDeserializer::new);
-
-            if (this.presenceCacheImpl == CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP) {
-                this.userKeySerializerView = ThreadLocal.withInitial(() -> new DataOutputSerializer(32));
-            } else {
-                this.userKeySerializerView = null;
-            }
-
-            if (this.keyPresenceCacheEnabled) {
-                if (presenceCacheImpl == CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP) {
-                    // L2 primitive cache
-                    this.l2PrimitivePresenceCache = new PrimitivePresenceCache(mapL2KeyPresenceCacheSize,
-                            evicted -> ownerBackend.reportCacheMemoryReleased(16L));
-
-                    // L1 primitive cache
-                    this.l1PrimitivePresenceCache = new PrimitivePresenceCache(mapL1KeyPresenceCacheSize,
-                            evictedL1 -> {
-                                this.l2PrimitivePresenceCache.put(evictedL1.getKey(), evictedL1.getValue());
-                                // Eviction from L1 means release, but put to L2 means add. Net effect on total memory is 0.
-                                // Eliminate both reports.
+            this.userKeySerializerView =
+                    ThreadLocal.withInitial(
+                            () -> {
+                                if (this.userKeySerializer != null) {
+                                    return new DataOutputSerializer(128);
+                                } else {
+                                    return new DataOutputSerializer(0);
+                                }
                             });
 
+            this.userValueSerializerView =
+                    ThreadLocal.withInitial(
+                            () -> {
+                                if (this.userValueSerializer != null) {
+                                    return new DataOutputSerializer(128);
+                                } else {
+                                    return new DataOutputSerializer(0);
+                                }
+                            });
+            this.userValueDeserializerView =
+                    ThreadLocal.withInitial(
+                            () -> {
+                                if (this.userValueSerializer != null) {
+                                    return new DataInputDeserializer();
+                                } else {
+                                    return new DataInputDeserializer(new byte[0]);
+                                }
+                            });
+
+            if (this.keyPresenceCacheEnabled) {
+                if (presenceCacheImpl
+                        == CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP) {
+                    this.l1PrimitivePresenceCache = new TinyLFUMap<>(
+                            mapL1KeyPresenceCacheSize,
+                            entry -> {
+                                if (entry.getValue() != null) {
+                                    ownerBackend.reportCacheMemoryAdded(16L);
+                                }
+                            });
+                    this.l2PrimitivePresenceCache = new TinyLFUMap<>(
+                            mapL2KeyPresenceCacheSize,
+                            entry -> {
+                                if (entry.getValue() != null) {
+                                    ownerBackend.reportCacheMemoryAdded(16L);
+                                }
+                            });
                     // Init old caches to NoOp
                     this.l1KeyPresenceCache = new NoOpCachePolicy<>();
                     this.l2KeyPresenceCache = new NoOpCachePolicy<>();
                 } else {
-                    // Initialize L2 Presence Cache
-                    this.l2KeyPresenceCache =
-                            createCachePolicyInstance(cachePolicyType, mapL2KeyPresenceCacheSize, null,
-                                    ownerBackend, true, this.keyPresenceCacheEnabled);
-
-                    // Initialize L1 Presence Cache (with eviction to L2 Presence Cache)
-                    this.l1KeyPresenceCache = createCachePolicyInstance(cachePolicyType,
-                            mapL1KeyPresenceCacheSize, evictedL1PresenceEntry -> {
-                                if (this.keyPresenceCacheEnabled
-                                        && evictedL1PresenceEntry.getValue() != null) {
-                                    this.l2KeyPresenceCache.put(evictedL1PresenceEntry.getKey(),
-                                            CacheEntry.clean(
-                                                    evictedL1PresenceEntry.getValue().getValue()));
+                    this.l1KeyPresenceCache = new LRUMap<>(
+                            mapL1KeyPresenceCacheSize,
+                            entry -> {
+                                if (entry.getValue() != null) {
+                                    ownerBackend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
                                 }
-                            }, ownerBackend, true, this.keyPresenceCacheEnabled);
+                            });
+                    this.l2KeyPresenceCache = new LRUMap<>(
+                            mapL2KeyPresenceCacheSize,
+                            entry -> {
+                                if (entry.getValue() != null) {
+                                    ownerBackend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
+                                }
+                            });
                     // Init primitive caches to NoOp
                     this.l1PrimitivePresenceCache = new NoOpCachePolicy<>();
                     this.l2PrimitivePresenceCache = new NoOpCachePolicy<>();
@@ -299,6 +321,37 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                         }
                         // --- END OF FIX ---
                     }, ownerBackend, false, false);
+        }
+
+        private void initializeViews() {
+            this.userKeySerializerView =
+                    ThreadLocal.withInitial(
+                            () -> {
+                                if (this.userKeySerializer != null) {
+                                    return new DataOutputSerializer(128);
+                                } else {
+                                    return new DataOutputSerializer(0);
+                                }
+                            });
+
+            this.userValueSerializerView =
+                    ThreadLocal.withInitial(
+                            () -> {
+                                if (this.userValueSerializer != null) {
+                                    return new DataOutputSerializer(128);
+                                } else {
+                                    return new DataOutputSerializer(0);
+                                }
+                            });
+            this.userValueDeserializerView =
+                    ThreadLocal.withInitial(
+                            () -> {
+                                if (this.userValueSerializer != null) {
+                                    return new DataInputDeserializer();
+                                } else {
+                                    return new DataInputDeserializer(new byte[0]);
+                                }
+                            });
         }
 
         private <CK, CV_ENTRY_TYPE> CachePolicy<CK, CacheEntry<CV_ENTRY_TYPE>> createCachePolicyInstance(
@@ -809,12 +862,14 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         // Get the value serializer safely
         TypeSerializer<Map<UK, UV>> valueSerializer = delegateState.getValueSerializer();
         if (valueSerializer == null) {
-            throw new NullPointerException("Value serializer from delegate state is null. "
-                    + "Ensure the delegate state is properly initialized before creating CachingInternalMapState.");
+            throw new NullPointerException(
+                    "Value serializer from delegate state is null. "
+                            + "Ensure the delegate state is properly initialized before creating CachingInternalMapState.");
         }
         if (!(valueSerializer instanceof MapSerializer)) {
-            throw new IllegalArgumentException("Value serializer must be a MapSerializer but was "
-                    + valueSerializer.getClass().getName());
+            throw new IllegalArgumentException(
+                    "Value serializer must be a MapSerializer but was "
+                            + valueSerializer.getClass().getName());
         }
         MapSerializer<UK, UV> mapSerializer = (MapSerializer<UK, UV>) valueSerializer;
         this.userKeySerializer = mapSerializer.getKeySerializer();

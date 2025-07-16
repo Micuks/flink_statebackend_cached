@@ -48,6 +48,7 @@ import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.SnapshotType;
+import org.apache.flink.runtime.memory.MemoryManager;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
@@ -123,6 +124,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
 
     private transient ManagedPagePool managedPagePool;
+    private final transient MemoryManager memoryManager;
 
     // Added for memory capping
     private transient AtomicLong currentEstimatedCacheSizeBytes;
@@ -149,7 +151,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
             boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
-            boolean l2ManagedMemoryEnabled) {
+            boolean l2ManagedMemoryEnabled, MemoryManager memoryManager) {
 
         super(
                 kvStateRegistry,
@@ -179,11 +181,20 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapBypassEnabled = mapBypassEnabled;
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
         this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
+        this.memoryManager = memoryManager;
 
         // Initialize memory capping fields
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
         this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
         this.bytesSinceLastEvictionCheck = new AtomicLong(0L);
+
+        if (this.l2ManagedMemoryEnabled && this.memoryManager != null) {
+            LOG.info("L2 cache is configured to use managed memory. Max size: {} MB", this.maxCacheMemoryMb);
+            this.managedPagePool = new ManagedPagePool(this.memoryManager);
+        } else {
+            LOG.info("L2 cache is NOT using managed memory (or MemoryManager is null).");
+            this.managedPagePool = new ManagedPagePool(null);
+        }
 
         // Register memory usage gauge
         if (this.metricGroup != null) {
@@ -222,6 +233,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             @Nonnegative long writeBatchSize,
             MetricGroup metricGroup,
             @Nonnull Collection<KeyedStateHandle> stateHandles,
+            AbstractKeyedStateBackend<K> delegateKeyedStateBackend, // Add this
             int l1EntryCacheSize,
             int l2EntryCacheSize,
             int maxActiveNamespaceOrPerKeyCacheContainers,
@@ -230,7 +242,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
             boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
-            boolean l2ManagedMemoryEnabled
+            boolean l2ManagedMemoryEnabled,
+            MemoryManager memoryManager
     ) {
         // Call super constructor first, using direct parameters where available
         super(
@@ -245,33 +258,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 keyContext); // direct parameter
 
         // Now initialize the delegateKeyedStateBackend
-        this.delegateKeyedStateBackend = new RocksDBKeyedStateBackend<K>(
-                userCodeClassLoader,
-                instanceBasePath,
-                optionsContainer,
-                columnFamilyOptionsFactory,
-                kvStateRegistry,
-                keySerializer,
-                executionConfig,
-                ttlTimeProvider,
-                latencyTrackingStateConfig,
-                db,
-                kvStateInformation,
-                registeredPQStates,
-                keyGroupPrefixBytes,
-                cancelStreamRegistry,
-                keyGroupCompressionDecorator,
-                rocksDBResourceGuard,
-                checkpointSnapshotStrategy,
-                writeBatchWrapper,
-                defaultColumnFamilyHandle,
-                nativeMetricMonitor,
-                sharedRocksKeyBuilder,
-                priorityQueueFactory,
-                ttlCompactFiltersManager,
-                keyContext,
-                writeBatchSize
-        );
+        this.delegateKeyedStateBackend = delegateKeyedStateBackend;
         this.metricGroup = metricGroup;
 
         this.l1EntryCacheSize = l1EntryCacheSize;
@@ -289,6 +276,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapBypassEnabled = mapBypassEnabled;
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
         this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
+        this.memoryManager = memoryManager;
 
         // Initialize memory capping fields
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
