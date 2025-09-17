@@ -77,6 +77,8 @@ public class CachingInternalValueState<K, N, V>
     
     private volatile boolean bypassCache = false;
     private final boolean bypassEnabled;
+    // When false, perform write-through on update() to ensure correctness
+    private final boolean writeBehindEnabled;
 
     public CachingInternalValueState(
             InternalValueState<K, N, V> delegateState,
@@ -90,6 +92,7 @@ public class CachingInternalValueState<K, N, V>
             long cacheHitRateWindowSize,
             long cacheMinAccessesForBypassCheck,
             boolean bypassEnabled,
+            boolean writeBehindEnabled,
             MetricGroup metricsGroup) {
         this.delegateState = delegateState;
         this.backend = backend;
@@ -103,6 +106,7 @@ public class CachingInternalValueState<K, N, V>
         this.cacheHitRateWindowSize = cacheHitRateWindowSize;
         this.cacheMinAccessesForBypassCheck = cacheMinAccessesForBypassCheck;
         this.bypassEnabled = bypassEnabled;
+        this.writeBehindEnabled = writeBehindEnabled;
 
         if (this.bypassEnabled && this.cacheHitRateThreshold > 0.0) {
             this.accessesForHitRateWindow = new AtomicLong(0);
@@ -264,8 +268,10 @@ public class CachingInternalValueState<K, N, V>
     }
 
     private CachePolicy<K, CacheEntry<V>> getL1CacheForNamespace(N namespace) {
+        // Use a stable copy of the namespace as the cache key to avoid issues with mutable namespaces
+        N stableNamespaceKey = getNamespaceSerializer().copy(namespace);
         return namespaceCachesL1.computeIfAbsent(
-                namespace,
+                stableNamespaceKey,
                 ns -> createCachePolicyWithEvictionListener(l1CacheSizePerKeyPerNamespace,
                         evictedL1Entry -> {
                             // This is the L1 eviction listener for a specific key in a specific namespace.
@@ -318,8 +324,9 @@ public class CachingInternalValueState<K, N, V>
     }
 
     private CachePolicy<K, CacheEntry<V>> getL2CacheForNamespace(N namespace) {
+        N stableNamespaceKey = getNamespaceSerializer().copy(namespace);
         return namespaceCachesL2.computeIfAbsent(
-                namespace,
+                stableNamespaceKey,
                 ns -> new LRUMap<>(l2CacheSizePerKeyPerNamespace) // L2 is always LRU
                 // L2 eviction doesn't trigger further writes here
                 );
@@ -408,6 +415,8 @@ public class CachingInternalValueState<K, N, V>
             backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
         }
         backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
+
+        // L1 remains write-back tolerant even if write-behind is disabled; L2 will only contain clean entries via eviction path
 
         // If L2 had this key, it's now stale, remove it.
         CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);

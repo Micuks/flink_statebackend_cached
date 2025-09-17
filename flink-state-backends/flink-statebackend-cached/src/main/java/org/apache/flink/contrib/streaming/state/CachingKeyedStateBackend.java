@@ -26,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.RunnableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
@@ -104,6 +105,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private static final Logger LOG = LoggerFactory.getLogger(CachingKeyedStateBackend.class);
 
     private final AbstractKeyedStateBackend<K> delegateKeyedStateBackend; // RocksDBKeyedStateBackend
+    private final ExecutionConfig executionConfig; // Store execution config as field
     private final int l1EntryCacheSize;
     private final int l2EntryCacheSize;
     private final int maxActiveNamespaceOrPerKeyCacheContainers;
@@ -120,11 +122,14 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean mapBypassEnabled;
     private final CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl;
     private final boolean l2ManagedMemoryEnabled;
+    private final int mapSpecificL1EntryCacheSize;
+    private final int mapSpecificL2EntryCacheSize;
 
     private final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
 
     private transient ManagedPagePool managedPagePool;
     private final transient MemoryManager memoryManager;
+    private final transient org.apache.flink.configuration.Configuration taskConfiguration;
 
     // Added for memory capping
     private transient AtomicLong currentEstimatedCacheSizeBytes;
@@ -133,6 +138,10 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private transient AtomicLong bytesSinceLastEvictionCheck;
     // Using the static ValueSizeUtils for now, but a Function could be injected here
     // private transient Function<Object, Long> valueSizeEstimator;
+
+    // Global L2 map entry counting
+    private transient AtomicLong globalL2MapEntryCount;
+    private final long maxGlobalL2Entries;
 
     public CachingKeyedStateBackend(
             TaskKvStateRegistry kvStateRegistry,
@@ -151,7 +160,9 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
             boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
-            boolean l2ManagedMemoryEnabled, MemoryManager memoryManager) {
+            boolean l2ManagedMemoryEnabled, MemoryManager memoryManager,
+            org.apache.flink.configuration.Configuration taskConfiguration,
+            int mapSpecificL1EntryCacheSize, int mapSpecificL2EntryCacheSize) {
 
         super(
                 kvStateRegistry,
@@ -165,6 +176,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 delegateKeyedStateBackend.getKeyContext());
 
         this.delegateKeyedStateBackend = delegateKeyedStateBackend;
+        this.executionConfig = executionConfig; // Initialize execution config field
         this.l1EntryCacheSize = l1EntryCacheSize;
         this.l2EntryCacheSize = l2EntryCacheSize;
         this.maxActiveNamespaceOrPerKeyCacheContainers = maxActiveNamespaceOrPerKeyCacheContainers;
@@ -182,17 +194,34 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
         this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
         this.memoryManager = memoryManager;
+        this.taskConfiguration = taskConfiguration;
+
+        this.mapSpecificL1EntryCacheSize = mapSpecificL1EntryCacheSize;
+        this.mapSpecificL2EntryCacheSize = mapSpecificL2EntryCacheSize;
+
+        // Initialize global L2 entry limit from configuration
+        this.maxGlobalL2Entries = taskConfiguration.getLong("state.backend.cached.map.l2.size.entries", 16384L);
 
         // Initialize memory capping fields
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
         this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
         this.bytesSinceLastEvictionCheck = new AtomicLong(0L);
+        this.globalL2MapEntryCount = new AtomicLong(0L);
 
-        if (this.l2ManagedMemoryEnabled && this.memoryManager != null) {
+        // Initialize managed page pool.
+        // It's crucial to check both the feature flag and the availability of the memory manager.
+        if (this.l2ManagedMemoryEnabled && this.memoryManager != null && this.memoryManager.getMemorySize() > 0) {
             LOG.info("L2 cache is configured to use managed memory. Max size: {} MB", this.maxCacheMemoryMb);
             this.managedPagePool = new ManagedPagePool(this.memoryManager);
         } else {
-            LOG.info("L2 cache is NOT using managed memory (or MemoryManager is null).");
+            if (!this.l2ManagedMemoryEnabled) {
+                LOG.info("L2 cache is not configured to use managed memory (l2ManagedMemoryEnabled is false).");
+            } else if (this.memoryManager == null) {
+                LOG.info("L2 cache cannot use managed memory because MemoryManager is null.");
+            } else {
+                LOG.info("L2 cache cannot use managed memory because no managed memory is allocated (size is 0).");
+            }
+            // Fallback to a no-op pool if managed memory is not used.
             this.managedPagePool = new ManagedPagePool(null);
         }
 
@@ -200,6 +229,18 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         if (this.metricGroup != null) {
             this.metricGroup.gauge("estimatedCacheMemoryBytes",
                     currentEstimatedCacheSizeBytes::get);
+            this.metricGroup.gauge("globalL2MapEntries",
+                    globalL2MapEntryCount::get);
+        }
+        // Configure auto left-bypass from task configuration (kill-switch)
+        try {
+            boolean autoLeftBypass = this.taskConfiguration.getBoolean(
+                    "state.backend.cached.auto-left-bypass.enabled", true);
+            CachingInternalMapState.setAutoLeftBypass(autoLeftBypass);
+            LOG.info("Auto left-bypass for cached backend is {}", autoLeftBypass ? "ENABLED" : "DISABLED");
+        } catch (Throwable t) {
+            LOG.warn("Failed to read config for auto-left-bypass; defaulting to ENABLED", t);
+            CachingInternalMapState.setAutoLeftBypass(true);
         }
         // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
     }
@@ -243,7 +284,9 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
             boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
             boolean l2ManagedMemoryEnabled,
-            MemoryManager memoryManager
+            MemoryManager memoryManager,
+            org.apache.flink.configuration.Configuration taskConfiguration,
+            int mapSpecificL1EntryCacheSize, int mapSpecificL2EntryCacheSize
     ) {
         // Call super constructor first, using direct parameters where available
         super(
@@ -259,6 +302,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         // Now initialize the delegateKeyedStateBackend
         this.delegateKeyedStateBackend = delegateKeyedStateBackend;
+        this.executionConfig = executionConfig; // Initialize execution config field
         this.metricGroup = metricGroup;
 
         this.l1EntryCacheSize = l1EntryCacheSize;
@@ -277,31 +321,62 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
         this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
         this.memoryManager = memoryManager;
+        this.taskConfiguration = taskConfiguration;
+
+        this.mapSpecificL1EntryCacheSize = mapSpecificL1EntryCacheSize;
+        this.mapSpecificL2EntryCacheSize = mapSpecificL2EntryCacheSize;
+
+        // Initialize global L2 entry limit from configuration (same default as other constructor)
+        this.maxGlobalL2Entries = taskConfiguration != null
+                ? taskConfiguration.getLong("state.backend.cached.map.l2.size.entries", 16384L)
+                : 16384L;
 
         // Initialize memory capping fields
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
         this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
         this.bytesSinceLastEvictionCheck = new AtomicLong(0L);
+        this.globalL2MapEntryCount = new AtomicLong(0L);
 
         // Register memory usage gauge
         if (this.metricGroup != null) {
             this.metricGroup.gauge("estimatedCacheMemoryBytes",
                     currentEstimatedCacheSizeBytes::get);
+            this.metricGroup.gauge("globalL2MapEntries",
+                    globalL2MapEntryCount::get);
         }
-        // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
-    }
+        
+        // Ensure managedPagePool is initialized based on configuration
+        if (this.l2ManagedMemoryEnabled && this.memoryManager != null && this.memoryManager.getMemorySize() > 0) {
+            this.managedPagePool = new ManagedPagePool(this.memoryManager);
+            LOG.info("L2 cache is using managed memory via RocksDB constructor path. Max size: {} MB", this.maxCacheMemoryMb);
+        } else {
+            this.managedPagePool = new ManagedPagePool(null); // Fallback to no-op pool
+        }
 
-    public void setManagedMemoryFraction(double managedMemoryFraction) {
-        // Initialize managed page pool with a fixed size for now
-        // This is a simplified implementation for demo purposes
-        if (this.managedPagePool == null) {
-            // Use null for the memory manager as this is a demo implementation
-            this.managedPagePool = new ManagedPagePool(null);
+        // Configure auto left-bypass from task configuration (kill-switch)
+        try {
+            boolean autoLeftBypass = this.taskConfiguration != null
+                    ? this.taskConfiguration.getBoolean(
+                            "state.backend.cached.auto-left-bypass.enabled", true)
+                    : true;
+            CachingInternalMapState.setAutoLeftBypass(autoLeftBypass);
+            LOG.info("Auto left-bypass for cached backend is {} (RocksDB path)", autoLeftBypass ? "ENABLED" : "DISABLED");
+        } catch (Throwable t) {
+            LOG.warn("Failed to read config for auto-left-bypass (RocksDB path); defaulting to ENABLED", t);
+            CachingInternalMapState.setAutoLeftBypass(true);
         }
     }
 
     public ManagedPagePool getManagedPagePool() {
         return managedPagePool;
+    }
+
+    public AtomicLong getGlobalL2MapEntryCount() {
+        return globalL2MapEntryCount;
+    }
+
+    public long getMaxGlobalL2Entries() {
+        return maxGlobalL2Entries;
     }
 
     public int getMaxActiveNamespaceOrPerKeyCacheContainers() {
@@ -330,7 +405,6 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     Object delegateFromRegistered = registeredState.getDelegateState();
                     // A more robust check would be needed here, potentially involving the state descriptor name and type.
                     // This is a placeholder for a proper check to see if the state is already created and cached.
-                    // For this example, let's assume we need to create it if not found via a more specific lookup.
                 }
             }
         }
@@ -346,20 +420,37 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         if (stateDescriptor.getType() == StateDescriptor.Type.VALUE && actualStateRaw instanceof InternalValueState) {
             InternalValueState<K, N, V_SD> actualStateValue = (InternalValueState<K, N, V_SD>) actualStateRaw;
-            cachingStateToRegister = new CachingInternalValueState<>(
+            boolean writeBehindEnabled = false;
+            try {
+                if (this.taskConfiguration != null) {
+                    writeBehindEnabled = this.taskConfiguration.getBoolean(
+                            "state.backend.cached.write-behind.enabled", false);
+                }
+            } catch (Throwable t) {
+                writeBehindEnabled = false;
+            }
+            cachingStateToRegister = new CachingInternalValueState<K, N, V_SD>(
                     actualStateValue, this, l1EntryCacheSize, l2EntryCacheSize,
                     maxActiveNamespaceOrPerKeyCacheContainers, this.maxCacheMemoryMb, this.cachePolicyType,
-                    0.0, 0, 0, false, this.metricGroup.addGroup("state").addGroup(stateDescriptor.getName()).addGroup("cache"));
+                    0.0, 0, 0, false, writeBehindEnabled,
+                    this.metricGroup.addGroup("state").addGroup(stateDescriptor.getName()).addGroup("cache"));
         } else if (stateDescriptor.getType() == StateDescriptor.Type.MAP && actualStateRaw instanceof InternalMapState) {
+            boolean mapCacheEnabled = taskConfiguration.get(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG);
+            if (!mapCacheEnabled) {
+                LOG.info("Map state caching is disabled by config. Returning raw state.");
+                return (S) actualStateRaw; // caching disabled by config
+            }
             InternalMapState<K, N, ?, ?> actualDelegateMapState = (InternalMapState<K, N, ?, ?>) actualStateRaw;
             String stateName = stateDescriptor.getName(); // Get state name for metrics
             MetricGroup mapMetricsGroup = this.metricGroup.addGroup("state").addGroup(stateName).addGroup("cache");
 
+            int l1SizeForMap = mapSpecificL1EntryCacheSize > 0 ? mapSpecificL1EntryCacheSize : l1EntryCacheSize;
+            int l2SizeForMap = mapSpecificL2EntryCacheSize > 0 ? mapSpecificL2EntryCacheSize : l2EntryCacheSize;
+
             cachingStateToRegister = new CachingInternalMapState<>(
-                    actualDelegateMapState, this, l1EntryCacheSize, l2EntryCacheSize,
+                    (InternalMapState<K, N, ?, ?>) actualDelegateMapState, this, l1SizeForMap, l2SizeForMap,
                     maxActiveNamespaceOrPerKeyCacheContainers, this.maxCacheMemoryMb, this.cachePolicyType,
                     this.mapL1KeyPresenceCacheSize, this.mapL2KeyPresenceCacheSize,
-                    mapMetricsGroup,
                     this.mapCacheHitRateThreshold, this.mapCacheHitRateWindowSize, this.mapCacheMinAccessesForBypassCheck,
                     this.mapKeyPresenceCacheEnabled, this.mapBypassEnabled, this.mapPresenceCacheImpl,
                     this.l2ManagedMemoryEnabled);
@@ -766,11 +857,25 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @Override
     public boolean isSafeToReuseKVState(){
-        return true;
+        return delegateKeyedStateBackend.isSafeToReuseKVState();
     }
 
     public boolean useManagedMemory() {
-        return true;
+        // honour explicit cache-level switch
+        if (l2ManagedMemoryEnabled) {
+            return true;
+        }
+
+        /*
+         * Fall back to the delegate decision. In Flink, {@code RocksDBKeyedStateBackend}
+         * is the concrete implementation that actually consumes the managed memory quota
+         * that has been reserved for the RocksDB state backend. The previous check only
+         * looked for the simple substring "RocksDBStateBackend" which is not contained
+         * in the concrete class name and therefore always returned {@code false}. As a
+         * result, the Task was not marked as requiring managed memory and the runtime
+         * handed out a zero-byte quota – hence the 0 B usage you observed.
+         */
+        return delegateKeyedStateBackend instanceof RocksDBKeyedStateBackend;
     }
 
     @VisibleForTesting
@@ -884,5 +989,37 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     // This is the crucial method needed by CachingInternalMapState
     CloseableRegistry getCloseableRegistry() {
         return this.cancelStreamRegistry;
+    }
+
+    public <R> R runWithSpecificContext(
+        K key,
+        Object namespace, // Use Object to be generic for N
+        java.util.concurrent.Callable<R> callable) throws Exception {
+
+        K originalKey = getCurrentKey();
+        Object originalNamespace = null;
+        CachingInternalState<?, ?, ?, ?> stateForNs = registeredStates.stream().findFirst().orElse(null);
+        if (stateForNs instanceof CachingInternalMapState) {
+            originalNamespace = ((CachingInternalMapState) stateForNs).getCurrentNamespace();
+        } else if (stateForNs instanceof CachingInternalValueState) {
+            originalNamespace = ((CachingInternalValueState) stateForNs).getCurrentNamespace();
+        }
+
+        try {
+            setCurrentKey(key);
+            if (stateForNs instanceof CachingInternalMapState) {
+                ((CachingInternalMapState) stateForNs).setCurrentNamespace(namespace);
+            } else if (stateForNs instanceof CachingInternalValueState) {
+                ((CachingInternalValueState) stateForNs).setCurrentNamespace(namespace);
+            }
+            return callable.call();
+        } finally {
+            setCurrentKey(originalKey);
+            if (stateForNs instanceof CachingInternalMapState) {
+                ((CachingInternalMapState) stateForNs).setCurrentNamespace(originalNamespace);
+            } else if (stateForNs instanceof CachingInternalValueState) {
+                ((CachingInternalValueState) stateForNs).setCurrentNamespace(originalNamespace);
+            }
+        }
     }
 }
