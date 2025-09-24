@@ -448,11 +448,22 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int l2SizeForMap = mapSpecificL2EntryCacheSize > 0 ? mapSpecificL2EntryCacheSize : l2EntryCacheSize;
 
             cachingStateToRegister = new CachingInternalMapState<>(
-                    (InternalMapState<K, N, ?, ?>) actualDelegateMapState, this, l1SizeForMap, l2SizeForMap,
-                    maxActiveNamespaceOrPerKeyCacheContainers, this.maxCacheMemoryMb, this.cachePolicyType,
-                    this.mapL1KeyPresenceCacheSize, this.mapL2KeyPresenceCacheSize,
-                    this.mapCacheHitRateThreshold, this.mapCacheHitRateWindowSize, this.mapCacheMinAccessesForBypassCheck,
-                    this.mapKeyPresenceCacheEnabled, this.mapBypassEnabled, this.mapPresenceCacheImpl,
+                    (InternalMapState<K, N, ?, ?>) actualDelegateMapState,
+                    this,
+                    l1SizeForMap,
+                    l2SizeForMap,
+                    maxActiveNamespaceOrPerKeyCacheContainers,
+                    this.maxCacheMemoryMb,
+                    this.cachePolicyType,
+                    this.mapL1KeyPresenceCacheSize,
+                    this.mapL2KeyPresenceCacheSize,
+                    mapMetricsGroup,
+                    this.mapCacheHitRateThreshold,
+                    this.mapCacheHitRateWindowSize,
+                    this.mapCacheMinAccessesForBypassCheck,
+                    this.mapKeyPresenceCacheEnabled,
+                    this.mapBypassEnabled,
+                    this.mapPresenceCacheImpl,
                     this.l2ManagedMemoryEnabled);
         } else if (stateDescriptor.getType() == StateDescriptor.Type.LIST && actualStateRaw instanceof InternalListState) {
             InternalListState<K, N, V_SD> actualDelegateListState = (InternalListState<K, N, V_SD>) actualStateRaw;

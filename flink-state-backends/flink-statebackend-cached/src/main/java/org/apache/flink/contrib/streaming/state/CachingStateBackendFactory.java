@@ -106,6 +106,12 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .withDescription(
                             "Minimum number of accesses (get/contains operations) in CachingInternalMapState before the hit rate bypass check becomes active.");
 
+    public static final ConfigOption<Boolean> MAP_CACHE_ENABLED_CONFIG =
+            ConfigOptions.key("state.backend.cached.map.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription("Enable caching for MapState. If false, MapState will not be wrapped by caching layer.");
+
     public static final ConfigOption<Boolean> MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG =
             ConfigOptions.key("state.backend.cached.map.key-presence.enabled")
                     .booleanType()

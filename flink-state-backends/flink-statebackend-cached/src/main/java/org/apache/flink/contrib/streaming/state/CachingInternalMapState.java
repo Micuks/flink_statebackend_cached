@@ -102,6 +102,13 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     private static final int SAMPLING_RATE = 100; // 1%
     private volatile boolean bypassCache = false;
 
+    // Global kill-switch for auto left-bypass behavior, configurable via backend
+    private static volatile boolean AUTO_LEFT_BYPASS_ENABLED = true;
+
+    public static void setAutoLeftBypass(boolean enabled) {
+        AUTO_LEFT_BYPASS_ENABLED = enabled;
+    }
+
     // Metrics
     private final transient MetricGroup metrics;
     transient Counter l1ValueCacheHitCount;

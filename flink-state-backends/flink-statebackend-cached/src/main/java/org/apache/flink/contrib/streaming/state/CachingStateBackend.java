@@ -21,6 +21,7 @@ import javax.annotation.Nonnull;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.IllegalConfigurationException;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.MetricGroup;
@@ -174,7 +175,10 @@ public class CachingStateBackend extends AbstractStateBackend
                 this.mapBypassEnabled,
                 this.mapPresenceCacheImpl,
                 this.l2ManagedMemoryEnabled,
-                env.getMemoryManager());
+                env.getMemoryManager(),
+                new Configuration(),
+                0,
+                0);
     }
 
     @Override
