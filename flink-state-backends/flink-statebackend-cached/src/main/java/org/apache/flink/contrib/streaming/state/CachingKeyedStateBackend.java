@@ -419,20 +419,51 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         CachingInternalState<K, N, ?, ?> cachingStateToRegister = null;
 
         if (stateDescriptor.getType() == StateDescriptor.Type.VALUE && actualStateRaw instanceof InternalValueState) {
-            InternalValueState<K, N, V_SD> actualStateValue = (InternalValueState<K, N, V_SD>) actualStateRaw;
+            // Check if ValueState caching is enabled
+            boolean valueCacheEnabled = true;
+            double valueHitRateThreshold = 0.0;
+            long valueHitRateWindow = 1000L;
+            long valueMinAccessesForBypassCheck = 100L;
+            boolean valueBypassEnabled = true;
             boolean writeBehindEnabled = false;
             try {
                 if (this.taskConfiguration != null) {
+                    valueCacheEnabled = this.taskConfiguration.getBoolean(
+                            CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG);
+                    valueHitRateThreshold = this.taskConfiguration.getDouble(
+                            CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG);
+                    valueHitRateWindow = this.taskConfiguration.getLong(
+                            CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
+                    valueMinAccessesForBypassCheck = this.taskConfiguration.getLong(
+                            CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
+                    valueBypassEnabled = this.taskConfiguration.getBoolean(
+                            CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG);
                     writeBehindEnabled = this.taskConfiguration.getBoolean(
-                            "state.backend.cached.write-behind.enabled", false);
+                            CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG);
                 }
             } catch (Throwable t) {
-                writeBehindEnabled = false;
+                // keep defaults
             }
+
+            if (!valueCacheEnabled) {
+                LOG.info("Value state caching is disabled by config. Returning raw state.");
+                return (S) actualStateRaw;
+            }
+
+            InternalValueState<K, N, V_SD> actualStateValue = (InternalValueState<K, N, V_SD>) actualStateRaw;
             cachingStateToRegister = new CachingInternalValueState<K, N, V_SD>(
-                    actualStateValue, this, l1EntryCacheSize, l2EntryCacheSize,
-                    maxActiveNamespaceOrPerKeyCacheContainers, this.maxCacheMemoryMb, this.cachePolicyType,
-                    0.0, 0, 0, false, writeBehindEnabled,
+                    actualStateValue,
+                    this,
+                    l1EntryCacheSize,
+                    l2EntryCacheSize,
+                    maxActiveNamespaceOrPerKeyCacheContainers,
+                    this.maxCacheMemoryMb,
+                    this.cachePolicyType,
+                    valueHitRateThreshold,
+                    valueHitRateWindow,
+                    valueMinAccessesForBypassCheck,
+                    valueBypassEnabled,
+                    writeBehindEnabled,
                     this.metricGroup.addGroup("state").addGroup(stateDescriptor.getName()).addGroup("cache"));
         } else if (stateDescriptor.getType() == StateDescriptor.Type.MAP && actualStateRaw instanceof InternalMapState) {
             boolean mapCacheEnabled = taskConfiguration.get(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG);
