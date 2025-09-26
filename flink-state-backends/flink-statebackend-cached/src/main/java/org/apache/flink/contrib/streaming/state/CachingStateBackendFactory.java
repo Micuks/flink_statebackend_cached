@@ -123,6 +123,44 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .booleanType()
                     .defaultValue(true);
 
+    // Value state caching configuration
+    public static final ConfigOption<Boolean> VALUE_CACHE_ENABLED_CONFIG =
+            ConfigOptions.key("state.backend.cached.value.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription("Enable caching for ValueState. If false, ValueState will not be wrapped by caching layer.");
+
+    public static final ConfigOption<Double> VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG =
+            ConfigOptions.key("state.backend.cached.value.hit-rate.threshold")
+                    .doubleType()
+                    .defaultValue(0.0)
+                    .withDescription("Hit rate threshold for CachingInternalValueState (0.0 to 1.0). 0.0 disables adaptive bypass.");
+
+    public static final ConfigOption<Long> VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG =
+            ConfigOptions.key("state.backend.cached.value.hit-rate.window-size")
+                    .longType()
+                    .defaultValue(1000L)
+                    .withDescription("Number of accesses in CachingInternalValueState to calculate hit rate for bypass decisions.");
+
+    public static final ConfigOption<Long> VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG =
+            ConfigOptions.key("state.backend.cached.value.min-accesses-for-bypass-check")
+                    .longType()
+                    .defaultValue(100L)
+                    .withDescription("Minimum number of accesses in CachingInternalValueState before bypass check becomes active.");
+
+    public static final ConfigOption<Boolean> VALUE_BYPASS_ENABLED_CONFIG =
+            ConfigOptions.key("state.backend.cached.value.bypass.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription("Enable adaptive bypass for ValueState caching based on hit rate.");
+
+    // Write-behind configuration (used by ValueState caching)
+    public static final ConfigOption<Boolean> WRITE_BEHIND_ENABLED_CONFIG =
+            ConfigOptions.key("state.backend.cached.write-behind.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription("Enable write-behind (defer writes to underlying backend) for cached states where applicable.");
+
     public static final ConfigOption<Boolean> L2_MANAGED_MEMORY_ENABLED_CONFIG =
             ConfigOptions.key("state.backend.cached.l2.managed.enable")
                     .booleanType()

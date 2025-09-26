@@ -20,6 +20,8 @@ import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.runtime.state.internal.InternalKvState.StateIncrementalVisitor;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.core.memory.DataInputDeserializer;
+import org.apache.flink.core.memory.DataOutputSerializer;
 
 import javax.annotation.Nonnull;
 
@@ -47,12 +49,12 @@ public class CachingInternalValueState<K, N, V>
     private static final Logger LOG = LoggerFactory.getLogger(CachingInternalValueState.class);
     private final InternalValueState<K, N, V> delegateState;
     private final CachingKeyedStateBackend<K> backend; // For accessing current key
-    private final CachePolicy<N, CachePolicy<K, CacheEntry<V>>> namespaceCachesL1; // Namespace ->
-                                                                                   // Key -> L1
-                                                                                   // CacheEntry
-    private final CachePolicy<N, CachePolicy<K, CacheEntry<V>>> namespaceCachesL2; // Namespace ->
-                                                                                   // Key -> L2
-                                                                                   // CacheEntry
+    private final CachePolicy<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> namespaceCachesL1; // Namespace ->
+                                                                                                    // Key -> L1
+                                                                                                    // CacheEntry
+    private final CachePolicy<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> namespaceCachesL2; // Namespace ->
+                                                                                                    // Key -> L2
+                                                                                                    // CacheEntry
 
     private final int l1CacheSizePerKeyPerNamespace;
     private final int l2CacheSizePerKeyPerNamespace;
@@ -141,16 +143,16 @@ public class CachingInternalValueState<K, N, V>
         this.namespaceCachesL1 = createCachePolicyWithEvictionListener(maxActiveNamespacesInCache,
                 evictedNsEntry -> {
                     // Flush any dirty entries in the evicted namespace before removing it
-                    N evictedNamespace = evictedNsEntry.getKey();
+                    StableNamespaceKey evictedNamespaceKey = evictedNsEntry.getKey();
                     CachePolicy<K, CacheEntry<V>> evictedL1Cache = evictedNsEntry.getValue();
-                    flushCacheForNamespace(evictedNamespace, evictedL1Cache);
+                    flushCacheForNamespaceKey(evictedNamespaceKey, evictedL1Cache);
                 });
         this.namespaceCachesL2 = createCachePolicyWithEvictionListener(maxActiveNamespacesInCache,
                 evictedNsEntry -> {
                     // Flush any dirty entries in the evicted namespace before removing it
-                    N evictedNamespace = evictedNsEntry.getKey();
+                    StableNamespaceKey evictedNamespaceKey = evictedNsEntry.getKey();
                     CachePolicy<K, CacheEntry<V>> evictedL2Cache = evictedNsEntry.getValue();
-                    flushCacheForNamespace(evictedNamespace, evictedL2Cache);
+                    flushCacheForNamespaceKey(evictedNamespaceKey, evictedL2Cache);
                 });
     }
 
@@ -175,11 +177,11 @@ public class CachingInternalValueState<K, N, V>
         }
     }
 
-    private void flushCacheForNamespace(N namespace, CachePolicy<K, CacheEntry<V>> cache) {
+    private void flushCacheForNamespaceKey(StableNamespaceKey namespaceKey, CachePolicy<K, CacheEntry<V>> cache) {
         N originalNamespace = getCurrentNamespace();
         K originalKey = backend.getCurrentKey();
         try {
-            setCurrentNamespace(namespace);
+            setCurrentNamespace(namespaceKey.deserialize(getNamespaceSerializer()));
 
             // Create a copy of entries to avoid ConcurrentModificationException
             java.util.List<Map.Entry<K, CacheEntry<V>>> entries = new java.util.ArrayList<>();
@@ -203,7 +205,7 @@ public class CachingInternalValueState<K, N, V>
                 }
             }
         } catch (IOException e) {
-            throw new RuntimeException("Failed to flush dirty entries for evicted namespace: " + namespace, e);
+            throw new RuntimeException("Failed to flush dirty entries for evicted namespace: " + namespaceKey, e);
         } finally {
             setCurrentNamespace(originalNamespace);
             backend.setCurrentKey(originalKey);
@@ -268,14 +270,13 @@ public class CachingInternalValueState<K, N, V>
     }
 
     private CachePolicy<K, CacheEntry<V>> getL1CacheForNamespace(N namespace) {
-        // Use a stable copy of the namespace as the cache key to avoid issues with mutable namespaces
-        N stableNamespaceKey = getNamespaceSerializer().copy(namespace);
+        StableNamespaceKey stableNamespaceKey = StableNamespaceKey.fromNamespace(namespace, getNamespaceSerializer());
         return namespaceCachesL1.computeIfAbsent(
                 stableNamespaceKey,
-                ns -> createCachePolicyWithEvictionListener(l1CacheSizePerKeyPerNamespace,
+                nsKey -> createCachePolicyWithEvictionListener(l1CacheSizePerKeyPerNamespace,
                         evictedL1Entry -> {
                             // This is the L1 eviction listener for a specific key in a specific namespace.
-                            CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(ns);
+                            CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(namespaceKeyToNamespace(nsKey));
                             K evictedKey = evictedL1Entry.getKey();
                             CacheEntry<V> evictedValueWrapper = evictedL1Entry.getValue();
                             V evictedValue = evictedValueWrapper.getValue();
@@ -288,7 +289,7 @@ public class CachingInternalValueState<K, N, V>
                                 N originalNamespace = getCurrentNamespace();
                                 try {
                                     backend.setCurrentKey(evictedKey);
-                                    this.setCurrentNamespace(ns); // Set NS for delegate for this op
+                                    this.setCurrentNamespace(namespaceKeyToNamespace(nsKey)); // Set NS for delegate for this op
                                     delegateState.update(evictedValue);
                                     evictedValueWrapper.setDirty(false); // Mark as clean
 
@@ -305,7 +306,7 @@ public class CachingInternalValueState<K, N, V>
                                     // The backend.reportCacheMemoryReleased(estimatedSize) done earlier stands.
                                     throw new RuntimeException(
                                             "Failed to flush L1 entry to delegate on L1 eviction for key: "
-                                                    + evictedKey + " in ns: " + ns,
+                                                    + evictedKey + " in nsKey: " + nsKey,
                                             e);
                                 } finally {
                                     // Restore context
@@ -324,10 +325,10 @@ public class CachingInternalValueState<K, N, V>
     }
 
     private CachePolicy<K, CacheEntry<V>> getL2CacheForNamespace(N namespace) {
-        N stableNamespaceKey = getNamespaceSerializer().copy(namespace);
+        StableNamespaceKey stableNamespaceKey = StableNamespaceKey.fromNamespace(namespace, getNamespaceSerializer());
         return namespaceCachesL2.computeIfAbsent(
                 stableNamespaceKey,
-                ns -> new LRUMap<>(l2CacheSizePerKeyPerNamespace) // L2 is always LRU
+                nsKey -> new LRUMap<>(l2CacheSizePerKeyPerNamespace) // L2 is always LRU
                 // L2 eviction doesn't trigger further writes here
                 );
     }
@@ -403,6 +404,44 @@ public class CachingInternalValueState<K, N, V>
             updateCacheBypassCondition(true);
             cacheBypassActivations.inc();
             delegateState.update(value);
+            // Invalidate caches to avoid stale flush later
+            CachePolicy<K, CacheEntry<V>> l1Bypass = getL1CacheForNamespace(currentNamespace);
+            CacheEntry<V> old1 = l1Bypass.remove(currentKey);
+            if (old1 != null) {
+                backend.reportCacheMemoryReleased(old1.getEstimatedSizeBytes());
+            }
+            CachePolicy<K, CacheEntry<V>> l2Bypass = getL2CacheForNamespace(currentNamespace);
+            CacheEntry<V> old2 = l2Bypass.remove(currentKey);
+            if (old2 != null) {
+                backend.reportCacheMemoryReleased(old2.getEstimatedSizeBytes());
+            }
+            // Optionally cache a clean value in L1 for locality
+            CacheEntry<V> cleanEntry = CacheEntry.clean(value);
+            CacheEntry<V> prev = l1Bypass.put(currentKey, cleanEntry);
+            if (prev != null) {
+                backend.reportCacheMemoryReleased(prev.getEstimatedSizeBytes());
+            }
+            backend.reportCacheMemoryAdded(cleanEntry.getEstimatedSizeBytes());
+            return;
+        }
+
+        // Honor write-behind toggle: when disabled, perform write-through and keep L1 clean
+        if (!writeBehindEnabled) {
+            updateCacheBypassCondition(true);
+            cacheHits.inc();
+            delegateState.update(value);
+            CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
+            CacheEntry<V> clean = CacheEntry.clean(value);
+            CacheEntry<V> oldL1 = l1Cache.put(currentKey, clean);
+            if (oldL1 != null) {
+                backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
+            }
+            backend.reportCacheMemoryAdded(clean.getEstimatedSizeBytes());
+            CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
+            CacheEntry<V> oldL2 = l2Cache.remove(currentKey);
+            if (oldL2 != null) {
+                backend.reportCacheMemoryReleased(oldL2.getEstimatedSizeBytes());
+            }
             return;
         }
 
@@ -461,10 +500,10 @@ public class CachingInternalValueState<K, N, V>
         N originalNamespace = getCurrentNamespace();
         try {
             // Flush L1 caches
-            for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL1.entrySet()) {
-                N namespace = nsEntry.getKey();
+            for (Map.Entry<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL1.entrySet()) {
+                StableNamespaceKey namespaceKey = nsEntry.getKey();
                 CachePolicy<K, CacheEntry<V>> l1Cache = nsEntry.getValue();
-                setCurrentNamespace(namespace);
+                setCurrentNamespace(namespaceKey.deserialize(getNamespaceSerializer()));
 
                 // Iterate over a defensive copy of entries to avoid ConcurrentModificationException
                 java.util.List<Map.Entry<K, CacheEntry<V>>> currentL1Entries = new java.util.ArrayList<>();
@@ -487,10 +526,10 @@ public class CachingInternalValueState<K, N, V>
             }
 
             // Flush L2 caches
-            for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL2.entrySet()) {
-                N namespace = nsEntry.getKey();
+            for (Map.Entry<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL2.entrySet()) {
+                StableNamespaceKey namespaceKey = nsEntry.getKey();
                 CachePolicy<K, CacheEntry<V>> l2Cache = nsEntry.getValue();
-                setCurrentNamespace(namespace);
+                setCurrentNamespace(namespaceKey.deserialize(getNamespaceSerializer()));
 
                 // Iterate over a defensive copy of entries to avoid ConcurrentModificationException
                 java.util.List<Map.Entry<K, CacheEntry<V>>> currentL2Entries = new java.util.ArrayList<>();
@@ -570,13 +609,13 @@ public class CachingInternalValueState<K, N, V>
         if (targetBytesToFreeThisState <= 0) return 0;
 
         // Iterate over a snapshot of L2 namespaces to avoid concurrent modification if map supports it
-        List<N> l2Namespaces = new ArrayList<>();
-        for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> entry : namespaceCachesL2.entrySet()) {
+        List<StableNamespaceKey> l2Namespaces = new ArrayList<>();
+        for (Map.Entry<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> entry : namespaceCachesL2.entrySet()) {
             l2Namespaces.add(entry.getKey());
         }
 
-        for (N namespace : l2Namespaces) {
-            CachePolicy<K, CacheEntry<V>> l2Cache = namespaceCachesL2.get(namespace); // Re-fetch, could be removed by another thread
+        for (StableNamespaceKey namespaceKey : l2Namespaces) {
+            CachePolicy<K, CacheEntry<V>> l2Cache = namespaceCachesL2.get(namespaceKey); // Re-fetch, could be removed by another thread
             if (l2Cache == null || l2Cache.isEmpty()) continue; // Optimization: skip empty L2 caches
 
             Iterator<Map.Entry<K, CacheEntry<V>>> l2Iter = l2Cache.entrySet().iterator();
@@ -592,13 +631,13 @@ public class CachingInternalValueState<K, N, V>
         }
 
         // Iterate over L1 namespaces
-        List<N> l1Namespaces = new ArrayList<>();
-        for (Map.Entry<N, CachePolicy<K, CacheEntry<V>>> entry : namespaceCachesL1.entrySet()) {
+        List<StableNamespaceKey> l1Namespaces = new ArrayList<>();
+        for (Map.Entry<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> entry : namespaceCachesL1.entrySet()) {
             l1Namespaces.add(entry.getKey());
         }
 
-        for (N namespace : l1Namespaces) {
-            CachePolicy<K, CacheEntry<V>> l1Cache = namespaceCachesL1.get(namespace);
+        for (StableNamespaceKey namespaceKey : l1Namespaces) {
+            CachePolicy<K, CacheEntry<V>> l1Cache = namespaceCachesL1.get(namespaceKey);
             if (l1Cache == null || l1Cache.isEmpty()) continue; // Optimization: skip empty L1 caches
 
             // Evict clean L1 entries first
@@ -636,7 +675,7 @@ public class CachingInternalValueState<K, N, V>
                 try {
                     // Simplified: Attempt to flush. In a real scenario, this needs robust context management.
                     backend.setCurrentKey(key);       // Set key for backend & delegate
-                    setCurrentNamespace(namespace); // Set NS for delegate
+                    setCurrentNamespace(namespaceKey.deserialize(getNamespaceSerializer())); // Set NS for delegate
                     delegateState.update(value);    // Flush to delegate
                     dirtyEntry.setDirty(false);     // Mark as clean if flush was successful
 
@@ -668,5 +707,67 @@ public class CachingInternalValueState<K, N, V>
         
         return String.format("CacheStats{hits=%d, misses=%d, hitRate=%.2f%%, bypassActivations=%d}",
                 hits, misses, hitRate, cacheBypassActivations.getCount());
+    }
+
+    /**
+     * A stable, serialized namespace key to avoid relying on object identity or mutable namespaces
+     * for cache keying. Two logically equal namespaces map to the same StableNamespaceKey via
+     * their serialized bytes.
+     */
+    private static final class StableNamespaceKey {
+        private final byte[] serialized;
+
+        private StableNamespaceKey(byte[] serialized) {
+            this.serialized = serialized;
+        }
+
+        static <N> StableNamespaceKey fromNamespace(N namespace, TypeSerializer<N> namespaceSerializer) {
+            try {
+                DataOutputSerializer out = new DataOutputSerializer(64);
+                namespaceSerializer.serialize(namespace, out);
+                return new StableNamespaceKey(out.getCopyOfBuffer());
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to serialize namespace for cache key", e);
+            }
+        }
+
+        <N> N deserialize(TypeSerializer<N> namespaceSerializer) {
+            try {
+                DataInputDeserializer in = new DataInputDeserializer(serialized);
+                return namespaceSerializer.deserialize(in);
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to deserialize namespace from cache key", e);
+            }
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || this.getClass() != o.getClass()) return false;
+            StableNamespaceKey that = (StableNamespaceKey) o;
+            if (this.serialized.length != that.serialized.length) return false;
+            for (int i = 0; i < this.serialized.length; i++) {
+                if (this.serialized[i] != that.serialized[i]) return false;
+            }
+            return true;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            for (byte element : serialized) {
+                result = 31 * result + element;
+            }
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "StableNamespaceKey{" + serialized.length + "b}";
+        }
+    }
+
+    private N namespaceKeyToNamespace(StableNamespaceKey key) {
+        return key.deserialize(getNamespaceSerializer());
     }
 }

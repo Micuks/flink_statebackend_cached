@@ -67,6 +67,8 @@ public class CachingStateBackend extends AbstractStateBackend
     private final boolean mapBypassEnabled;
     private final CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl;
     private final boolean l2ManagedMemoryEnabled;
+    // Configuration to pass down to keyed backend for per-state toggles
+    private final org.apache.flink.configuration.Configuration taskConfiguration;
 
     public CachingStateBackend(
             StateBackend delegateBackend,
@@ -96,6 +98,25 @@ public class CachingStateBackend extends AbstractStateBackend
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
         this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
 
+        // Build a minimal task configuration reflecting relevant options
+        org.apache.flink.configuration.Configuration cfg = new org.apache.flink.configuration.Configuration();
+        cfg.set(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG, true);
+        cfg.set(CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG, this.mapBypassEnabled);
+        cfg.set(CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG, this.mapKeyPresenceCacheEnabled);
+        cfg.set(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG, this.mapCacheHitRateThreshold);
+        cfg.set(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, this.mapCacheHitRateWindowSize);
+        cfg.set(CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, this.mapCacheMinAccessesForBypassCheck);
+        cfg.set(CachingStateBackendFactory.MAP_PRESENCE_CACHE_IMPL, this.mapPresenceCacheImpl);
+        cfg.set(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG, this.l2ManagedMemoryEnabled);
+        // Defaults for ValueState: enabled with bypass off unless overridden by configure(path)
+        cfg.set(CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG, true);
+        cfg.set(CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG, true);
+        cfg.set(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG, 0.0);
+        cfg.set(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, 1000L);
+        cfg.set(CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, 100L);
+        cfg.set(CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG, false);
+        this.taskConfiguration = cfg;
+
         if (!(delegateBackend instanceof AbstractStateBackend)) {
             System.err.println(
                     "Warning: CachingStateBackend delegate is not an AbstractStateBackend. Some features like checkpoint resolution might fail if not overridden by the specific StateBackend implementation.");
@@ -118,6 +139,25 @@ public class CachingStateBackend extends AbstractStateBackend
         this.mapBypassEnabled = config.get(CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG);
         this.mapPresenceCacheImpl = config.get(CachingStateBackendFactory.MAP_PRESENCE_CACHE_IMPL);
         this.l2ManagedMemoryEnabled = config.get(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG);
+        // Preserve full configuration relevant to keyed backend
+        org.apache.flink.configuration.Configuration cfg = new org.apache.flink.configuration.Configuration();
+        cfg.set(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG, config.get(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG));
+        cfg.set(CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG, this.mapBypassEnabled);
+        cfg.set(CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG, this.mapKeyPresenceCacheEnabled);
+        cfg.set(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG, this.mapCacheHitRateThreshold);
+        cfg.set(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, this.mapCacheHitRateWindowSize);
+        cfg.set(CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, this.mapCacheMinAccessesForBypassCheck);
+        cfg.set(CachingStateBackendFactory.MAP_PRESENCE_CACHE_IMPL, this.mapPresenceCacheImpl);
+        cfg.set(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG, this.l2ManagedMemoryEnabled);
+        // ValueState toggles
+        cfg.set(CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG, config.get(CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG));
+        cfg.set(CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG, config.get(CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG));
+        cfg.set(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG, config.get(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG));
+        cfg.set(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, config.get(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG));
+        cfg.set(CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, config.get(CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG));
+        cfg.set(CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG, config.get(CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG));
+        // Advanced/kill-switch option left default true unless present elsewhere
+        this.taskConfiguration = cfg;
     }
 
     @Override
@@ -176,7 +216,7 @@ public class CachingStateBackend extends AbstractStateBackend
                 this.mapPresenceCacheImpl,
                 this.l2ManagedMemoryEnabled,
                 env.getMemoryManager(),
-                new Configuration(),
+                this.taskConfiguration,
                 0,
                 0);
     }
