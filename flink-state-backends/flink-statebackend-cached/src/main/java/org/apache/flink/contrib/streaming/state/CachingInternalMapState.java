@@ -261,10 +261,14 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 this.l2PrimitivePresenceCache = new NoOpCachePolicy<>();
             }
 
-            if (l2ManagedMemoryEnabled && ownerBackend.getManagedPagePool() != null) {
+            if (l2ManagedMemoryEnabled && ownerBackend.getManagedPagePool() != null
+                    && ownerBackend.getManagedPagePool().isUsable()) {
                 this.l2MapEntriesOffHeap = new OffHeapKVStore(ownerBackend.getManagedPagePool(), ownerBackend);
                 this.l2MapEntries = new NoOpCachePolicy<>();
             } else {
+                if (l2ManagedMemoryEnabled) {
+                    LOG.info("Falling back to on-heap L2 cache for this PerKeyMapCache because managed memory is not available.");
+                }
                 this.l2MapEntriesOffHeap = null;
                 this.l2MapEntries = createCachePolicyInstance(cachePolicyType, l2Size, null,
                     ownerBackend, false, false);
@@ -957,7 +961,11 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                 delegateState.setCurrentNamespace(perKeyCache.cacheNamespace);
                                 flushL1Entries(perKeyCache, perKeyCache.flinkKey,
                                         perKeyCache.cacheNamespace, backend, delegateState, NCDN);
-                                perKeyCache.l2MapEntries.clear(); // Should trigger memory reporting
+                                if (perKeyCache.l2ManagedMemoryEnabled && perKeyCache.l2MapEntriesOffHeap != null) {
+                                    perKeyCache.l2MapEntriesOffHeap.clear();
+                                } else {
+                                    perKeyCache.l2MapEntries.clear(); // Should trigger memory reporting
+                                }
                                                                   // via its own eviction
                                 if (perKeyCache.keyPresenceCacheEnabled) { // Guard presence cache
                                                                            // clearing
@@ -1087,7 +1095,11 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                                         backend,
                                                         delegateState,
                                                         originalNamespace);
-                                                perKeyCache.l2MapEntries.clear();
+                                                if (perKeyCache.l2ManagedMemoryEnabled && perKeyCache.l2MapEntriesOffHeap != null) {
+                                                    perKeyCache.l2MapEntriesOffHeap.clear();
+                                                } else {
+                                                    perKeyCache.l2MapEntries.clear();
+                                                }
                                                 if (perKeyCache.keyPresenceCacheEnabled) {
                                                     perKeyCache.l1KeyPresenceCache.clear();
                                                     perKeyCache.l2KeyPresenceCache.clear();
@@ -1797,7 +1809,11 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         perKeyCache.l1MapEntries.clear();
 
         // Clear L2 map entries. Similarly, eviction listeners should be triggered.
-        perKeyCache.l2MapEntries.clear();
+        if (perKeyCache.l2ManagedMemoryEnabled && perKeyCache.l2MapEntriesOffHeap != null) {
+            perKeyCache.l2MapEntriesOffHeap.clear();
+        } else {
+            perKeyCache.l2MapEntries.clear();
+        }
 
         // If key-value separation is enabled, clear the presence caches as well.
         if (this.keyPresenceCacheEnabled) {
@@ -2320,4 +2336,3 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         return total > 0 ? (hits.getCount() * 100.0) / total : 0.0;
     }
 }
-
