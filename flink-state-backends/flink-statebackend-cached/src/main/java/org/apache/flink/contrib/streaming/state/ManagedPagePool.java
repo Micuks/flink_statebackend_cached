@@ -94,6 +94,13 @@ public class ManagedPagePool implements Closeable {
     }
 
     /**
+     * Whether this pool is backed by a usable MemoryManager (non-null and non-zero size).
+     */
+    public boolean isUsable() {
+        return memoryManager != null && memoryManager.getMemorySize() > 0;
+    }
+
+    /**
      * @return The total number of pages currently allocated by this pool.
      */
     public int getNumberOfAllocatedPages() {

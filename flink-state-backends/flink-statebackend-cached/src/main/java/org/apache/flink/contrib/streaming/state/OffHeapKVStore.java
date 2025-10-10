@@ -255,6 +255,10 @@ public class OffHeapKVStore implements Closeable {
         // No page with enough space, allocate a new one.
         try {
             List<MemorySegment> newPages = pagePool.allocatePages(1);
+            if (newPages.isEmpty()) {
+                throw new IOException("No managed memory pages allocated for OffHeapKVStore.",
+                        new org.apache.flink.runtime.memory.MemoryAllocationException("No pages"));
+            }
             MemorySegment newPage = newPages.get(0);
             newPage.putInt(FREE_POINTER_OFFSET, PAGE_HEADER_SIZE); // Initialize free pointer
             pages.add(newPage);
@@ -269,6 +273,10 @@ public class OffHeapKVStore implements Closeable {
                 long freed = evict(currentlyUsed);
                 if (freed > 0) {
                     List<MemorySegment> newPages = pagePool.allocatePages(1);
+                    if (newPages.isEmpty()) {
+                        throw new IOException("No managed memory pages allocated for OffHeapKVStore after eviction.",
+                                new org.apache.flink.runtime.memory.MemoryAllocationException("No pages after eviction"));
+                    }
                     MemorySegment newPage = newPages.get(0);
                     newPage.putInt(FREE_POINTER_OFFSET, PAGE_HEADER_SIZE);
                     pages.add(newPage);
