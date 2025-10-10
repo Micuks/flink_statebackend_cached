@@ -37,6 +37,8 @@ import java.util.Map;
 public class OffHeapKVStore implements Closeable {
 
     private final ManagedPagePool pagePool;
+    // Optional: report page allocations/frees to cache memory accounting
+    private final CachingKeyedStateBackend<?> ownerBackend;
     private final List<MemorySegment> pages;
     private final int pageSize;
     
@@ -53,6 +55,15 @@ public class OffHeapKVStore implements Closeable {
 
     public OffHeapKVStore(ManagedPagePool pagePool) {
         this.pagePool = Preconditions.checkNotNull(pagePool);
+        this.ownerBackend = null;
+        this.pages = new ArrayList<>();
+        this.pageSize = pagePool.getPageSize();
+        this.keyIndex = new HashMap<>();
+    }
+
+    public OffHeapKVStore(ManagedPagePool pagePool, CachingKeyedStateBackend<?> ownerBackend) {
+        this.pagePool = Preconditions.checkNotNull(pagePool);
+        this.ownerBackend = ownerBackend; // may be null in tests
         this.pages = new ArrayList<>();
         this.pageSize = pagePool.getPageSize();
         this.keyIndex = new HashMap<>();
@@ -165,9 +176,13 @@ public class OffHeapKVStore implements Closeable {
     public void clear() {
         keyIndex.clear();
         entryCount = 0;
-        // Reset free pointers in all pages
-        for (MemorySegment page : pages) {
-            page.putInt(FREE_POINTER_OFFSET, PAGE_HEADER_SIZE);
+        if (!pages.isEmpty()) {
+            long freedBytes = (long) pages.size() * pageSize;
+            pagePool.freePages(pages);
+            pages.clear();
+            if (ownerBackend != null && freedBytes > 0) {
+                ownerBackend.reportCacheMemoryReleased(freedBytes);
+            }
         }
     }
     
@@ -238,19 +253,45 @@ public class OffHeapKVStore implements Closeable {
             }
         }
         // No page with enough space, allocate a new one.
-        List<MemorySegment> newPages = pagePool.allocatePages(1);
-        MemorySegment newPage = newPages.get(0);
-        newPage.putInt(FREE_POINTER_OFFSET, PAGE_HEADER_SIZE); // Initialize free pointer
-        pages.add(newPage);
-        return pages.size() - 1;
+        try {
+            List<MemorySegment> newPages = pagePool.allocatePages(1);
+            MemorySegment newPage = newPages.get(0);
+            newPage.putInt(FREE_POINTER_OFFSET, PAGE_HEADER_SIZE); // Initialize free pointer
+            pages.add(newPage);
+            if (ownerBackend != null) {
+                ownerBackend.reportCacheMemoryAdded((long) pageSize * newPages.size());
+            }
+            return pages.size() - 1;
+        } catch (IOException allocEx) {
+            // Best-effort: try to evict current contents and retry once
+            long currentlyUsed = getEstimatedMemoryUsageBytes();
+            if (currentlyUsed > 0) {
+                long freed = evict(currentlyUsed);
+                if (freed > 0) {
+                    List<MemorySegment> newPages = pagePool.allocatePages(1);
+                    MemorySegment newPage = newPages.get(0);
+                    newPage.putInt(FREE_POINTER_OFFSET, PAGE_HEADER_SIZE);
+                    pages.add(newPage);
+                    if (ownerBackend != null) {
+                        ownerBackend.reportCacheMemoryAdded((long) pageSize * newPages.size());
+                    }
+                    return pages.size() - 1;
+                }
+            }
+            throw allocEx;
+        }
     }
 
     @Override
     public void close() {
         keyIndex.clear();
-        if (pagePool != null && pages != null && !pages.isEmpty()) {
+        if (!pages.isEmpty()) {
+            long freedBytes = (long) pages.size() * pageSize;
             pagePool.freePages(pages);
             pages.clear();
+            if (ownerBackend != null && freedBytes > 0) {
+                ownerBackend.reportCacheMemoryReleased(freedBytes);
+            }
         }
     }
     

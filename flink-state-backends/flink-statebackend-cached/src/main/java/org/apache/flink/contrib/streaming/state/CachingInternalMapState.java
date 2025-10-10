@@ -262,7 +262,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             }
 
             if (l2ManagedMemoryEnabled && ownerBackend.getManagedPagePool() != null) {
-                this.l2MapEntriesOffHeap = new OffHeapKVStore(ownerBackend.getManagedPagePool());
+                this.l2MapEntriesOffHeap = new OffHeapKVStore(ownerBackend.getManagedPagePool(), ownerBackend);
                 this.l2MapEntries = new NoOpCachePolicy<>();
             } else {
                 this.l2MapEntriesOffHeap = null;
@@ -302,7 +302,27 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                     if (l2ManagedMemoryEnabled && l2MapEntriesOffHeap != null) {
                                         byte[] serializedKey = serializeKey(evictedUK);
                                         byte[] serializedValue = serializeValue(evictedUVWrapper.getValue());
-                                        this.l2MapEntriesOffHeap.put(serializedKey, serializedValue);
+                                        try {
+                                            this.l2MapEntriesOffHeap.put(serializedKey, serializedValue);
+                                        } catch (Exception e) {
+                                            Throwable cause = (e instanceof java.io.IOException) ? e.getCause() : e;
+                                            if (cause instanceof org.apache.flink.runtime.memory.MemoryAllocationException) {
+                                                LOG.info("L2 off-heap cache is full. Attempting to evict to make space for key '{}'.", evictedUK);
+                                                long spaceNeeded = serializedKey.length + serializedValue.length + 128; // 128 bytes buffer
+                                                long freed = this.l2MapEntriesOffHeap.evict(spaceNeeded);
+                                                if (freed > 0) {
+                                                    try {
+                                                        this.l2MapEntriesOffHeap.put(serializedKey, serializedValue);
+                                                    } catch (Exception e2) {
+                                                        LOG.warn("Failed to add entry for key '{}' to L2 cache even after evicting {} bytes. This may impact performance.", evictedUK, freed, e2);
+                                                    }
+                                                } else {
+                                                    LOG.warn("Could not evict any data from L2 cache for key '{}'. Entry will not be cached in L2. This may impact performance.", evictedUK);
+                                                }
+                                            } else {
+                                                throw e;
+                                            }
+                                        }
                                     } else {
                                         this.l2MapEntries.put(evictedUK,
                                             CacheEntry.clean(evictedUVWrapper.getValue()));
@@ -2186,7 +2206,25 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                         if (perKeyCache.l2ManagedMemoryEnabled && perKeyCache.l2MapEntriesOffHeap != null) {
                             byte[] serializedKey = perKeyCache.serializeKey(userKey);
                             byte[] serializedValue = perKeyCache.serializeValue(userValue);
-                            perKeyCache.l2MapEntriesOffHeap.put(serializedKey, serializedValue);
+                            try {
+                                perKeyCache.l2MapEntriesOffHeap.put(serializedKey, serializedValue);
+                            } catch (IOException ioe) {
+                                Throwable cause = ioe.getCause();
+                                if (cause instanceof org.apache.flink.runtime.memory.MemoryAllocationException) {
+                                    long freed = perKeyCache.l2MapEntriesOffHeap.evict(serializedKey.length + serializedValue.length + 128L);
+                                    if (freed > 0) {
+                                        try {
+                                            perKeyCache.l2MapEntriesOffHeap.put(serializedKey, serializedValue);
+                                        } catch (IOException retry) {
+                                            LOG.warn("L2 off-heap put still failed after evicting {} bytes.", freed, retry);
+                                        }
+                                    } else {
+                                        LOG.warn("L2 off-heap eviction freed 0 bytes; skipping L2 insert.");
+                                    }
+                                } else {
+                                    throw ioe;
+                                }
+                            }
                         } else if (perKeyCache.l2MapEntries.getClass() != NoOpCachePolicy.class) {
                             perKeyCache.l2MapEntries.put(userKey, CacheEntry.clean(userValue));
                         }
@@ -2196,7 +2234,25 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     if (perKeyCache.l2ManagedMemoryEnabled && perKeyCache.l2MapEntriesOffHeap != null) {
                         byte[] serializedKey = perKeyCache.serializeKey(userKey);
                         byte[] serializedValue = perKeyCache.serializeValue(cacheEntry.getValue());
-                        perKeyCache.l2MapEntriesOffHeap.put(serializedKey, serializedValue);
+                        try {
+                            perKeyCache.l2MapEntriesOffHeap.put(serializedKey, serializedValue);
+                        } catch (IOException ioe) {
+                            Throwable cause = ioe.getCause();
+                            if (cause instanceof org.apache.flink.runtime.memory.MemoryAllocationException) {
+                                long freed = perKeyCache.l2MapEntriesOffHeap.evict(serializedKey.length + serializedValue.length + 128L);
+                                if (freed > 0) {
+                                    try {
+                                        perKeyCache.l2MapEntriesOffHeap.put(serializedKey, serializedValue);
+                                    } catch (IOException retry) {
+                                        LOG.warn("L2 off-heap put still failed after evicting {} bytes.", freed, retry);
+                                    }
+                                } else {
+                                    LOG.warn("L2 off-heap eviction freed 0 bytes; skipping L2 insert.");
+                                }
+                            } else {
+                                throw ioe;
+                            }
+                        }
                     } else if (perKeyCache.l2MapEntries.getClass() != NoOpCachePolicy.class) {
                         perKeyCache.l2MapEntries.put(userKey, CacheEntry.clean(cacheEntry.getValue()));
                     }
@@ -2264,5 +2320,4 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         return total > 0 ? (hits.getCount() * 100.0) / total : 0.0;
     }
 }
-
 
