@@ -56,7 +56,12 @@ public class CachingStateBackend extends AbstractStateBackend
     private final long l2CacheSize;
     private final long maxActiveNamespaces;
     private final long maxCacheMemoryMb;
-    private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
+    // Global and per-state cache policy types
+    private final CachingStateBackendFactory.CachePolicyType globalCachePolicyType;
+    private final CachingStateBackendFactory.CachePolicyType mapCachePolicyType;
+    private final CachingStateBackendFactory.CachePolicyType valueCachePolicyType;
+    private final CachingStateBackendFactory.CachePolicyType listCachePolicyType;
+    private final CachingStateBackendFactory.CachePolicyType aggregatingCachePolicyType;
     private final long mapL1KeyPresenceCacheSize;
     private final long mapL2KeyPresenceCacheSize;
 
@@ -87,7 +92,12 @@ public class CachingStateBackend extends AbstractStateBackend
         this.l2CacheSize = l2CacheSize;
         this.maxActiveNamespaces = maxActiveNamespaces;
         this.maxCacheMemoryMb = maxCacheMemoryMb;
-        this.cachePolicyType = cachePolicyType;
+        // When constructed directly, apply the same policy to all states
+        this.globalCachePolicyType = cachePolicyType;
+        this.mapCachePolicyType = cachePolicyType;
+        this.valueCachePolicyType = cachePolicyType;
+        this.listCachePolicyType = cachePolicyType;
+        this.aggregatingCachePolicyType = cachePolicyType;
         this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
         this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
         this.mapCacheHitRateThreshold = mapCacheHitRateThreshold;
@@ -129,7 +139,8 @@ public class CachingStateBackend extends AbstractStateBackend
         this.l2CacheSize = config.get(CachingStateBackendFactory.L2_CACHE_SIZE_CONFIG);
         this.maxActiveNamespaces = config.get(CachingStateBackendFactory.MAX_ACTIVE_NAMESPACES_CONFIG);
         this.maxCacheMemoryMb = config.get(CachingStateBackendFactory.MAX_CACHE_MEMORY_MB_CONFIG);
-        this.cachePolicyType = config.get(CachingStateBackendFactory.CACHE_POLICY_CONFIG);
+        // Read global policy
+        this.globalCachePolicyType = config.get(CachingStateBackendFactory.CACHE_POLICY_CONFIG);
         this.mapL1KeyPresenceCacheSize = config.get(CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG);
         this.mapL2KeyPresenceCacheSize = config.get(CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG);
         this.mapCacheHitRateThreshold = config.get(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG);
@@ -139,6 +150,38 @@ public class CachingStateBackend extends AbstractStateBackend
         this.mapBypassEnabled = config.get(CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG);
         this.mapPresenceCacheImpl = config.get(CachingStateBackendFactory.MAP_PRESENCE_CACHE_IMPL);
         this.l2ManagedMemoryEnabled = config.get(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG);
+        // Resolve per-state policies with fallback to the global policy when option is absent
+        CachingStateBackendFactory.CachePolicyType tmpMapPolicy = this.globalCachePolicyType;
+        CachingStateBackendFactory.CachePolicyType tmpValuePolicy = this.globalCachePolicyType;
+        CachingStateBackendFactory.CachePolicyType tmpListPolicy = this.globalCachePolicyType;
+        CachingStateBackendFactory.CachePolicyType tmpAggPolicy = this.globalCachePolicyType;
+        if (config instanceof Configuration) {
+            Configuration conf = (Configuration) config;
+            if (conf.contains(CachingStateBackendFactory.MAP_CACHE_POLICY_CONFIG)) {
+                tmpMapPolicy = conf.get(CachingStateBackendFactory.MAP_CACHE_POLICY_CONFIG);
+            }
+            if (conf.contains(CachingStateBackendFactory.VALUE_CACHE_POLICY_CONFIG)) {
+                tmpValuePolicy = conf.get(CachingStateBackendFactory.VALUE_CACHE_POLICY_CONFIG);
+            }
+            if (conf.contains(CachingStateBackendFactory.LIST_CACHE_POLICY_CONFIG)) {
+                tmpListPolicy = conf.get(CachingStateBackendFactory.LIST_CACHE_POLICY_CONFIG);
+            }
+            if (conf.contains(CachingStateBackendFactory.AGGREGATING_CACHE_POLICY_CONFIG)) {
+                tmpAggPolicy = conf.get(CachingStateBackendFactory.AGGREGATING_CACHE_POLICY_CONFIG);
+            }
+        } else {
+            // Best-effort fallback when we cannot check presence: use per-state value directly
+            // which will be equal to its default if not set. This may not reflect global override.
+            tmpMapPolicy = config.get(CachingStateBackendFactory.MAP_CACHE_POLICY_CONFIG);
+            tmpValuePolicy = config.get(CachingStateBackendFactory.VALUE_CACHE_POLICY_CONFIG);
+            tmpListPolicy = config.get(CachingStateBackendFactory.LIST_CACHE_POLICY_CONFIG);
+            tmpAggPolicy = config.get(CachingStateBackendFactory.AGGREGATING_CACHE_POLICY_CONFIG);
+        }
+        this.mapCachePolicyType = tmpMapPolicy;
+        this.valueCachePolicyType = tmpValuePolicy;
+        this.listCachePolicyType = tmpListPolicy;
+        this.aggregatingCachePolicyType = tmpAggPolicy;
+
         // Preserve full configuration relevant to keyed backend
         org.apache.flink.configuration.Configuration cfg = new org.apache.flink.configuration.Configuration();
         cfg.set(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG, config.get(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG));
@@ -149,6 +192,12 @@ public class CachingStateBackend extends AbstractStateBackend
         cfg.set(CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, this.mapCacheMinAccessesForBypassCheck);
         cfg.set(CachingStateBackendFactory.MAP_PRESENCE_CACHE_IMPL, this.mapPresenceCacheImpl);
         cfg.set(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG, this.l2ManagedMemoryEnabled);
+        // Expose resolved per-state policies to the keyed backend (for completeness/testing)
+        cfg.set(CachingStateBackendFactory.CACHE_POLICY_CONFIG, this.globalCachePolicyType);
+        cfg.set(CachingStateBackendFactory.MAP_CACHE_POLICY_CONFIG, this.mapCachePolicyType);
+        cfg.set(CachingStateBackendFactory.VALUE_CACHE_POLICY_CONFIG, this.valueCachePolicyType);
+        cfg.set(CachingStateBackendFactory.LIST_CACHE_POLICY_CONFIG, this.listCachePolicyType);
+        cfg.set(CachingStateBackendFactory.AGGREGATING_CACHE_POLICY_CONFIG, this.aggregatingCachePolicyType);
         // ValueState toggles
         cfg.set(CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG, config.get(CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG));
         cfg.set(CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG, config.get(CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG));
@@ -208,7 +257,11 @@ public class CachingStateBackend extends AbstractStateBackend
                 (int) l1CacheSize,
                 (int) l2CacheSize,
                 (int) maxActiveNamespaces,
-                this.maxCacheMemoryMb, this.cachePolicyType,
+                this.maxCacheMemoryMb,
+                this.valueCachePolicyType,
+                this.mapCachePolicyType,
+                this.listCachePolicyType,
+                this.aggregatingCachePolicyType,
                 (int) this.mapL1KeyPresenceCacheSize, (int) this.mapL2KeyPresenceCacheSize,
                 this.mapCacheHitRateThreshold, this.mapCacheHitRateWindowSize, this.mapCacheMinAccessesForBypassCheck,
                 this.mapKeyPresenceCacheEnabled,
@@ -280,9 +333,11 @@ public class CachingStateBackend extends AbstractStateBackend
         return maxCacheMemoryMb;
     }
 
-    public CachingStateBackendFactory.CachePolicyType getCachePolicyType() {
-        return cachePolicyType;
-    }
+    public CachingStateBackendFactory.CachePolicyType getGlobalCachePolicyType() { return globalCachePolicyType; }
+    public CachingStateBackendFactory.CachePolicyType getMapCachePolicyType() { return mapCachePolicyType; }
+    public CachingStateBackendFactory.CachePolicyType getValueCachePolicyType() { return valueCachePolicyType; }
+    public CachingStateBackendFactory.CachePolicyType getListCachePolicyType() { return listCachePolicyType; }
+    public CachingStateBackendFactory.CachePolicyType getAggregatingCachePolicyType() { return aggregatingCachePolicyType; }
 
     public long getMapL1KeyPresenceCacheSize() {
         return mapL1KeyPresenceCacheSize;

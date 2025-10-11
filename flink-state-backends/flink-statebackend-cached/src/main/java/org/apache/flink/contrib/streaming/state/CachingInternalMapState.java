@@ -166,6 +166,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
         /** The MetricGroup created for this cache instance (can be null before registration). */
         private transient MetricGroup metricGroup;
+        private transient boolean metricsRegistered = false;
 
         PerKeyMapCache(int l1Size, int l2Size, InternalMapState<K_F, N_F, UK_C, UV_C> delegateState,
                 CachingKeyedStateBackend<K_F> ownerBackend, K_F flinkKey, N_F cacheNamespace,
@@ -263,7 +264,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
             if (l2ManagedMemoryEnabled && ownerBackend.getManagedPagePool() != null
                     && ownerBackend.getManagedPagePool().isUsable()) {
-                this.l2MapEntriesOffHeap = new OffHeapKVStore(ownerBackend.getManagedPagePool(), ownerBackend);
+                this.l2MapEntriesOffHeap = new OffHeapKVStore(
+                        ownerBackend.getManagedPagePool(), ownerBackend, ownerBackend.getL2TimeBucketSizeMillis());
                 this.l2MapEntries = new NoOpCachePolicy<>();
             } else {
                 if (l2ManagedMemoryEnabled) {
@@ -652,6 +654,9 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
 
         void registerMetrics(MetricGroup group, K_F key, N_F namespace) {
+            if (metricsRegistered) {
+                return; // avoid duplicate registration with Prometheus reporters
+            }
             // Build a unique metric group path for every cache instance to avoid name clashes
             String keyStr = key != null ? key.toString() : "nullKey";
             String nsStr = namespace != null ? namespace.toString() : "nullNamespace";
@@ -667,6 +672,18 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             metricGroup.gauge("l2MapEntries", this::l2MapEntriesSize);
             metricGroup.gauge("l1PresenceCacheEntries", this::l1PresenceCacheSize);
             metricGroup.gauge("l2PresenceCacheEntries", this::l2PresenceCacheSize);
+
+            // Off-heap L2 specific gauges
+            if (l2ManagedMemoryEnabled && l2MapEntriesOffHeap != null) {
+                metricGroup.gauge("l2OffHeapPages", () -> l2MapEntriesOffHeap.getPageCount());
+                metricGroup.gauge("l2OffHeapBytes", () -> l2MapEntriesOffHeap.getEstimatedMemoryUsageBytes());
+                metricGroup.gauge("l2OffHeapEntries", () -> l2MapEntriesOffHeap.size());
+                metricGroup.gauge("l2OffHeapPagesFreedCapacity", () -> l2MapEntriesOffHeap.getPagesFreedByCapacity());
+                metricGroup.gauge("l2OffHeapPagesFreedWatermark", () -> l2MapEntriesOffHeap.getPagesFreedByWatermark());
+                metricGroup.gauge("l2OffHeapPagesFreedPerSec", () -> l2MapEntriesOffHeap.getApproxPagesFreedPerSecond());
+            }
+
+            metricsRegistered = true;
         }
 
         /**
@@ -886,7 +903,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             long mapCacheMinAccessesForBypassCheck, boolean enableKeyPresenceCache,
             boolean enableBypass,
             CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
-            boolean l2ManagedMemoryEnabled) {
+            boolean l2ManagedMemoryEnabled,
+            boolean perKeyMetricsEnabled) {
         this.delegateState = delegateState;
         this.backend = backend;
 
@@ -1025,6 +1043,21 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
         this.delegateLookups = cacheMetrics.counter("delegateLookups");
 
+        // Register aggregate (low-cardinality) gauges on the state-level metrics group
+        try {
+            MetricGroup agg = cacheMetrics.addGroup("aggregate");
+            agg.gauge("perKeyCaches", () -> countPerKeyCaches());
+            agg.gauge("l1MapEntriesTotal", () -> sumL1Entries());
+            agg.gauge("l2MapEntriesTotal", () -> sumL2Entries());
+            agg.gauge("l2OffHeapPagesTotal", () -> sumOffHeapPages());
+            agg.gauge("l2OffHeapBytesTotal", () -> sumOffHeapBytes());
+            agg.gauge("l2OffHeapEntriesTotal", () -> sumOffHeapEntries());
+            agg.gauge("l2OffHeapPagesFreedCapacityTotal", () -> sumOffHeapPagesFreedCapacity());
+            agg.gauge("l2OffHeapPagesFreedWatermarkTotal", () -> sumOffHeapPagesFreedWatermark());
+        } catch (Throwable t) {
+            // best-effort only
+        }
+
         // cacheMetrics.gauge("bypassActive", () -> bypassCache ? 1 : 0);
         // if (mapCacheHitRateThreshold > 0.0) {
         //     cacheMetrics.gauge("currentHitRateForBypass", () -> {
@@ -1153,10 +1186,109 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                     this.userKeySerializer,
                                     this.userValueSerializer,
                                     l2ManagedMemoryEnabled);
-                    // perKeyCache.registerMetrics(this.metrics.addGroup("perKeyCache"), k,
-                    //         getCurrentNamespace());
+                    if (CachingInternalMapState.this.metrics != null && perKeyMetricsEnabled) {
+                        perKeyCache.registerMetrics(CachingInternalMapState.this.metrics.addGroup("perKeyCache"), k,
+                                getCurrentNamespace());
+                    }
                     return perKeyCache;
                 });
+    }
+
+    private long countPerKeyCaches() {
+        long c = 0;
+        for (CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> m : namespaceCaches.values()) {
+            if (m == null) continue;
+            for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> e : m.entrySet()) {
+                if (e.getValue() != null) c++;
+            }
+        }
+        return c;
+    }
+
+    private long sumL1Entries() {
+        long s = 0;
+        for (CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> m : namespaceCaches.values()) {
+            if (m == null) continue;
+            for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> e : m.entrySet()) {
+                PerKeyMapCache<UK, UV, K, N> pc = e.getValue();
+                if (pc != null) s += pc.l1MapEntries.size();
+            }
+        }
+        return s;
+    }
+
+    private long sumL2Entries() {
+        long s = 0;
+        for (CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> m : namespaceCaches.values()) {
+            if (m == null) continue;
+            for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> e : m.entrySet()) {
+                PerKeyMapCache<UK, UV, K, N> pc = e.getValue();
+                if (pc == null) continue;
+                if (pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) s += pc.l2MapEntriesOffHeap.size();
+                else s += pc.l2MapEntries.size();
+            }
+        }
+        return s;
+    }
+
+    private long sumOffHeapPages() {
+        long s = 0;
+        for (CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> m : namespaceCaches.values()) {
+            if (m == null) continue;
+            for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> e : m.entrySet()) {
+                PerKeyMapCache<UK, UV, K, N> pc = e.getValue();
+                if (pc != null && pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) s += pc.l2MapEntriesOffHeap.getPageCount();
+            }
+        }
+        return s;
+    }
+
+    private long sumOffHeapBytes() {
+        long s = 0;
+        for (CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> m : namespaceCaches.values()) {
+            if (m == null) continue;
+            for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> e : m.entrySet()) {
+                PerKeyMapCache<UK, UV, K, N> pc = e.getValue();
+                if (pc != null && pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) s += pc.l2MapEntriesOffHeap.getEstimatedMemoryUsageBytes();
+            }
+        }
+        return s;
+    }
+
+    private long sumOffHeapEntries() {
+        long s = 0;
+        for (CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> m : namespaceCaches.values()) {
+            if (m == null) continue;
+            for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> e : m.entrySet()) {
+                PerKeyMapCache<UK, UV, K, N> pc = e.getValue();
+                if (pc != null && pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) s += pc.l2MapEntriesOffHeap.size();
+            }
+        }
+        return s;
+    }
+
+    private long sumOffHeapPagesFreedCapacity() {
+        long s = 0;
+        for (CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> m : namespaceCaches.values()) {
+            if (m == null) continue;
+            for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> e : m.entrySet()) {
+                PerKeyMapCache<UK, UV, K, N> pc = e.getValue();
+                if (pc != null && pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) s += pc.l2MapEntriesOffHeap.getPagesFreedByCapacity();
+            }
+        }
+        return s;
+    }
+
+    private long sumOffHeapPagesFreedWatermark() {
+        long s = 0;
+        for (CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> m : namespaceCaches.values()) {
+            if (m == null) continue;
+            for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> e : m.entrySet()) {
+                PerKeyMapCache<UK, UV, K, N> pc = e.getValue();
+                if (pc != null && pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) s += pc.l2MapEntriesOffHeap.getPagesFreedByWatermark();
+            }
+        }
+        return s;
     }
 
     private void updateCacheBypassCondition(boolean resolvedByCache) {
@@ -1883,6 +2015,31 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         return delegateState;
     }
 
+    /**
+     * Trigger time-bucketed eviction on all off-heap L2 caches based on a watermark.
+     * This does nothing if off-heap L2 is disabled.
+     */
+    public void onWatermarkEvict(long watermarkMillis) {
+        try {
+            for (Map.Entry<N, CachePolicy<K, PerKeyMapCache<UK, UV, K, N>>> nsEntry : namespaceCaches.entrySet()) {
+                CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> keyCaches = nsEntry.getValue();
+                if (keyCaches == null) continue;
+                // iterate over a snapshot to avoid CME
+                java.util.List<PerKeyMapCache<UK, UV, K, N>> caches = new java.util.ArrayList<>();
+                for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> e : keyCaches.entrySet()) {
+                    if (e.getValue() != null) caches.add(e.getValue());
+                }
+                for (PerKeyMapCache<UK, UV, K, N> perKey : caches) {
+                    if (perKey.l2ManagedMemoryEnabled && perKey.l2MapEntriesOffHeap != null) {
+                        perKey.l2MapEntriesOffHeap.evictBucketsUpTo(watermarkMillis);
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            LOG.debug("onWatermarkEvict failed: {}", t.getMessage());
+        }
+    }
+
     @Override
     public TypeSerializer<K> getKeySerializer() {
         return delegateState.getKeySerializer();
@@ -2163,25 +2320,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 UK key = delegateEntry.getKey();
                 if (processedKeys.add(key)) { // If not already processed from L1 or L2
                     this.nextEntry = delegateEntry;
-                    UV value = delegateEntry.getValue();
-
-                    // Warm up cache: Add the fetched entry to L1.
-                    // This is best-effort and respects cache size limits via eviction.
-                    if (value != null) {
-                        CacheEntry<UV> newCacheEntry = CacheEntry.clean(value);
-                        CacheEntry<UV> oldCacheEntry = perKeyCache.l1MapEntries.put(key, newCacheEntry);
-
-                        if (oldCacheEntry != null) {
-                            perKeyCache.ownerBackend.reportCacheMemoryReleased(
-                                    oldCacheEntry.getEstimatedSizeBytes());
-                        }
-                        perKeyCache.ownerBackend.reportCacheMemoryAdded(
-                                newCacheEntry.getEstimatedSizeBytes());
-                    }
-
-                    if (perKeyCache.keyPresenceCacheEnabled) {
-                        perKeyCache.updatePresenceCacheOnGet(key, value != null);
-                    }
+                    // Light-touch iteration: do not populate L1/L2/presence caches to avoid scan pollution.
                     return;
                 }
             }

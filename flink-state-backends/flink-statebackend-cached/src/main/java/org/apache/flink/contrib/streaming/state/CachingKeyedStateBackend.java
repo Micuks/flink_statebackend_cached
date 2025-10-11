@@ -110,7 +110,11 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int l2EntryCacheSize;
     private final int maxActiveNamespaceOrPerKeyCacheContainers;
     private final long maxCacheMemoryMb;
-    private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
+    // Per-state cache policy types
+    private final CachingStateBackendFactory.CachePolicyType valueCachePolicyType;
+    private final CachingStateBackendFactory.CachePolicyType mapCachePolicyType;
+    private final CachingStateBackendFactory.CachePolicyType listCachePolicyType;
+    private final CachingStateBackendFactory.CachePolicyType aggregatingCachePolicyType;
     private final int mapL1KeyPresenceCacheSize;
     private final int mapL2KeyPresenceCacheSize;
     private final MetricGroup metricGroup;
@@ -124,6 +128,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean l2ManagedMemoryEnabled;
     private final int mapSpecificL1EntryCacheSize;
     private final int mapSpecificL2EntryCacheSize;
+    private final long l2TimeBucketSizeMillis;
 
     private final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
 
@@ -156,7 +161,11 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int l1EntryCacheSize,
             int l2EntryCacheSize,
             int maxActiveNamespaceOrPerKeyCacheContainers,
-            long maxCacheMemoryMb, CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            long maxCacheMemoryMb,
+            CachingStateBackendFactory.CachePolicyType valueCachePolicyType,
+            CachingStateBackendFactory.CachePolicyType mapCachePolicyType,
+            CachingStateBackendFactory.CachePolicyType listCachePolicyType,
+            CachingStateBackendFactory.CachePolicyType aggregatingCachePolicyType,
             int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
             boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
@@ -182,7 +191,10 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.maxActiveNamespaceOrPerKeyCacheContainers = maxActiveNamespaceOrPerKeyCacheContainers;
         this.maxCacheMemoryMb = maxCacheMemoryMb;
         this.registeredStates = new ArrayList<>();
-        this.cachePolicyType = cachePolicyType;
+        this.valueCachePolicyType = valueCachePolicyType;
+        this.mapCachePolicyType = mapCachePolicyType;
+        this.listCachePolicyType = listCachePolicyType;
+        this.aggregatingCachePolicyType = aggregatingCachePolicyType;
         this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
         this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
         this.metricGroup = metricGroup;
@@ -202,11 +214,27 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         // Initialize global L2 entry limit from configuration
         this.maxGlobalL2Entries = taskConfiguration.getLong("state.backend.cached.map.l2.size.entries", 16384L);
 
+        long cfgBucket = 0L;
+        try {
+            cfgBucket = this.taskConfiguration.getLong("state.backend.cached.map.l2.time-bucket.size", 0L);
+        } catch (Throwable t) {
+            cfgBucket = 0L;
+        }
+        this.l2TimeBucketSizeMillis = Math.max(0L, cfgBucket);
+
         // Initialize memory capping fields
         this.currentEstimatedCacheSizeBytes = new AtomicLong(0L);
         this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
         this.bytesSinceLastEvictionCheck = new AtomicLong(0L);
         this.globalL2MapEntryCount = new AtomicLong(0L);
+
+        boolean pkme = false;
+        try {
+            pkme = this.taskConfiguration.getBoolean(CachingStateBackendFactory.MAP_PER_KEY_METRICS_ENABLED);
+        } catch (Throwable t) {
+            pkme = false;
+        }
+        this.perKeyMetricsEnabled = pkme;
 
         // Initialize managed page pool.
         // It's crucial to check both the feature flag and the availability of the memory manager.
@@ -231,6 +259,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     currentEstimatedCacheSizeBytes::get);
             this.metricGroup.gauge("globalL2MapEntries",
                     globalL2MapEntryCount::get);
+            this.metricGroup.gauge("l2TimeBucketSizeMillis", () -> this.l2TimeBucketSizeMillis);
         }
         // Configure auto left-bypass from task configuration (kill-switch)
         try {
@@ -279,7 +308,10 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int l2EntryCacheSize,
             int maxActiveNamespaceOrPerKeyCacheContainers,
             long maxCacheMemoryMb,
-            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            CachingStateBackendFactory.CachePolicyType valueCachePolicyType,
+            CachingStateBackendFactory.CachePolicyType mapCachePolicyType,
+            CachingStateBackendFactory.CachePolicyType listCachePolicyType,
+            CachingStateBackendFactory.CachePolicyType aggregatingCachePolicyType,
             int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
             boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
@@ -310,7 +342,10 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.maxActiveNamespaceOrPerKeyCacheContainers = maxActiveNamespaceOrPerKeyCacheContainers;
         this.maxCacheMemoryMb = maxCacheMemoryMb;
         this.registeredStates = new ArrayList<>();
-        this.cachePolicyType = cachePolicyType;
+        this.valueCachePolicyType = valueCachePolicyType;
+        this.mapCachePolicyType = mapCachePolicyType;
+        this.listCachePolicyType = listCachePolicyType;
+        this.aggregatingCachePolicyType = aggregatingCachePolicyType;
         this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
         this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
         this.mapCacheHitRateThreshold = mapCacheHitRateThreshold;
@@ -325,6 +360,16 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         this.mapSpecificL1EntryCacheSize = mapSpecificL1EntryCacheSize;
         this.mapSpecificL2EntryCacheSize = mapSpecificL2EntryCacheSize;
+
+        long cfgBucket2 = 0L;
+        try {
+            cfgBucket2 = (this.taskConfiguration != null)
+                    ? this.taskConfiguration.getLong("state.backend.cached.map.l2.time-bucket.size", 0L)
+                    : 0L;
+        } catch (Throwable t) {
+            cfgBucket2 = 0L;
+        }
+        this.l2TimeBucketSizeMillis = Math.max(0L, cfgBucket2);
 
         // Initialize global L2 entry limit from configuration (same default as other constructor)
         this.maxGlobalL2Entries = taskConfiguration != null
@@ -343,6 +388,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     currentEstimatedCacheSizeBytes::get);
             this.metricGroup.gauge("globalL2MapEntries",
                     globalL2MapEntryCount::get);
+            this.metricGroup.gauge("l2TimeBucketSizeMillis", () -> this.l2TimeBucketSizeMillis);
         }
         
         // Ensure managedPagePool is initialized based on configuration
@@ -371,6 +417,10 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         return managedPagePool;
     }
 
+    public long getL2TimeBucketSizeMillis() {
+        return l2TimeBucketSizeMillis;
+    }
+
     public AtomicLong getGlobalL2MapEntryCount() {
         return globalL2MapEntryCount;
     }
@@ -381,6 +431,27 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     public int getMaxActiveNamespaceOrPerKeyCacheContainers() {
         return maxActiveNamespaceOrPerKeyCacheContainers;
+    }
+
+    /**
+     * Hook to notify cached states about watermark advancement for time-bucketed eviction.
+     * Safe to call even if no cached MapState is present.
+     */
+    public void onWatermark(long watermarkMillis) {
+        try {
+            synchronized (registeredStates) {
+                for (CachingInternalState<K, ?, ?, ?> state : registeredStates) {
+                    if (state instanceof CachingInternalMapState) {
+                        @SuppressWarnings("unchecked")
+                        CachingInternalMapState<K, Object, Object, Object> mapState =
+                                (CachingInternalMapState<K, Object, Object, Object>) state;
+                        mapState.onWatermarkEvict(watermarkMillis);
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            LOG.debug("onWatermark hook failed: {}", t.getMessage());
+        }
     }
 
     @Nonnull
@@ -458,7 +529,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     l2EntryCacheSize,
                     maxActiveNamespaceOrPerKeyCacheContainers,
                     this.maxCacheMemoryMb,
-                    this.cachePolicyType,
+                    this.valueCachePolicyType,
                     valueHitRateThreshold,
                     valueHitRateWindow,
                     valueMinAccessesForBypassCheck,
@@ -485,7 +556,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     l2SizeForMap,
                     maxActiveNamespaceOrPerKeyCacheContainers,
                     this.maxCacheMemoryMb,
-                    this.cachePolicyType,
+                    this.mapCachePolicyType,
                     this.mapL1KeyPresenceCacheSize,
                     this.mapL2KeyPresenceCacheSize,
                     mapMetricsGroup,
@@ -495,12 +566,13 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     this.mapKeyPresenceCacheEnabled,
                     this.mapBypassEnabled,
                     this.mapPresenceCacheImpl,
-                    this.l2ManagedMemoryEnabled);
+                    this.l2ManagedMemoryEnabled,
+                    this.perKeyMetricsEnabled);
         } else if (stateDescriptor.getType() == StateDescriptor.Type.LIST && actualStateRaw instanceof InternalListState) {
             InternalListState<K, N, V_SD> actualDelegateListState = (InternalListState<K, N, V_SD>) actualStateRaw;
             cachingStateToRegister = new CachingInternalListState<>(
                     actualDelegateListState, this, l1EntryCacheSize, l2EntryCacheSize,
-                    maxActiveNamespaceOrPerKeyCacheContainers, this.cachePolicyType); // Max memory mb was missing here for list
+                    maxActiveNamespaceOrPerKeyCacheContainers, this.listCachePolicyType); // Max memory mb was missing here for list
         } else if (stateDescriptor.getType() == StateDescriptor.Type.AGGREGATING && actualStateRaw instanceof InternalAggregatingState) {
             InternalAggregatingState actualDelegateAggState = (InternalAggregatingState) actualStateRaw;
             AggregatingStateDescriptor aggStateDesc = (AggregatingStateDescriptor) stateDescriptor;
@@ -512,7 +584,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 aggStateDesc.getAggregateFunction(),
                 l1EntryCacheSize,
                 l2EntryCacheSize,
-                this.cachePolicyType,
+                this.aggregatingCachePolicyType,
                 aggMetricsGroup);
         } else {
             // For unsupported types or if actualStateRaw is not an instance of the expected internal type,

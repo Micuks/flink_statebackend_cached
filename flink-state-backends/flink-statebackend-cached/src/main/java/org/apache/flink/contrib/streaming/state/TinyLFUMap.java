@@ -50,14 +50,17 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
     // Window cache (LRU) - admits all new entries
     private final LinkedHashMap<K, V> windowLruCache;
 
-    // Main cache (LRU) - protected by the frequency sketch
-    private final LinkedHashMap<K, V> mainLruCache;
+    // Main cache split into probation (admission frontier) and protected (frequently-used)
+    private final LinkedHashMap<K, V> mainProbationLru;
+    private final LinkedHashMap<K, V> mainProtectedLru;
 
     // Window cache capacity
     private final int windowCacheCapacity;
 
-    // Main cache capacity
+    // Main cache capacity and its split
     private final int mainCacheCapacity;
+    private final int probationCapacity;
+    private final int protectedCapacity;
 
     // Total maximum capacity
     private final int maxCapacity;
@@ -120,10 +123,21 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
             }
         };
 
-        // Create access-ordered main cache (LRU eviction)
-        // The mainLruCache itself does not have an eviction listener that writes to a lower tier.
-        // Evictions from mainLruCache happen within tryAdmitToMainCache, which calls the listener.
-        this.mainLruCache = new LinkedHashMap<K, V>(16, 0.75f, true);
+        // Create access-ordered main caches (LRU eviction)
+        // - probation: entries newly admitted from window
+        // - protected: entries that proved frequent (promotion on hit)
+        // Evictions call the eviction listener.
+        // Split main into 20% probation, 80% protected (typical W-TinyLFU default)
+        int probationCap = (int) Math.floor(mainCacheCapacity * 0.20);
+        if (probationCap < 1 && mainCacheCapacity > 0) {
+            probationCap = 1;
+        }
+        int protectedCap = Math.max(0, mainCacheCapacity - probationCap);
+        this.probationCapacity = probationCap;
+        this.protectedCapacity = protectedCap;
+
+        this.mainProbationLru = new LinkedHashMap<K, V>(16, 0.75f, true);
+        this.mainProtectedLru = new LinkedHashMap<K, V>(16, 0.75f, true);
     }
 
     /**
@@ -136,48 +150,77 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
      * @return true if the entry was admitted to main cache, false otherwise
      */
     private boolean tryAdmitToMainCache(K key, V value) {
-        // If main cache has space, admit directly
-        if (mainLruCache.size() < mainCacheCapacity) {
-            mainLruCache.put(key, value);
+        // If main cache has space, admit to probation
+        int mainSize = mainProbationLru.size() + mainProtectedLru.size();
+        if (mainSize < mainCacheCapacity) {
+            admitToProbation(key, value);
             return true;
         }
 
-        // If main cache capacity is 0, cannot admit
         if (mainCacheCapacity == 0) {
+            // No main region available
             return false;
         }
 
-        // Use TinyLFU admission policy, but continue evicting until we have space
-        while (mainLruCache.size() >= mainCacheCapacity) {
-            Iterator<Map.Entry<K, V>> it = mainLruCache.entrySet().iterator();
-            if (!it.hasNext()) {
-                // Shouldn't happen if capacities are set correctly
-                return false;
-            }
+        // Choose a victim from probation (its LRU). If probation is empty, demote the LRU of
+        // protected into probation to create a victim there.
+        ensureProbationVictimExists();
 
-            // Get the victim (LRU item from main cache)
-            Map.Entry<K, V> victim = it.next();
-
-            // Compare estimated frequency of candidate vs victim
-            long candidateFreq = sketch.estimate(key);
-            long victimFreq = sketch.estimate(victim.getKey());
-
-            // Admit the candidate if its estimated frequency is at least as high as the victim's
-            // Using ">=" prevents a stand-off where equally infrequent entries pin the older one in cache
-            if (candidateFreq >= victimFreq) {
-                it.remove(); // Removes victim from mainLruCache
-                if (evictionListener != null) {
-                    evictionListener.accept(victim);
-                }
-            } else {
-                // Candidate is not more frequent, cannot admit
-                return false;
-            }
+        if (mainProbationLru.isEmpty()) {
+            // Could not create a probation victim (e.g., capacities are pathological)
+            return false;
         }
 
-        // After evicting some victims, we now have space
-        mainLruCache.put(key, value);
-        return true;
+        Map.Entry<K, V> victim = oldestEntry(mainProbationLru);
+        if (victim == null) {
+            return false;
+        }
+
+        long candidateFreq = sketch.estimate(key);
+        long victimFreq = sketch.estimate(victim.getKey());
+
+        if (candidateFreq >= victimFreq) {
+            // Evict victim and admit candidate to probation
+            mainProbationLru.remove(victim.getKey());
+            if (evictionListener != null) {
+                evictionListener.accept(victim);
+            }
+            admitToProbation(key, value);
+            return true;
+        } else {
+            // Reject candidate
+            return false;
+        }
+    }
+
+    private void admitToProbation(K key, V value) {
+        mainProbationLru.put(key, value);
+        // Enforce probation capacity by evicting its LRU (not from protected)
+        if (mainProbationLru.size() > probationCapacity) {
+            Map.Entry<K, V> ev = oldestEntry(mainProbationLru);
+            if (ev != null) {
+                mainProbationLru.remove(ev.getKey());
+                if (evictionListener != null) {
+                    evictionListener.accept(ev);
+                }
+            }
+        }
+    }
+
+    private void ensureProbationVictimExists() {
+        if (!mainProbationLru.isEmpty()) return;
+        if (mainProtectedLru.isEmpty()) return;
+        // Demote protected's LRU into probation to create a victim there
+        Map.Entry<K, V> ev = oldestEntry(mainProtectedLru);
+        if (ev != null) {
+            mainProtectedLru.remove(ev.getKey());
+            mainProbationLru.put(ev.getKey(), ev.getValue());
+        }
+    }
+
+    private static <K, V> Map.Entry<K, V> oldestEntry(LinkedHashMap<K, V> lru) {
+        Iterator<Map.Entry<K, V>> it = lru.entrySet().iterator();
+        return it.hasNext() ? it.next() : null;
     }
 
     @Override
@@ -193,8 +236,20 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
             return value;
         }
 
-        // Check main cache
-        return mainLruCache.get(key);
+        // Check protected
+        V v = mainProtectedLru.get(key);
+        if (v != null) {
+            return v; // access-order map updates recency
+        }
+
+        // Check probation; if hit, promote to protected
+        v = mainProbationLru.remove(key);
+        if (v != null) {
+            promoteToProtected(key, v);
+            return v;
+        }
+
+        return null;
     }
 
     @Override
@@ -212,10 +267,15 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
             return oldValue;
         }
 
-        // Check main cache
-        if (mainLruCache.containsKey(key)) {
-            oldValue = mainLruCache.put(key, value);
-            return oldValue;
+        // Check protected
+        if (mainProtectedLru.containsKey(key)) {
+            return mainProtectedLru.put(key, value);
+        }
+
+        // Check probation
+        if (mainProbationLru.containsKey(key)) {
+            // Update in place; we keep it probationary until next hit promotes it
+            return mainProbationLru.put(key, value);
         }
 
         // New entry, add to window cache
@@ -246,7 +306,7 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
             return removedValue;
         }
 
-        removedValue = mainLruCache.remove(key);
+        removedValue = mainProtectedLru.remove(key);
         if (removedValue != null && evictionListener != null) {
             final K finalKeyMain = key;
             final V finalRemovedValueMain = removedValue;
@@ -259,23 +319,40 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
             };
             evictionListener.accept(evictedEntry);
         }
-        return removedValue;
+
+        V removedProb = mainProbationLru.remove(key);
+        if (removedProb != null && evictionListener != null) {
+            final K finalKeyMain = key;
+            final V finalRemovedValueMain = removedProb;
+            Map.Entry<K,V> evictedEntry = new Map.Entry<K,V>() {
+                @Override public K getKey() { return finalKeyMain; }
+                @Override public V getValue() { return finalRemovedValueMain; }
+                @Override public V setValue(V value) { throw new UnsupportedOperationException(); }
+                @Override public boolean equals(Object o) { return (o instanceof Map.Entry) && Objects.equals(finalKeyMain, ((Map.Entry<?,?>)o).getKey()) && Objects.equals(finalRemovedValueMain, ((Map.Entry<?,?>)o).getValue()); }
+                @Override public int hashCode() { return Objects.hashCode(finalKeyMain) ^ Objects.hashCode(finalRemovedValueMain); }
+            };
+            evictionListener.accept(evictedEntry);
+        }
+        return removedValue != null ? removedValue : removedProb;
     }
 
     @Override
     public boolean containsKey(K key) {
-        return windowLruCache.containsKey(key) || mainLruCache.containsKey(key);
+        return windowLruCache.containsKey(key)
+                || mainProbationLru.containsKey(key)
+                || mainProtectedLru.containsKey(key);
     }
 
     @Override
     public int size() {
-        return windowLruCache.size() + mainLruCache.size();
+        return windowLruCache.size() + mainProbationLru.size() + mainProtectedLru.size();
     }
 
     @Override
     public void clear() {
         windowLruCache.clear();
-        mainLruCache.clear();
+        mainProbationLru.clear();
+        mainProtectedLru.clear();
         sketch.reset();
         accessCounter.reset();
     }
@@ -285,7 +362,8 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
         // Combine entries from both caches
         List<Map.Entry<K, V>> entries = new ArrayList<>(size());
         entries.addAll(windowLruCache.entrySet());
-        entries.addAll(mainLruCache.entrySet());
+        entries.addAll(mainProbationLru.entrySet());
+        entries.addAll(mainProtectedLru.entrySet());
         return entries;
     }
 
@@ -309,13 +387,36 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
     public Collection<V> values() {
         List<V> values = new ArrayList<>(size());
         values.addAll(windowLruCache.values());
-        values.addAll(mainLruCache.values());
+        values.addAll(mainProbationLru.values());
+        values.addAll(mainProtectedLru.values());
         return values;
     }
 
     @Override
     public boolean isEmpty() {
-        return windowLruCache.isEmpty() && mainLruCache.isEmpty();
+        return windowLruCache.isEmpty() && mainProbationLru.isEmpty() && mainProtectedLru.isEmpty();
+    }
+
+    private void promoteToProtected(K key, V value) {
+        mainProtectedLru.put(key, value);
+        // Enforce protected capacity; demote its LRU to probation first
+        if (mainProtectedLru.size() > protectedCapacity) {
+            Map.Entry<K, V> demoted = oldestEntry(mainProtectedLru);
+            if (demoted != null) {
+                mainProtectedLru.remove(demoted.getKey());
+                mainProbationLru.put(demoted.getKey(), demoted.getValue());
+                // If probation overflows due to demotion, evict probation LRU
+                if (mainProbationLru.size() > probationCapacity) {
+                    Map.Entry<K, V> ev = oldestEntry(mainProbationLru);
+                    if (ev != null) {
+                        mainProbationLru.remove(ev.getKey());
+                        if (evictionListener != null) {
+                            evictionListener.accept(ev);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /**
