@@ -85,6 +85,31 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                                     .defaultValue(CachePolicyType.LRU)
                                     .withDescription("The caching policy to use (LRU or TINYLFU).");
 
+    // Per-state cache policy configuration (falls back to global CACHE_POLICY_CONFIG when unset)
+    public static final ConfigOption<CachePolicyType> MAP_CACHE_POLICY_CONFIG =
+            ConfigOptions.key("state.backend.cached.map.policy")
+                    .enumType(CachePolicyType.class)
+                    .defaultValue(CachePolicyType.LRU)
+                    .withDescription("Cache policy for MapState (overrides global policy if set).");
+
+    public static final ConfigOption<CachePolicyType> VALUE_CACHE_POLICY_CONFIG =
+            ConfigOptions.key("state.backend.cached.value.policy")
+                    .enumType(CachePolicyType.class)
+                    .defaultValue(CachePolicyType.LRU)
+                    .withDescription("Cache policy for ValueState (overrides global policy if set).");
+
+    public static final ConfigOption<CachePolicyType> LIST_CACHE_POLICY_CONFIG =
+            ConfigOptions.key("state.backend.cached.list.policy")
+                    .enumType(CachePolicyType.class)
+                    .defaultValue(CachePolicyType.LRU)
+                    .withDescription("Cache policy for ListState (overrides global policy if set).");
+
+    public static final ConfigOption<CachePolicyType> AGGREGATING_CACHE_POLICY_CONFIG =
+            ConfigOptions.key("state.backend.cached.aggregating.policy")
+                    .enumType(CachePolicyType.class)
+                    .defaultValue(CachePolicyType.LRU)
+                    .withDescription("Cache policy for AggregatingState (overrides global policy if set).");
+
     public static final ConfigOption<Double> MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG =
             ConfigOptions.key("state.backend.cached.map.hit-rate.threshold")
                     .doubleType()
@@ -167,6 +192,14 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .defaultValue(true)
                     .withDescription("Enable managed memory for L2 cache.");
 
+    // Time-bucket size for L2 off-heap pages (in milliseconds). When > 0, new writes are grouped
+    // into pages by time bucket to enable O(1) bucket evictions on watermark/time progression.
+    public static final ConfigOption<Long> MAP_L2_TIME_BUCKET_SIZE_MILLIS =
+            ConfigOptions.key("state.backend.cached.map.l2.time-bucket.size")
+                    .longType()
+                    .defaultValue(0L)
+                    .withDescription("Time bucket size (ms) for L2 off-heap cache pages; 0 disables time-bucketed eviction.");
+
     public enum PresenceCacheImplementation {
         DEFAULT,
         PRIMITIVE_MAP
@@ -177,6 +210,13 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .enumType(PresenceCacheImplementation.class)
                     .defaultValue(PresenceCacheImplementation.DEFAULT)
                     .withDescription("Implementation for MapState key presence cache. PRIMITIVE_MAP uses a more memory-efficient implementation.");
+
+    // Per-key metrics can explode cardinality causing large pushes; default disabled.
+    public static final ConfigOption<Boolean> MAP_PER_KEY_METRICS_ENABLED =
+            ConfigOptions.key("state.backend.cached.map.metrics.per-key.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription("Enable per-key/namespace cache metrics (high-cardinality). Default false. Aggregated metrics are recommended.");
 
     // Potentially, a config for delegate backend factory if it's not hardcoded to RocksDB
     // For now, assumes RocksDBStateBackend is the default delegate and is configured using its own
