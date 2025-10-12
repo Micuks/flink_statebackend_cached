@@ -359,12 +359,39 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
 
     @Override
     public Iterable<Map.Entry<K, V>> entrySet() {
-        // Combine entries from both caches
-        List<Map.Entry<K, V>> entries = new ArrayList<>(size());
-        entries.addAll(windowLruCache.entrySet());
-        entries.addAll(mainProbationLru.entrySet());
-        entries.addAll(mainProtectedLru.entrySet());
-        return entries;
+        return () ->
+                new Iterator<Map.Entry<K, V>>() {
+                    private Iterator<Map.Entry<K, V>> current = windowLruCache.entrySet().iterator();
+                    private int phase = 0;
+
+                    @Override
+                    public boolean hasNext() {
+                        advanceIfNeeded();
+                        return current.hasNext();
+                    }
+
+                    @Override
+                    public Map.Entry<K, V> next() {
+                        advanceIfNeeded();
+                        return current.next();
+                    }
+
+                    private void advanceIfNeeded() {
+                        while (!current.hasNext() && phase < 2) {
+                            phase++;
+                            switch (phase) {
+                                case 1:
+                                    current = mainProbationLru.entrySet().iterator();
+                                    break;
+                                case 2:
+                                    current = mainProtectedLru.entrySet().iterator();
+                                    break;
+                                default:
+                                    break;
+                            }
+                        }
+                    }
+                };
     }
 
     @Override
@@ -432,7 +459,9 @@ public class TinyLFUMap<K, V> implements CachePolicy<K, V> {
         // Check if we need to reset the counters (every maxCapacity * 10 accesses)
         accessCounter.increment();
         long count = accessCounter.sum();
-        if (count % (maxCapacity * 10) == 0) {
+        // Use a safe interval to avoid division by zero and int overflow
+        long resetInterval = (long) maxCapacity * 10L;
+        if (resetInterval > 0 && count % resetInterval == 0) {
             sketch.reset();
         }
     }
