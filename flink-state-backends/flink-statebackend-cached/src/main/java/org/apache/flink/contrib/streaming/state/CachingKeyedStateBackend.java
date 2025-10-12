@@ -129,6 +129,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int mapSpecificL1EntryCacheSize;
     private final int mapSpecificL2EntryCacheSize;
     private final long l2TimeBucketSizeMillis;
+    private final boolean perKeyMetricsEnabled;
 
     private final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
 
@@ -227,15 +228,10 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
         this.bytesSinceLastEvictionCheck = new AtomicLong(0L);
         this.globalL2MapEntryCount = new AtomicLong(0L);
-
-        boolean pkme = false;
-        try {
-            pkme = this.taskConfiguration.getBoolean(CachingStateBackendFactory.MAP_PER_KEY_METRICS_ENABLED);
-        } catch (Throwable t) {
-            pkme = false;
-        }
-        this.perKeyMetricsEnabled = pkme;
-
+        // Initialize per-key metrics flag (default false to avoid high cardinality)
+        this.perKeyMetricsEnabled = (this.taskConfiguration != null)
+                ? this.taskConfiguration.getBoolean(CachingStateBackendFactory.MAP_PER_KEY_METRICS_ENABLED)
+                : false;
         // Initialize managed page pool.
         // It's crucial to check both the feature flag and the availability of the memory manager.
         if (this.l2ManagedMemoryEnabled && this.memoryManager != null && this.memoryManager.getMemorySize() > 0) {
@@ -381,6 +377,10 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.maxConfiguredCacheSizeBytes = this.maxCacheMemoryMb * 1024L * 1024L;
         this.bytesSinceLastEvictionCheck = new AtomicLong(0L);
         this.globalL2MapEntryCount = new AtomicLong(0L);
+        // Initialize per-key metrics flag (default false to avoid high cardinality)
+        this.perKeyMetricsEnabled = (this.taskConfiguration != null)
+                ? this.taskConfiguration.getBoolean(CachingStateBackendFactory.MAP_PER_KEY_METRICS_ENABLED)
+                : false;
 
         // Register memory usage gauge
         if (this.metricGroup != null) {
@@ -535,7 +535,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueMinAccessesForBypassCheck,
                     valueBypassEnabled,
                     writeBehindEnabled,
-                    this.metricGroup.addGroup("state").addGroup(stateDescriptor.getName()).addGroup("cache"));
+                    this.metricGroup.addGroup("state").addGroup(stateDescriptor.getName()));
         } else if (stateDescriptor.getType() == StateDescriptor.Type.MAP && actualStateRaw instanceof InternalMapState) {
             boolean mapCacheEnabled = taskConfiguration.get(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG);
             if (!mapCacheEnabled) {
@@ -544,7 +544,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             }
             InternalMapState<K, N, ?, ?> actualDelegateMapState = (InternalMapState<K, N, ?, ?>) actualStateRaw;
             String stateName = stateDescriptor.getName(); // Get state name for metrics
-            MetricGroup mapMetricsGroup = this.metricGroup.addGroup("state").addGroup(stateName).addGroup("cache");
+            MetricGroup mapMetricsGroup = this.metricGroup.addGroup("state").addGroup(stateName);
 
             int l1SizeForMap = mapSpecificL1EntryCacheSize > 0 ? mapSpecificL1EntryCacheSize : l1EntryCacheSize;
             int l2SizeForMap = mapSpecificL2EntryCacheSize > 0 ? mapSpecificL2EntryCacheSize : l2EntryCacheSize;
