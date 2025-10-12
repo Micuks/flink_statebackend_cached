@@ -20,6 +20,7 @@ import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.runtime.state.internal.InternalKvState.StateIncrementalVisitor;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.metrics.Gauge;
 import org.apache.flink.core.memory.DataInputDeserializer;
 import org.apache.flink.core.memory.DataOutputSerializer;
 
@@ -73,9 +74,17 @@ public class CachingInternalValueState<K, N, V>
     private transient AtomicLong hitsInHitRateWindow;
     private transient AtomicLong totalAccessesForBypassEligibility;
     // Metrics
-    private final Counter cacheHits;
-    private final Counter cacheMisses;
-    private final Counter cacheBypassActivations;
+    private final transient MetricGroup metrics;
+    private final Counter cacheHits;                 // generic compatibility
+    private final Counter cacheMisses;               // generic compatibility
+    private final Counter cacheBypassActivations;    // generic
+
+    // Detailed counters aligned with CachingInternalMapState naming
+    private final Counter l1ValueCacheHitCount;
+    private final Counter l1ValueCacheMissCount;
+    private final Counter l2ValueCacheHitCount;
+    private final Counter l2ValueCacheMissCount;
+    private final Counter delegateLookups;
     
     private volatile boolean bypassCache = false;
     private final boolean bypassEnabled;
@@ -121,22 +130,40 @@ public class CachingInternalValueState<K, N, V>
         }
         
         // Initialize metrics
+        this.metrics = metricsGroup;
         if (metricsGroup != null) {
-            this.cacheHits = metricsGroup.counter("hits");
-            this.cacheMisses = metricsGroup.counter("misses");
-            this.cacheBypassActivations = metricsGroup.counter("bypassActivations");
+            MetricGroup cacheMetrics = metricsGroup.addGroup("cache");
+            // Detailed counters (match map-state names: l1ValueCacheHit/Miss, l2ValueCacheHit/Miss)
+            this.l1ValueCacheHitCount = cacheMetrics.counter("l1ValueCacheHit");
+            this.l1ValueCacheMissCount = cacheMetrics.counter("l1ValueCacheMiss");
+            this.l2ValueCacheHitCount = cacheMetrics.counter("l2ValueCacheHit");
+            this.l2ValueCacheMissCount = cacheMetrics.counter("l2ValueCacheMiss");
+            this.delegateLookups = cacheMetrics.counter("delegateLookups");
+
+            // Generic counters for backward-compat dashboards
+            this.cacheHits = cacheMetrics.counter("hits");
+            this.cacheMisses = cacheMetrics.counter("misses");
+            this.cacheBypassActivations = cacheMetrics.counter("bypassActivations");
+
+            // Optional aggregate gauges for total entries across namespaces (low-cardinality)
+            try {
+                MetricGroup agg = cacheMetrics.addGroup("aggregate");
+                agg.gauge("l1EntriesTotal", (Gauge<Long>) this::sumL1Entries);
+                agg.gauge("l2EntriesTotal", (Gauge<Long>) this::sumL2Entries);
+            } catch (Throwable t) {
+                // best-effort only
+            }
         } else {
-            // Create shared dummy counter instance
-            Counter dummyCounter = new Counter() {
-                @Override public void inc() {}
-                @Override public void inc(long n) {}
-                @Override public void dec() {}
-                @Override public void dec(long n) {}
-                @Override public long getCount() { return 0; }
-            };
-            this.cacheHits = dummyCounter;
-            this.cacheMisses = dummyCounter;
-            this.cacheBypassActivations = dummyCounter;
+            // No metrics group: use no-op counters
+            Counter no = new NoOpCounter();
+            this.cacheHits = no;
+            this.cacheMisses = no;
+            this.cacheBypassActivations = no;
+            this.l1ValueCacheHitCount = no;
+            this.l1ValueCacheMissCount = no;
+            this.l2ValueCacheHitCount = no;
+            this.l2ValueCacheMissCount = no;
+            this.delegateLookups = no;
         }
 
         // Create namespace caches with eviction listeners that flush dirty entries
@@ -210,6 +237,35 @@ public class CachingInternalValueState<K, N, V>
             setCurrentNamespace(originalNamespace);
             backend.setCurrentKey(originalKey);
         }
+    }
+
+    // Aggregate helpers for gauges
+    private long sumL1Entries() {
+        long total = 0L;
+        try {
+            for (Map.Entry<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> e : namespaceCachesL1.entrySet()) {
+                CachePolicy<K, CacheEntry<V>> c = e.getValue();
+                if (c != null) {
+                    total += c.size();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return total;
+    }
+
+    private long sumL2Entries() {
+        long total = 0L;
+        try {
+            for (Map.Entry<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> e : namespaceCachesL2.entrySet()) {
+                CachePolicy<K, CacheEntry<V>> c = e.getValue();
+                if (c != null) {
+                    total += c.size();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return total;
     }
 
     private void updateCacheBypassCondition(boolean resolvedByCache) {
@@ -349,8 +405,12 @@ public class CachingInternalValueState<K, N, V>
         if (l1Entry != null) {
             updateCacheBypassCondition(true);
             cacheHits.inc();
+            l1ValueCacheHitCount.inc();
             return l1Entry.getValue();
         }
+
+        // L1 miss
+        l1ValueCacheMissCount.inc();
 
         CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
         CacheEntry<V> l2Entry = l2Cache.get(currentKey);
@@ -358,6 +418,7 @@ public class CachingInternalValueState<K, N, V>
         if (l2Entry != null) {
             updateCacheBypassCondition(true);
             cacheHits.inc();
+            l2ValueCacheHitCount.inc();
             // L2 entry is always clean. Remove from L2, put into L1.
             // No memory change reported here as it's a move between caches of the same backend instance.
             // However, if L1.put causes an eviction, that eviction will report a release.
@@ -378,6 +439,8 @@ public class CachingInternalValueState<K, N, V>
 
         updateCacheBypassCondition(false);
         cacheMisses.inc();
+        l2ValueCacheMissCount.inc();
+        delegateLookups.inc();
         V valueFromDelegate = delegateState.value();
         if (valueFromDelegate != null) { // Only cache non-null
             CacheEntry<V> newEntry = CacheEntry.clean(valueFromDelegate);
@@ -769,5 +832,14 @@ public class CachingInternalValueState<K, N, V>
 
     private N namespaceKeyToNamespace(StableNamespaceKey key) {
         return key.deserialize(getNamespaceSerializer());
+    }
+
+    // No-op counter for when metrics group is absent
+    private static class NoOpCounter implements Counter {
+        @Override public void inc() {}
+        @Override public void inc(long n) {}
+        @Override public void dec() {}
+        @Override public void dec(long n) {}
+        @Override public long getCount() { return 0; }
     }
 }
