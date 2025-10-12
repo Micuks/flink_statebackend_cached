@@ -25,7 +25,6 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.AbstractMap;
-import java.util.HashSet;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.Collections;
@@ -88,6 +87,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     private final boolean bypassEnabled;
     private final CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl;
     private final boolean l2ManagedMemoryEnabled;
+    private final boolean perKeyMetricsEnabled;
 
     // Configuration for cache bypass
     private final double mapCacheHitRateThreshold;
@@ -109,12 +109,40 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         AUTO_LEFT_BYPASS_ENABLED = enabled;
     }
 
+    // Lightweight detection of left-input processing context. This checks a few top
+    // stack frames for method names used by Flink's two-input operators, e.g.,
+    // processElement1/processRecord1. It avoids a full scan to keep overhead tiny.
+    private static boolean isLikelyLeftInputCallContext() {
+        if (!AUTO_LEFT_BYPASS_ENABLED) {
+            return false;
+        }
+        // Fast path: inspect only a small prefix of the stack to bound cost.
+        // The exact depth can vary slightly across Flink versions; 16 is a safe upper bound
+        // that keeps overhead low.
+        try {
+            StackTraceElement[] st = Thread.currentThread().getStackTrace();
+            int limit = Math.min(st.length, 16);
+            for (int i = 2; i < limit; i++) { // skip getStackTrace and this method
+                String m = st[i].getMethodName();
+                if ("processElement1".equals(m) || "processRecord1".equals(m)) {
+                    return true;
+                }
+                if ("processElement2".equals(m) || "processRecord2".equals(m)) {
+                    return false; // Explicit right-side context
+                }
+            }
+        } catch (Throwable ignore) {
+            // Fallback: if detection fails for any reason, do not bypass based on this heuristic.
+        }
+        return false;
+    }
+
     // Metrics
     private final transient MetricGroup metrics;
-    transient Counter l1ValueCacheHitCount;
-    transient Counter l1ValueCacheMissCount;
-    transient Counter l2ValueCacheHitCount;
-    transient Counter l2ValueCacheMissCount;
+    transient Counter l1MapValueCacheHitCount;
+    transient Counter l1MapValueCacheMissCount;
+    transient Counter l2MapValueCacheHitCount;
+    transient Counter l2MapValueCacheMissCount;
     transient Counter l1PresenceCacheHitCount;
     transient Counter l1PresenceCacheMissCount;
     transient Counter l2PresenceCacheHitCount;
@@ -153,6 +181,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         private final CachingStateBackendFactory.PresenceCacheImplementation presenceCacheImpl;
         private final TypeSerializer<UK_C> userKeySerializer;
         private transient ThreadLocal<DataOutputSerializer> userKeySerializerView;
+        private transient ThreadLocal<DataInputDeserializer> userKeyDeserializerView;
         private final TypeSerializer<UV_C> userValueSerializer;
         private transient ThreadLocal<DataOutputSerializer> userValueSerializerView;
         private transient ThreadLocal<DataInputDeserializer> userValueDeserializerView;
@@ -194,6 +223,16 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                     return new DataOutputSerializer(128);
                                 } else {
                                     return new DataOutputSerializer(0);
+                                }
+                            });
+
+            this.userKeyDeserializerView =
+                    ThreadLocal.withInitial(
+                            () -> {
+                                if (this.userKeySerializer != null) {
+                                    return new DataInputDeserializer();
+                                } else {
+                                    return new DataInputDeserializer(new byte[0]);
                                 }
                             });
 
@@ -485,6 +524,15 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             return dos.getCopyOfBuffer();
         }
 
+        private UK_C deserializeKey(byte[] serializedKey) throws IOException {
+            if (serializedKey == null) {
+                return null;
+            }
+            DataInputDeserializer did = userKeyDeserializerView.get();
+            did.setBuffer(serializedKey);
+            return userKeySerializer.deserialize(did);
+        }
+
         private byte[] serializeValue(UV_C value) throws IOException {
             DataOutputSerializer dos = userValueSerializerView.get();
             dos.clear();
@@ -515,6 +563,12 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 // Should not happen with in-memory DataOutputSerializer
                 throw new RuntimeException("Error serializing user key for presence cache fingerprint", e);
             }
+        }
+
+        private long fingerprint(byte[] serializedKey) {
+            MurmurHash3.LongPair out = new MurmurHash3.LongPair();
+            MurmurHash3.murmurhash3_x64_128(serializedKey, 0, serializedKey.length, 0, out);
+            return out.val1;
         }
 
         // Methods for presence cache interactions, guarded by keyPresenceCacheEnabled
@@ -956,6 +1010,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         this.bypassEnabled = enableBypass;
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
         this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
+        this.perKeyMetricsEnabled = perKeyMetricsEnabled;
 
         // Initialize namespaceCaches (top-level cache: Namespace -> (FlinkKey -> PerKeyMapCache))
         this.namespaceCaches = createCachePolicyForHierarchicalCache(
@@ -1025,10 +1080,10 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         // Metrics
         this.metrics = metrics;
         MetricGroup cacheMetrics = metrics.addGroup("cache");
-        this.l1ValueCacheHitCount = cacheMetrics.counter("l1ValueCacheHit");
-        this.l1ValueCacheMissCount = cacheMetrics.counter("l1ValueCacheMiss");
-        this.l2ValueCacheHitCount = cacheMetrics.counter("l2ValueCacheHit");
-        this.l2ValueCacheMissCount = cacheMetrics.counter("l2ValueCacheMiss");
+        this.l1MapValueCacheHitCount = cacheMetrics.counter("l1ValueCacheHit");
+        this.l1MapValueCacheMissCount = cacheMetrics.counter("l1ValueCacheMiss");
+        this.l2MapValueCacheHitCount = cacheMetrics.counter("l2ValueCacheHit");
+        this.l2MapValueCacheMissCount = cacheMetrics.counter("l2ValueCacheMiss");
 
         if (this.keyPresenceCacheEnabled) {
             this.l1PresenceCacheHitCount = cacheMetrics.counter("l1PresenceCacheHit");
@@ -1186,7 +1241,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                     this.userKeySerializer,
                                     this.userValueSerializer,
                                     l2ManagedMemoryEnabled);
-                    if (CachingInternalMapState.this.metrics != null && perKeyMetricsEnabled) {
+                    if (CachingInternalMapState.this.metrics != null && CachingInternalMapState.this.perKeyMetricsEnabled) {
                         perKeyCache.registerMetrics(CachingInternalMapState.this.metrics.addGroup("perKeyCache"), k,
                                 getCurrentNamespace());
                     }
@@ -1349,6 +1404,13 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             return null;
         delegateState.setCurrentNamespace(getCurrentNamespace());
 
+        // Heuristic: if this call originates from the left input of a two-input operator
+        // (e.g., processElement1), bypass all cache layers to avoid overhead on non-reused probes.
+        if (isLikelyLeftInputCallContext()) {
+            delegateLookups.inc();
+            return delegateState.get(userKey);
+        }
+
         if (bypassEnabled && bypassCache) {
             boolean isSample =
                     accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
@@ -1370,11 +1432,11 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             if (!this.keyPresenceCacheEnabled) { // KV Separation DISABLED path
                 CacheEntry<UV> l1Entry = perKeyCache.l1MapEntries.get(userKey);
                 if (l1Entry != null) {
-                    l1ValueCacheHitCount.inc();
+                    l1MapValueCacheHitCount.inc();
                     userValue = l1Entry.getValue(); // Could be null if tombstone
                     resolvedByCache = true;
                 } else {
-                    l1ValueCacheMissCount.inc();
+                    l1MapValueCacheMissCount.inc();
                     try {
                         CacheEntry<UV> l2Entry = null;
                         if (perKeyCache.l2ManagedMemoryEnabled && perKeyCache.l2MapEntriesOffHeap != null) {
@@ -1393,7 +1455,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                         }
                         
                         if (l2Entry != null || userValue != null) {
-                            l2ValueCacheHitCount.inc();
+                            l2MapValueCacheHitCount.inc();
                             // L2 entry removal will trigger the listener to report memory released.
                             CacheEntry<UV> newL1Entry = CacheEntry.clean(userValue);
                             CacheEntry<UV> oldL1Entry =
@@ -1406,7 +1468,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                     newL1Entry.getEstimatedSizeBytes());
                             resolvedByCache = true;
                         } else {
-                            l2ValueCacheMissCount.inc();
+                            l2MapValueCacheMissCount.inc();
                             if (perKeyCache.fullyLoaded) {
                                 return null;
                             }
@@ -1448,7 +1510,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             // Check L1 Value Cache regardless of initial presence outcome (unless ABSENT_IN_CACHE)
             CacheEntry<UV> l1ValEntry = perKeyCache.l1MapEntries.get(userKey);
             if (l1ValEntry != null) {
-                l1ValueCacheHitCount.inc();
+                l1MapValueCacheHitCount.inc();
                 // If presence was uncertain, this L1 value hit resolves it.
                 // If presence said PRESENT_IN_CACHE_CLEAN, this confirms the value part.
                 if (presence == ValuePresence.ABSENT_MAYBE_IN_VALUE_CACHE)
@@ -1459,7 +1521,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 userValue = l1ValEntry.getValue(); // Could be null if it's a tombstone
                 resolvedByCache = true;
             } else {
-                l1ValueCacheMissCount.inc();
+                l1MapValueCacheMissCount.inc();
                 // If presence cache said PRESENT_IN_CACHE_CLEAN, but L1 value is a miss, this is a
                 // slight inconsistency
                 // or means it was just evicted from L1 value to L2 value. Log for observation if strict
@@ -1493,7 +1555,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     }
                     
                     if (foundInL2) {
-                        l2ValueCacheHitCount.inc();
+                        l2MapValueCacheHitCount.inc();
                         CacheEntry<UV> newL1Entry = CacheEntry.clean(userValue);
                         CacheEntry<UV> oldL1Entry = perKeyCache.l1MapEntries.put(userKey, newL1Entry);
                         if (oldL1Entry != null) {
@@ -1503,7 +1565,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                         perKeyCache.ownerBackend.reportCacheMemoryAdded(newL1Entry.getEstimatedSizeBytes());
                         resolvedByCache = true;
                     } else {
-                        l2ValueCacheMissCount.inc();
+                        l2MapValueCacheMissCount.inc();
                         if (perKeyCache.fullyLoaded) {
                             perKeyCache.updatePresenceCacheOnGet(userKey, false);
                             updateCacheBypassCondition(true);
@@ -1671,6 +1733,12 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
         delegateState.setCurrentNamespace(getCurrentNamespace());
 
+        // Apply the same left-input bypass for contains() probes.
+        if (isLikelyLeftInputCallContext()) {
+            updateCacheBypassCondition(false);
+            return delegateState.contains(userKey);
+        }
+
         if (bypassEnabled && bypassCache) {
             boolean isSample =
                     accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
@@ -1771,7 +1839,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
     @Override
     public Iterable<Map.Entry<UK, UV>> entries() throws Exception {
-        // This iterable will produce a new MergingIterator on each call to iterator().
+        // This iterable will produce a new UnionIterator on each call to iterator().
         return () -> {
             try {
                 return iterator();
@@ -1921,7 +1989,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             // entries are not covered by a tombstone.
             final Iterable<Map.Entry<UK, UV>> delegateEntries =
                     perKeyCache.fullyLoaded ? null : delegateState.entries();
-            try (MergingIterator it = new MergingIterator(perKeyCache, delegateEntries)) {
+            try (UnionIterator it = new UnionIterator(perKeyCache, delegateEntries)) {
                 return !it.hasNext();
             }
         }
@@ -2194,46 +2262,125 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         final Iterable<Map.Entry<UK, UV>> delegateEntries =
                 perKeyCache.fullyLoaded ? null : delegateState.entries();
 
-        return new MergingIterator(perKeyCache, delegateEntries);
+        return new UnionIterator(perKeyCache, delegateEntries);
     }
 
-    private enum MergingIteratorState {
-        L1,
-        L2,
-        DELEGATE,
-        DONE
+    private static final class VisitedKeySet {
+        private static final float LOAD_FACTOR = 0.6f;
+        private long[] keys;
+        private boolean[] occupied;
+        private int mask;
+        private int size;
+
+        VisitedKeySet(int expected) {
+            int capacity = 1;
+            int target = expected <= 0 ? 4 : (int) Math.ceil(expected / LOAD_FACTOR);
+            while (capacity < target) {
+                capacity <<= 1;
+            }
+            keys = new long[capacity];
+            occupied = new boolean[capacity];
+            mask = capacity - 1;
+        }
+
+        boolean add(long key) {
+            ensureCapacity();
+            int idx = mix(key) & mask;
+            while (occupied[idx]) {
+                if (keys[idx] == key) {
+                    return false;
+                }
+                idx = (idx + 1) & mask;
+            }
+            occupied[idx] = true;
+            keys[idx] = key;
+            size++;
+            return true;
+        }
+
+        boolean contains(long key) {
+            int idx = mix(key) & mask;
+            while (occupied[idx]) {
+                if (keys[idx] == key) {
+                    return true;
+                }
+                idx = (idx + 1) & mask;
+            }
+            return false;
+        }
+
+        private void ensureCapacity() {
+            if ((float) (size + 1) / keys.length <= LOAD_FACTOR) {
+                return;
+            }
+            int newCapacity = keys.length << 1;
+            long[] newKeys = new long[newCapacity];
+            boolean[] newOccupied = new boolean[newCapacity];
+            int newMask = newCapacity - 1;
+            for (int i = 0; i < keys.length; i++) {
+                if (!occupied[i]) {
+                    continue;
+                }
+                long key = keys[i];
+                int idx = mix(key) & newMask;
+                while (newOccupied[idx]) {
+                    idx = (idx + 1) & newMask;
+                }
+                newOccupied[idx] = true;
+                newKeys[idx] = key;
+            }
+            keys = newKeys;
+            occupied = newOccupied;
+            mask = newMask;
+        }
+
+        private int mix(long key) {
+            key ^= (key >>> 33);
+            key *= 0xff51afd7ed558ccdL;
+            key ^= (key >>> 33);
+            key *= 0xc4ceb9fe1a85ec53L;
+            key ^= (key >>> 33);
+            return (int) key;
+        }
     }
 
-    private class MergingIterator implements Iterator<Map.Entry<UK, UV>>, AutoCloseable {
+    private class UnionIterator implements Iterator<Map.Entry<UK, UV>>, AutoCloseable {
 
         private final PerKeyMapCache<UK, UV, K, N> perKeyCache;
         private final Iterator<Map.Entry<UK, CacheEntry<UV>>> l1Iterator;
         private final Iterator<?> l2Iterator;
         private final Iterator<Map.Entry<UK, UV>> delegateIterator;
-        private final Set<UK> processedKeys; // To track keys from L1 and L2
-
+        private final boolean usingOffHeapL2;
+        private final VisitedKeySet visited;
         private Map.Entry<UK, UV> nextEntry;
 
-        private MergingIteratorState currentState;
-
-        MergingIterator(
+        UnionIterator(
                 PerKeyMapCache<UK, UV, K, N> perKeyCache,
                 Iterable<Map.Entry<UK, UV>> delegateEntries) {
             this.perKeyCache = perKeyCache;
             this.l1Iterator = perKeyCache.l1MapEntries.entrySet().iterator();
-            if (perKeyCache.l2ManagedMemoryEnabled && perKeyCache.l2MapEntriesOffHeap != null) {
-                this.l2Iterator = perKeyCache.l2MapEntriesOffHeap.keyIterator();
-            } else {
-                this.l2Iterator = perKeyCache.l2MapEntries.entrySet().iterator();
-            }
-            this.delegateIterator = (delegateEntries != null) ? delegateEntries.iterator() : null;
-            this.processedKeys = new HashSet<>();
-            this.currentState = MergingIteratorState.L1;
+            this.usingOffHeapL2 =
+                    perKeyCache.l2ManagedMemoryEnabled && perKeyCache.l2MapEntriesOffHeap != null;
+            this.l2Iterator =
+                    usingOffHeapL2
+                            ? perKeyCache.l2MapEntriesOffHeap.keyIterator()
+                            : perKeyCache.l2MapEntries.entrySet().iterator();
+            this.delegateIterator = delegateEntries != null ? delegateEntries.iterator() : null;
+            int l1Size = perKeyCache.l1MapEntries.size();
+            int l2Size =
+                    usingOffHeapL2
+                            ? perKeyCache.l2MapEntriesOffHeap.size()
+                            : perKeyCache.l2MapEntries.size();
+            this.visited = new VisitedKeySet(l1Size + l2Size + 4);
             advance();
         }
 
         @Override
         public boolean hasNext() {
+            if (nextEntry != null) {
+                return true;
+            }
+            advance();
             return nextEntry != null;
         }
 
@@ -2243,93 +2390,124 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 throw new NoSuchElementException();
             }
             Map.Entry<UK, UV> current = nextEntry;
-            advance();
+            nextEntry = null;
             return current;
         }
 
         private void advance() {
-            this.nextEntry = null;
-            while (this.nextEntry == null && currentState != MergingIteratorState.DONE) {
-                switch (currentState) {
-                    case L1:
-                        processL1();
-                        break;
-                    case L2:
-                        processL2();
-                        break;
-                    case DELEGATE:
-                        processDelegate();
-                        break;
-                }
+            if (nextEntry != null) {
+                return;
             }
+            nextEntry = null;
+            if (emitFromL1()) {
+                return;
+            }
+            if (emitFromL2()) {
+                return;
+            }
+            emitFromDelegate();
         }
 
-        private void processL1() {
+        private boolean emitFromL1() {
             while (l1Iterator.hasNext()) {
-                Map.Entry<UK, CacheEntry<UV>> l1Entry = l1Iterator.next();
-                processedKeys.add(l1Entry.getKey()); // Track key
-                if (l1Entry.getValue().getValue() != null) { // Not a tombstone
-                    this.nextEntry = new AbstractMap.SimpleEntry<>(
-                            l1Entry.getKey(), l1Entry.getValue().getValue());
-                    return;
+                Map.Entry<UK, CacheEntry<UV>> entry = l1Iterator.next();
+                CacheEntry<UV> cacheEntry = entry.getValue();
+                if (cacheEntry == null) {
+                    continue;
                 }
+                long fingerprint = perKeyCache.fingerprint(entry.getKey());
+                if (!visited.add(fingerprint)) {
+                    continue;
+                }
+                UV value = cacheEntry.getValue();
+                if (value == null) {
+                    continue;
+                }
+                nextEntry = new AbstractMap.SimpleEntry<>(entry.getKey(), value);
+                return true;
             }
-            currentState = MergingIteratorState.L2;
+            return false;
         }
 
-        private void processL2() {
-            while (l2Iterator.hasNext()) {
+        private boolean emitFromL2() {
+            return usingOffHeapL2 ? emitFromL2OffHeap() : emitFromL2OnHeap();
+        }
+
+        @SuppressWarnings("unchecked")
+        private boolean emitFromL2OnHeap() {
+            Iterator<Map.Entry<UK, CacheEntry<UV>>> iterator =
+                    (Iterator<Map.Entry<UK, CacheEntry<UV>>>) l2Iterator;
+            while (iterator.hasNext()) {
+                Map.Entry<UK, CacheEntry<UV>> entry = iterator.next();
+                CacheEntry<UV> cacheEntry = entry.getValue();
+                if (cacheEntry == null) {
+                    continue;
+                }
+                long fingerprint = perKeyCache.fingerprint(entry.getKey());
+                if (!visited.add(fingerprint)) {
+                    continue;
+                }
+                UV value = cacheEntry.getValue();
+                if (value == null) {
+                    continue;
+                }
+                nextEntry = new AbstractMap.SimpleEntry<>(entry.getKey(), value);
+                return true;
+            }
+            return false;
+        }
+
+        @SuppressWarnings("unchecked")
+        private boolean emitFromL2OffHeap() {
+            Iterator<byte[]> iterator = (Iterator<byte[]>) l2Iterator;
+            while (iterator.hasNext()) {
+                byte[] keyBytes = iterator.next();
+                long fingerprint = perKeyCache.fingerprint(keyBytes);
+                if (!visited.add(fingerprint)) {
+                    continue;
+                }
+                byte[] valueBytes = perKeyCache.l2MapEntriesOffHeap.get(keyBytes);
+                if (valueBytes == null) {
+                    continue;
+                }
                 try {
-                    UK userKey;
-                    UV userValue;
-                    
-                    if (perKeyCache.l2ManagedMemoryEnabled && perKeyCache.l2MapEntriesOffHeap != null) {
-                        // Off-heap implementation
-                        byte[] keyBytes = (byte[]) l2Iterator.next();
-                        userKey = perKeyCache.userKeySerializer.deserialize(new DataInputDeserializer(keyBytes));
-                        if (processedKeys.add(userKey)) {
-                            byte[] valueBytes = perKeyCache.l2MapEntriesOffHeap.get(keyBytes);
-                            if (valueBytes != null) {
-                                userValue = deserializeValue(valueBytes);
-                                this.nextEntry = new AbstractMap.SimpleEntry<>(userKey, userValue);
-                                return;
-                            }
-                        }
-                    } else {
-                        // On-heap implementation
-                        @SuppressWarnings("unchecked")
-                        Map.Entry<UK, CacheEntry<UV>> l2Entry = (Map.Entry<UK, CacheEntry<UV>>) l2Iterator.next();
-                        userKey = l2Entry.getKey();
-                        if (processedKeys.add(userKey)) {
-                            userValue = l2Entry.getValue().getValue();
-                            this.nextEntry = new AbstractMap.SimpleEntry<>(userKey, userValue);
-                            return;
-                        }
+                    UK key = perKeyCache.deserializeKey(keyBytes);
+                    UV value = perKeyCache.deserializeValue(valueBytes);
+                    if (value == null) {
+                        continue;
                     }
+                    nextEntry = new AbstractMap.SimpleEntry<>(key, value);
+                    return true;
                 } catch (IOException e) {
-                    throw new RuntimeException("Error deserializing key/value from cache", e);
+                    throw new RuntimeException("Failed to deserialize L2 off-heap map entry", e);
                 }
             }
-            this.currentState = MergingIteratorState.DELEGATE;
-            processDelegate();
+            return false;
         }
 
-        private void processDelegate() {
-            while (delegateIterator != null && delegateIterator.hasNext()) {
-                Map.Entry<UK, UV> delegateEntry = delegateIterator.next();
-                UK key = delegateEntry.getKey();
-                if (processedKeys.add(key)) { // If not already processed from L1 or L2
-                    this.nextEntry = delegateEntry;
-                    // Light-touch iteration: do not populate L1/L2/presence caches to avoid scan pollution.
-                    return;
-                }
+        private boolean emitFromDelegate() {
+            if (delegateIterator == null) {
+                return false;
             }
-            currentState = MergingIteratorState.DONE;
+            while (delegateIterator.hasNext()) {
+                Map.Entry<UK, UV> entry = delegateIterator.next();
+                long fingerprint = perKeyCache.fingerprint(entry.getKey());
+                if (!visited.add(fingerprint)) {
+                    continue;
+                }
+                UV value = entry.getValue();
+                if (value == null) {
+                    continue;
+                }
+                nextEntry = entry;
+                return true;
+            }
+            return false;
         }
 
         @Override
-        public void close() throws Exception {
-            // No resources to close in this specific iterator implementation
+        public void close() {
+            // Nothing to close
         }
     }
 
@@ -2446,8 +2624,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     private void logCacheMetrics() {
         if (LOG.isDebugEnabled()) {
             // Calculate hit rates
-            double l1ValueHitRate = calculateHitRate(l1ValueCacheHitCount, l1ValueCacheMissCount);
-            double l2ValueHitRate = calculateHitRate(l2ValueCacheHitCount, l2ValueCacheMissCount);
+            double l1ValueHitRate = calculateHitRate(l1MapValueCacheHitCount, l1MapValueCacheMissCount);
+            double l2ValueHitRate = calculateHitRate(l2MapValueCacheHitCount, l2MapValueCacheMissCount);
             double l1PresenceHitRate =
                     calculateHitRate(l1PresenceCacheHitCount, l1PresenceCacheMissCount);
             double l2PresenceHitRate =
@@ -2458,10 +2636,10 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                             + "L2 Value: {}/{}, Hit Rate: {:.2f}% | "
                             + "L1 Presence: {}/{}, Hit Rate: {:.2f}% | "
                             + "L2 Presence: {}/{}, Hit Rate: {:.2f}% | " + "Delegate Lookups: {}",
-                    l1ValueCacheHitCount.getCount(),
-                    l1ValueCacheHitCount.getCount() + l1ValueCacheMissCount.getCount(),
-                    l1ValueHitRate, l2ValueCacheHitCount.getCount(),
-                            l2ValueCacheHitCount.getCount() + l2ValueCacheMissCount.getCount(),
+                    l1MapValueCacheHitCount.getCount(),
+                    l1MapValueCacheHitCount.getCount() + l1MapValueCacheMissCount.getCount(),
+                    l1ValueHitRate, l2MapValueCacheHitCount.getCount(),
+                            l2MapValueCacheHitCount.getCount() + l2MapValueCacheMissCount.getCount(),
                     l2ValueHitRate, l1PresenceCacheHitCount.getCount(),
                             l1PresenceCacheHitCount.getCount() + l1PresenceCacheMissCount.getCount(),
                     l1PresenceHitRate, l2PresenceCacheHitCount.getCount(),
