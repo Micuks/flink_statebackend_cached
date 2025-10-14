@@ -88,6 +88,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     private final CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl;
     private final boolean l2ManagedMemoryEnabled;
     private final boolean perKeyMetricsEnabled;
+    private final boolean forceBypassAlways;
 
     // Configuration for cache bypass
     private final double mapCacheHitRateThreshold;
@@ -102,39 +103,94 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     private static final int SAMPLING_RATE = 100; // 1%
     private volatile boolean bypassCache = false;
 
-    // Global kill-switch for auto left-bypass behavior, configurable via backend
-    private static volatile boolean AUTO_LEFT_BYPASS_ENABLED = true;
+    // ----------------------------------------------------------------------
+    // Left-stream bypass implementation (restored from milestone_40_pct)
+    // ----------------------------------------------------------------------
+    // Thread-local access hints to support asymmetric cache usage per-call.
+    // BYPASS: fully bypass cache and go directly to the delegate (for writes or reads).
+    // NO_TOUCH: avoid touching/creating cache structures during iteration; use delegate iteration.
+    private static final ThreadLocal<Boolean> THREAD_LOCAL_BYPASS =
+            ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final ThreadLocal<Boolean> THREAD_LOCAL_NO_TOUCH =
+            ThreadLocal.withInitial(() -> Boolean.FALSE);
 
-    public static void setAutoLeftBypass(boolean enabled) {
-        AUTO_LEFT_BYPASS_ENABLED = enabled;
+    // Global defaults controlled by configuration; OR'ed with thread-local hints.
+    private static volatile boolean GLOBAL_BYPASS = false;
+    private static volatile boolean GLOBAL_NO_TOUCH = false;
+
+    // Auto-detect join side based on stack frames (no operator changes required).
+    // If enabled, calls coming from processElement1() are treated as LEFT and will bypass/no-touch.
+    private static volatile boolean AUTO_LEFT_BYPASS = true;
+
+    public static void setAutoLeftBypass(boolean enable) {
+        AUTO_LEFT_BYPASS = enable;
     }
 
-    // Lightweight detection of left-input processing context. This checks a few top
-    // stack frames for method names used by Flink's two-input operators, e.g.,
-    // processElement1/processRecord1. It avoids a full scan to keep overhead tiny.
-    private static boolean isLikelyLeftInputCallContext() {
-        if (!AUTO_LEFT_BYPASS_ENABLED) {
-            return false;
-        }
-        // Fast path: inspect only a small prefix of the stack to bound cost.
-        // The exact depth can vary slightly across Flink versions; 16 is a safe upper bound
-        // that keeps overhead low.
+    private enum JoinSide { LEFT, RIGHT, UNKNOWN }
+    private static final ThreadLocal<JoinSide> DETECTED_JOIN_SIDE =
+            ThreadLocal.withInitial(() -> JoinSide.UNKNOWN);
+
+    // Track whether we have already attempted detection on this thread to avoid
+    // repeated stack walking in hot paths when side cannot be detected.
+    private static final ThreadLocal<Boolean> DETECTION_ATTEMPTED =
+            ThreadLocal.withInitial(() -> Boolean.FALSE);
+
+    // Best-effort single log for unknown detection to avoid log flooding
+    private static volatile boolean LOGGED_UNKNOWN_ONCE = false;
+
+    private static JoinSide detectJoinSideFromStack() {
+        // Always inspect a small portion of the stack to determine side for this call.
+        // Do NOT cache the result per-thread: the same task thread processes both inputs.
         try {
-            StackTraceElement[] st = Thread.currentThread().getStackTrace();
-            int limit = Math.min(st.length, 16);
-            for (int i = 2; i < limit; i++) { // skip getStackTrace and this method
-                String m = st[i].getMethodName();
-                if ("processElement1".equals(m) || "processRecord1".equals(m)) {
-                    return true;
+            StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+            int maxDepth = Math.min(stack.length, 32);
+            for (int i = 2; i < maxDepth; i++) {
+                String method = stack[i].getMethodName();
+                if ("processElement1".equals(method) || method.contains("processElement1")
+                        || "processRecord1".equals(method) || method.contains("processRecord1")) {
+                    return JoinSide.LEFT;
                 }
-                if ("processElement2".equals(m) || "processRecord2".equals(m)) {
-                    return false; // Explicit right-side context
+                if ("processElement2".equals(method) || method.contains("processElement2")
+                        || "processRecord2".equals(method) || method.contains("processRecord2")) {
+                    return JoinSide.RIGHT;
                 }
             }
-        } catch (Throwable ignore) {
-            // Fallback: if detection fails for any reason, do not bypass based on this heuristic.
+        } catch (Throwable t) {
+            // ignore and fall through
         }
-        return false;
+        if (!LOGGED_UNKNOWN_ONCE) {
+            LOGGED_UNKNOWN_ONCE = true;
+            LOG.debug("Join side could not be detected from stack; using conservative mode (no auto-bypass).");
+        }
+        return JoinSide.UNKNOWN;
+    }
+
+    private static boolean isAutoBypassActiveForThisCall() {
+        if (!AUTO_LEFT_BYPASS) {
+            return false;
+        }
+        JoinSide side = detectJoinSideForThisState();
+        return side == JoinSide.LEFT;
+    }
+
+    // ------------------------------------------------------------------
+    // Per-state side detection (avoids per-thread memoization bugs)
+    // ------------------------------------------------------------------
+    // Each CachingInternalMapState instance typically belongs to one logical
+    // side in a two-input operator. Detect once for this instance and reuse.
+    private volatile JoinSide perStateDetectedSide = JoinSide.UNKNOWN;
+    private volatile boolean perStateDetectionAttempted = false;
+
+    private JoinSide detectJoinSideForThisState() {
+        if (perStateDetectionAttempted) {
+            return perStateDetectedSide;
+        }
+        // Perform a single, shallow scan to infer the side. Even if UNKNOWN, we
+        // mark as attempted to avoid scanning on every call.
+        JoinSide s = detectJoinSideFromStack();
+        perStateDetectedSide = s;
+        perStateDetectionAttempted = true;
+        return s;
     }
 
     // Metrics
@@ -958,7 +1014,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             boolean enableBypass,
             CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
             boolean l2ManagedMemoryEnabled,
-            boolean perKeyMetricsEnabled) {
+            boolean perKeyMetricsEnabled,
+            boolean forceBypassAlways) {
         this.delegateState = delegateState;
         this.backend = backend;
 
@@ -990,6 +1047,9 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
 
         this.mapCacheHitRateThreshold = mapCacheHitRateThreshold;
+        // Initialize hysteresis thresholds after threshold is set
+        this.lowHitRateThreshold = Math.max(0.0, this.mapCacheHitRateThreshold - 0.10);
+        this.highHitRateThreshold = Math.min(1.0, this.mapCacheHitRateThreshold);
         this.mapCacheHitRateWindowSize = mapCacheHitRateWindowSize;
         this.mapCacheMinAccessesForBypassCheck = mapCacheMinAccessesForBypassCheck;
 
@@ -1011,6 +1071,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
         this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
         this.perKeyMetricsEnabled = perKeyMetricsEnabled;
+        this.forceBypassAlways = forceBypassAlways;
 
         // Initialize namespaceCaches (top-level cache: Namespace -> (FlinkKey -> PerKeyMapCache))
         this.namespaceCaches = createCachePolicyForHierarchicalCache(
@@ -1097,6 +1158,17 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             this.l2PresenceCacheMissCount = new NoOpCounter();
         }
         this.delegateLookups = cacheMetrics.counter("delegateLookups");
+        try {
+            cacheMetrics.gauge("bypassActive", (Gauge<Integer>) () -> (bypassEnabled && bypassCache) ? 1 : 0);
+            cacheMetrics.gauge("currentHitRateForBypass",
+                    (Gauge<Double>) () -> {
+                        if (accessesForHitRateWindow == null || hitsInHitRateWindow == null) return 0.0;
+                        long acc = Math.max(1L, accessesForHitRateWindow.get());
+                        return Math.min(1.0, Math.max(0.0, ((double) hitsInHitRateWindow.get()) / acc));
+                    });
+        } catch (Throwable t) {
+            // best-effort only
+        }
 
         // Register aggregate (low-cardinality) gauges on the state-level metrics group
         try {
@@ -1247,6 +1319,156 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     }
                     return perKeyCache;
                 });
+
+    }
+
+    // Overloaded constructor with explicit maxActiveNamespacesInCache override for MapState
+    public CachingInternalMapState(InternalMapState<K, N, UK, UV> delegateState,
+            CachingKeyedStateBackend<K> backend, int l1CacheSizePerMap, int l2CacheSizePerMap,
+            int maxFlinkKeysWithActiveCachesPerNamespace, long maxCacheMemoryMb,
+            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize, MetricGroup metrics,
+            double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize,
+            long mapCacheMinAccessesForBypassCheck, boolean enableKeyPresenceCache,
+            boolean enableBypass,
+            CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
+            boolean l2ManagedMemoryEnabled,
+            boolean perKeyMetricsEnabled,
+            boolean forceBypassAlways,
+            int maxActiveNamespacesInCacheOverride) {
+        this.delegateState = delegateState;
+        this.backend = backend;
+
+        TypeSerializer<Map<UK, UV>> valueSerializer = delegateState.getValueSerializer();
+        if (valueSerializer == null) {
+            throw new NullPointerException(
+                    "Value serializer from delegate state is null. "
+                            + "Ensure the delegate state is properly initialized before creating CachingInternalMapState.");
+        }
+        if (!(valueSerializer instanceof MapSerializer)) {
+            throw new IllegalArgumentException(
+                    "Value serializer must be a MapSerializer but was "
+                            + valueSerializer.getClass().getName());
+        }
+        MapSerializer<UK, UV> mapSerializer = (MapSerializer<UK, UV>) valueSerializer;
+        this.userKeySerializer = mapSerializer.getKeySerializer();
+        this.userValueSerializer = mapSerializer.getValueSerializer();
+
+        this.l1CacheSizePerMap = l1CacheSizePerMap;
+        this.l2CacheSizePerMap = l2CacheSizePerMap;
+        this.maxFlinkKeysWithActiveCachesPerNamespace = maxFlinkKeysWithActiveCachesPerNamespace;
+        this.maxActiveNamespacesInCache = maxActiveNamespacesInCacheOverride;
+        this.cachePolicyType = cachePolicyType;
+        this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
+        this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
+
+        this.mapCacheHitRateThreshold = mapCacheHitRateThreshold;
+        this.lowHitRateThreshold = Math.max(0.0, this.mapCacheHitRateThreshold - 0.10);
+        this.highHitRateThreshold = Math.min(1.0, this.mapCacheHitRateThreshold);
+        this.mapCacheHitRateWindowSize = mapCacheHitRateWindowSize;
+        this.mapCacheMinAccessesForBypassCheck = mapCacheMinAccessesForBypassCheck;
+
+        if (this.mapCacheHitRateThreshold > 0.0) {
+            this.accessesForHitRateWindow = new AtomicLong(0);
+            this.hitsInHitRateWindow = new AtomicLong(0);
+            this.totalAccessesForBypassEligibility = new AtomicLong(0);
+            this.accessSampler = new AtomicLong(0);
+        } else {
+            this.accessesForHitRateWindow = null;
+            this.hitsInHitRateWindow = null;
+            this.totalAccessesForBypassEligibility = null;
+            this.accessSampler = null;
+        }
+
+        this.keyPresenceCacheEnabled = enableKeyPresenceCache;
+        this.bypassEnabled = enableBypass;
+        this.mapPresenceCacheImpl = mapPresenceCacheImpl;
+        this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
+        this.perKeyMetricsEnabled = perKeyMetricsEnabled;
+        this.forceBypassAlways = forceBypassAlways;
+
+        this.namespaceCaches = createCachePolicyForHierarchicalCache(
+                this.maxActiveNamespacesInCache, evictedNamespaceEntry -> {
+                    CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> flinkKeyCaches =
+                            evictedNamespaceEntry.getValue();
+                    if (flinkKeyCaches != null) {
+                        try {
+                            K NCDK = backend.getCurrentKey();
+                            N NCDN = getCurrentNamespace();
+
+                            for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> flinkKeyEntry : flinkKeyCaches.entrySet()) {
+                                PerKeyMapCache<UK, UV, K, N> perKeyCache = flinkKeyEntry.getValue();
+                                backend.setCurrentKey(perKeyCache.flinkKey);
+                                delegateState.setCurrentNamespace(perKeyCache.cacheNamespace);
+                                flushL1Entries(perKeyCache, perKeyCache.flinkKey,
+                                        perKeyCache.cacheNamespace, backend, delegateState, NCDN);
+                                if (perKeyCache.l2ManagedMemoryEnabled && perKeyCache.l2MapEntriesOffHeap != null) {
+                                    perKeyCache.l2MapEntriesOffHeap.clear();
+                                } else {
+                                    perKeyCache.l2MapEntries.clear();
+                                }
+                                if (perKeyCache.keyPresenceCacheEnabled) {
+                                    perKeyCache.l1KeyPresenceCache.clear();
+                                    perKeyCache.l2KeyPresenceCache.clear();
+                                }
+                                perKeyCache.closeMetrics();
+                            }
+                            if (NCDK != null) backend.setCurrentKey(NCDK); else backend.setCurrentKey(null);
+                            if (NCDN != null) delegateState.setCurrentNamespace(NCDN); else delegateState.setCurrentNamespace(null);
+                        } catch (Exception e) {
+                            LOG.error("Error flushing PerKeyMapCache during namespace eviction: {}",
+                                    evictedNamespaceEntry.getKey(), e);
+                            throw new RuntimeException(
+                                    "Error during namespace cache eviction and flush for namespace: "
+                                            + evictedNamespaceEntry.getKey(), e);
+                        }
+                    }
+                });
+        // Initialize metrics just like the primary constructor
+        this.metrics = metrics;
+        MetricGroup cacheMetrics = metrics.addGroup("cache");
+        this.l1MapValueCacheHitCount = cacheMetrics.counter("l1ValueCacheHit");
+        this.l1MapValueCacheMissCount = cacheMetrics.counter("l1ValueCacheMiss");
+        this.l2MapValueCacheHitCount = cacheMetrics.counter("l2ValueCacheHit");
+        this.l2MapValueCacheMissCount = cacheMetrics.counter("l2ValueCacheMiss");
+
+        if (this.keyPresenceCacheEnabled) {
+            this.l1PresenceCacheHitCount = cacheMetrics.counter("l1PresenceCacheHit");
+            this.l1PresenceCacheMissCount = cacheMetrics.counter("l1PresenceCacheMiss");
+            this.l2PresenceCacheHitCount = cacheMetrics.counter("l2PresenceCacheHit");
+            this.l2PresenceCacheMissCount = cacheMetrics.counter("l2PresenceCacheMiss");
+        } else {
+            this.l1PresenceCacheHitCount = new NoOpCounter();
+            this.l1PresenceCacheMissCount = new NoOpCounter();
+            this.l2PresenceCacheHitCount = new NoOpCounter();
+            this.l2PresenceCacheMissCount = new NoOpCounter();
+        }
+        this.delegateLookups = cacheMetrics.counter("delegateLookups");
+        try {
+            cacheMetrics.gauge("bypassActive", (Gauge<Integer>) () -> (bypassEnabled && bypassCache) ? 1 : 0);
+            cacheMetrics.gauge("currentHitRateForBypass",
+                    (Gauge<Double>) () -> {
+                        if (accessesForHitRateWindow == null || hitsInHitRateWindow == null) return 0.0;
+                        long acc = Math.max(1L, accessesForHitRateWindow.get());
+                        return Math.min(1.0, Math.max(0.0, ((double) hitsInHitRateWindow.get()) / acc));
+                    });
+        } catch (Throwable t) {
+            // best-effort only
+        }
+
+        try {
+            MetricGroup agg = cacheMetrics.addGroup("aggregate");
+            agg.gauge("perKeyCaches", () -> countPerKeyCaches());
+            agg.gauge("l1MapEntriesTotal", () -> sumL1Entries());
+            agg.gauge("l2MapEntriesTotal", () -> sumL2Entries());
+            agg.gauge("l2OffHeapPagesTotal", () -> sumOffHeapPages());
+            agg.gauge("l2OffHeapBytesTotal", () -> sumOffHeapBytes());
+            agg.gauge("l2OffHeapEntriesTotal", () -> sumOffHeapEntries());
+            agg.gauge("l2OffHeapPagesFreedCapacityTotal", () -> sumOffHeapPagesFreedCapacity());
+            agg.gauge("l2OffHeapPagesFreedWatermarkTotal", () -> sumOffHeapPagesFreedWatermark());
+        } catch (Throwable t) {
+            // best-effort only
+        }
     }
 
     private long countPerKeyCaches() {
@@ -1346,7 +1568,29 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         return s;
     }
 
+    // Hysteresis parameters for adaptive bypass
+    private final double lowHitRateThreshold; // enter bypass below this
+    private final double highHitRateThreshold; // exit bypass above this
+    private final int enterConsecutiveLowWindows = 1;  // react quickly to poor locality
+    private final int exitConsecutiveHighWindows = 2;  // require stability to re-enable cache
+    private final int cooldownWindowsAfterToggle = 2;  // avoid thrashing after a decision
+
+    private transient long completedWindows = 0L;
+    private transient int consecutiveLow = 0;
+    private transient int consecutiveHigh = 0;
+    private transient int windowsSinceToggle = 0;
+
     private void updateCacheBypassCondition(boolean resolvedByCache) {
+        updateCacheBypassConditionWeighted(resolvedByCache, 1);
+    }
+
+    // Weighted variant used during bypass sampling. When in bypass mode we sample only a fraction
+    // of accesses; this method lets a single sample represent multiple accesses to avoid biasing
+    // the hit-rate estimate toward zero and to let windows progress.
+    private void updateCacheBypassConditionWeighted(boolean resolvedByCache, int weight) {
+        if (weight <= 0) {
+            return; // ignore zero/negative weights
+        }
         if (!bypassEnabled || this.mapCacheHitRateThreshold <= 0.0
                 || accessesForHitRateWindow == null || hitsInHitRateWindow == null
                 || totalAccessesForBypassEligibility == null) {
@@ -1355,9 +1599,9 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
 
         if (resolvedByCache) {
-            hitsInHitRateWindow.incrementAndGet();
+            hitsInHitRateWindow.addAndGet(weight);
         }
-        long currentWindowAccesses = accessesForHitRateWindow.incrementAndGet();
+        long currentWindowAccesses = accessesForHitRateWindow.addAndGet(weight);
 
         if (currentWindowAccesses >= this.mapCacheHitRateWindowSize) {
             long totalAccesses = totalAccessesForBypassEligibility.addAndGet(currentWindowAccesses);
@@ -1370,7 +1614,38 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             }
 
             double currentHitRate = (double) hitsInHitRateWindow.get() / currentWindowAccesses;
-            this.bypassCache = currentHitRate < this.mapCacheHitRateThreshold;
+
+            // Hysteresis window accounting
+            completedWindows++;
+            boolean inCooldown = windowsSinceToggle < cooldownWindowsAfterToggle;
+            if (currentHitRate < lowHitRateThreshold) {
+                consecutiveLow++;
+                consecutiveHigh = 0;
+                if (!inCooldown && !bypassCache && consecutiveLow >= enterConsecutiveLowWindows) {
+                    bypassCache = true; // enter bypass
+                    windowsSinceToggle = 0;
+                    consecutiveLow = 0;
+                    consecutiveHigh = 0;
+                }
+            } else if (currentHitRate > highHitRateThreshold) {
+                consecutiveHigh++;
+                consecutiveLow = 0;
+                if (!inCooldown && bypassCache && consecutiveHigh >= exitConsecutiveHighWindows) {
+                    bypassCache = false; // exit bypass
+                    windowsSinceToggle = 0;
+                    consecutiveLow = 0;
+                    consecutiveHigh = 0;
+                }
+            } else {
+                // Between thresholds: drift toward stability
+                consecutiveLow = 0;
+                consecutiveHigh = 0;
+            }
+
+            // Advance cooldown window counter if we have recently toggled
+            if (windowsSinceToggle < cooldownWindowsAfterToggle) {
+                windowsSinceToggle++;
+            }
 
             accessesForHitRateWindow.set(0);
             hitsInHitRateWindow.set(0);
@@ -1404,24 +1679,32 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             return null;
         delegateState.setCurrentNamespace(getCurrentNamespace());
 
-        // Heuristic: if this call originates from the left input of a two-input operator
-        // (e.g., processElement1), bypass all cache layers to avoid overhead on non-reused probes.
-        if (isLikelyLeftInputCallContext()) {
+        if (forceBypassAlways) {
             delegateLookups.inc();
             return delegateState.get(userKey);
         }
 
+        // Prefer explicit hints; otherwise use auto-bypass if this is likely the left input.
+        if (forceBypassAlways
+                || Boolean.TRUE.equals(THREAD_LOCAL_BYPASS.get())
+                || GLOBAL_BYPASS
+                || isAutoBypassActiveForThisCall()) {
+            delegateLookups.inc();
+            return delegateState.get(userKey);
+        }
+
+        int decisionWeight = 1;
         if (bypassEnabled && bypassCache) {
             boolean isSample =
                     accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
             if (!isSample) {
                 delegateLookups.inc();
-                UV value = delegateState.get(userKey);
-                updateCacheBypassCondition(false); // A bypass is always a cache miss.
-                return value;
+                // In bypass mode, do not count unsampled accesses toward the hit-rate window to
+                // avoid biasing hit rate to zero.
+                return delegateState.get(userKey);
             }
-            // If it is a sample, fall through to the normal cache logic to get a real hit/miss
-            // metric.
+            // Sampled access: account with weight so windows progress and estimate is unbiased.
+            decisionWeight = SAMPLING_RATE;
         }
 
         try {
@@ -1493,7 +1776,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                         throw new RuntimeException("Error during L2 cache access", e);
                     }
                 }
-                updateCacheBypassCondition(resolvedByCache && userValue != null);
+                updateCacheBypassConditionWeighted(resolvedByCache && userValue != null, decisionWeight);
                 return userValue;
             }
 
@@ -1503,7 +1786,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             if (presence == ValuePresence.ABSENT_IN_CACHE) {
                 l1PresenceCacheHitCount.inc(); // Hit in presence cache (L1 or promoted L2) indicating
                                                // absence
-                updateCacheBypassCondition(true); // Resolved by cache as definitively absent
+                updateCacheBypassConditionWeighted(true, decisionWeight); // Resolved by cache as definitively absent
                 return null;
             }
 
@@ -1568,7 +1851,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                         l2MapValueCacheMissCount.inc();
                         if (perKeyCache.fullyLoaded) {
                             perKeyCache.updatePresenceCacheOnGet(userKey, false);
-                            updateCacheBypassCondition(true);
+                            updateCacheBypassConditionWeighted(true, decisionWeight);
                             return null;
                         }
                         // Not in L1 value, not in L2 value. Fetch from delegate.
@@ -1594,7 +1877,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
             // Update presence cache based on the final outcome from value caches or delegate.
             perKeyCache.updatePresenceCacheOnGet(userKey, userValue != null);
-            updateCacheBypassCondition(resolvedByCache && userValue != null); // Hit if found in cache &
+            updateCacheBypassConditionWeighted(resolvedByCache && userValue != null, decisionWeight); // Hit if found in cache &
                                                                               // not tombstone
             return userValue;
         } catch (IOException e) {
@@ -1613,12 +1896,20 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
         delegateState.setCurrentNamespace(getCurrentNamespace());
 
+        if (forceBypassAlways
+                || Boolean.TRUE.equals(THREAD_LOCAL_BYPASS.get())
+                || GLOBAL_BYPASS
+                || isAutoBypassActiveForThisCall()) {
+            delegateState.put(userKey, userValue);
+            return;
+        }
+
         if (bypassEnabled && bypassCache) {
             boolean isSample =
                     accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
             if (!isSample) {
                 delegateState.put(userKey, userValue);
-                updateCacheBypassCondition(false);
+                // Do not update hit-rate window for unsampled bypass writes.
                 return;
             }
         }
@@ -1653,7 +1944,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             perKeyCache.updatePresenceCacheOnPut(userKey);
         }
         perKeyCache.fullyLoaded = false; // A put might change the full set of keys
-        updateCacheBypassCondition(true); // A put often implies a subsequent get (hit)
+        updateCacheBypassCondition(true); // Leave as-is: primes toward enabling cache after writes
     }
 
     @Override
@@ -1672,9 +1963,24 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         // So, this explicit call here might be redundant unless we bypass this.put().
         // For safety and clarity, let's rely on this.put() to set the namespace.
 
+        // If left side or explicit bypass, write-through directly.
+        if (forceBypassAlways
+                || Boolean.TRUE.equals(THREAD_LOCAL_BYPASS.get())
+                || GLOBAL_BYPASS
+                || isAutoBypassActiveForThisCall()) {
+            delegateState.setCurrentNamespace(getCurrentNamespace());
+            for (Map.Entry<UK, UV> entry : map.entrySet()) {
+                if (entry.getKey() == null) continue;
+                if (entry.getValue() == null) {
+                    delegateState.remove(entry.getKey());
+                } else {
+                    delegateState.put(entry.getKey(), entry.getValue());
+                }
+            }
+            return;
+        }
+
         for (Map.Entry<UK, UV> entry : map.entrySet()) {
-            // this.put() will handle null userKey within its logic (likely a no-op or error)
-            // and will convert put(key, null) to remove(key).
             this.put(entry.getKey(), entry.getValue());
         }
     }
@@ -1686,12 +1992,20 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
         delegateState.setCurrentNamespace(getCurrentNamespace());
 
+        if (forceBypassAlways
+                || Boolean.TRUE.equals(THREAD_LOCAL_BYPASS.get())
+                || GLOBAL_BYPASS
+                || isAutoBypassActiveForThisCall()) {
+            delegateState.remove(userKey);
+            return;
+        }
+
         if (bypassEnabled && bypassCache) {
             boolean isSample =
                     accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
             if (!isSample) {
                 delegateState.remove(userKey);
-                updateCacheBypassCondition(false);
+                // Do not update hit-rate window for unsampled bypass removes.
                 return;
             }
         }
@@ -1733,19 +2047,22 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         }
         delegateState.setCurrentNamespace(getCurrentNamespace());
 
-        // Apply the same left-input bypass for contains() probes.
-        if (isLikelyLeftInputCallContext()) {
-            updateCacheBypassCondition(false);
+        if (forceBypassAlways
+                || Boolean.TRUE.equals(THREAD_LOCAL_BYPASS.get())
+                || GLOBAL_BYPASS
+                || isAutoBypassActiveForThisCall()) {
             return delegateState.contains(userKey);
         }
 
+        int containsWeight = 1;
         if (bypassEnabled && bypassCache) {
             boolean isSample =
                     accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
             if (!isSample) {
-                updateCacheBypassCondition(false);
+                // Do not skew hit rate with unsampled bypass reads
                 return delegateState.contains(userKey);
             }
+            containsWeight = SAMPLING_RATE;
         }
 
         try {
@@ -1754,13 +2071,13 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             // 1. Check L1, it has the most up-to-date information.
             CacheEntry<UV> l1Entry = perKeyCache.l1MapEntries.get(userKey);
             if (l1Entry != null) {
-                updateCacheBypassCondition(true); // L1 hit.
+                updateCacheBypassConditionWeighted(true, containsWeight); // L1 hit.
                 return l1Entry.getValue() != null; // A null value is a tombstone (doesn't exist).
             }
 
                     // 2. If fully loaded, the cache is the source of truth. If not in L1, check L2.
         if (perKeyCache.fullyLoaded) {
-            updateCacheBypassCondition(true); // Resolved from cache, even if absent.
+            updateCacheBypassConditionWeighted(true, containsWeight); // Resolved from cache, even if absent.
             try {
                 if (perKeyCache.l2ManagedMemoryEnabled && perKeyCache.l2MapEntriesOffHeap != null) {
                     byte[] serializedKey = serializeKey(userKey);
@@ -1779,11 +2096,11 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             if (keyPresenceCacheEnabled) {
                 ValuePresence presence = perKeyCache.getValuePresence(userKey);
                 if (presence == ValuePresence.ABSENT_IN_CACHE) {
-                    updateCacheBypassCondition(true); // A hit on "absence" information.
+                    updateCacheBypassConditionWeighted(true, containsWeight); // A hit on "absence" information.
                     return false;
                 }
                 if (presence == ValuePresence.PRESENT_IN_CACHE_CLEAN) {
-                    updateCacheBypassCondition(true); // A hit on "presence" information.
+                    updateCacheBypassConditionWeighted(true, containsWeight); // A hit on "presence" information.
                     // This implies it exists in the delegate, even if the value isn't in the value
                     // cache.
                     return true;
@@ -1811,7 +2128,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 }
                 
                 if (foundInL2) {
-                    updateCacheBypassCondition(true); // L2 hit.
+                    updateCacheBypassConditionWeighted(true, containsWeight); // L2 hit.
                     // Promote to L1.
                     perKeyCache.l1MapEntries.put(userKey, CacheEntry.clean(l2Value));
                     return true;
@@ -1821,7 +2138,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             }
 
             // 5. Cache miss, consult the delegate.
-            updateCacheBypassCondition(false);
+            updateCacheBypassConditionWeighted(false, containsWeight);
             boolean exists = delegateState.contains(userKey);
 
             // 6. Update caches with information from delegate.
@@ -2254,6 +2571,20 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
     @Override
     public Iterator<Map.Entry<UK, UV>> iterator() throws Exception {
+        // Respect explicit/global/auto bypass for iteration to avoid touching caches
+        if (forceBypassAlways
+                || Boolean.TRUE.equals(THREAD_LOCAL_NO_TOUCH.get())
+                || Boolean.TRUE.equals(THREAD_LOCAL_BYPASS.get())
+                || GLOBAL_BYPASS
+                || GLOBAL_NO_TOUCH
+                || isAutoBypassActiveForThisCall()) {
+            delegateState.setCurrentNamespace(getCurrentNamespace());
+            final Iterable<Map.Entry<UK, UV>> delegateEntries = delegateState.entries();
+            return delegateEntries == null
+                    ? java.util.Collections.<Map.Entry<UK, UV>>emptyList().iterator()
+                    : delegateEntries.iterator();
+        }
+
         delegateState.setCurrentNamespace(getCurrentNamespace());
         final PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
 
