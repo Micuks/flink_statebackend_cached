@@ -62,6 +62,8 @@ public class CachingInternalValueState<K, N, V>
     private final int maxActiveNamespacesInCache;
     private final long maxCacheMemoryMb;
     private N currentNamespace;
+    // Cached serialized form of current namespace to avoid re-serialization on hot paths
+    private StableNamespaceKey currentNamespaceStableKey;
     private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
 
     // Configuration for cache bypass
@@ -85,6 +87,11 @@ public class CachingInternalValueState<K, N, V>
     private final Counter l2ValueCacheHitCount;
     private final Counter l2ValueCacheMissCount;
     private final Counter delegateLookups;
+    // ValueState-specific aliases to enable separate reporting in benchmarks
+    private final Counter valueStateL1CacheHitCount;
+    private final Counter valueStateL1CacheMissCount;
+    private final Counter valueStateL2CacheHitCount;
+    private final Counter valueStateL2CacheMissCount;
     
     private volatile boolean bypassCache = false;
     private final boolean bypassEnabled;
@@ -140,6 +147,12 @@ public class CachingInternalValueState<K, N, V>
             this.l2ValueCacheMissCount = cacheMetrics.counter("l2ValueCacheMiss");
             this.delegateLookups = cacheMetrics.counter("delegateLookups");
 
+            // ValueState-specific counters for separate reporting in Nexmark
+            this.valueStateL1CacheHitCount = cacheMetrics.counter("valueStateL1CacheHit");
+            this.valueStateL1CacheMissCount = cacheMetrics.counter("valueStateL1CacheMiss");
+            this.valueStateL2CacheHitCount = cacheMetrics.counter("valueStateL2CacheHit");
+            this.valueStateL2CacheMissCount = cacheMetrics.counter("valueStateL2CacheMiss");
+
             // Generic counters for backward-compat dashboards
             this.cacheHits = cacheMetrics.counter("hits");
             this.cacheMisses = cacheMetrics.counter("misses");
@@ -164,6 +177,10 @@ public class CachingInternalValueState<K, N, V>
             this.l2ValueCacheHitCount = no;
             this.l2ValueCacheMissCount = no;
             this.delegateLookups = no;
+            this.valueStateL1CacheHitCount = no;
+            this.valueStateL1CacheMissCount = no;
+            this.valueStateL2CacheHitCount = no;
+            this.valueStateL2CacheMissCount = no;
         }
 
         // Create namespace caches with eviction listeners that flush dirty entries
@@ -326,13 +343,18 @@ public class CachingInternalValueState<K, N, V>
     }
 
     private CachePolicy<K, CacheEntry<V>> getL1CacheForNamespace(N namespace) {
-        StableNamespaceKey stableNamespaceKey = StableNamespaceKey.fromNamespace(namespace, getNamespaceSerializer());
+        // Prefer cached StableNamespaceKey when namespace matches currentNamespace
+        StableNamespaceKey nsKey = (currentNamespaceStableKey != null
+                && (namespace == this.currentNamespace
+                    || (namespace != null && namespace.equals(this.currentNamespace))))
+                ? currentNamespaceStableKey
+                : StableNamespaceKey.fromNamespace(namespace, getNamespaceSerializer());
         return namespaceCachesL1.computeIfAbsent(
-                stableNamespaceKey,
-                nsKey -> createCachePolicyWithEvictionListener(l1CacheSizePerKeyPerNamespace,
+                nsKey,
+                stableKey -> createCachePolicyWithEvictionListener(l1CacheSizePerKeyPerNamespace,
                         evictedL1Entry -> {
                             // This is the L1 eviction listener for a specific key in a specific namespace.
-                            CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(namespaceKeyToNamespace(nsKey));
+                            CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(namespaceKeyToNamespace(stableKey));
                             K evictedKey = evictedL1Entry.getKey();
                             CacheEntry<V> evictedValueWrapper = evictedL1Entry.getValue();
                             V evictedValue = evictedValueWrapper.getValue();
@@ -345,7 +367,7 @@ public class CachingInternalValueState<K, N, V>
                                 N originalNamespace = getCurrentNamespace();
                                 try {
                                     backend.setCurrentKey(evictedKey);
-                                    this.setCurrentNamespace(namespaceKeyToNamespace(nsKey)); // Set NS for delegate for this op
+                                    this.setCurrentNamespace(namespaceKeyToNamespace(stableKey)); // Set NS for delegate for this op
                                     delegateState.update(evictedValue);
                                     evictedValueWrapper.setDirty(false); // Mark as clean
 
@@ -381,10 +403,15 @@ public class CachingInternalValueState<K, N, V>
     }
 
     private CachePolicy<K, CacheEntry<V>> getL2CacheForNamespace(N namespace) {
-        StableNamespaceKey stableNamespaceKey = StableNamespaceKey.fromNamespace(namespace, getNamespaceSerializer());
+        // Prefer cached StableNamespaceKey when namespace matches currentNamespace
+        StableNamespaceKey nsKey = (currentNamespaceStableKey != null
+                && (namespace == this.currentNamespace
+                    || (namespace != null && namespace.equals(this.currentNamespace))))
+                ? currentNamespaceStableKey
+                : StableNamespaceKey.fromNamespace(namespace, getNamespaceSerializer());
         return namespaceCachesL2.computeIfAbsent(
-                stableNamespaceKey,
-                nsKey -> new LRUMap<>(l2CacheSizePerKeyPerNamespace) // L2 is always LRU
+                nsKey,
+                k -> new LRUMap<>(l2CacheSizePerKeyPerNamespace) // L2 is always LRU
                 // L2 eviction doesn't trigger further writes here
                 );
     }
@@ -406,11 +433,13 @@ public class CachingInternalValueState<K, N, V>
             updateCacheBypassCondition(true);
             cacheHits.inc();
             l1ValueCacheHitCount.inc();
+            valueStateL1CacheHitCount.inc();
             return l1Entry.getValue();
         }
 
         // L1 miss
         l1ValueCacheMissCount.inc();
+        valueStateL1CacheMissCount.inc();
 
         CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
         CacheEntry<V> l2Entry = l2Cache.get(currentKey);
@@ -419,6 +448,7 @@ public class CachingInternalValueState<K, N, V>
             updateCacheBypassCondition(true);
             cacheHits.inc();
             l2ValueCacheHitCount.inc();
+            valueStateL2CacheHitCount.inc();
             // L2 entry is always clean. Remove from L2, put into L1.
             // No memory change reported here as it's a move between caches of the same backend instance.
             // However, if L1.put causes an eviction, that eviction will report a release.
@@ -440,6 +470,7 @@ public class CachingInternalValueState<K, N, V>
         updateCacheBypassCondition(false);
         cacheMisses.inc();
         l2ValueCacheMissCount.inc();
+        valueStateL2CacheMissCount.inc();
         delegateLookups.inc();
         V valueFromDelegate = delegateState.value();
         if (valueFromDelegate != null) { // Only cache non-null
@@ -639,6 +670,13 @@ public class CachingInternalValueState<K, N, V>
         // Set for the delegate, the cache keying already uses the namespace.
         this.currentNamespace = namespace;
         delegateState.setCurrentNamespace(namespace);
+        // Cache serialized form for hot-path cache lookups
+        try {
+            this.currentNamespaceStableKey = StableNamespaceKey.fromNamespace(namespace, getNamespaceSerializer());
+        } catch (Throwable t) {
+            // Best-effort; if serialization fails here, fall back to on-demand serialization later
+            this.currentNamespaceStableKey = null;
+        }
     }
 
     @Override
