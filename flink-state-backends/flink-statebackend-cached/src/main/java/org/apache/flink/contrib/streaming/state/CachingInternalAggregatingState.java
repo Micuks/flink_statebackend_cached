@@ -97,6 +97,44 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
                 evictedNsEntry -> flushCacheForNamespace(evictedNsEntry.getKey(), evictedNsEntry.getValue()));
     }
 
+    // Overloaded constructor with explicit maxActiveNamespaces override
+    public CachingInternalAggregatingState(
+            InternalAggregatingState<K, N, IN, ACC, OUT> delegateState,
+            CachingKeyedStateBackend<K> backend,
+            AggregateFunction<IN, ACC, OUT> aggFunction,
+            int l1CacheSize,
+            int l2CacheSize,
+            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            MetricGroup metricsGroup,
+            int maxActiveNamespaces) {
+        this.delegateState = delegateState;
+        this.backend = backend;
+        this.aggFunction = aggFunction;
+        this.l1CacheSizePerKeyPerNamespace = l1CacheSize;
+        this.l2CacheSizePerKeyPerNamespace = l2CacheSize;
+        this.cachePolicyType = cachePolicyType;
+
+        if (metricsGroup != null) {
+            this.cacheHits = metricsGroup.counter("hits");
+            this.cacheMisses = metricsGroup.counter("misses");
+        } else {
+            Counter dummyCounter = new Counter() {
+                @Override public void inc() {}
+                @Override public void inc(long n) {}
+                @Override public void dec() {}
+                @Override public void dec(long n) {}
+                @Override public long getCount() { return 0; }
+            };
+            this.cacheHits = dummyCounter;
+            this.cacheMisses = dummyCounter;
+        }
+
+        this.namespaceCachesL1 = createCachePolicyWithEvictionListener(maxActiveNamespaces,
+                evictedNsEntry -> flushCacheForNamespace(evictedNsEntry.getKey(), evictedNsEntry.getValue()));
+        this.namespaceCachesL2 = createCachePolicyWithEvictionListener(maxActiveNamespaces,
+                evictedNsEntry -> flushCacheForNamespace(evictedNsEntry.getKey(), evictedNsEntry.getValue()));
+    }
+
     private <CK, CV> CachePolicy<CK, CV> createCachePolicy(int capacity) {
         switch (cachePolicyType) {
             case TINYLFU:

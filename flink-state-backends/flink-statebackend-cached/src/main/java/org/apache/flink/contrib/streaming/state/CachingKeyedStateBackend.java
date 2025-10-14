@@ -128,6 +128,11 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean l2ManagedMemoryEnabled;
     private final int mapSpecificL1EntryCacheSize;
     private final int mapSpecificL2EntryCacheSize;
+    // Per-state overrides for max active namespaces
+    private final int valueMaxActiveNamespaces;
+    private final int mapMaxActiveNamespaces;
+    private final int listMaxActiveNamespaces;
+    private final int aggregatingMaxActiveNamespaces;
     private final long l2TimeBucketSizeMillis;
     private final boolean perKeyMetricsEnabled;
 
@@ -172,7 +177,9 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
             boolean l2ManagedMemoryEnabled, MemoryManager memoryManager,
             org.apache.flink.configuration.Configuration taskConfiguration,
-            int mapSpecificL1EntryCacheSize, int mapSpecificL2EntryCacheSize) {
+            int mapSpecificL1EntryCacheSize, int mapSpecificL2EntryCacheSize,
+            int valueMaxActiveNamespaces, int mapMaxActiveNamespaces,
+            int listMaxActiveNamespaces, int aggregatingMaxActiveNamespaces) {
 
         super(
                 kvStateRegistry,
@@ -211,6 +218,10 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         this.mapSpecificL1EntryCacheSize = mapSpecificL1EntryCacheSize;
         this.mapSpecificL2EntryCacheSize = mapSpecificL2EntryCacheSize;
+        this.valueMaxActiveNamespaces = (valueMaxActiveNamespaces > 0) ? valueMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
+        this.mapMaxActiveNamespaces = (mapMaxActiveNamespaces > 0) ? mapMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
+        this.listMaxActiveNamespaces = (listMaxActiveNamespaces > 0) ? listMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
+        this.aggregatingMaxActiveNamespaces = (aggregatingMaxActiveNamespaces > 0) ? aggregatingMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
 
         // Initialize global L2 entry limit from configuration
         this.maxGlobalL2Entries = taskConfiguration.getLong("state.backend.cached.map.l2.size.entries", 16384L);
@@ -314,7 +325,9 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean l2ManagedMemoryEnabled,
             MemoryManager memoryManager,
             org.apache.flink.configuration.Configuration taskConfiguration,
-            int mapSpecificL1EntryCacheSize, int mapSpecificL2EntryCacheSize
+            int mapSpecificL1EntryCacheSize, int mapSpecificL2EntryCacheSize,
+            int valueMaxActiveNamespaces, int mapMaxActiveNamespaces,
+            int listMaxActiveNamespaces, int aggregatingMaxActiveNamespaces
     ) {
         // Call super constructor first, using direct parameters where available
         super(
@@ -356,6 +369,10 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         this.mapSpecificL1EntryCacheSize = mapSpecificL1EntryCacheSize;
         this.mapSpecificL2EntryCacheSize = mapSpecificL2EntryCacheSize;
+        this.valueMaxActiveNamespaces = (valueMaxActiveNamespaces > 0) ? valueMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
+        this.mapMaxActiveNamespaces = (mapMaxActiveNamespaces > 0) ? mapMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
+        this.listMaxActiveNamespaces = (listMaxActiveNamespaces > 0) ? listMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
+        this.aggregatingMaxActiveNamespaces = (aggregatingMaxActiveNamespaces > 0) ? aggregatingMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
 
         long cfgBucket2 = 0L;
         try {
@@ -527,7 +544,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     this,
                     l1EntryCacheSize,
                     l2EntryCacheSize,
-                    maxActiveNamespaceOrPerKeyCacheContainers,
+                    this.valueMaxActiveNamespaces,
                     this.maxCacheMemoryMb,
                     this.valueCachePolicyType,
                     valueHitRateThreshold,
@@ -549,6 +566,29 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int l1SizeForMap = mapSpecificL1EntryCacheSize > 0 ? mapSpecificL1EntryCacheSize : l1EntryCacheSize;
             int l2SizeForMap = mapSpecificL2EntryCacheSize > 0 ? mapSpecificL2EntryCacheSize : l2EntryCacheSize;
 
+            boolean forceBypass = false;
+            try {
+                String pattern = this.taskConfiguration.getString(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX, "");
+                if (pattern != null && !pattern.isEmpty()) {
+                    forceBypass = stateName != null && stateName.matches(pattern);
+                }
+            } catch (Throwable t) {
+                // ignore, keep default false
+            }
+            // If a state is force-bypassed and configured to return raw, hand back the delegate
+            // state directly instead of wrapping it at all. This avoids any wrapper overhead and
+            // guarantees vanilla behavior for these states.
+            try {
+                boolean returnRawOnForceBypass = this.taskConfiguration.getBoolean(
+                        CachingStateBackendFactory.MAP_FORCE_BYPASS_RETURN_RAW);
+                if (forceBypass && returnRawOnForceBypass) {
+                    LOG.info("Map state '{}' matched force-bypass; returning raw delegate state.", stateName);
+                    return (S) actualDelegateMapState;
+                }
+            } catch (Throwable t) {
+                // best-effort; fall through to wrapper creation
+            }
+
             cachingStateToRegister = new CachingInternalMapState<>(
                     (InternalMapState<K, N, ?, ?>) actualDelegateMapState,
                     this,
@@ -567,12 +607,14 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     this.mapBypassEnabled,
                     this.mapPresenceCacheImpl,
                     this.l2ManagedMemoryEnabled,
-                    this.perKeyMetricsEnabled);
+                    this.perKeyMetricsEnabled,
+                    forceBypass,
+                    this.mapMaxActiveNamespaces);
         } else if (stateDescriptor.getType() == StateDescriptor.Type.LIST && actualStateRaw instanceof InternalListState) {
             InternalListState<K, N, V_SD> actualDelegateListState = (InternalListState<K, N, V_SD>) actualStateRaw;
             cachingStateToRegister = new CachingInternalListState<>(
                     actualDelegateListState, this, l1EntryCacheSize, l2EntryCacheSize,
-                    maxActiveNamespaceOrPerKeyCacheContainers, this.listCachePolicyType); // Max memory mb was missing here for list
+                    this.listMaxActiveNamespaces, this.listCachePolicyType); // Max memory mb was missing here for list
         } else if (stateDescriptor.getType() == StateDescriptor.Type.AGGREGATING && actualStateRaw instanceof InternalAggregatingState) {
             InternalAggregatingState actualDelegateAggState = (InternalAggregatingState) actualStateRaw;
             AggregatingStateDescriptor aggStateDesc = (AggregatingStateDescriptor) stateDescriptor;
@@ -585,7 +627,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 l1EntryCacheSize,
                 l2EntryCacheSize,
                 this.aggregatingCachePolicyType,
-                aggMetricsGroup);
+                aggMetricsGroup,
+                this.aggregatingMaxActiveNamespaces);
         } else {
             // For unsupported types or if actualStateRaw is not an instance of the expected internal type,
             // return the raw state from the delegate directly.
