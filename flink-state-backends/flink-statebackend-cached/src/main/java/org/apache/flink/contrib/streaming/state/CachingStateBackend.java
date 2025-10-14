@@ -55,6 +55,11 @@ public class CachingStateBackend extends AbstractStateBackend
     private final long l1CacheSize;
     private final long l2CacheSize;
     private final long maxActiveNamespaces;
+    // Per-state overrides (fall back to global when not set)
+    private final long valueMaxActiveNamespaces;
+    private final long mapMaxActiveNamespaces;
+    private final long listMaxActiveNamespaces;
+    private final long aggregatingMaxActiveNamespaces;
     private final long maxCacheMemoryMb;
     // Global and per-state cache policy types
     private final CachingStateBackendFactory.CachePolicyType globalCachePolicyType;
@@ -91,6 +96,11 @@ public class CachingStateBackend extends AbstractStateBackend
         this.l1CacheSize = l1CacheSize;
         this.l2CacheSize = l2CacheSize;
         this.maxActiveNamespaces = maxActiveNamespaces;
+        // default per-state to the global value in this constructor variant
+        this.valueMaxActiveNamespaces = maxActiveNamespaces;
+        this.mapMaxActiveNamespaces = maxActiveNamespaces;
+        this.listMaxActiveNamespaces = maxActiveNamespaces;
+        this.aggregatingMaxActiveNamespaces = maxActiveNamespaces;
         this.maxCacheMemoryMb = maxCacheMemoryMb;
         // When constructed directly, apply the same policy to all states
         this.globalCachePolicyType = cachePolicyType;
@@ -182,6 +192,41 @@ public class CachingStateBackend extends AbstractStateBackend
         this.listCachePolicyType = tmpListPolicy;
         this.aggregatingCachePolicyType = tmpAggPolicy;
 
+        // Resolve per-state max active namespaces with fallback to the global value
+        long tmpValueMaxNs = this.maxActiveNamespaces;
+        long tmpMapMaxNs = this.maxActiveNamespaces;
+        long tmpListMaxNs = this.maxActiveNamespaces;
+        long tmpAggMaxNs = this.maxActiveNamespaces;
+        if (config instanceof Configuration) {
+            Configuration conf = (Configuration) config;
+            if (conf.contains(CachingStateBackendFactory.VALUE_MAX_ACTIVE_NAMESPACES_CONFIG)) {
+                tmpValueMaxNs = conf.get(CachingStateBackendFactory.VALUE_MAX_ACTIVE_NAMESPACES_CONFIG);
+            }
+            if (conf.contains(CachingStateBackendFactory.MAP_MAX_ACTIVE_NAMESPACES_CONFIG)) {
+                tmpMapMaxNs = conf.get(CachingStateBackendFactory.MAP_MAX_ACTIVE_NAMESPACES_CONFIG);
+            }
+            if (conf.contains(CachingStateBackendFactory.LIST_MAX_ACTIVE_NAMESPACES_CONFIG)) {
+                tmpListMaxNs = conf.get(CachingStateBackendFactory.LIST_MAX_ACTIVE_NAMESPACES_CONFIG);
+            }
+            if (conf.contains(CachingStateBackendFactory.AGGREGATING_MAX_ACTIVE_NAMESPACES_CONFIG)) {
+                tmpAggMaxNs = conf.get(CachingStateBackendFactory.AGGREGATING_MAX_ACTIVE_NAMESPACES_CONFIG);
+            }
+        } else {
+            // Best-effort when presence cannot be checked
+            try { tmpValueMaxNs = config.get(CachingStateBackendFactory.VALUE_MAX_ACTIVE_NAMESPACES_CONFIG); } catch (Throwable ignore) {}
+            try { tmpMapMaxNs = config.get(CachingStateBackendFactory.MAP_MAX_ACTIVE_NAMESPACES_CONFIG); } catch (Throwable ignore) {}
+            try { tmpListMaxNs = config.get(CachingStateBackendFactory.LIST_MAX_ACTIVE_NAMESPACES_CONFIG); } catch (Throwable ignore) {}
+            try { tmpAggMaxNs = config.get(CachingStateBackendFactory.AGGREGATING_MAX_ACTIVE_NAMESPACES_CONFIG); } catch (Throwable ignore) {}
+            if (tmpValueMaxNs == 0) tmpValueMaxNs = this.maxActiveNamespaces;
+            if (tmpMapMaxNs == 0) tmpMapMaxNs = this.maxActiveNamespaces;
+            if (tmpListMaxNs == 0) tmpListMaxNs = this.maxActiveNamespaces;
+            if (tmpAggMaxNs == 0) tmpAggMaxNs = this.maxActiveNamespaces;
+        }
+        this.valueMaxActiveNamespaces = (int) Math.max(0, tmpValueMaxNs);
+        this.mapMaxActiveNamespaces = (int) Math.max(0, tmpMapMaxNs);
+        this.listMaxActiveNamespaces = (int) Math.max(0, tmpListMaxNs);
+        this.aggregatingMaxActiveNamespaces = (int) Math.max(0, tmpAggMaxNs);
+
         // Preserve full configuration relevant to keyed backend
         org.apache.flink.configuration.Configuration cfg = new org.apache.flink.configuration.Configuration();
         cfg.set(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG, config.get(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG));
@@ -192,6 +237,8 @@ public class CachingStateBackend extends AbstractStateBackend
         cfg.set(CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, this.mapCacheMinAccessesForBypassCheck);
         cfg.set(CachingStateBackendFactory.MAP_PRESENCE_CACHE_IMPL, this.mapPresenceCacheImpl);
         cfg.set(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG, this.l2ManagedMemoryEnabled);
+        cfg.set(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX,
+                config.get(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX));
         // Expose resolved per-state policies to the keyed backend (for completeness/testing)
         cfg.set(CachingStateBackendFactory.CACHE_POLICY_CONFIG, this.globalCachePolicyType);
         cfg.set(CachingStateBackendFactory.MAP_CACHE_POLICY_CONFIG, this.mapCachePolicyType);
@@ -205,6 +252,9 @@ public class CachingStateBackend extends AbstractStateBackend
         cfg.set(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, config.get(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG));
         cfg.set(CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, config.get(CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG));
         cfg.set(CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG, config.get(CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG));
+        // Force-bypass regex (if any)
+        cfg.set(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX,
+                config.get(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX));
         // Advanced/kill-switch option left default true unless present elsewhere
         this.taskConfiguration = cfg;
     }
@@ -271,7 +321,11 @@ public class CachingStateBackend extends AbstractStateBackend
                 env.getMemoryManager(),
                 this.taskConfiguration,
                 0,
-                0);
+                0,
+                (int) this.valueMaxActiveNamespaces,
+                (int) this.mapMaxActiveNamespaces,
+                (int) this.listMaxActiveNamespaces,
+                (int) this.aggregatingMaxActiveNamespaces);
     }
 
     @Override
@@ -328,6 +382,11 @@ public class CachingStateBackend extends AbstractStateBackend
     public long getMaxActiveNamespaces() {
         return maxActiveNamespaces;
     }
+
+    public long getValueMaxActiveNamespaces() { return valueMaxActiveNamespaces; }
+    public long getMapMaxActiveNamespaces() { return mapMaxActiveNamespaces; }
+    public long getListMaxActiveNamespaces() { return listMaxActiveNamespaces; }
+    public long getAggregatingMaxActiveNamespaces() { return aggregatingMaxActiveNamespaces; }
 
     public long getMaxCacheMemoryMb() {
         return maxCacheMemoryMb;

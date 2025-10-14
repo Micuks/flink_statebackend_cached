@@ -55,6 +55,31 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .withDescription(
                             "The maximum number of active namespaces (or Flink Key for MapState) whose caches are kept in memory.");
 
+    // Per-state overrides for max active namespaces (fall back to global when unset)
+    public static final ConfigOption<Long> VALUE_MAX_ACTIVE_NAMESPACES_CONFIG =
+            ConfigOptions.key("state.backend.cached.value.max.active.namespaces")
+                    .longType()
+                    .noDefaultValue()
+                    .withDescription("Override for maximum active namespaces for ValueState caches.");
+
+    public static final ConfigOption<Long> MAP_MAX_ACTIVE_NAMESPACES_CONFIG =
+            ConfigOptions.key("state.backend.cached.map.max.active.namespaces")
+                    .longType()
+                    .noDefaultValue()
+                    .withDescription("Override for maximum active namespaces for MapState caches.");
+
+    public static final ConfigOption<Long> LIST_MAX_ACTIVE_NAMESPACES_CONFIG =
+            ConfigOptions.key("state.backend.cached.list.max.active.namespaces")
+                    .longType()
+                    .noDefaultValue()
+                    .withDescription("Override for maximum active namespaces for ListState caches.");
+
+    public static final ConfigOption<Long> AGGREGATING_MAX_ACTIVE_NAMESPACES_CONFIG =
+            ConfigOptions.key("state.backend.cached.aggregating.max.active.namespaces")
+                    .longType()
+                    .noDefaultValue()
+                    .withDescription("Override for maximum active namespaces for AggregatingState caches.");
+
     public static final ConfigOption<Long> MAX_CACHE_MEMORY_MB_CONFIG =
             ConfigOptions.key("state.backend.cached.max.memory.mb")
                     .longType()
@@ -217,6 +242,25 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .booleanType()
                     .defaultValue(false)
                     .withDescription("Enable per-key/namespace cache metrics (high-cardinality). Default false. Aggregated metrics are recommended.");
+
+    // Force bypass for specific MapState instances by state name, matched by regex.
+    // Useful when job code (e.g., SQL/Table) cannot provide side hints but the problematic
+    // state names are known and stable.
+    public static final ConfigOption<String> MAP_FORCE_BYPASS_STATES_REGEX =
+            ConfigOptions.key("state.backend.cached.map.force-bypass.states.regex")
+                    .stringType()
+                    .defaultValue("")
+                    .withDescription("Regex of state names for which MapState cache should be force-bypassed.");
+
+    // When a MapState name matches MAP_FORCE_BYPASS_STATES_REGEX, return the raw delegate state
+    // (no caching wrapper) instead of wrapping and bypassing internally. This moves the bypass
+    // decision to the backend layer as a one-time choice, eliminating any wrapper overhead in the
+    // hot path.
+    public static final ConfigOption<Boolean> MAP_FORCE_BYPASS_RETURN_RAW =
+            ConfigOptions.key("state.backend.cached.map.force-bypass.return-raw")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription("If true, states matched by the force-bypass regex are returned as raw delegate MapState without caching wrapper.");
 
     // Potentially, a config for delegate backend factory if it's not hardcoded to RocksDB
     // For now, assumes RocksDBStateBackend is the default delegate and is configured using its own
