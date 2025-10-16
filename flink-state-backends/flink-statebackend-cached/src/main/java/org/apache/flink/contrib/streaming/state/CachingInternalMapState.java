@@ -127,13 +127,11 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     }
 
     private enum JoinSide { LEFT, RIGHT, UNKNOWN }
-    private static final ThreadLocal<JoinSide> DETECTED_JOIN_SIDE =
-            ThreadLocal.withInitial(() -> JoinSide.UNKNOWN);
 
-    // Track whether we have already attempted detection on this thread to avoid
-    // repeated stack walking in hot paths when side cannot be detected.
-    private static final ThreadLocal<Boolean> DETECTION_ATTEMPTED =
-            ThreadLocal.withInitial(() -> Boolean.FALSE);
+    // Note: older versions attempted per-thread memoization of detected side.
+    // In Flink task threads that process both inputs, that led to repeated
+    // stack walks and incorrect reuse. We now detect per-state instance once
+    // and reuse the result to avoid stack walking on hot paths.
 
     // Best-effort single log for unknown detection to avoid log flooding
     private static volatile boolean LOGGED_UNKNOWN_ONCE = false;
@@ -143,7 +141,9 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         // Do NOT cache the result per-thread: the same task thread processes both inputs.
         try {
             StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-            int maxDepth = Math.min(stack.length, 32);
+            // Limit scan depth aggressively to reduce overhead; 16 is sufficient
+            // to catch operator processing frames in typical Flink stacks.
+            int maxDepth = Math.min(stack.length, 16);
             for (int i = 2; i < maxDepth; i++) {
                 String method = stack[i].getMethodName();
                 if ("processElement1".equals(method) || method.contains("processElement1")
@@ -165,7 +165,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         return JoinSide.UNKNOWN;
     }
 
-    private static boolean isAutoBypassActiveForThisCall() {
+    private boolean isAutoBypassActiveForThisCall() {
         if (!AUTO_LEFT_BYPASS) {
             return false;
         }
