@@ -212,7 +212,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapKeyPresenceCacheEnabled = mapKeyPresenceCacheEnabled;
         this.mapBypassEnabled = mapBypassEnabled;
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
-        this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
+        // If L2 capacity is zero, disable managed L2 to avoid unnecessary Off-Heap setup
+        this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled && (this.l2EntryCacheSize > 0);
         this.memoryManager = memoryManager;
         this.taskConfiguration = taskConfiguration;
 
@@ -363,7 +364,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapKeyPresenceCacheEnabled = mapKeyPresenceCacheEnabled;
         this.mapBypassEnabled = mapBypassEnabled;
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
-        this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
+        // If L2 capacity is zero, disable managed L2 to avoid unnecessary Off-Heap setup
+        this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled && (this.l2EntryCacheSize > 0);
         this.memoryManager = memoryManager;
         this.taskConfiguration = taskConfiguration;
 

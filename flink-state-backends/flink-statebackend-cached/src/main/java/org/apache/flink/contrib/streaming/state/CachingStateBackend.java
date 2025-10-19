@@ -116,7 +116,8 @@ public class CachingStateBackend extends AbstractStateBackend
         this.mapKeyPresenceCacheEnabled = mapKeyPresenceCacheEnabled;
         this.mapBypassEnabled = mapBypassEnabled;
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
-        this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
+        // Disable managed L2 when L2 capacity is zero to avoid unnecessary off-heap setup
+        this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled && l2CacheSize > 0;
 
         // Build a minimal task configuration reflecting relevant options
         org.apache.flink.configuration.Configuration cfg = new org.apache.flink.configuration.Configuration();
@@ -159,7 +160,9 @@ public class CachingStateBackend extends AbstractStateBackend
         this.mapKeyPresenceCacheEnabled = config.get(CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG);
         this.mapBypassEnabled = config.get(CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG);
         this.mapPresenceCacheImpl = config.get(CachingStateBackendFactory.MAP_PRESENCE_CACHE_IMPL);
-        this.l2ManagedMemoryEnabled = config.get(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG);
+        // Disable managed L2 when L2 capacity is zero to avoid unnecessary off-heap setup
+        boolean cfgL2Managed = config.get(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG);
+        this.l2ManagedMemoryEnabled = cfgL2Managed && this.l2CacheSize > 0;
         // Resolve per-state policies with fallback to the global policy when option is absent
         CachingStateBackendFactory.CachePolicyType tmpMapPolicy = this.globalCachePolicyType;
         CachingStateBackendFactory.CachePolicyType tmpValuePolicy = this.globalCachePolicyType;

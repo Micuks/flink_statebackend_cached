@@ -57,9 +57,6 @@ public class OffHeapKVStore implements Closeable {
     private static final int KEY_LENGTH_OFFSET = 0;
     private static final int VALUE_LENGTH_OFFSET = 4;
 
-    // Log only once when the first page is successfully allocated
-    private boolean firstAllocationLogged = false;
-
     // --- Time-bucketed eviction support ---
     // Size of one time bucket in milliseconds. When > 0, new records are written to pages
     // dedicated to the current time bucket (based on processing time), and we can evict
@@ -405,10 +402,6 @@ public class OffHeapKVStore implements Closeable {
             if (ownerBackend != null) {
                 ownerBackend.reportCacheMemoryAdded((long) pageSize * newPages.size());
             }
-            if (!firstAllocationLogged) {
-                firstAllocationLogged = true;
-                LOG.info("Off-heap L2: allocated first managed page. pageSize={} bytes, totalPages={}", pageSize, pages.size());
-            }
             return pages.size() - 1;
         } catch (IOException allocEx) {
             // Best-effort: try to evict current contents and retry once
@@ -427,10 +420,6 @@ public class OffHeapKVStore implements Closeable {
                     pageToBucket.put(pages.size() - 1, null);
                     if (ownerBackend != null) {
                         ownerBackend.reportCacheMemoryAdded((long) pageSize * newPages.size());
-                    }
-                    if (!firstAllocationLogged) {
-                        firstAllocationLogged = true;
-                        LOG.info("Off-heap L2: allocated first managed page after eviction. pageSize={} bytes, totalPages={}", pageSize, pages.size());
                     }
                     return pages.size() - 1;
                 }
