@@ -646,7 +646,13 @@ public class CachingInternalValueState<K, N, V>
             }
         } finally {
             backend.setCurrentKey(originalKey);
-            setCurrentNamespace(originalNamespace);
+            // Avoid calling delegate with null namespace
+            if (originalNamespace != null) {
+                setCurrentNamespace(originalNamespace);
+            } else {
+                this.currentNamespace = null;
+                this.currentNamespaceStableKey = null;
+            }
         }
     }
 
@@ -669,10 +675,16 @@ public class CachingInternalValueState<K, N, V>
     public void setCurrentNamespace(@Nonnull N namespace) {
         // Set for the delegate, the cache keying already uses the namespace.
         this.currentNamespace = namespace;
-        delegateState.setCurrentNamespace(namespace);
+        if (namespace != null) {
+            delegateState.setCurrentNamespace(namespace);
+        }
         // Cache serialized form for hot-path cache lookups
         try {
-            this.currentNamespaceStableKey = StableNamespaceKey.fromNamespace(namespace, getNamespaceSerializer());
+            if (namespace != null) {
+                this.currentNamespaceStableKey = StableNamespaceKey.fromNamespace(namespace, getNamespaceSerializer());
+            } else {
+                this.currentNamespaceStableKey = null;
+            }
         } catch (Throwable t) {
             // Best-effort; if serialization fails here, fall back to on-demand serialization later
             this.currentNamespaceStableKey = null;

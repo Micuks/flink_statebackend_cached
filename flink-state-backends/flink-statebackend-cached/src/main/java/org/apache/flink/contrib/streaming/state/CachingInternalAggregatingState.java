@@ -369,7 +369,11 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
             }
         } finally {
             backend.setCurrentKey(originalKey);
-            setCurrentNamespace(originalNamespace);
+            if (originalNamespace != null) {
+                setCurrentNamespace(originalNamespace);
+            } else {
+                this.currentNamespace = null;
+            }
         }
     }
 
@@ -480,7 +484,9 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
     @Override
     public void setCurrentNamespace(@Nonnull N namespace) {
         this.currentNamespace = namespace;
-        delegateState.setCurrentNamespace(namespace);
+        if (namespace != null) {
+            delegateState.setCurrentNamespace(namespace);
+        }
     }
 
     @Nonnull

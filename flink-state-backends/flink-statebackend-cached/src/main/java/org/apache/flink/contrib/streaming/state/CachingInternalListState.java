@@ -400,7 +400,8 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
     @Override
     public void flushToUnderlyingState() throws IOException {
         K originalFlushKey = backend.getCurrentKey();
-        N originalFlushNamespace = this.getCurrentNamespace();
+        // Do not call getCurrentNamespace() here because it may be unset during snapshots
+        N originalFlushNamespace = this.currentNamespace;
         try {
             for (Map.Entry<N, CachePolicy<K, CacheEntry<List<V_ELE>>>> nsEntry : namespaceCachesL1
                     .entrySet()) {
@@ -452,7 +453,13 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
             }
         } finally {
             backend.setCurrentKey(originalFlushKey);
-            this.setCurrentNamespace(originalFlushNamespace);
+            // Restore namespace context only if it was previously set
+            if (originalFlushNamespace != null) {
+                this.setCurrentNamespace(originalFlushNamespace);
+            } else {
+                // Leave delegate as-is; just reset our local field
+                this.currentNamespace = null;
+            }
         }
         // Consider clearing L1 caches after flushing, or let LRU manage them.
         // L2 caches only hold clean data, so no flush needed for L2 itself.
@@ -481,7 +488,9 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
     @Override
     public void setCurrentNamespace(N namespace) {
         this.currentNamespace = namespace;
-        delegateState.setCurrentNamespace(namespace);
+        if (namespace != null) {
+            delegateState.setCurrentNamespace(namespace);
+        }
     }
 
     @Override
@@ -571,11 +580,7 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
     }
 
     public N getCurrentNamespace() {
-        if (currentNamespace == null) {
-            throw new IllegalStateException(
-                    "Namespace has not been set. Typically, you should call "
-                            + "setCurrentNamespace" + " first.");
-        }
+        // May be null during snapshot/initialization; callers must handle null.
         return currentNamespace;
     }
 
