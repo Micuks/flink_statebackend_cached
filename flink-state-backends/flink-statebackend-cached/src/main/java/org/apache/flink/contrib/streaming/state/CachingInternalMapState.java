@@ -314,14 +314,14 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             if (this.keyPresenceCacheEnabled) {
                 if (presenceCacheImpl
                         == CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP) {
-                    this.l1PrimitivePresenceCache = new TinyLFUMap<>(
+                    this.l1PrimitivePresenceCache = new PrimitivePresenceCache(
                             mapL1KeyPresenceCacheSize,
                             entry -> {
                                 if (entry.getValue() != null) {
                                     ownerBackend.reportCacheMemoryAdded(16L);
                                 }
                             });
-                    this.l2PrimitivePresenceCache = new TinyLFUMap<>(
+                    this.l2PrimitivePresenceCache = new PrimitivePresenceCache(
                             mapL2KeyPresenceCacheSize,
                             entry -> {
                                 if (entry.getValue() != null) {
@@ -332,20 +332,28 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                     this.l1KeyPresenceCache = new NoOpCachePolicy<>();
                     this.l2KeyPresenceCache = new NoOpCachePolicy<>();
                 } else {
-                    this.l1KeyPresenceCache = new LRUMap<>(
+                    this.l1KeyPresenceCache = createCachePolicyInstance(
+                            cachePolicyType,
                             mapL1KeyPresenceCacheSize,
                             entry -> {
                                 if (entry.getValue() != null) {
                                     ownerBackend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
                                 }
-                            });
-                    this.l2KeyPresenceCache = new LRUMap<>(
+                            },
+                            ownerBackend,
+                            true,
+                            true);
+                    this.l2KeyPresenceCache = createCachePolicyInstance(
+                            cachePolicyType,
                             mapL2KeyPresenceCacheSize,
                             entry -> {
                                 if (entry.getValue() != null) {
                                     ownerBackend.reportCacheMemoryAdded(ValueSizeUtils.estimate(Boolean.TRUE));
                                 }
-                            });
+                            },
+                            ownerBackend,
+                            true,
+                            true);
                     // Init primitive caches to NoOp
                     this.l1PrimitivePresenceCache = new NoOpCachePolicy<>();
                     this.l2PrimitivePresenceCache = new NoOpCachePolicy<>();
@@ -357,13 +365,13 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                 this.l2PrimitivePresenceCache = new NoOpCachePolicy<>();
             }
 
-            if (l2ManagedMemoryEnabled && ownerBackend.getManagedPagePool() != null
+            if (l2ManagedMemoryEnabled && l2Size > 0 && ownerBackend.getManagedPagePool() != null
                     && ownerBackend.getManagedPagePool().isUsable()) {
                 this.l2MapEntriesOffHeap = new OffHeapKVStore(
                         ownerBackend.getManagedPagePool(), ownerBackend, ownerBackend.getL2TimeBucketSizeMillis());
                 this.l2MapEntries = new NoOpCachePolicy<>();
             } else {
-                if (l2ManagedMemoryEnabled) {
+                if (l2ManagedMemoryEnabled && l2Size > 0) {
                     LOG.info("Falling back to on-heap L2 cache for this PerKeyMapCache because managed memory is not available.");
                 }
                 this.l2MapEntriesOffHeap = null;
@@ -1887,6 +1895,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
     @Override
     public void put(UK userKey, UV userValue) throws Exception {
+        LOG.info("Putting value for key {}", userKey);
         if (userKey == null) {
             /* let delegate handle or throw */ return;
         }
@@ -2350,7 +2359,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     @Override
     public void flushToUnderlyingState() throws IOException {
         K originalKey = backend.getCurrentKey();
-        N originalNamespace = getCurrentNamespace();
+        // Do not call getCurrentNamespace() here because it may be unset during snapshots
+        N originalNamespace = this.currentNamespace;
         try {
             for (Map.Entry<N, CachePolicy<K, PerKeyMapCache<UK, UV, K, N>>> nsEntry : namespaceCaches
                     .entrySet()) {
@@ -2391,7 +2401,12 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             }
         } finally {
             backend.setCurrentKey(originalKey);
-            setCurrentNamespace(originalNamespace);
+            // Restore namespace context only if it was previously set
+            if (originalNamespace != null) {
+                setCurrentNamespace(originalNamespace);
+            } else {
+                this.currentNamespace = null;
+            }
         }
     }
 
@@ -2443,15 +2458,14 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     @Override
     public void setCurrentNamespace(N namespace) {
         this.currentNamespace = namespace;
-        this.delegateState.setCurrentNamespace(namespace);
+        // Avoid setting a null namespace on the delegate; it may not accept null.
+        if (namespace != null) {
+            this.delegateState.setCurrentNamespace(namespace);
+        }
     }
 
     public N getCurrentNamespace() {
-        if (currentNamespace == null) {
-            throw new IllegalStateException(
-                    "Namespace has not been set. Typically, you should call "
-                            + "setCurrentNamespace" + " first.");
-        }
+        // May be null during snapshot/initialization; callers must handle null.
         return currentNamespace;
     }
 
@@ -2925,7 +2939,9 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         } finally {
             // Restore context
             backendForContext.setCurrentKey(null);
-            delegateStateForContext.setCurrentNamespace(originalNamespaceToRestore);
+            if (originalNamespaceToRestore != null) {
+                delegateStateForContext.setCurrentNamespace(originalNamespaceToRestore);
+            }
             // Clear L1 after flushing its contents
             perKeyCache.l1MapEntries.clear();
         }
