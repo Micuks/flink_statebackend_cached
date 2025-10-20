@@ -262,6 +262,21 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .defaultValue(true)
                     .withDescription("If true, states matched by the force-bypass regex are returned as raw delegate MapState without caching wrapper.");
 
+    // Lightweight profiling to estimate wrapper overhead. When enabled, wrappers record sampled
+    // wall-clock time spent in wrapper methods (e.g., get/put/remove) and expose totals/averages
+    // via metrics. Sampling reduces nanoTime overhead on hot paths.
+    public static final ConfigOption<Boolean> PROFILE_ENABLED_CONFIG =
+            ConfigOptions.key("state.backend.cached.profile.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription("Enable lightweight profiling of cached state wrappers to estimate framework overhead (default: false).");
+
+    public static final ConfigOption<Integer> PROFILE_SAMPLE_RATE_CONFIG =
+            ConfigOptions.key("state.backend.cached.profile.sample.rate")
+                    .intType()
+                    .defaultValue(1024)
+                    .withDescription("1 in N calls are profiled to limit overhead (default: 1024). Use 1 to profile every call.");
+
     // Potentially, a config for delegate backend factory if it's not hardcoded to RocksDB
     // For now, assumes RocksDBStateBackend is the default delegate and is configured using its own
     // factory/options.

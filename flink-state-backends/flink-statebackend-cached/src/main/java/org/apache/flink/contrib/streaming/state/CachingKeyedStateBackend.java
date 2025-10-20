@@ -135,6 +135,9 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int aggregatingMaxActiveNamespaces;
     private final long l2TimeBucketSizeMillis;
     private final boolean perKeyMetricsEnabled;
+    // Profiling controls (lightweight wrapper overhead estimation)
+    private final boolean profileEnabled;
+    private final int profileSampleRate;
 
     private final List<CachingInternalState<K, ?, ?, ?>> registeredStates;
 
@@ -244,6 +247,19 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.perKeyMetricsEnabled = (this.taskConfiguration != null)
                 ? this.taskConfiguration.getBoolean(CachingStateBackendFactory.MAP_PER_KEY_METRICS_ENABLED)
                 : false;
+        // Lightweight profiling flags (default off to avoid overhead)
+        boolean pEnabled = false;
+        int pRate = 1024;
+        try {
+            if (this.taskConfiguration != null) {
+                pEnabled = this.taskConfiguration.getBoolean(CachingStateBackendFactory.PROFILE_ENABLED_CONFIG);
+                pRate = Math.max(1, this.taskConfiguration.getInteger(CachingStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG));
+            }
+        } catch (Throwable t) {
+            // keep defaults on error
+        }
+        this.profileEnabled = pEnabled;
+        this.profileSampleRate = pRate;
         // Initialize managed page pool.
         // It's crucial to check both the feature flag and the availability of the memory manager.
         if (this.l2ManagedMemoryEnabled && this.memoryManager != null && this.memoryManager.getMemorySize() > 0) {
@@ -418,6 +434,20 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             this.managedPagePool = new ManagedPagePool(null); // Fallback to no-op pool
         }
 
+        // Lightweight profiling flags (default off to avoid overhead)
+        boolean pEnabled = false;
+        int pRate = 1024;
+        try {
+            if (this.taskConfiguration != null) {
+                pEnabled = this.taskConfiguration.getBoolean(CachingStateBackendFactory.PROFILE_ENABLED_CONFIG);
+                pRate = Math.max(1, this.taskConfiguration.getInteger(CachingStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG));
+            }
+        } catch (Throwable t) {
+            // keep defaults on error
+        }
+        this.profileEnabled = pEnabled;
+        this.profileSampleRate = pRate;
+
         // Configure auto left-bypass from task configuration (kill-switch)
         try {
             boolean autoLeftBypass = this.taskConfiguration != null
@@ -563,6 +593,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             }
             InternalMapState<K, N, ?, ?> actualDelegateMapState = (InternalMapState<K, N, ?, ?>) actualStateRaw;
             String stateName = stateDescriptor.getName(); // Get state name for metrics
+            LOG.info("[CachedBackend] Creating MapState for state '{}'", stateName);
             MetricGroup mapMetricsGroup = this.metricGroup.addGroup("state").addGroup(stateName);
 
             int l1SizeForMap = mapSpecificL1EntryCacheSize > 0 ? mapSpecificL1EntryCacheSize : l1EntryCacheSize;
@@ -971,6 +1002,14 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @VisibleForTesting
     boolean isDisposed(){
         return ((RocksDBKeyedStateBackend<K>) delegateKeyedStateBackend).isDisposed();
+    }
+
+    public boolean isProfileEnabled() {
+        return profileEnabled;
+    }
+
+    public int getProfileSampleRate() {
+        return profileSampleRate;
     }
 
 

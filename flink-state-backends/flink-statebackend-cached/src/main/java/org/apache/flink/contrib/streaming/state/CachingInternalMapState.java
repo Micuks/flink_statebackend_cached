@@ -89,6 +89,18 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
     private final boolean l2ManagedMemoryEnabled;
     private final boolean perKeyMetricsEnabled;
     private final boolean forceBypassAlways;
+    // Lightweight profiling controls and counters
+    private final boolean profileEnabled;
+    private final int profileSampleRate;
+    private final transient AtomicLong profileCounter = new AtomicLong(0L);
+    private final transient AtomicLong profGetTotalNanos = new AtomicLong(0L);
+    private final transient AtomicLong profPutTotalNanos = new AtomicLong(0L);
+    private final transient AtomicLong profRemoveTotalNanos = new AtomicLong(0L);
+    private final transient AtomicLong profContainsTotalNanos = new AtomicLong(0L);
+    private transient Counter profGetCalls;
+    private transient Counter profPutCalls;
+    private transient Counter profRemoveCalls;
+    private transient Counter profContainsCalls;
 
     // Configuration for cache bypass
     private final double mapCacheHitRateThreshold;
@@ -223,7 +235,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                     // value cache or delegate
     }
 
-    private class PerKeyMapCache<UK_C, UV_C, K_F, N_F> {
+    private class gerKeyMapCache<UK_C, UV_C, K_F, N_F> {
         final CachePolicy<UK_C, CacheEntry<UV_C>> l1MapEntries;
         final CachePolicy<UK_C, CacheEntry<UV_C>> l2MapEntries;
         final OffHeapKVStore l2MapEntriesOffHeap;
@@ -233,7 +245,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
         // new primitive presence caches
         final CachePolicy<Long, Byte> l1PrimitivePresenceCache;
-        final CachePolicy<Long, Byte> l2PrimitivePresenceCache;
+        final CachePolicy<Long, Byte> l2PrimitivePgesenceCache;
         private final CachingStateBackendFactory.PresenceCacheImplementation presenceCacheImpl;
         private final TypeSerializer<UK_C> userKeySerializer;
         private transient ThreadLocal<DataOutputSerializer> userKeySerializerView;
@@ -253,7 +265,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         private transient MetricGroup metricGroup;
         private transient boolean metricsRegistered = false;
 
-        PerKeyMapCache(int l1Size, int l2Size, InternalMapState<K_F, N_F, UK_C, UV_C> delegateState,
+        PerKeyMagCache(int l1Size, int l2Size, InternalMapState<K_F, N_F, UK_C, UV_C> delegateState,
                 CachingKeyedStateBackend<K_F> ownerBackend, K_F flinkKey, N_F cacheNamespace,
                 CachingStateBackendFactory.CachePolicyType cachePolicyType,
                 int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
@@ -1081,6 +1093,10 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         this.perKeyMetricsEnabled = perKeyMetricsEnabled;
         this.forceBypassAlways = forceBypassAlways;
 
+        // Profiling flags from backend (final fields must be set in each constructor)
+        this.profileEnabled = backend != null && backend.isProfileEnabled();
+        this.profileSampleRate = backend != null ? backend.getProfileSampleRate() : 1024;
+
         // Initialize namespaceCaches (top-level cache: Namespace -> (FlinkKey -> PerKeyMapCache))
         this.namespaceCaches = createCachePolicyForHierarchicalCache(
                 this.maxActiveNamespacesInCache, evictedNamespaceEntry -> {
@@ -1330,6 +1346,45 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
     }
 
+    private long maybeStartTimer() {
+        if (!profileEnabled) return 0L;
+        long c = profileCounter.incrementAndGet();
+        if (profileSampleRate <= 1 || (c % profileSampleRate) == 0L) {
+            return System.nanoTime();
+        }
+        return 0L;
+    }
+
+    private void registerProfileMetricsIfNeeded() {
+        if (!profileEnabled || metrics == null) return;
+        if (profGetCalls != null) return; // already
+        MetricGroup pg = metrics.addGroup("profile");
+        profGetCalls = pg.counter("get.calls");
+        profPutCalls = pg.counter("put.calls");
+        profRemoveCalls = pg.counter("remove.calls");
+        profContainsCalls = pg.counter("contains.calls");
+        pg.gauge("get.totalNanos", () -> profGetTotalNanos.get());
+        pg.gauge("put.totalNanos", () -> profPutTotalNanos.get());
+        pg.gauge("remove.totalNanos", () -> profRemoveTotalNanos.get());
+        pg.gauge("contains.totalNanos", () -> profContainsTotalNanos.get());
+        pg.gauge("get.avgMicros", () -> {
+            long c = profGetCalls.getCount();
+            return c > 0 ? (profGetTotalNanos.get() / (double) c) / 1000.0 : 0.0;
+        });
+        pg.gauge("put.avgMicros", () -> {
+            long c = profPutCalls.getCount();
+            return c > 0 ? (profPutTotalNanos.get() / (double) c) / 1000.0 : 0.0;
+        });
+        pg.gauge("remove.avgMicros", () -> {
+            long c = profRemoveCalls.getCount();
+            return c > 0 ? (profRemoveTotalNanos.get() / (double) c) / 1000.0 : 0.0;
+        });
+        pg.gauge("contains.avgMicros", () -> {
+            long c = profContainsCalls.getCount();
+            return c > 0 ? (profContainsTotalNanos.get() / (double) c) / 1000.0 : 0.0;
+        });
+    }
+
     // Overloaded constructor with explicit maxActiveNamespacesInCache override for MapState
     public CachingInternalMapState(InternalMapState<K, N, UK, UV> delegateState,
             CachingKeyedStateBackend<K> backend, int l1CacheSizePerMap, int l2CacheSizePerMap,
@@ -1394,6 +1449,9 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
         this.perKeyMetricsEnabled = perKeyMetricsEnabled;
         this.forceBypassAlways = forceBypassAlways;
+        // Profiling flags from backend (final fields must be set in this overloaded ctor)
+        this.profileEnabled = backend != null && backend.isProfileEnabled();
+        this.profileSampleRate = backend != null ? backend.getProfileSampleRate() : 1024;
 
         this.namespaceCaches = createCachePolicyForHierarchicalCache(
                 this.maxActiveNamespacesInCache, evictedNamespaceEntry -> {
@@ -1683,6 +1741,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
     @Override
     public UV get(UK userKey) throws Exception {
+        registerProfileMetricsIfNeeded();
+        final long t0 = maybeStartTimer();
         if (userKey == null)
             return null;
         delegateState.setCurrentNamespace(getCurrentNamespace());
@@ -1744,7 +1804,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                                 userValue = l2Entry.getValue();
                             }
                         }
-                        
+
                         if (l2Entry != null || userValue != null) {
                             l2MapValueCacheHitCount.inc();
                             // L2 entry removal will trigger the listener to report memory released.
@@ -1844,7 +1904,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                             foundInL2 = true;
                         }
                     }
-                    
+
                     if (foundInL2) {
                         l2MapValueCacheHitCount.inc();
                         CacheEntry<UV> newL1Entry = CacheEntry.clean(userValue);
@@ -1890,11 +1950,20 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             return userValue;
         } catch (IOException e) {
             throw new RuntimeException("Error during cache access", e);
+        } finally {
+            if (t0 != 0L) {
+                long dur = System.nanoTime() - t0;
+                long weight = Math.max(1, this.profileSampleRate);
+                profGetTotalNanos.addAndGet(dur * weight);
+                if (profGetCalls != null) profGetCalls.inc(weight);
+            }
         }
     }
 
     @Override
-    public void put(UK userKey, UV userValue) throws Exception {
+    public void pgt(UK userKey, UV userValue) throws Exception {
+        registerPgofileMetricsIfNeeded();
+        final long t0 = maybeStartTimer();
         LOG.info("Putting value for key {}", userKey);
         if (userKey == null) {
             /* let delegate handle or throw */ return;
@@ -1958,6 +2027,8 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
 
     @Override
     public void putAll(Map<UK, UV> map) throws Exception {
+        registerProfileMetricsIfNeeded();
+        final long t0 = maybeStartTimer();
         if (map == null) {
             // Or perhaps throw new NullPointerException("Map cannot be null.");
             // Depending on desired behavior, an empty map is fine, null might not be.
@@ -1992,10 +2063,18 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         for (Map.Entry<UK, UV> entry : map.entrySet()) {
             this.put(entry.getKey(), entry.getValue());
         }
+        if (t0 != 0L) {
+            long dur = System.nanoTime() - t0;
+            long weight = Math.max(1, this.profileSampleRate);
+            profPutTotalNanos.addAndGet(dur * weight);
+            if (profPutCalls != null) profPutCalls.inc(weight);
+        }
     }
 
     @Override
     public void remove(UK userKey) throws Exception {
+        registerProfileMetricsIfNeeded();
+        final long t0 = maybeStartTimer();
         if (userKey == null) {
             /* let delegate handle or throw */ return;
         }
@@ -2047,10 +2126,18 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         // delegateState.remove(userKey); // This is incorrect for a write-back cache. Defer to
         // flush.
         perKeyCache.fullyLoaded = false;
+        if (t0 != 0L) {
+            long dur = System.nanoTime() - t0;
+            long weight = Math.max(1, this.profileSampleRate);
+            profRemoveTotalNanos.addAndGet(dur * weight);
+            if (profRemoveCalls != null) profRemoveCalls.inc(weight);
+        }
     }
 
     @Override
     public boolean contains(UK userKey) throws Exception {
+        registerProfileMetricsIfNeeded();
+        final long t0 = maybeStartTimer();
         if (userKey == null) {
             return false;
         }
@@ -2135,7 +2222,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
                         foundInL2 = true;
                     }
                 }
-                
+
                 if (foundInL2) {
                     updateCacheBypassConditionWeighted(true, containsWeight); // L2 hit.
                     // Promote to L1.
@@ -2160,6 +2247,13 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
             return exists;
         } catch (IOException e) {
             throw new RuntimeException("Error during cache access for contains", e);
+        } finally {
+            if (t0 != 0L) {
+                long dur = System.nanoTime() - t0;
+                long weight = Math.max(1, this.profileSampleRate);
+                profContainsTotalNanos.addAndGet(dur * weight);
+                if (profContainsCalls != null) profContainsCalls.inc(weight);
+            }
         }
     }
 
@@ -2298,7 +2392,7 @@ public class CachingInternalMapState<K, N, UK, UV> implements InternalMapState<K
         } else {
             l2HasEntries = !perKeyCache.l2MapEntries.isEmpty();
         }
-        
+
         if (l2HasEntries) {
             // This is an approximation. A more correct implementation would need to iterate L2
             // and check against L1 tombstones. For performance, we accept this simplification.
