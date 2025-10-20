@@ -98,6 +98,17 @@ public class CachingInternalValueState<K, N, V>
     // When false, perform write-through on update() to ensure correctness
     private final boolean writeBehindEnabled;
 
+    // Lightweight profiling controls (align names with MapState for Prometheus queries)
+    private final boolean profileEnabled;
+    private final int profileSampleRate;
+    private final transient AtomicLong profileCounter = new AtomicLong(0L);
+    private final transient AtomicLong profGetTotalNanos = new AtomicLong(0L);    // value() ~ get
+    private final transient AtomicLong profPutTotalNanos = new AtomicLong(0L);    // update() ~ put
+    private final transient AtomicLong profRemoveTotalNanos = new AtomicLong(0L); // clear() ~ remove
+    private transient Counter profGetCalls;
+    private transient Counter profPutCalls;
+    private transient Counter profRemoveCalls;
+
     public CachingInternalValueState(
             InternalValueState<K, N, V> delegateState,
             CachingKeyedStateBackend<K> backend,
@@ -125,6 +136,10 @@ public class CachingInternalValueState<K, N, V>
         this.cacheMinAccessesForBypassCheck = cacheMinAccessesForBypassCheck;
         this.bypassEnabled = bypassEnabled;
         this.writeBehindEnabled = writeBehindEnabled;
+
+        // Initialize lightweight profiling configuration (must assign final fields)
+        this.profileEnabled = backend != null && backend.isProfileEnabled();
+        this.profileSampleRate = backend != null ? backend.getProfileSampleRate() : 1024;
 
         if (this.bypassEnabled && this.cacheHitRateThreshold > 0.0) {
             this.accessesForHitRateWindow = new AtomicLong(0);
@@ -200,6 +215,38 @@ public class CachingInternalValueState<K, N, V>
                 });
     }
 
+    private void registerProfileMetricsIfNeeded() {
+        if (!profileEnabled || metrics == null) return;
+        if (profGetCalls != null) return; // already registered
+        MetricGroup pg = metrics.addGroup("profile");
+        profGetCalls = pg.counter("get.calls");
+        profPutCalls = pg.counter("put.calls");
+        profRemoveCalls = pg.counter("remove.calls");
+        pg.gauge("get.totalNanos", () -> profGetTotalNanos.get());
+        pg.gauge("put.totalNanos", () -> profPutTotalNanos.get());
+        pg.gauge("remove.totalNanos", () -> profRemoveTotalNanos.get());
+        pg.gauge("get.avgMicros", () -> {
+            long c = profGetCalls.getCount();
+            return c > 0 ? (profGetTotalNanos.get() / (double) c) / 1000.0 : 0.0;
+        });
+        pg.gauge("put.avgMicros", () -> {
+            long c = profPutCalls.getCount();
+            return c > 0 ? (profPutTotalNanos.get() / (double) c) / 1000.0 : 0.0;
+        });
+        pg.gauge("remove.avgMicros", () -> {
+            long c = profRemoveCalls.getCount();
+            return c > 0 ? (profRemoveTotalNanos.get() / (double) c) / 1000.0 : 0.0;
+        });
+    }
+
+    private long maybeStartTimer() {
+        if (!profileEnabled) return 0L;
+        long c = profileCounter.incrementAndGet();
+        if (profileSampleRate <= 1 || (c % profileSampleRate) == 0L) {
+            return System.nanoTime();
+        }
+        return 0L;
+    }
     private <CK, CV> CachePolicy<CK, CV> createCachePolicy(int capacity) {
         switch (cachePolicyType) {
             case TINYLFU:
@@ -418,13 +465,16 @@ public class CachingInternalValueState<K, N, V>
 
     @Override
     public V value() throws IOException {
+        registerProfileMetricsIfNeeded();
+        final long t0 = maybeStartTimer();
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
-        if (bypassEnabled && bypassCache) {
-            updateCacheBypassCondition(false);
-            return delegateState.value();
-        }
+        try {
+            if (bypassEnabled && bypassCache) {
+                updateCacheBypassCondition(false);
+                return delegateState.value();
+            }
 
         CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
         CacheEntry<V> l1Entry = l1Cache.get(currentKey);
@@ -481,11 +531,21 @@ public class CachingInternalValueState<K, N, V>
             }
             backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
         }
-        return valueFromDelegate;
+            return valueFromDelegate;
+        } finally {
+            if (t0 != 0L) {
+                long dur = System.nanoTime() - t0;
+                long weight = Math.max(1, this.profileSampleRate);
+                profGetTotalNanos.addAndGet(dur * weight);
+                if (profGetCalls != null) profGetCalls.inc(weight);
+            }
+        }
     }
 
     @Override
     public void update(V value) throws IOException {
+        registerProfileMetricsIfNeeded();
+        final long t0 = maybeStartTimer();
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
@@ -566,10 +626,18 @@ public class CachingInternalValueState<K, N, V>
             // an aggressive release reporting on its own removals. This explicit remove should report.
             backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
         }
+        if (t0 != 0L) {
+            long dur = System.nanoTime() - t0;
+            long weight = Math.max(1, this.profileSampleRate);
+            profPutTotalNanos.addAndGet(dur * weight);
+            if (profPutCalls != null) profPutCalls.inc(weight);
+        }
     }
 
     @Override
     public void clear() {
+        registerProfileMetricsIfNeeded();
+        final long t0 = maybeStartTimer();
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
@@ -586,6 +654,12 @@ public class CachingInternalValueState<K, N, V>
         }
 
         delegateState.clear(); // Clear the underlying state
+        if (t0 != 0L) {
+            long dur = System.nanoTime() - t0;
+            long weight = Math.max(1, this.profileSampleRate);
+            profRemoveTotalNanos.addAndGet(dur * weight);
+            if (profRemoveCalls != null) profRemoveCalls.inc(weight);
+        }
     }
 
     @Override
