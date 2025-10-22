@@ -277,6 +277,22 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .defaultValue(1024)
                     .withDescription("1 in N calls are profiled to limit overhead (default: 1024). Use 1 to profile every call.");
 
+    // Logging controls for this cached backend package. These allow turning down
+    // verbose logs (e.g. DEBUG/INFO) during performance testing without editing
+    // cluster-wide log configuration files.
+    public static final ConfigOption<Boolean> LOGGING_ENABLED_CONFIG =
+            ConfigOptions.key("state.backend.cached.logging.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription("Enable package-level logging for cached state backend (default: true). Set false to reduce to WARN/ERROR only.");
+
+    public static final ConfigOption<String> LOGGING_LEVEL_CONFIG =
+            ConfigOptions.key("state.backend.cached.logging.level")
+                    .stringType()
+                    .defaultValue("")
+                    .withDescription("Optional explicit logging level for package 'org.apache.flink.contrib.streaming.state' (e.g., ERROR, WARN, INFO, DEBUG). If empty, uses framework default or reduces to ERROR when logging.enabled=false.");
+
+
     // Potentially, a config for delegate backend factory if it's not hardcoded to RocksDB
     // For now, assumes RocksDBStateBackend is the default delegate and is configured using its own
     // factory/options.

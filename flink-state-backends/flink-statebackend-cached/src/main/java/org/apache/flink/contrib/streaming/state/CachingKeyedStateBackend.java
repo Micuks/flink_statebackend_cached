@@ -295,6 +295,25 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             LOG.warn("Failed to read config for auto-left-bypass; defaulting to ENABLED", t);
             CachingInternalMapState.setAutoLeftBypass(true);
         }
+
+        // Configure package logging level if requested
+        try {
+            boolean cachedLoggingEnabled = (this.taskConfiguration != null) &&
+                    this.taskConfiguration.getBoolean(CachingStateBackendFactory.LOGGING_ENABLED_CONFIG);
+            String cachedLoggingLevel = (this.taskConfiguration != null)
+                    ? this.taskConfiguration.get(CachingStateBackendFactory.LOGGING_LEVEL_CONFIG)
+                    : null;
+            if (!cachedLoggingEnabled) {
+                String lvl = (cachedLoggingLevel == null || cachedLoggingLevel.isEmpty()) ? "ERROR" : cachedLoggingLevel;
+                LoggingUtils.setPackageLogLevel("org.apache.flink.contrib.streaming.state", lvl);
+                LOG.info("Cached backend logging disabled via config; using level {}", lvl);
+            } else if (cachedLoggingLevel != null && !cachedLoggingLevel.isEmpty()) {
+                LoggingUtils.setPackageLogLevel("org.apache.flink.contrib.streaming.state", cachedLoggingLevel);
+                LOG.info("Cached backend logging level set to {} via config", cachedLoggingLevel);
+            }
+        } catch (Throwable t) {
+            // best-effort; ignore failures
+        }
         // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
     }
 
@@ -459,6 +478,25 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         } catch (Throwable t) {
             LOG.warn("Failed to read config for auto-left-bypass (RocksDB path); defaulting to ENABLED", t);
             CachingInternalMapState.setAutoLeftBypass(true);
+        }
+
+        // Configure package logging level if requested
+        try {
+            boolean cachedLoggingEnabled = (this.taskConfiguration != null) &&
+                    this.taskConfiguration.getBoolean(CachingStateBackendFactory.LOGGING_ENABLED_CONFIG);
+            String cachedLoggingLevel = (this.taskConfiguration != null)
+                    ? this.taskConfiguration.get(CachingStateBackendFactory.LOGGING_LEVEL_CONFIG)
+                    : null;
+            if (!cachedLoggingEnabled) {
+                String lvl = (cachedLoggingLevel == null || cachedLoggingLevel.isEmpty()) ? "ERROR" : cachedLoggingLevel;
+                LoggingUtils.setPackageLogLevel("org.apache.flink.contrib.streaming.state", lvl);
+                LOG.info("Cached backend logging disabled via config; using level {}", lvl);
+            } else if (cachedLoggingLevel != null && !cachedLoggingLevel.isEmpty()) {
+                LoggingUtils.setPackageLogLevel("org.apache.flink.contrib.streaming.state", cachedLoggingLevel);
+                LOG.info("Cached backend logging level set to {} via config", cachedLoggingLevel);
+            }
+        } catch (Throwable t) {
+            // best-effort; ignore failures
         }
     }
 

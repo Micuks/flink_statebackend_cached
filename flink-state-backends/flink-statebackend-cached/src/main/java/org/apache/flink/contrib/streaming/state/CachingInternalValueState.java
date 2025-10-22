@@ -92,7 +92,7 @@ public class CachingInternalValueState<K, N, V>
     private final Counter valueStateL1CacheMissCount;
     private final Counter valueStateL2CacheHitCount;
     private final Counter valueStateL2CacheMissCount;
-    
+
     private volatile boolean bypassCache = false;
     private final boolean bypassEnabled;
     // When false, perform write-through on update() to ensure correctness
@@ -115,7 +115,7 @@ public class CachingInternalValueState<K, N, V>
             int l1CacheSize,
             int l2CacheSize,
             int maxActiveNamespacesInCache,
-            long maxCacheMemoryMb, 
+            long maxCacheMemoryMb,
             CachingStateBackendFactory.CachePolicyType cachePolicyType,
             double cacheHitRateThreshold,
             long cacheHitRateWindowSize,
@@ -150,7 +150,7 @@ public class CachingInternalValueState<K, N, V>
             this.hitsInHitRateWindow = null;
             this.totalAccessesForBypassEligibility = null;
         }
-        
+
         // Initialize metrics
         this.metrics = metricsGroup;
         if (metricsGroup != null) {
@@ -216,27 +216,35 @@ public class CachingInternalValueState<K, N, V>
     }
 
     private void registerProfileMetricsIfNeeded() {
-        if (!profileEnabled || metrics == null) return;
         if (profGetCalls != null) return; // already registered
-        MetricGroup pg = metrics.addGroup("profile");
-        profGetCalls = pg.counter("get.calls");
-        profPutCalls = pg.counter("put.calls");
-        profRemoveCalls = pg.counter("remove.calls");
-        pg.gauge("get.totalNanos", () -> profGetTotalNanos.get());
-        pg.gauge("put.totalNanos", () -> profPutTotalNanos.get());
-        pg.gauge("remove.totalNanos", () -> profRemoveTotalNanos.get());
-        pg.gauge("get.avgMicros", () -> {
-            long c = profGetCalls.getCount();
-            return c > 0 ? (profGetTotalNanos.get() / (double) c) / 1000.0 : 0.0;
-        });
-        pg.gauge("put.avgMicros", () -> {
-            long c = profPutCalls.getCount();
-            return c > 0 ? (profPutTotalNanos.get() / (double) c) / 1000.0 : 0.0;
-        });
-        pg.gauge("remove.avgMicros", () -> {
-            long c = profRemoveCalls.getCount();
-            return c > 0 ? (profRemoveTotalNanos.get() / (double) c) / 1000.0 : 0.0;
-        });
+        LOG.info("Attempting to register profile metrics. profileEnabled={}, metricsIsNull={}", profileEnabled, metrics == null);
+        if (!profileEnabled || metrics == null) {
+            return;
+        }
+        try {
+            MetricGroup pg = metrics.addGroup("profile");
+            profGetCalls = pg.counter("get_calls");
+            profPutCalls = pg.counter("put_calls");
+            profRemoveCalls = pg.counter("remove_calls");
+            pg.gauge("get_totalNanos", () -> profGetTotalNanos.get());
+            pg.gauge("put_totalNanos", () -> profPutTotalNanos.get());
+            pg.gauge("remove_totalNanos", () -> profRemoveTotalNanos.get());
+            pg.gauge("get_avgMicros", () -> {
+                long c = profGetCalls.getCount();
+                return c > 0 ? (profGetTotalNanos.get() / (double) c) / 1000.0 : 0.0;
+            });
+            pg.gauge("put_avgMicros", () -> {
+                long c = profPutCalls.getCount();
+                return c > 0 ? (profPutTotalNanos.get() / (double) c) / 1000.0 : 0.0;
+            });
+            pg.gauge("remove_avgMicros", () -> {
+                long c = profRemoveCalls.getCount();
+                return c > 0 ? (profRemoveTotalNanos.get() / (double) c) / 1000.0 : 0.0;
+            });
+            LOG.info("Successfully registered profile metrics.");
+        } catch (Exception e) {
+            LOG.error("Failed to register profile metrics", e);
+        }
     }
 
     private long maybeStartTimer() {
@@ -420,7 +428,7 @@ public class CachingInternalValueState<K, N, V>
 
                                     // Move to L2 as clean after successful update
                                     CacheEntry<V> entryToL2 = CacheEntry.clean(evictedValue); // Re-estimate size if value changed, though it shouldn't for ValueState here
-                                    CacheEntry<V> oldL2Entry = l2Cache.put(evictedKey, entryToL2); 
+                                    CacheEntry<V> oldL2Entry = l2Cache.put(evictedKey, entryToL2);
                                     if (oldL2Entry != null) { // If L2 already had an entry for this key (should be rare)
                                         backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
                                     }
@@ -435,7 +443,7 @@ public class CachingInternalValueState<K, N, V>
                                             e);
                                 } finally {
                                     // Restore context
-                                    backend.setCurrentKey(originalKey); 
+                                    backend.setCurrentKey(originalKey);
                                     this.setCurrentNamespace(originalNamespace);
                                 }
                             } else {
@@ -548,89 +556,91 @@ public class CachingInternalValueState<K, N, V>
         final long t0 = maybeStartTimer();
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
-
-        if (value == null) { // As per Flink ValueState contract
-            clear(); // clear() will handle memory reporting
-            return;
-        }
-
-        if (bypassEnabled && bypassCache) {
-            updateCacheBypassCondition(true);
-            cacheBypassActivations.inc();
-            delegateState.update(value);
-            // Invalidate caches to avoid stale flush later
-            CachePolicy<K, CacheEntry<V>> l1Bypass = getL1CacheForNamespace(currentNamespace);
-            CacheEntry<V> old1 = l1Bypass.remove(currentKey);
-            if (old1 != null) {
-                backend.reportCacheMemoryReleased(old1.getEstimatedSizeBytes());
+        try {
+            if (value == null) { // As per Flink ValueState contract
+                clear(); // clear() will handle memory reporting
+                return;
             }
-            CachePolicy<K, CacheEntry<V>> l2Bypass = getL2CacheForNamespace(currentNamespace);
-            CacheEntry<V> old2 = l2Bypass.remove(currentKey);
-            if (old2 != null) {
-                backend.reportCacheMemoryReleased(old2.getEstimatedSizeBytes());
-            }
-            // Optionally cache a clean value in L1 for locality
-            CacheEntry<V> cleanEntry = CacheEntry.clean(value);
-            CacheEntry<V> prev = l1Bypass.put(currentKey, cleanEntry);
-            if (prev != null) {
-                backend.reportCacheMemoryReleased(prev.getEstimatedSizeBytes());
-            }
-            backend.reportCacheMemoryAdded(cleanEntry.getEstimatedSizeBytes());
-            return;
-        }
 
-        // Honor write-behind toggle: when disabled, perform write-through and keep L1 clean
-        if (!writeBehindEnabled) {
+            if (bypassEnabled && bypassCache) {
+                updateCacheBypassCondition(true);
+                cacheBypassActivations.inc();
+                delegateState.update(value);
+                // Invalidate caches to avoid stale flush later
+                CachePolicy<K, CacheEntry<V>> l1Bypass = getL1CacheForNamespace(currentNamespace);
+                CacheEntry<V> old1 = l1Bypass.remove(currentKey);
+                if (old1 != null) {
+                    backend.reportCacheMemoryReleased(old1.getEstimatedSizeBytes());
+                }
+                CachePolicy<K, CacheEntry<V>> l2Bypass = getL2CacheForNamespace(currentNamespace);
+                CacheEntry<V> old2 = l2Bypass.remove(currentKey);
+                if (old2 != null) {
+                    backend.reportCacheMemoryReleased(old2.getEstimatedSizeBytes());
+                }
+                // Optionally cache a clean value in L1 for locality
+                CacheEntry<V> cleanEntry = CacheEntry.clean(value);
+                CacheEntry<V> prev = l1Bypass.put(currentKey, cleanEntry);
+                if (prev != null) {
+                    backend.reportCacheMemoryReleased(prev.getEstimatedSizeBytes());
+                }
+                backend.reportCacheMemoryAdded(cleanEntry.getEstimatedSizeBytes());
+                return;
+            }
+
+            // Honor write-behind toggle: when disabled, perform write-through and keep L1 clean
+            if (!writeBehindEnabled) {
+                updateCacheBypassCondition(true);
+                cacheHits.inc();
+                delegateState.update(value);
+                CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
+                CacheEntry<V> clean = CacheEntry.clean(value);
+                CacheEntry<V> oldL1 = l1Cache.put(currentKey, clean);
+                if (oldL1 != null) {
+                    backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
+                }
+                backend.reportCacheMemoryAdded(clean.getEstimatedSizeBytes());
+                CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
+                CacheEntry<V> oldL2 = l2Cache.remove(currentKey);
+                if (oldL2 != null) {
+                    backend.reportCacheMemoryReleased(oldL2.getEstimatedSizeBytes());
+                }
+                return;
+            }
+
             updateCacheBypassCondition(true);
             cacheHits.inc();
-            delegateState.update(value);
             CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
-            CacheEntry<V> clean = CacheEntry.clean(value);
-            CacheEntry<V> oldL1 = l1Cache.put(currentKey, clean);
-            if (oldL1 != null) {
-                backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
+            CacheEntry<V> newEntry = CacheEntry.dirty(value);
+            CacheEntry<V> oldL1Entry = l1Cache.put(currentKey, newEntry);
+            if (oldL1Entry != null) {
+                backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
             }
-            backend.reportCacheMemoryAdded(clean.getEstimatedSizeBytes());
+            backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
+
+            // L1 remains write-back tolerant even if write-behind is disabled; L2 will only contain clean entries via eviction path
+
+            // If L2 had this key, it's now stale, remove it.
             CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
-            CacheEntry<V> oldL2 = l2Cache.remove(currentKey);
-            if (oldL2 != null) {
-                backend.reportCacheMemoryReleased(oldL2.getEstimatedSizeBytes());
+            CacheEntry<V> oldL2Entry = l2Cache.remove(currentKey);
+            if (oldL2Entry != null) {
+                // L2 entries are implicitly managed by L1 evictions or direct stale removal like here.
+                // Their memory was accounted for when they moved from L1 to L2 (L1 released, L2 added - though we simplified this)
+                // Or when loaded to L2 directly. When removing from L2 here because L1 got an update,
+                // we should report its memory as released if it wasn't already part of L1's old entry.
+                // Simplified: Assume L2 entries are clean and their removal directly translates to released memory
+                // if they weren't the source for the L1 update that just happened.
+                // However, simpler just to let their L1 eviction listener handle the release when they were put there.
+                // The current logic in L1 eviction listener (getL1CacheForNamespace) moves to L2 and L2 doesn't have
+                // an aggressive release reporting on its own removals. This explicit remove should report.
+                backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
             }
-            return;
-        }
-
-        updateCacheBypassCondition(true);
-        cacheHits.inc();
-        CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        CacheEntry<V> newEntry = CacheEntry.dirty(value);
-        CacheEntry<V> oldL1Entry = l1Cache.put(currentKey, newEntry);
-        if (oldL1Entry != null) {
-            backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
-        }
-        backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
-
-        // L1 remains write-back tolerant even if write-behind is disabled; L2 will only contain clean entries via eviction path
-
-        // If L2 had this key, it's now stale, remove it.
-        CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
-        CacheEntry<V> oldL2Entry = l2Cache.remove(currentKey);
-        if (oldL2Entry != null) {
-            // L2 entries are implicitly managed by L1 evictions or direct stale removal like here.
-            // Their memory was accounted for when they moved from L1 to L2 (L1 released, L2 added - though we simplified this)
-            // Or when loaded to L2 directly. When removing from L2 here because L1 got an update,
-            // we should report its memory as released if it wasn't already part of L1's old entry.
-            // Simplified: Assume L2 entries are clean and their removal directly translates to released memory
-            // if they weren't the source for the L1 update that just happened.
-            // However, simpler just to let their L1 eviction listener handle the release when they were put there.
-            // The current logic in L1 eviction listener (getL1CacheForNamespace) moves to L2 and L2 doesn't have
-            // an aggressive release reporting on its own removals. This explicit remove should report.
-            backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
-        }
-        if (t0 != 0L) {
-            long dur = System.nanoTime() - t0;
-            long weight = Math.max(1, this.profileSampleRate);
-            profPutTotalNanos.addAndGet(dur * weight);
-            if (profPutCalls != null) profPutCalls.inc(weight);
+        } finally {
+            if (t0 != 0L) {
+                long dur = System.nanoTime() - t0;
+                long weight = Math.max(1, this.profileSampleRate);
+                profPutTotalNanos.addAndGet(dur * weight);
+                if (profPutCalls != null) profPutCalls.inc(weight);
+            }
         }
     }
 
@@ -891,7 +901,7 @@ public class CachingInternalValueState<K, N, V>
         long misses = cacheMisses.getCount();
         long total = hits + misses;
         double hitRate = total > 0 ? (double) hits / total * 100 : 0.0;
-        
+
         return String.format("CacheStats{hits=%d, misses=%d, hitRate=%.2f%%, bypassActivations=%d}",
                 hits, misses, hitRate, cacheBypassActivations.getCount());
     }
