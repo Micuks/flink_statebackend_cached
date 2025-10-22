@@ -2290,21 +2290,19 @@ public class CachingInternalMapState<K, N, UK, UV>
                 String mapKeyStr = (userKey == null) ? "null" : userKey.toString();
                 String mapValueStr = (userValue == null) ? "null" : userValue.toString();
 
-                LOG.info("====== STATE_VERIFICATION ======\n" +
-                         "  - State Name: {}\n" +
-                         "  - Flink Partition Key: {}\n" +
-                         "  - Namespace: {}\n" +
-                         "  - Map Key (UK): {}\n" +
-                         "  - Map Value (UV): {}\n" +
-                         "================================",
-                         delegateState.toString(), flinkKeyStr, namespaceStr, mapKeyStr, mapValueStr);
-
+                // LOG.info("====== STATE_VERIFICATION ======\n" +
+                //          "  - State Name: {}\n" +
+                //          "  - Flink Partition Key: {}\n" +
+                //          "  - Namespace: {}\n" +
+                //          "  - Map Key (UK): {}\n" +
+                //          "  - Map Value (UV): {}\n" +
+                //          "================================",
+                //          delegateState.toString(), flinkKeyStr, namespaceStr, mapKeyStr, mapValueStr);
             } catch (Exception e) {
                 LOG.warn("Failed to log state for verification", e);
             }
         }
         // ===================== END: CUSTOM LOGGING FOR VERIFICATION =====================
-
 
         registerProfileMetricsIfNeeded();
         final long t0 = maybeStartTimer();
