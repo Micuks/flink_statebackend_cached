@@ -129,6 +129,9 @@ public class CachingStateBackend extends AbstractStateBackend
         cfg.set(CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, this.mapCacheMinAccessesForBypassCheck);
         cfg.set(CachingStateBackendFactory.MAP_PRESENCE_CACHE_IMPL, this.mapPresenceCacheImpl);
         cfg.set(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG, this.l2ManagedMemoryEnabled);
+        // Lightweight wrapper profiling defaults (disabled unless explicitly enabled via configure())
+        cfg.set(CachingStateBackendFactory.PROFILE_ENABLED_CONFIG, false);
+        cfg.set(CachingStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG, 1024);
         // Defaults for ValueState: enabled with bypass off unless overridden by configure(path)
         cfg.set(CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG, true);
         cfg.set(CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG, true);
@@ -242,12 +245,28 @@ public class CachingStateBackend extends AbstractStateBackend
         cfg.set(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG, this.l2ManagedMemoryEnabled);
         cfg.set(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX,
                 config.get(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX));
+        // Lightweight wrapper profiling options (propagate exactly as configured)
+        try {
+            cfg.set(CachingStateBackendFactory.PROFILE_ENABLED_CONFIG, config.get(CachingStateBackendFactory.PROFILE_ENABLED_CONFIG));
+            cfg.set(CachingStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG, Math.max(1, config.get(CachingStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG)));
+        } catch (Throwable t) {
+            // Keep safe defaults if not present
+        }
         // Expose resolved per-state policies to the keyed backend (for completeness/testing)
         cfg.set(CachingStateBackendFactory.CACHE_POLICY_CONFIG, this.globalCachePolicyType);
         cfg.set(CachingStateBackendFactory.MAP_CACHE_POLICY_CONFIG, this.mapCachePolicyType);
         cfg.set(CachingStateBackendFactory.VALUE_CACHE_POLICY_CONFIG, this.valueCachePolicyType);
         cfg.set(CachingStateBackendFactory.LIST_CACHE_POLICY_CONFIG, this.listCachePolicyType);
         cfg.set(CachingStateBackendFactory.AGGREGATING_CACHE_POLICY_CONFIG, this.aggregatingCachePolicyType);
+        // Package-level logging controls
+        try {
+            cfg.set(CachingStateBackendFactory.LOGGING_ENABLED_CONFIG, config.get(CachingStateBackendFactory.LOGGING_ENABLED_CONFIG));
+            String lvl = config.get(CachingStateBackendFactory.LOGGING_LEVEL_CONFIG);
+            if (lvl != null) { cfg.set(CachingStateBackendFactory.LOGGING_LEVEL_CONFIG, lvl); }
+        } catch (Throwable t) {
+            // ignore, keep defaults
+        }
+
         // ValueState toggles
         cfg.set(CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG, config.get(CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG));
         cfg.set(CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG, config.get(CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG));
