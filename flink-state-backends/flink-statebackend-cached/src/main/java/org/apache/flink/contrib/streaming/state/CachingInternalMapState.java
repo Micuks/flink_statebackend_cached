@@ -1344,8 +1344,13 @@ public class CachingInternalMapState<K, N, UK, UV>
                             perKeyCache.closeMetrics();
                         }
                         // Restore original context if changed
-                        if (NCDK != null) backend.setCurrentKey(NCDK);
-                        else backend.setCurrentKey(null); // TODO: check if this null is okay
+                        if (NCDK != null) {
+                            backend.setCurrentKey(NCDK);
+                        } else {
+                            // It is safe to set null here: CachingKeyedStateBackend#setCurrentKey(null)
+                            // only updates the internal key context and does not forward to the delegate.
+                            backend.setCurrentKey(null);
+                        }
                         if (NCDN != null) delegateState.setCurrentNamespace(NCDN);
                         else delegateState.setCurrentNamespace(null);
                     } catch (Exception e) {
