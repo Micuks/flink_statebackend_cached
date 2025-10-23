@@ -264,19 +264,32 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
 
     @Override
     public void updateInternal(ACC valueToStore) throws Exception {
+        // AggregatingState is heavily intertwined with runtime operators which may
+        // read the delegate state immediately after an update. To guarantee correctness
+        // under all call paths without disabling caching wholesale, we use write-through
+        // semantics here: update the delegate first, then keep a clean L1 copy for locality.
+
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
+        // Write-through to delegate to ensure visibility
+        delegateState.updateInternal(valueToStore);
+
+        // Maintain a clean entry in L1 for fast subsequent reads
         CachePolicy<K, CacheEntry<ACC>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        CacheEntry<ACC> newEntry = CacheEntry.dirty(valueToStore);
-        CacheEntry<ACC> oldL1Entry = l1Cache.put(currentKey, newEntry);
+        CacheEntry<ACC> cleanEntry = CacheEntry.clean(valueToStore);
+        CacheEntry<ACC> oldL1Entry = l1Cache.put(currentKey, cleanEntry);
         if (oldL1Entry != null) {
             backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
         }
-        backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
+        backend.reportCacheMemoryAdded(cleanEntry.getEstimatedSizeBytes());
 
+        // Remove any stale copy from L2
         CachePolicy<K, CacheEntry<ACC>> l2Cache = getL2CacheForNamespace(currentNamespace);
-        l2Cache.remove(currentKey);
+        CacheEntry<ACC> oldL2 = l2Cache.remove(currentKey);
+        if (oldL2 != null) {
+            backend.reportCacheMemoryReleased(oldL2.getEstimatedSizeBytes());
+        }
     }
 
     @Override

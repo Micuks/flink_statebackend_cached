@@ -277,10 +277,17 @@ public class CachingInternalValueState<K, N, V>
     }
 
     private void flushCacheForNamespaceKey(StableNamespaceKey namespaceKey, CachePolicy<K, CacheEntry<V>> cache) {
-        N originalNamespace = getCurrentNamespace();
+        // Flush without mutating this wrapper's currentNamespace to avoid interfering with
+        // concurrent operator logic that relies on wrapper context.
+        N originalWrapperNs = this.currentNamespace; // do not modify
         K originalKey = backend.getCurrentKey();
+        N nsForFlush = namespaceKey.deserialize(getNamespaceSerializer());
+        // Capture delegate's original namespace (equal to wrapper's in normal cases)
+        N originalDelegateNs = originalWrapperNs;
         try {
-            setCurrentNamespace(namespaceKey.deserialize(getNamespaceSerializer()));
+            if (nsForFlush != null) {
+                delegateState.setCurrentNamespace(nsForFlush);
+            }
 
             // Create a copy of entries to avoid ConcurrentModificationException
             java.util.List<Map.Entry<K, CacheEntry<V>>> entries = new java.util.ArrayList<>();
@@ -306,7 +313,10 @@ public class CachingInternalValueState<K, N, V>
         } catch (IOException e) {
             throw new RuntimeException("Failed to flush dirty entries for evicted namespace: " + namespaceKey, e);
         } finally {
-            setCurrentNamespace(originalNamespace);
+            // Restore delegate namespace to original without touching wrapper's field
+            if (originalDelegateNs != null) {
+                delegateState.setCurrentNamespace(originalDelegateNs);
+            }
             backend.setCurrentKey(originalKey);
         }
     }
@@ -419,10 +429,10 @@ public class CachingInternalValueState<K, N, V>
 
                             if (evictedValueWrapper.isDirty()) {
                                 K originalKey = backend.getCurrentKey();
-                                N originalNamespace = getCurrentNamespace();
+                                N originalNamespace = this.currentNamespace; // do not mutate wrapper
                                 try {
                                     backend.setCurrentKey(evictedKey);
-                                    this.setCurrentNamespace(namespaceKeyToNamespace(stableKey)); // Set NS for delegate for this op
+                                    delegateState.setCurrentNamespace(namespaceKeyToNamespace(stableKey)); // Set NS for delegate for this op
                                     delegateState.update(evictedValue);
                                     evictedValueWrapper.setDirty(false); // Mark as clean
 
@@ -444,7 +454,9 @@ public class CachingInternalValueState<K, N, V>
                                 } finally {
                                     // Restore context
                                     backend.setCurrentKey(originalKey);
-                                    this.setCurrentNamespace(originalNamespace);
+                                    if (originalNamespace != null) {
+                                        delegateState.setCurrentNamespace(originalNamespace);
+                                    }
                                 }
                             } else {
                                 // Not dirty, just move to L2 (it's already clean)
@@ -675,15 +687,17 @@ public class CachingInternalValueState<K, N, V>
     @Override
     public void flushToUnderlyingState() throws IOException {
         K originalKey = backend.getCurrentKey();
-        N originalNamespace = getCurrentNamespace();
+        N originalWrapperNs = this.currentNamespace; // keep wrapper stable
+        N originalDelegateNs = originalWrapperNs;
         try {
-            // Flush L1 caches
+            // Flush L1 caches across all namespaces without mutating wrapper context
             for (Map.Entry<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL1.entrySet()) {
                 StableNamespaceKey namespaceKey = nsEntry.getKey();
                 CachePolicy<K, CacheEntry<V>> l1Cache = nsEntry.getValue();
-                setCurrentNamespace(namespaceKey.deserialize(getNamespaceSerializer()));
+                N ns = namespaceKey.deserialize(getNamespaceSerializer());
+                if (ns != null) delegateState.setCurrentNamespace(ns);
 
-                // Iterate over a defensive copy of entries to avoid ConcurrentModificationException
+                // Defensive copy to avoid CME
                 java.util.List<Map.Entry<K, CacheEntry<V>>> currentL1Entries = new java.util.ArrayList<>();
                 for (Map.Entry<K, CacheEntry<V>> e : l1Cache.entrySet()) {
                     currentL1Entries.add(e);
@@ -691,51 +705,29 @@ public class CachingInternalValueState<K, N, V>
 
                 for (Map.Entry<K, CacheEntry<V>> mapEntry : currentL1Entries) {
                     K key = mapEntry.getKey();
-                    CacheEntry<V> entry = mapEntry.getValue(); // Use the entry directly from the snapshot
-                    if (entry.isDirty()) { // No need for null check if it came from entrySet
-                        V value = entry.getValue();
-                        if (key != null) { // Guard against null key
-                            backend.setCurrentKey(key);
-                            delegateState.update(value);
-                            entry.setDirty(false);
-                        }
-                    }
-                }
-            }
-
-            // Flush L2 caches
-            for (Map.Entry<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL2.entrySet()) {
-                StableNamespaceKey namespaceKey = nsEntry.getKey();
-                CachePolicy<K, CacheEntry<V>> l2Cache = nsEntry.getValue();
-                setCurrentNamespace(namespaceKey.deserialize(getNamespaceSerializer()));
-
-                // Iterate over a defensive copy of entries to avoid ConcurrentModificationException
-                java.util.List<Map.Entry<K, CacheEntry<V>>> currentL2Entries = new java.util.ArrayList<>();
-                for (Map.Entry<K, CacheEntry<V>> e : l2Cache.entrySet()) {
-                    currentL2Entries.add(e);
-                }
-
-                for (Map.Entry<K, CacheEntry<V>> mapEntry : currentL2Entries) {
-                    K key = mapEntry.getKey();
                     CacheEntry<V> entry = mapEntry.getValue();
-                    if (entry.isDirty()) { // L2 entries ideally shouldn't be dirty with current logic
+                    if (entry != null && entry.isDirty()) {
                         V value = entry.getValue();
-                        if (key != null) { // Guard against null key
-                            backend.setCurrentKey(key);
-                            delegateState.update(value);
-                            entry.setDirty(false);
+                        if (key != null) {
+                            K prevKey = backend.getCurrentKey();
+                            try {
+                                backend.setCurrentKey(key);
+                                delegateState.update(value);
+                                entry.setDirty(false);
+                            } finally {
+                                backend.setCurrentKey(prevKey);
+                            }
                         }
                     }
                 }
             }
+
+            // L2 should be clean; no-op
+
         } finally {
             backend.setCurrentKey(originalKey);
-            // Avoid calling delegate with null namespace
-            if (originalNamespace != null) {
-                setCurrentNamespace(originalNamespace);
-            } else {
-                this.currentNamespace = null;
-                this.currentNamespaceStableKey = null;
+            if (originalDelegateNs != null) {
+                delegateState.setCurrentNamespace(originalDelegateNs);
             }
         }
     }
@@ -782,6 +774,9 @@ public class CachingInternalValueState<K, N, V>
             TypeSerializer<N> safeNamespaceSerializer,
             TypeSerializer<V> safeValueSerializer)
             throws Exception {
+        // To guarantee correctness for delegate reads that bypass the wrapper, flush
+        // pending updates first. This is a relatively cold path and safe to flush.
+        flushToUnderlyingState();
         return delegateState.getSerializedValue(
                 serializedKeyAndNamespace,
                 safeKeySerializer,
@@ -792,6 +787,12 @@ public class CachingInternalValueState<K, N, V>
     @Override
     public StateIncrementalVisitor<K, N, V> getStateIncrementalVisitor(
             int recommendedMaxNumberOfReturnedRecords) {
+        try {
+            // Ensure delegate reflects all pending updates before exposing a visitor
+            flushToUnderlyingState();
+        } catch (IOException e) {
+            throw new RuntimeException("Error flushing value state before creating visitor.", e);
+        }
         return delegateState.getStateIncrementalVisitor(recommendedMaxNumberOfReturnedRecords);
     }
 
@@ -872,7 +873,7 @@ public class CachingInternalValueState<K, N, V>
                 try {
                     // Simplified: Attempt to flush. In a real scenario, this needs robust context management.
                     backend.setCurrentKey(key);       // Set key for backend & delegate
-                    setCurrentNamespace(namespaceKey.deserialize(getNamespaceSerializer())); // Set NS for delegate
+                    delegateState.setCurrentNamespace(namespaceKey.deserialize(getNamespaceSerializer())); // Set NS for delegate
                     delegateState.update(value);    // Flush to delegate
                     dirtyEntry.setDirty(false);     // Mark as clean if flush was successful
 
@@ -886,7 +887,9 @@ public class CachingInternalValueState<K, N, V>
                     // System.err.println("Global eviction: Failed to flush/evict dirty L1 entry for key " + key + " in NS " + namespace + ": " + e.getMessage());
                 } finally {
                     // Restore context
-                    setCurrentNamespace(originalCurrentNamespace);
+                    if (originalCurrentNamespace != null) {
+                        delegateState.setCurrentNamespace(originalCurrentNamespace);
+                    }
                     backend.setCurrentKey(originalBackendKey);
                 }
             }
