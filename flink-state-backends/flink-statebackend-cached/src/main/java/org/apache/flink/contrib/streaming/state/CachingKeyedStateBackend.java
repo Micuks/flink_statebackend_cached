@@ -625,7 +625,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
             // Scope correction: force write-through for ValueState in Table window code paths
             if (isTableWindowStack()) {
-                writeBehindEnabled = false;
+                // writeBehindEnabled = false;
             }
 
             if (!valueCacheEnabled) {
@@ -662,11 +662,13 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int l1SizeForMap = mapSpecificL1EntryCacheSize > 0 ? mapSpecificL1EntryCacheSize : l1EntryCacheSize;
             int l2SizeForMap = mapSpecificL2EntryCacheSize > 0 ? mapSpecificL2EntryCacheSize : l2EntryCacheSize;
 
-            // For correctness isolation in complex queries (e.g., nested aggregations in q5),
-            // force MapState to bypass the cache and read/write directly to the delegate.
-            // This avoids corner cases in cache coherence for iterator/merge paths without
-            // touching ValueState write-back performance.
-            boolean forceBypass = true;
+            boolean forceBypass = false;
+            try {
+                String pattern = this.taskConfiguration.getString(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX, "");
+                forceBypass = pattern != null && stateName != null && stateName.matches(pattern);
+            } catch (Throwable t) {
+                LOG.warn("Failed to parse force-bypass pattern for map state '{}'", stateName, t);
+            }
             // If a state is force-bypassed and configured to return raw, hand back the delegate
             // state directly instead of wrapping it at all. This avoids any wrapper overhead and
             // guarantees vanilla behavior for these states.
@@ -831,7 +833,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 }
 
                 if (isTableWindowStack()) {
-                    writeBehindEnabled = false;
+                    // writeBehindEnabled = false;
                 }
                 if (!valueCacheEnabled) {
                     return (S) actualStateRaw;
@@ -865,7 +867,13 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 MetricGroup mapMetricsGroup = this.metricGroup.addGroup("state").addGroup(stateName);
                 int l1SizeForMap = mapSpecificL1EntryCacheSize > 0 ? mapSpecificL1EntryCacheSize : l1EntryCacheSize;
                 int l2SizeForMap = mapSpecificL2EntryCacheSize > 0 ? mapSpecificL2EntryCacheSize : l2EntryCacheSize;
-                boolean forceBypass = true; // correctness-first for Table window paths
+                boolean forceBypass = false;
+                try {
+                    String pattern = this.taskConfiguration.getString(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX, "");
+                    forceBypass = pattern != null && stateName != null && stateName.matches(pattern);
+                } catch (Throwable t) {
+                    LOG.warn("Failed to parse force-bypass pattern for map state '{}'", stateName, t);
+                }
                 try {
                     boolean returnRawOnForceBypass = this.taskConfiguration.getBoolean(
                             CachingStateBackendFactory.MAP_FORCE_BYPASS_RETURN_RAW);
@@ -1087,7 +1095,13 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 MetricGroup mapMetricsGroup = this.metricGroup.addGroup("state").addGroup(stateName);
                 int l1SizeForMap = mapSpecificL1EntryCacheSize > 0 ? mapSpecificL1EntryCacheSize : l1EntryCacheSize;
                 int l2SizeForMap = mapSpecificL2EntryCacheSize > 0 ? mapSpecificL2EntryCacheSize : l2EntryCacheSize;
-            boolean forceBypass = true; // correctness-first for complex queries
+            boolean forceBypass = false;
+            try {
+                String pattern = this.taskConfiguration.getString(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX, "");
+                forceBypass = pattern != null && stateName != null && stateName.matches(pattern);
+            } catch (Throwable t) {
+                LOG.warn("Failed to parse force-bypass pattern for map state '{}'", stateName, t);
+            }
             try {
                 boolean returnRawOnForceBypass = this.taskConfiguration.getBoolean(
                         CachingStateBackendFactory.MAP_FORCE_BYPASS_RETURN_RAW);
@@ -1513,6 +1527,7 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     // Heuristic: detect Table window operator on call stack to scope ValueState write-through
     private boolean isTableWindowStack() {
+        // HACK: Detect Table window operator on call stack to scope ValueState write-through
         try {
             StackTraceElement[] st = Thread.currentThread().getStackTrace();
             for (StackTraceElement el : st) {
