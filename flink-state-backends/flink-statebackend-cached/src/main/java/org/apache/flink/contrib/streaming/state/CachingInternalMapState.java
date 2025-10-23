@@ -70,10 +70,12 @@ public class CachingInternalMapState<K, N, UK, UV>
     private final CachingKeyedStateBackend<K> backend;
     private N currentNamespace;
 
-    // Cache structure: Namespace -> Flink Key -> L1/L2 Caches for UserKey-UserValue
-    // pairs
-    // LRUMap<Namespace, LRUMap<FlinkKey, PerKeyMapCache>>
+    // Legacy hierarchical cache (Namespace -> FlinkKey -> PerKeyMapCache)
     private final CachePolicy<N, CachePolicy<K, PerKeyMapCache<UK, UV, K, N>>> namespaceCaches;
+
+    // Single-layer global caches keyed by composite key (keyGroup + namespace + flinkKey + userKey)
+    private final CachePolicy<CompositeKey, CacheEntry<UV>> singleLayerL1;
+    private final CachePolicy<CompositeKey, CacheEntry<UV>> singleLayerL2;
 
     private final TypeSerializer<UK> userKeySerializer;
     private final TypeSerializer<UV> userValueSerializer;
@@ -92,6 +94,12 @@ public class CachingInternalMapState<K, N, UK, UV>
     private final boolean l2ManagedMemoryEnabled;
     private final boolean perKeyMetricsEnabled;
     private final boolean forceBypassAlways;
+    // Single-layer mode: OFF (legacy hierarchical), FLAT ((K,N,UK)->UV), CONTAINER ((K,N)->Map<UK,UV>)
+    private enum SingleLayerMode { OFF, FLAT, CONTAINER }
+    private final SingleLayerMode singleLayerMode;
+    private final boolean singleLayerEnabled;
+    // Container map for CONTAINER mode
+    private final CachePolicy<ContainerKey, PerKeyMapCache<UK, UV, K, N>> containerMap;
     // Lightweight profiling controls and counters
     private final boolean profileEnabled;
     private final int profileSampleRate;
@@ -1227,210 +1235,28 @@ public class CachingInternalMapState<K, N, UK, UV>
         boolean perKeyMetricsEnabled,
         boolean forceBypassAlways
     ) {
-        this.delegateState = delegateState;
-        this.backend = backend;
-
-        // Get the value serializer safely
-        TypeSerializer<Map<UK, UV>> valueSerializer = delegateState.getValueSerializer();
-        if (valueSerializer == null) {
-            throw new NullPointerException(
-                "Value serializer from delegate state is null. " +
-                    "Ensure the delegate state is properly initialized before creating CachingInternalMapState."
-            );
-        }
-        if (!(valueSerializer instanceof MapSerializer)) {
-            throw new IllegalArgumentException(
-                "Value serializer must be a MapSerializer but was " +
-                    valueSerializer.getClass().getName()
-            );
-        }
-        MapSerializer<UK, UV> mapSerializer = (MapSerializer<UK, UV>) valueSerializer;
-        this.userKeySerializer = mapSerializer.getKeySerializer();
-        this.userValueSerializer = mapSerializer.getValueSerializer();
-
-        this.l1CacheSizePerMap = l1CacheSizePerMap;
-        this.l2CacheSizePerMap = l2CacheSizePerMap;
-        this.maxFlinkKeysWithActiveCachesPerNamespace = maxFlinkKeysWithActiveCachesPerNamespace;
-        this.maxActiveNamespacesInCache = backend.getMaxActiveNamespaceOrPerKeyCacheContainers(); // Reuse
-        // this
-        // for
-        // namespaces
-        this.cachePolicyType = cachePolicyType;
-        this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
-        this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
-
-        this.mapCacheHitRateThreshold = mapCacheHitRateThreshold;
-        // Initialize hysteresis thresholds after threshold is set
-        this.lowHitRateThreshold = Math.max(0.0, this.mapCacheHitRateThreshold - 0.10);
-        this.highHitRateThreshold = Math.min(1.0, this.mapCacheHitRateThreshold);
-        this.mapCacheHitRateWindowSize = mapCacheHitRateWindowSize;
-        this.mapCacheMinAccessesForBypassCheck = mapCacheMinAccessesForBypassCheck;
-
-        if (this.mapCacheHitRateThreshold > 0.0) {
-            this.accessesForHitRateWindow = new AtomicLong(0);
-            this.hitsInHitRateWindow = new AtomicLong(0);
-            this.totalAccessesForBypassEligibility = new AtomicLong(0);
-            this.accessSampler = new AtomicLong(0);
-        } else {
-            this.accessesForHitRateWindow = null;
-            this.hitsInHitRateWindow = null;
-            this.totalAccessesForBypassEligibility = null;
-            this.accessSampler = null;
-        }
-
-        // Add new fields
-        this.keyPresenceCacheEnabled = enableKeyPresenceCache;
-        this.bypassEnabled = enableBypass;
-        this.mapPresenceCacheImpl = mapPresenceCacheImpl;
-        this.l2ManagedMemoryEnabled = l2ManagedMemoryEnabled;
-        this.perKeyMetricsEnabled = perKeyMetricsEnabled;
-        this.forceBypassAlways = forceBypassAlways;
-
-        // Profiling flags from backend (final fields must be set in each constructor)
-        this.profileEnabled = backend != null && backend.isProfileEnabled();
-        this.profileSampleRate = backend != null ? backend.getProfileSampleRate() : 1024;
-
-        // Initialize namespaceCaches (top-level cache: Namespace -> (FlinkKey -> PerKeyMapCache))
-        this.namespaceCaches = createCachePolicyForHierarchicalCache(
-            this.maxActiveNamespacesInCache,
-            evictedNamespaceEntry -> {
-                // When a namespace is evicted, iterate its FlinkKey caches and flush them
-                CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> flinkKeyCaches =
-                    evictedNamespaceEntry.getValue();
-                if (flinkKeyCaches != null) {
-                    try {
-                        K NCDK = backend.getCurrentKey(); // Namespace Cache Delegate Key
-                        // (current Flink key)
-                        N NCDN = getCurrentNamespace(); // Namespace Cache Delegate Namespace -
-                        // Corrected
-
-                        for (Map.Entry<
-                            K,
-                            PerKeyMapCache<UK, UV, K, N>
-                        > flinkKeyEntry : flinkKeyCaches.entrySet()) {
-                            PerKeyMapCache<UK, UV, K, N> perKeyCache = flinkKeyEntry.getValue();
-                            // Ensure context is set for the specific Flink key and namespace of
-                            // this PerKeyMapCache
-                            backend.setCurrentKey(perKeyCache.flinkKey);
-                            delegateState.setCurrentNamespace(perKeyCache.cacheNamespace);
-                            flushL1Entries(
-                                perKeyCache,
-                                perKeyCache.flinkKey,
-                                perKeyCache.cacheNamespace,
-                                backend,
-                                delegateState,
-                                NCDN
-                            );
-                            if (
-                                perKeyCache.l2ManagedMemoryEnabled &&
-                                perKeyCache.l2MapEntriesOffHeap != null
-                            ) {
-                                perKeyCache.l2MapEntriesOffHeap.clear();
-                            } else {
-                                perKeyCache.l2MapEntries.clear(); // Should trigger memory reporting
-                            }
-                            // via its own eviction
-                            if (perKeyCache.keyPresenceCacheEnabled) {
-                                // Guard presence cache
-                                // clearing
-                                perKeyCache.l1KeyPresenceCache.clear(); // Should trigger memory
-                                // reporting
-                                perKeyCache.l2KeyPresenceCache.clear(); // Should trigger memory
-                                // reporting
-                            }
-
-                            // Unregister metrics for this cache so that future instances can
-                            // re-register cleanly.
-                            perKeyCache.closeMetrics();
-                        }
-                        // Restore original context if changed
-                        if (NCDK != null) {
-                            backend.setCurrentKey(NCDK);
-                        } else {
-                            // It is safe to set null here: CachingKeyedStateBackend#setCurrentKey(null)
-                            // only updates the internal key context and does not forward to the delegate.
-                            backend.setCurrentKey(null);
-                        }
-                        if (NCDN != null) delegateState.setCurrentNamespace(NCDN);
-                        else delegateState.setCurrentNamespace(null);
-                    } catch (Exception e) {
-                        LOG.error(
-                            "Error flushing PerKeyMapCache during namespace eviction: {}",
-                            evictedNamespaceEntry.getKey(),
-                            e
-                        );
-                        // Propagate as unchecked to ensure it's noticed; crucial cleanup
-                        // failed.
-                        throw new RuntimeException(
-                            "Error during namespace cache eviction and flush for namespace: " +
-                                evictedNamespaceEntry.getKey(),
-                            e
-                        );
-                    }
-                }
-            }
+        this(
+            delegateState,
+            backend,
+            l1CacheSizePerMap,
+            l2CacheSizePerMap,
+            maxFlinkKeysWithActiveCachesPerNamespace,
+            maxCacheMemoryMb,
+            cachePolicyType,
+            mapL1KeyPresenceCacheSize,
+            mapL2KeyPresenceCacheSize,
+            metrics,
+            mapCacheHitRateThreshold,
+            mapCacheHitRateWindowSize,
+            mapCacheMinAccessesForBypassCheck,
+            enableKeyPresenceCache,
+            enableBypass,
+            mapPresenceCacheImpl,
+            l2ManagedMemoryEnabled,
+            perKeyMetricsEnabled,
+            forceBypassAlways,
+            backend.getMaxActiveNamespaceOrPerKeyCacheContainers()
         );
-
-        // Metrics
-        this.metrics = metrics;
-        MetricGroup cacheMetrics = metrics.addGroup("cache");
-        this.l1MapValueCacheHitCount = cacheMetrics.counter("l1ValueCacheHit");
-        this.l1MapValueCacheMissCount = cacheMetrics.counter("l1ValueCacheMiss");
-        this.l2MapValueCacheHitCount = cacheMetrics.counter("l2ValueCacheHit");
-        this.l2MapValueCacheMissCount = cacheMetrics.counter("l2ValueCacheMiss");
-
-        if (this.keyPresenceCacheEnabled) {
-            this.l1PresenceCacheHitCount = cacheMetrics.counter("l1PresenceCacheHit");
-            this.l1PresenceCacheMissCount = cacheMetrics.counter("l1PresenceCacheMiss");
-            this.l2PresenceCacheHitCount = cacheMetrics.counter("l2PresenceCacheHit");
-            this.l2PresenceCacheMissCount = cacheMetrics.counter("l2PresenceCacheMiss");
-        } else {
-            this.l1PresenceCacheHitCount = new NoOpCounter();
-            this.l1PresenceCacheMissCount = new NoOpCounter();
-            this.l2PresenceCacheHitCount = new NoOpCounter();
-            this.l2PresenceCacheMissCount = new NoOpCounter();
-        }
-        this.delegateLookups = cacheMetrics.counter("delegateLookups");
-        try {
-            cacheMetrics.gauge(
-                "bypassActive",
-                (Gauge<Integer>) () -> (bypassEnabled && bypassCache) ? 1 : 0
-            );
-            cacheMetrics.gauge(
-                "currentHitRateForBypass",
-                (Gauge<Double>) () -> {
-                    if (accessesForHitRateWindow == null || hitsInHitRateWindow == null) return 0.0;
-                    long acc = Math.max(1L, accessesForHitRateWindow.get());
-                    return Math.min(1.0, Math.max(0.0, ((double) hitsInHitRateWindow.get()) / acc));
-                }
-            );
-        } catch (Throwable t) {
-            // best-effort only
-        }
-
-        // Register aggregate (low-cardinality) gauges on the state-level metrics group
-        try {
-            MetricGroup agg = cacheMetrics.addGroup("aggregate");
-            agg.gauge("perKeyCaches", () -> countPerKeyCaches());
-            agg.gauge("l1MapEntriesTotal", () -> sumL1Entries());
-            agg.gauge("l2MapEntriesTotal", () -> sumL2Entries());
-            agg.gauge("l2OffHeapPagesTotal", () -> sumOffHeapPages());
-            agg.gauge("l2OffHeapBytesTotal", () -> sumOffHeapBytes());
-            agg.gauge("l2OffHeapEntriesTotal", () -> sumOffHeapEntries());
-            agg.gauge("l2OffHeapPagesFreedCapacityTotal", () -> sumOffHeapPagesFreedCapacity());
-            agg.gauge("l2OffHeapPagesFreedWatermarkTotal", () -> sumOffHeapPagesFreedWatermark());
-        } catch (Throwable t) {
-            // best-effort only
-        }
-
-        // cacheMetrics.gauge("bypassActive", () -> bypassCache ? 1 : 0);
-        // if (mapCacheHitRateThreshold > 0.0) {
-        //     cacheMetrics.gauge("currentHitRateForBypass", () -> {
-        //         long accesses = accessesForHitRateWindow.get();
-        //         long hits = hitsInHitRateWindow.get();
-        //         return accesses > 0 ? (double) hits / accesses : 0.0;
-        //     });
-        // }
     }
 
     // Helper for non-CacheEntry valued caches (like namespaceCaches, keyCaches)
@@ -1450,6 +1276,23 @@ public class CachingInternalMapState<K, N, UK, UV>
         }
     }
 
+    private <CK, CV> CachePolicy<CK, CV> createCachePolicyWithEvictionListener(
+        int capacity,
+        Consumer<Map.Entry<CK, CV>> evictionListener
+    ) {
+        int effectiveCapacity = Math.max(1, capacity);
+        switch (this.cachePolicyType) {
+            case TINYLFU:
+                return new TinyLFUMap<>(effectiveCapacity, evictionListener);
+            case LRU:
+            default:
+                if (evictionListener != null) {
+                    return new LRUMap<>(effectiveCapacity, evictionListener);
+                }
+                return new LRUMap<>(effectiveCapacity);
+        }
+    }
+
     private PerKeyMapCache<UK, UV, K, N> getOrCreatePerKeyMapCache() {
         N namespace = getCurrentNamespace();
         K key = backend.getCurrentKey();
@@ -1461,6 +1304,27 @@ public class CachingInternalMapState<K, N, UK, UV>
             throw new IllegalStateException(
                 "Current Flink key is null. Cannot get/create PerKeyMapCache."
             );
+        }
+
+        if (this.singleLayerMode == SingleLayerMode.CONTAINER) {
+            int kg = backend.getKeyContext().getCurrentKeyGroupIndex();
+            ContainerKey ck = ContainerKey.from(key, kg, namespace, getKeySerializer(), getNamespaceSerializer());
+            return containerMap.computeIfAbsent(ck, ignore -> new PerKeyMapCache<>(
+                this.l1CacheSizePerMap,
+                this.l2CacheSizePerMap,
+                this.delegateState,
+                this.backend,
+                key,
+                namespace,
+                this.cachePolicyType,
+                this.mapL1KeyPresenceCacheSize,
+                this.mapL2KeyPresenceCacheSize,
+                this.keyPresenceCacheEnabled,
+                this.mapPresenceCacheImpl,
+                this.userKeySerializer,
+                this.userValueSerializer,
+                l2ManagedMemoryEnabled
+            ));
         }
 
         CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> flinkKeyCaches =
@@ -1694,6 +1558,9 @@ public class CachingInternalMapState<K, N, UK, UV>
         this.profileEnabled = backend != null && backend.isProfileEnabled();
         this.profileSampleRate = backend != null ? backend.getProfileSampleRate() : 1024;
 
+        this.singleLayerMode = parseSingleLayerMode();
+        this.singleLayerEnabled = this.singleLayerMode != SingleLayerMode.OFF;
+
         this.namespaceCaches = createCachePolicyForHierarchicalCache(
             this.maxActiveNamespacesInCache,
             evictedNamespaceEntry -> {
@@ -1752,6 +1619,44 @@ public class CachingInternalMapState<K, N, UK, UV>
                 }
             }
         );
+        if (this.singleLayerMode == SingleLayerMode.CONTAINER) {
+            int containerCap =
+                Math.max(
+                    1,
+                    this.maxActiveNamespacesInCache * this.maxFlinkKeysWithActiveCachesPerNamespace
+                );
+            this.containerMap = createCachePolicyForHierarchicalCache(
+                containerCap,
+                evictedEntry -> {
+                    PerKeyMapCache<UK, UV, K, N> perKeyCache = evictedEntry.getValue();
+                    if (perKeyCache != null) {
+                        try {
+                            flushL1Entries(
+                                perKeyCache,
+                                perKeyCache.flinkKey,
+                                perKeyCache.cacheNamespace,
+                                backend,
+                                delegateState,
+                                getCurrentNamespace()
+                            );
+                            if (
+                                perKeyCache.l2ManagedMemoryEnabled &&
+                                perKeyCache.l2MapEntriesOffHeap != null
+                            ) {
+                                perKeyCache.l2MapEntriesOffHeap.clear();
+                            } else {
+                                perKeyCache.l2MapEntries.clear();
+                            }
+                        } catch (Exception e) {
+                            throw new RuntimeException("Error during container eviction flush", e);
+                        }
+                    }
+                }
+            );
+        } else {
+            this.containerMap = null;
+        }
+
         // Initialize metrics just like the primary constructor
         this.metrics = metrics;
         MetricGroup cacheMetrics = metrics.addGroup("cache");
@@ -1802,6 +1707,72 @@ public class CachingInternalMapState<K, N, UK, UV>
         } catch (Throwable t) {
             // best-effort only
         }
+
+        if (this.singleLayerMode == SingleLayerMode.FLAT) {
+            int l1GlobalCap =
+                Math.max(
+                    1,
+                    l1CacheSizePerMap *
+                    Math.max(1, this.maxActiveNamespacesInCache) *
+                    Math.max(1, this.maxFlinkKeysWithActiveCachesPerNamespace)
+                );
+            int l2GlobalCap =
+                Math.max(
+                    1,
+                    l2CacheSizePerMap *
+                    Math.max(1, this.maxActiveNamespacesInCache) *
+                    Math.max(1, this.maxFlinkKeysWithActiveCachesPerNamespace)
+                );
+
+            this.singleLayerL2 = createCachePolicyWithEvictionListener(l2GlobalCap, evicted -> {
+                CacheEntry<UV> entry = evicted.getValue();
+                if (entry != null) {
+                    backend.reportCacheMemoryReleased(entry.getEstimatedSizeBytes());
+                }
+            });
+
+            this.singleLayerL1 = createCachePolicyWithEvictionListener(l1GlobalCap, evicted -> {
+                CompositeKey ck = evicted.getKey();
+                CacheEntry<UV> entry = evicted.getValue();
+                if (entry == null) {
+                    return;
+                }
+                long estimatedSize = entry.getEstimatedSizeBytes();
+                backend.reportCacheMemoryReleased(estimatedSize);
+                if (entry.isDirty()) {
+                    K originalKey = backend.getCurrentKey();
+                    N originalNs = this.currentNamespace;
+                    try {
+                        K flinkKey = ck.deserializeFlinkKey(getKeySerializer());
+                        N ns = ck.deserializeNamespace(getNamespaceSerializer());
+                        UK userKey = ck.deserializeUserKey(getKeySerializer(), userKeySerializer);
+                        backend.setCurrentKey(flinkKey);
+                        delegateState.setCurrentNamespace(ns);
+                        if (entry.getValue() == null) {
+                            delegateState.remove(userKey);
+                        } else {
+                            delegateState.put(userKey, entry.getValue());
+                        }
+                        entry.setDirty(false);
+                } catch (Exception e) {
+                    throw new RuntimeException("Failed to flush MapState entry on L1 eviction", e);
+                } finally {
+                    backend.setCurrentKey(originalKey);
+                    if (originalNs != null) {
+                        delegateState.setCurrentNamespace(originalNs);
+                        }
+                    }
+                }
+                CacheEntry<UV> old = singleLayerL2.put(ck, entry);
+                if (old != null) {
+                    backend.reportCacheMemoryReleased(old.getEstimatedSizeBytes());
+                }
+                backend.reportCacheMemoryAdded(entry.getEstimatedSizeBytes());
+            });
+        } else {
+            this.singleLayerL1 = new NoOpCachePolicy<>();
+            this.singleLayerL2 = new NoOpCachePolicy<>();
+        }
     }
 
     private long countPerKeyCaches() {
@@ -1810,6 +1781,11 @@ public class CachingInternalMapState<K, N, UK, UV>
             if (m == null) continue;
             for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> e : m.entrySet()) {
                 if (e.getValue() != null) c++;
+            }
+        }
+        if (containerMap != null) {
+            for (PerKeyMapCache<UK, UV, K, N> pc : containerMap.values()) {
+                if (pc != null) c++;
             }
         }
         return c;
@@ -1824,6 +1800,14 @@ public class CachingInternalMapState<K, N, UK, UV>
                 if (pc != null) s += pc.l1MapEntries.size();
             }
         }
+        if (containerMap != null) {
+            for (PerKeyMapCache<UK, UV, K, N> pc : containerMap.values()) {
+                if (pc != null) {
+                    s += pc.l1MapEntries.size();
+                }
+            }
+        }
+        try { s += singleLayerL1.size(); } catch (Throwable ignore) {}
         return s;
     }
 
@@ -1839,6 +1823,19 @@ public class CachingInternalMapState<K, N, UK, UV>
                 else s += pc.l2MapEntries.size();
             }
         }
+        if (containerMap != null) {
+            for (PerKeyMapCache<UK, UV, K, N> pc : containerMap.values()) {
+                if (pc == null) {
+                    continue;
+                }
+                if (pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) {
+                    s += pc.l2MapEntriesOffHeap.size();
+                } else {
+                    s += pc.l2MapEntries.size();
+                }
+            }
+        }
+        try { s += singleLayerL2.size(); } catch (Throwable ignore) {}
         return s;
     }
 
@@ -1850,6 +1847,13 @@ public class CachingInternalMapState<K, N, UK, UV>
                 PerKeyMapCache<UK, UV, K, N> pc = e.getValue();
                 if (pc != null && pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) s +=
                     pc.l2MapEntriesOffHeap.getPageCount();
+            }
+        }
+        if (containerMap != null) {
+            for (PerKeyMapCache<UK, UV, K, N> pc : containerMap.values()) {
+                if (pc != null && pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) {
+                    s += pc.l2MapEntriesOffHeap.getPageCount();
+                }
             }
         }
         return s;
@@ -1865,6 +1869,13 @@ public class CachingInternalMapState<K, N, UK, UV>
                     pc.l2MapEntriesOffHeap.getEstimatedMemoryUsageBytes();
             }
         }
+        if (containerMap != null) {
+            for (PerKeyMapCache<UK, UV, K, N> pc : containerMap.values()) {
+                if (pc != null && pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) {
+                    s += pc.l2MapEntriesOffHeap.getEstimatedMemoryUsageBytes();
+                }
+            }
+        }
         return s;
     }
 
@@ -1876,6 +1887,13 @@ public class CachingInternalMapState<K, N, UK, UV>
                 PerKeyMapCache<UK, UV, K, N> pc = e.getValue();
                 if (pc != null && pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) s +=
                     pc.l2MapEntriesOffHeap.size();
+            }
+        }
+        if (containerMap != null) {
+            for (PerKeyMapCache<UK, UV, K, N> pc : containerMap.values()) {
+                if (pc != null && pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) {
+                    s += pc.l2MapEntriesOffHeap.size();
+                }
             }
         }
         return s;
@@ -1891,6 +1909,13 @@ public class CachingInternalMapState<K, N, UK, UV>
                     pc.l2MapEntriesOffHeap.getPagesFreedByCapacity();
             }
         }
+        if (containerMap != null) {
+            for (PerKeyMapCache<UK, UV, K, N> pc : containerMap.values()) {
+                if (pc != null && pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) {
+                    s += pc.l2MapEntriesOffHeap.getPagesFreedByCapacity();
+                }
+            }
+        }
         return s;
     }
 
@@ -1902,6 +1927,13 @@ public class CachingInternalMapState<K, N, UK, UV>
                 PerKeyMapCache<UK, UV, K, N> pc = e.getValue();
                 if (pc != null && pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) s +=
                     pc.l2MapEntriesOffHeap.getPagesFreedByWatermark();
+            }
+        }
+        if (containerMap != null) {
+            for (PerKeyMapCache<UK, UV, K, N> pc : containerMap.values()) {
+                if (pc != null && pc.l2ManagedMemoryEnabled && pc.l2MapEntriesOffHeap != null) {
+                    s += pc.l2MapEntriesOffHeap.getPagesFreedByWatermark();
+                }
             }
         }
         return s;
@@ -2016,6 +2048,132 @@ public class CachingInternalMapState<K, N, UK, UV>
         return userValueSerializer.deserialize(did);
     }
 
+    // -------- Single-layer composite key --------
+    private static final class CompositeKey {
+        private final byte[] bytes; // [ kg:int32 | nsLen:int32 | nsBytes | flinkKey | userKey ]
+
+        private CompositeKey(byte[] bytes) { this.bytes = bytes; }
+
+        static <K,N,UK> CompositeKey from(K flinkKey, int keyGroup, N ns, UK userKey,
+                TypeSerializer<K> flinkKeySer,
+                TypeSerializer<N> nsSer,
+                TypeSerializer<UK> userKeySer) {
+            try {
+                DataOutputSerializer out = new DataOutputSerializer(256);
+                out.writeInt(keyGroup);
+                DataOutputSerializer nsOut = new DataOutputSerializer(128);
+                nsSer.serialize(ns, nsOut);
+                byte[] nsBytes = nsOut.getCopyOfBuffer();
+                out.writeInt(nsBytes.length);
+                out.write(nsBytes);
+                flinkKeySer.serialize(flinkKey, out);
+                userKeySer.serialize(userKey, out);
+                return new CompositeKey(out.getCopyOfBuffer());
+            } catch (IOException e) { throw new RuntimeException(e); }
+        }
+
+        <K> K deserializeFlinkKey(TypeSerializer<K> flinkKeySer) {
+            try {
+                DataInputDeserializer in = new DataInputDeserializer(bytes);
+                in.readInt();
+                int nsLen = in.readInt();
+                in.skipBytesToRead(nsLen);
+                return flinkKeySer.deserialize(in);
+            } catch (IOException e) { throw new RuntimeException(e); }
+        }
+        <N> N deserializeNamespace(TypeSerializer<N> nsSer) {
+            try {
+                DataInputDeserializer in = new DataInputDeserializer(bytes);
+                in.readInt();
+                int nsLen = in.readInt();
+                byte[] nsBytes = new byte[nsLen];
+                in.read(nsBytes);
+                return nsSer.deserialize(new DataInputDeserializer(nsBytes));
+            } catch (IOException e) { throw new RuntimeException(e); }
+        }
+        <K,UK> UK deserializeUserKey(TypeSerializer<K> flinkKeySer, TypeSerializer<UK> userKeySer) {
+            try {
+                DataInputDeserializer in = new DataInputDeserializer(bytes);
+                in.readInt();
+                int nsLen = in.readInt();
+                in.skipBytesToRead(nsLen);
+                // Deserialize flinkKey to advance the stream
+                flinkKeySer.deserialize(in);
+                // Now deserialize userKey
+                return userKeySer.deserialize(in);
+            } catch (IOException e) { throw new RuntimeException(e); }
+        }
+
+        boolean matches(Object flinkKey, int keyGroup, Object ns,
+                        TypeSerializer<?> flinkKeySer, TypeSerializer<?> nsSer) {
+            try {
+                DataInputDeserializer in = new DataInputDeserializer(bytes);
+                int kg = in.readInt();
+                if (kg != keyGroup) return false;
+                int nsLen = in.readInt();
+                byte[] nsBytes = new byte[nsLen];
+                in.read(nsBytes);
+                Object decodedNs = nsSer.deserialize(new DataInputDeserializer(nsBytes));
+                if (!decodedNs.equals(ns)) return false;
+                Object decodedKey = flinkKeySer.deserialize(in);
+                return decodedKey.equals(flinkKey);
+            } catch (IOException e) { throw new RuntimeException(e); }
+        }
+
+        @Override public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof CompositeKey)) return false;
+            CompositeKey that = (CompositeKey) o;
+            if (this.bytes.length != that.bytes.length) return false;
+            for (int i = 0; i < this.bytes.length; i++) if (this.bytes[i] != that.bytes[i]) return false;
+            return true;
+        }
+        @Override public int hashCode() { int r=1; for (byte b: bytes) r = 31*r + b; return r; }
+        @Override public String toString() { return "CompositeKey{"+bytes.length+"b}"; }
+    }
+
+    // Container key for (K,N) container caches (no user key)
+    private static final class ContainerKey {
+        private final byte[] bytes; // [ kg:int32 | nsLen:int32 | nsBytes | flinkKey ]
+        private ContainerKey(byte[] bytes) { this.bytes = bytes; }
+        static <K,N> ContainerKey from(K flinkKey, int keyGroup, N ns, TypeSerializer<K> flinkKeySer, TypeSerializer<N> nsSer) {
+            try {
+                DataOutputSerializer out = new DataOutputSerializer(256);
+                out.writeInt(keyGroup);
+                DataOutputSerializer nsOut = new DataOutputSerializer(128);
+                nsSer.serialize(ns, nsOut);
+                byte[] nsBytes = nsOut.getCopyOfBuffer();
+                out.writeInt(nsBytes.length);
+                out.write(nsBytes);
+                flinkKeySer.serialize(flinkKey, out);
+                return new ContainerKey(out.getCopyOfBuffer());
+            } catch (IOException e) { throw new RuntimeException(e); }
+        }
+        @Override public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof ContainerKey)) return false;
+            ContainerKey that = (ContainerKey) o;
+            if (this.bytes.length != that.bytes.length) return false;
+            for (int i=0;i<this.bytes.length;i++) if (this.bytes[i]!=that.bytes[i]) return false;
+            return true;
+        }
+        @Override public int hashCode() { int r=1; for (byte b: bytes) r=31*r+b; return r; }
+        @Override public String toString(){ return "ContainerKey{"+bytes.length+"b}"; }
+    }
+
+    private SingleLayerMode parseSingleLayerMode() {
+        String mode = System.getProperty("state.backend.cached.map.single-layer.mode", null);
+        if (mode != null) {
+            String m = mode.trim().toLowerCase();
+            if (m.equals("flat")) return SingleLayerMode.FLAT;
+            if (m.equals("container")) return SingleLayerMode.CONTAINER;
+            return SingleLayerMode.OFF;
+        }
+        boolean legacyFlat = Boolean.parseBoolean(System.getProperty("state.backend.cached.map.single-layer.enabled", "false"));
+        // HACK: set map.single_layer mode to container for test purpose. it should be off by default.
+        return legacyFlat ? SingleLayerMode.FLAT : SingleLayerMode.CONTAINER;
+    }
+
     @Override
     public UV get(UK userKey) throws Exception {
         registerProfileMetricsIfNeeded();
@@ -2054,6 +2212,46 @@ public class CachingInternalMapState<K, N, UK, UV>
         }
 
         try {
+            if (singleLayerEnabled) {
+                boolean resolvedByCache = false;
+                UV userValue = null;
+                K flinkKey = backend.getCurrentKey();
+                int kg = backend.getKeyContext().getCurrentKeyGroupIndex();
+                N ns = getCurrentNamespace();
+                CompositeKey ck = CompositeKey.from(flinkKey, kg, ns, userKey, getKeySerializer(), getNamespaceSerializer(), userKeySerializer);
+
+                CacheEntry<UV> l1Entry = singleLayerL1.get(ck);
+                if (l1Entry != null) {
+                    l1MapValueCacheHitCount.inc();
+                    userValue = l1Entry.getValue();
+                    resolvedByCache = true;
+                } else {
+                    l1MapValueCacheMissCount.inc();
+                    CacheEntry<UV> l2Entry = singleLayerL2.get(ck);
+                    if (l2Entry != null) {
+                        l2MapValueCacheHitCount.inc();
+                        singleLayerL2.remove(ck);
+                        CacheEntry<UV> clean = CacheEntry.clean(l2Entry.getValue());
+                        CacheEntry<UV> old = singleLayerL1.put(ck, clean);
+                        if (old != null) backend.reportCacheMemoryReleased(old.getEstimatedSizeBytes());
+                        backend.reportCacheMemoryAdded(clean.getEstimatedSizeBytes());
+                        userValue = clean.getValue();
+                        resolvedByCache = true;
+                    } else {
+                        l2MapValueCacheMissCount.inc();
+                        delegateLookups.inc();
+                        userValue = delegateState.get(userKey);
+                        if (userValue != null) {
+                            CacheEntry<UV> clean = CacheEntry.clean(userValue);
+                            CacheEntry<UV> old = singleLayerL1.put(ck, clean);
+                            if (old != null) backend.reportCacheMemoryReleased(old.getEstimatedSizeBytes());
+                            backend.reportCacheMemoryAdded(clean.getEstimatedSizeBytes());
+                        }
+                    }
+                }
+                updateCacheBypassConditionWeighted(resolvedByCache && userValue != null, decisionWeight);
+                return userValue;
+            }
             PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
             boolean resolvedByCache = false;
             UV userValue = null;
@@ -2341,6 +2539,20 @@ public class CachingInternalMapState<K, N, UK, UV>
             }
         }
 
+        if (singleLayerMode == SingleLayerMode.FLAT) {
+            if (userValue == null) { remove(userKey); return; }
+            K flinkKey = backend.getCurrentKey();
+            int kg = backend.getKeyContext().getCurrentKeyGroupIndex();
+            N ns = getCurrentNamespace();
+            CompositeKey ck = CompositeKey.from(flinkKey, kg, ns, userKey, getKeySerializer(), getNamespaceSerializer(), userKeySerializer);
+            CacheEntry<UV> newEntry = CacheEntry.dirty(userValue);
+            CacheEntry<UV> old = singleLayerL1.put(ck, newEntry);
+            if (old != null) backend.reportCacheMemoryReleased(old.getEstimatedSizeBytes());
+            backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
+            singleLayerL2.remove(ck);
+            updateCacheBypassCondition(true);
+            return;
+        }
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
         // The CachePolicy (e.g., LRUMap) used for l1MapEntries is responsible for:
         // 1. Evicting an old entry if capacity is reached (triggering its eviction listener, which
@@ -2451,6 +2663,18 @@ public class CachingInternalMapState<K, N, UK, UV>
             }
         }
 
+        if (singleLayerMode == SingleLayerMode.FLAT) {
+            K flinkKey = backend.getCurrentKey();
+            int kg = backend.getKeyContext().getCurrentKeyGroupIndex();
+            N ns = getCurrentNamespace();
+            CompositeKey ck = CompositeKey.from(flinkKey, kg, ns, userKey, getKeySerializer(), getNamespaceSerializer(), userKeySerializer);
+            CacheEntry<UV> newEntry = CacheEntry.dirty(null);
+            CacheEntry<UV> old = singleLayerL1.put(ck, newEntry);
+            if (old != null) backend.reportCacheMemoryReleased(old.getEstimatedSizeBytes());
+            backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
+            singleLayerL2.remove(ck);
+            return;
+        }
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
         CacheEntry<UV> newEntry = CacheEntry.dirty(null); // Tombstone
         CacheEntry<UV> oldEntry = perKeyCache.l1MapEntries.put(userKey, newEntry);
@@ -2502,6 +2726,22 @@ public class CachingInternalMapState<K, N, UK, UV>
             GLOBAL_BYPASS ||
             isAutoBypassActiveForThisCall()
         ) {
+            return delegateState.contains(userKey);
+        }
+
+        if (singleLayerMode == SingleLayerMode.FLAT) {
+            K flinkKey = backend.getCurrentKey();
+            int kg = backend.getKeyContext().getCurrentKeyGroupIndex();
+            N ns = getCurrentNamespace();
+            CompositeKey ck = CompositeKey.from(flinkKey, kg, ns, userKey, getKeySerializer(), getNamespaceSerializer(), userKeySerializer);
+            CacheEntry<UV> l1 = singleLayerL1.get(ck);
+            if (l1 != null) {
+                return l1.getValue() != null;
+            }
+            CacheEntry<UV> l2 = singleLayerL2.get(ck);
+            if (l2 != null) {
+                return l2.getValue() != null;
+            }
             return delegateState.contains(userKey);
         }
 
@@ -2617,6 +2857,11 @@ public class CachingInternalMapState<K, N, UK, UV>
 
     @Override
     public Iterable<Map.Entry<UK, UV>> entries() throws Exception {
+        if (singleLayerEnabled) {
+            // Ensure delegate sees all pending updates
+            try { flushToUnderlyingState(); } catch (IOException e) { throw new RuntimeException(e); }
+            return delegateState.entries();
+        }
         // This iterable will produce a new UnionIterator on each call to iterator().
         return () -> {
             try {
@@ -2629,6 +2874,17 @@ public class CachingInternalMapState<K, N, UK, UV>
 
     @Override
     public Iterable<UV> values() throws Exception {
+        if (singleLayerEnabled) {
+            try { flushToUnderlyingState(); } catch (IOException e) { throw new RuntimeException(e); }
+            final Iterable<Map.Entry<UK, UV>> iter = delegateState.entries();
+            return () -> {
+                final Iterator<Map.Entry<UK, UV>> it = iter.iterator();
+                return new Iterator<UV>() {
+                    @Override public boolean hasNext() { return it.hasNext(); }
+                    @Override public UV next() { return it.next().getValue(); }
+                };
+            };
+        }
         return () -> {
             try {
                 final Iterator<Map.Entry<UK, UV>> entryIterator = iterator();
@@ -2651,6 +2907,17 @@ public class CachingInternalMapState<K, N, UK, UV>
 
     @Override
     public Iterable<UK> keys() throws Exception {
+        if (singleLayerEnabled) {
+            try { flushToUnderlyingState(); } catch (IOException e) { throw new RuntimeException(e); }
+            final Iterable<Map.Entry<UK, UV>> iter = delegateState.entries();
+            return () -> {
+                final Iterator<Map.Entry<UK, UV>> it = iter.iterator();
+                return new Iterator<UK>() {
+                    @Override public boolean hasNext() { return it.hasNext(); }
+                    @Override public UK next() { return it.next().getKey(); }
+                };
+            };
+        }
         return () -> {
             try {
                 final Iterator<Map.Entry<UK, UV>> entryIterator = iterator();
@@ -2727,6 +2994,10 @@ public class CachingInternalMapState<K, N, UK, UV>
 
     @Override
     public boolean isEmpty() throws Exception {
+        if (singleLayerMode == SingleLayerMode.FLAT) {
+            try { flushToUnderlyingState(); } catch (IOException e) { throw new RuntimeException(e); }
+            return delegateState.isEmpty();
+        }
         if (bypassCache) {
             return delegateState.isEmpty();
         }
@@ -2783,36 +3054,52 @@ public class CachingInternalMapState<K, N, UK, UV>
 
     @Override
     public void clear() {
-        // Ensure the delegate state operates on the correct namespace.
-        // This is crucial because delegateState.clear() is namespace-specific.
+        // Single-layer fast path
+        if (singleLayerMode == SingleLayerMode.FLAT) {
+            K flinkKey = backend.getCurrentKey();
+            int kg = backend.getKeyContext().getCurrentKeyGroupIndex();
+            N ns = getCurrentNamespace();
+            java.util.List<CompositeKey> toRemove = new java.util.ArrayList<>();
+            for (Map.Entry<CompositeKey, CacheEntry<UV>> e : singleLayerL1.entrySet()) {
+                CompositeKey ck = e.getKey();
+                if (ck.matches(flinkKey, kg, ns, getKeySerializer(), getNamespaceSerializer())) {
+                    toRemove.add(ck);
+                }
+            }
+            for (CompositeKey ck : toRemove) {
+                CacheEntry<UV> old = singleLayerL1.remove(ck);
+                if (old != null) backend.reportCacheMemoryReleased(old.getEstimatedSizeBytes());
+            }
+            toRemove.clear();
+            for (Map.Entry<CompositeKey, CacheEntry<UV>> e : singleLayerL2.entrySet()) {
+                CompositeKey ck = e.getKey();
+                if (ck.matches(flinkKey, kg, ns, getKeySerializer(), getNamespaceSerializer())) {
+                    toRemove.add(ck);
+                }
+            }
+            for (CompositeKey ck : toRemove) {
+                CacheEntry<UV> old = singleLayerL2.remove(ck);
+                if (old != null) backend.reportCacheMemoryReleased(old.getEstimatedSizeBytes());
+            }
+            delegateState.setCurrentNamespace(getCurrentNamespace());
+            delegateState.clear();
+            return;
+        }
+
+        // Legacy hierarchical / container path
         delegateState.setCurrentNamespace(getCurrentNamespace());
-
-        // Obtain the cache specific to the current Flink key (K) and namespace (N).
         PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
-
-        // Clear L1 map entries. Eviction listeners (if any, e.g., for flushing dirty entries)
-        // should be triggered by the CachePolicy's clear() implementation.
         perKeyCache.l1MapEntries.clear();
-
-        // Clear L2 map entries. Similarly, eviction listeners should be triggered.
         if (perKeyCache.l2ManagedMemoryEnabled && perKeyCache.l2MapEntriesOffHeap != null) {
             perKeyCache.l2MapEntriesOffHeap.clear();
         } else {
             perKeyCache.l2MapEntries.clear();
         }
-
-        // If key-value separation is enabled, clear the presence caches as well.
         if (this.keyPresenceCacheEnabled) {
             perKeyCache.l1KeyPresenceCache.clear();
             perKeyCache.l2KeyPresenceCache.clear();
         }
-
-        // After clearing the caches, clear the entries in the underlying delegate state
-        // for the current key and namespace.
         delegateState.clear();
-
-        // Reset the fullyLoaded flag for this PerKeyMapCache, as its contents (both cache
-        // and underlying state for this key/namespace) have been cleared.
         perKeyCache.fullyLoaded = false;
     }
 
@@ -2822,6 +3109,51 @@ public class CachingInternalMapState<K, N, UK, UV>
         // Do not call getCurrentNamespace() here because it may be unset during snapshots
         N originalNamespace = this.currentNamespace;
         try {
+            // First flush single-layer dirty entries if enabled
+            if (singleLayerMode == SingleLayerMode.FLAT) {
+                java.util.List<Map.Entry<CompositeKey, CacheEntry<UV>>> snap = new java.util.ArrayList<>();
+                for (Map.Entry<CompositeKey, CacheEntry<UV>> e : singleLayerL1.entrySet()) snap.add(e);
+                for (Map.Entry<CompositeKey, CacheEntry<UV>> e : snap) {
+                    CacheEntry<UV> entry = e.getValue();
+                    if (entry != null && entry.isDirty()) {
+                        CompositeKey ck = e.getKey();
+                        K flinkKey = ck.deserializeFlinkKey(getKeySerializer());
+                        N ns = ck.deserializeNamespace(getNamespaceSerializer());
+                        UK uk = ck.deserializeUserKey(getKeySerializer(), userKeySerializer);
+                        K prevKey = backend.getCurrentKey();
+                        N prevNs = this.currentNamespace;
+                        try {
+                            backend.setCurrentKey(flinkKey);
+                            delegateState.setCurrentNamespace(ns);
+                            if (entry.getValue() == null) {
+                                delegateState.remove(uk);
+                            } else {
+                                delegateState.put(uk, entry.getValue());
+                            }
+                            entry.setDirty(false);
+                        } catch (Exception ex) {
+                            throw new IOException(
+                                "Failed to flush MapState entry for composite key during snapshot",
+                                ex
+                            );
+                        } finally {
+                            backend.setCurrentKey(prevKey);
+                            if (prevNs != null) delegateState.setCurrentNamespace(prevNs);
+                        }
+                    }
+                }
+            }
+            if (singleLayerMode == SingleLayerMode.CONTAINER) {
+                // Flush only current (K,N) container
+                try {
+                    PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
+                    flushL1Entries(perKeyCache, backend.getCurrentKey(), getCurrentNamespace(), backend, delegateState, originalNamespace);
+                } catch (Exception e) {
+                    throw new IOException("Failed to flush current container", e);
+                }
+                return;
+            }
+
             for (Map.Entry<
                 N,
                 CachePolicy<K, PerKeyMapCache<UK, UV, K, N>>
@@ -2885,20 +3217,30 @@ public class CachingInternalMapState<K, N, UK, UV>
      */
     public void onWatermarkEvict(long watermarkMillis) {
         try {
-            for (Map.Entry<
-                N,
-                CachePolicy<K, PerKeyMapCache<UK, UV, K, N>>
-            > nsEntry : namespaceCaches.entrySet()) {
-                CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> keyCaches = nsEntry.getValue();
-                if (keyCaches == null) continue;
-                // iterate over a snapshot to avoid CME
-                java.util.List<PerKeyMapCache<UK, UV, K, N>> caches = new java.util.ArrayList<>();
-                for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> e : keyCaches.entrySet()) {
-                    if (e.getValue() != null) caches.add(e.getValue());
+            if (singleLayerMode == SingleLayerMode.CONTAINER) {
+                if (containerMap != null) {
+                    java.util.List<PerKeyMapCache<UK, UV, K, N>> caches = new java.util.ArrayList<>();
+                    for (Map.Entry<ContainerKey, PerKeyMapCache<UK, UV, K, N>> e : containerMap.entrySet()) {
+                        if (e.getValue() != null) caches.add(e.getValue());
+                    }
+                    for (PerKeyMapCache<UK, UV, K, N> perKey : caches) {
+                        if (perKey.l2ManagedMemoryEnabled && perKey.l2MapEntriesOffHeap != null) {
+                            perKey.l2MapEntriesOffHeap.evictBucketsUpTo(watermarkMillis);
+                        }
+                    }
                 }
-                for (PerKeyMapCache<UK, UV, K, N> perKey : caches) {
-                    if (perKey.l2ManagedMemoryEnabled && perKey.l2MapEntriesOffHeap != null) {
-                        perKey.l2MapEntriesOffHeap.evictBucketsUpTo(watermarkMillis);
+            } else {
+                for (Map.Entry<N, CachePolicy<K, PerKeyMapCache<UK, UV, K, N>>> nsEntry : namespaceCaches.entrySet()) {
+                    CachePolicy<K, PerKeyMapCache<UK, UV, K, N>> keyCaches = nsEntry.getValue();
+                    if (keyCaches == null) continue;
+                    java.util.List<PerKeyMapCache<UK, UV, K, N>> caches = new java.util.ArrayList<>();
+                    for (Map.Entry<K, PerKeyMapCache<UK, UV, K, N>> e : keyCaches.entrySet()) {
+                        if (e.getValue() != null) caches.add(e.getValue());
+                    }
+                    for (PerKeyMapCache<UK, UV, K, N> perKey : caches) {
+                        if (perKey.l2ManagedMemoryEnabled && perKey.l2MapEntriesOffHeap != null) {
+                            perKey.l2MapEntriesOffHeap.evictBucketsUpTo(watermarkMillis);
+                        }
                     }
                 }
             }
@@ -2961,6 +3303,10 @@ public class CachingInternalMapState<K, N, UK, UV>
         int recommendedMaxNumberOfReturnedRecords
     ) {
         try {
+            if (singleLayerEnabled) {
+                flushToUnderlyingState();
+                return delegateState.getStateIncrementalVisitor(recommendedMaxNumberOfReturnedRecords);
+            }
             flushToUnderlyingState();
         } catch (IOException e) {
             throw new RuntimeException(
@@ -2990,43 +3336,86 @@ public class CachingInternalMapState<K, N, UK, UV>
         if (targetBytesToFreeThisState <= 0) return 0;
         long totalFreedBytes = 0;
 
+        // Single-layer caches free: L2 clean, then L1 clean, then flush-and-remove dirty
+        if (singleLayerEnabled) {
+            Iterator<Map.Entry<CompositeKey, CacheEntry<UV>>> itL2 = singleLayerL2.entrySet().iterator();
+            while (itL2.hasNext() && totalFreedBytes < targetBytesToFreeThisState) {
+                Map.Entry<CompositeKey, CacheEntry<UV>> e = itL2.next();
+                long est = e.getValue().getEstimatedSizeBytes();
+                itL2.remove();
+                backend.reportCacheMemoryReleased(est);
+                totalFreedBytes += est;
+            }
+            if (totalFreedBytes >= targetBytesToFreeThisState) return totalFreedBytes;
+            java.util.List<Map.Entry<CompositeKey, CacheEntry<UV>>> dirty = new java.util.ArrayList<>();
+            Iterator<Map.Entry<CompositeKey, CacheEntry<UV>>> itL1 = singleLayerL1.entrySet().iterator();
+            while (itL1.hasNext() && totalFreedBytes < targetBytesToFreeThisState) {
+                Map.Entry<CompositeKey, CacheEntry<UV>> e = itL1.next();
+                CacheEntry<UV> ce = e.getValue();
+                if (!ce.isDirty()) {
+                    long est = ce.getEstimatedSizeBytes();
+                    itL1.remove();
+                    backend.reportCacheMemoryReleased(est);
+                    totalFreedBytes += est;
+                } else {
+                    dirty.add(e);
+                }
+            }
+            for (Map.Entry<CompositeKey, CacheEntry<UV>> e : dirty) {
+                if (totalFreedBytes >= targetBytesToFreeThisState) break;
+                CompositeKey ck = e.getKey();
+                CacheEntry<UV> ce = e.getValue();
+                long est = ce.getEstimatedSizeBytes();
+                K prevKey = backend.getCurrentKey();
+                N prevNs = this.currentNamespace;
+                try {
+                    K fk = ck.deserializeFlinkKey(getKeySerializer());
+                    N ns = ck.deserializeNamespace(getNamespaceSerializer());
+                    UK uk = ck.deserializeUserKey(getKeySerializer(), userKeySerializer);
+                    backend.setCurrentKey(fk);
+                    delegateState.setCurrentNamespace(ns);
+                    if (ce.getValue() == null) delegateState.remove(uk); else delegateState.put(uk, ce.getValue());
+                    ce.setDirty(false);
+                    singleLayerL1.remove(ck);
+                    backend.reportCacheMemoryReleased(est);
+                    totalFreedBytes += est;
+                } catch (Exception ex) {
+                    // best-effort; skip on failure
+                } finally {
+                    backend.setCurrentKey(prevKey);
+                    if (prevNs != null) delegateState.setCurrentNamespace(prevNs);
+                }
+            }
+            if (totalFreedBytes >= targetBytesToFreeThisState) return totalFreedBytes;
+        }
+
         // Iterate over all PerKeyMapCache instances and ask them to evict
         // This is a simplified global eviction. More sophisticated might prioritize
         // namespaces/keys.
         try {
-            for (CachePolicy<
-                K,
-                PerKeyMapCache<UK, UV, K, N>
-            > flinkKeyCaches : namespaceCaches.values()) {
-                if (totalFreedBytes >= targetBytesToFreeThisState) break;
-                if (flinkKeyCaches == null) continue;
-
-                // Iterate over a snapshot of keys to avoid ConcurrentModificationException if map
-                // can change
+            if (singleLayerMode == SingleLayerMode.CONTAINER && containerMap != null) {
                 List<PerKeyMapCache<UK, UV, K, N>> perKeyCachesToEvict = new ArrayList<>(
-                    flinkKeyCaches.values()
+                    containerMap.values()
                 );
-
                 for (PerKeyMapCache<UK, UV, K, N> perKeyCache : perKeyCachesToEvict) {
-                    if (totalFreedBytes >= targetBytesToFreeThisState) break;
-                    if (perKeyCache == null) continue;
-
-                    // Set context for potential delegate operations if L1 dirty entries are flushed
-                    // during eviction
+                    if (totalFreedBytes >= targetBytesToFreeThisState) {
+                        break;
+                    }
+                    if (perKeyCache == null) {
+                        continue;
+                    }
                     K originalKey = backend.getCurrentKey();
                     N originalNamespace = getCurrentNamespace();
                     try {
                         LOG.debug(
-                            "evictEntriesToFreeMemory: CONTEXT SWITCH for per-key eviction. Original(key={}, ns={}). Setting to(key={}, ns={}).",
+                            "evictEntriesToFreeMemory: CONTAINER CONTEXT SWITCH. Original(key={}, ns={}). Switching to(key={}, ns={}).",
                             originalKey,
                             originalNamespace,
                             perKeyCache.flinkKey,
                             perKeyCache.cacheNamespace
                         );
-                        backend.setCurrentKey(perKeyCache.flinkKey); // Set context for this specific
-                        // key's cache
+                        backend.setCurrentKey(perKeyCache.flinkKey);
                         delegateState.setCurrentNamespace(perKeyCache.cacheNamespace);
-
                         long freedThisCache = perKeyCache.evictToMeetMemoryLimit(
                             targetBytesToFreeThisState - totalFreedBytes
                         );
@@ -3034,21 +3423,64 @@ public class CachingInternalMapState<K, N, UK, UV>
                     } finally {
                         K keyAfter = backend.getCurrentKey();
                         N nsAfter = getCurrentNamespace();
-                        // Restore original context
                         backend.setCurrentKey(originalKey);
                         delegateState.setCurrentNamespace(originalNamespace);
                         LOG.debug(
-                            "evictEntriesToFreeMemory: CONTEXT RESTORE. Before restore(key={}, ns={}). Restored to(key={}, ns={}).",
+                            "evictEntriesToFreeMemory: CONTAINER CONTEXT RESTORE. Before restore(key={}, ns={}). Restored to(key={}, ns={}).",
                             keyAfter,
                             nsAfter,
                             originalKey,
                             originalNamespace
                         );
                     }
+                }
+            } else {
+                for (CachePolicy<
+                    K,
+                    PerKeyMapCache<UK, UV, K, N>
+                > flinkKeyCaches : namespaceCaches.values()) {
+                    if (totalFreedBytes >= targetBytesToFreeThisState) break;
+                    if (flinkKeyCaches == null) continue;
 
-                    // Unregister metrics for this cache so that future instances can
-                    // re-register cleanly.
-                    // perKeyCache.closeMetrics();
+                    List<PerKeyMapCache<UK, UV, K, N>> perKeyCachesToEvict = new ArrayList<>(
+                        flinkKeyCaches.values()
+                    );
+
+                    for (PerKeyMapCache<UK, UV, K, N> perKeyCache : perKeyCachesToEvict) {
+                        if (totalFreedBytes >= targetBytesToFreeThisState) break;
+                        if (perKeyCache == null) continue;
+
+                        K originalKey = backend.getCurrentKey();
+                        N originalNamespace = getCurrentNamespace();
+                        try {
+                            LOG.debug(
+                                "evictEntriesToFreeMemory: CONTEXT SWITCH for per-key eviction. Original(key={}, ns={}). Setting to(key={}, ns={}).",
+                                originalKey,
+                                originalNamespace,
+                                perKeyCache.flinkKey,
+                                perKeyCache.cacheNamespace
+                            );
+                            backend.setCurrentKey(perKeyCache.flinkKey);
+                            delegateState.setCurrentNamespace(perKeyCache.cacheNamespace);
+
+                            long freedThisCache = perKeyCache.evictToMeetMemoryLimit(
+                                targetBytesToFreeThisState - totalFreedBytes
+                            );
+                            totalFreedBytes += freedThisCache;
+                        } finally {
+                            K keyAfter = backend.getCurrentKey();
+                            N nsAfter = getCurrentNamespace();
+                            backend.setCurrentKey(originalKey);
+                            delegateState.setCurrentNamespace(originalNamespace);
+                            LOG.debug(
+                                "evictEntriesToFreeMemory: CONTEXT RESTORE. Before restore(key={}, ns={}). Restored to(key={}, ns={}).",
+                                keyAfter,
+                                nsAfter,
+                                originalKey,
+                                originalNamespace
+                            );
+                        }
+                    }
                 }
             }
         } catch (Exception e) {
@@ -3065,6 +3497,19 @@ public class CachingInternalMapState<K, N, UK, UV>
 
     @Override
     public Iterator<Map.Entry<UK, UV>> iterator() throws Exception {
+        if (singleLayerEnabled) {
+            try {
+                flushToUnderlyingState();
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to flush map cache before iteration", e);
+            }
+            delegateState.setCurrentNamespace(getCurrentNamespace());
+            final Iterable<Map.Entry<UK, UV>> delegateEntries = delegateState.entries();
+            return delegateEntries == null
+                ? Collections.<Map.Entry<UK, UV>>emptyList().iterator()
+                : delegateEntries.iterator();
+        }
+
         // Respect explicit/global/auto bypass for iteration to avoid touching caches
         if (
             forceBypassAlways ||
