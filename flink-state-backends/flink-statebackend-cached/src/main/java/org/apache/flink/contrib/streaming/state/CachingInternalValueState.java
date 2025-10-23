@@ -50,12 +50,9 @@ public class CachingInternalValueState<K, N, V>
     private static final Logger LOG = LoggerFactory.getLogger(CachingInternalValueState.class);
     private final InternalValueState<K, N, V> delegateState;
     private final CachingKeyedStateBackend<K> backend; // For accessing current key
-    private final CachePolicy<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> namespaceCachesL1; // Namespace ->
-                                                                                                    // Key -> L1
-                                                                                                    // CacheEntry
-    private final CachePolicy<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> namespaceCachesL2; // Namespace ->
-                                                                                                    // Key -> L2
-                                                                                                    // CacheEntry
+    // Single-layer global caches keyed by composite key (keyGroup + namespace + key)
+    private final CachePolicy<CompositeKey, CacheEntry<V>> l1Cache;
+    private final CachePolicy<CompositeKey, CacheEntry<V>> l2Cache;
 
     private final int l1CacheSizePerKeyPerNamespace;
     private final int l2CacheSizePerKeyPerNamespace;
@@ -198,21 +195,53 @@ public class CachingInternalValueState<K, N, V>
             this.valueStateL2CacheMissCount = no;
         }
 
-        // Create namespace caches with eviction listeners that flush dirty entries
-        this.namespaceCachesL1 = createCachePolicyWithEvictionListener(maxActiveNamespacesInCache,
-                evictedNsEntry -> {
-                    // Flush any dirty entries in the evicted namespace before removing it
-                    StableNamespaceKey evictedNamespaceKey = evictedNsEntry.getKey();
-                    CachePolicy<K, CacheEntry<V>> evictedL1Cache = evictedNsEntry.getValue();
-                    flushCacheForNamespaceKey(evictedNamespaceKey, evictedL1Cache);
-                });
-        this.namespaceCachesL2 = createCachePolicyWithEvictionListener(maxActiveNamespacesInCache,
-                evictedNsEntry -> {
-                    // Flush any dirty entries in the evicted namespace before removing it
-                    StableNamespaceKey evictedNamespaceKey = evictedNsEntry.getKey();
-                    CachePolicy<K, CacheEntry<V>> evictedL2Cache = evictedNsEntry.getValue();
-                    flushCacheForNamespaceKey(evictedNamespaceKey, evictedL2Cache);
-                });
+        // Create single-layer global caches with eviction listeners
+        int l1GlobalCapacity = Math.max(1, this.l1CacheSizePerKeyPerNamespace * this.maxActiveNamespacesInCache);
+        int l2GlobalCapacity = Math.max(1, this.l2CacheSizePerKeyPerNamespace * this.maxActiveNamespacesInCache);
+
+        this.l2Cache = createCachePolicyWithEvictionListener(l2GlobalCapacity, evicted -> {
+            CacheEntry<V> entry = evicted.getValue();
+            if (entry != null) {
+                backend.reportCacheMemoryReleased(entry.getEstimatedSizeBytes());
+            }
+        });
+
+        this.l1Cache = createCachePolicyWithEvictionListener(l1GlobalCapacity, evicted -> {
+            CompositeKey ck = evicted.getKey();
+            CacheEntry<V> entry = evicted.getValue();
+            if (entry == null) {
+                return;
+            }
+            long estimatedSize = entry.getEstimatedSizeBytes();
+            backend.reportCacheMemoryReleased(estimatedSize); // release L1 memory
+
+            if (entry.isDirty()) {
+                // Flush dirty entry to delegate using composite key context
+                K originalKey = backend.getCurrentKey();
+                N originalNs = this.currentNamespace;
+                try {
+                    K k = ck.deserializeKey(getKeySerializer());
+                    N n = ck.deserializeNamespace(getNamespaceSerializer());
+                    backend.setCurrentKey(k);
+                    delegateState.setCurrentNamespace(n);
+                    delegateState.update(entry.getValue());
+                    entry.setDirty(false);
+                } catch (IOException e) {
+                    throw new RuntimeException("Failed to flush dirty entry on L1 eviction", e);
+                } finally {
+                    backend.setCurrentKey(originalKey);
+                    if (originalNs != null) {
+                        delegateState.setCurrentNamespace(originalNs);
+                    }
+                }
+            }
+
+            CacheEntry<V> old = l2Cache.put(ck, entry);
+            if (old != null) {
+                backend.reportCacheMemoryReleased(old.getEstimatedSizeBytes());
+            }
+            backend.reportCacheMemoryAdded(entry.getEstimatedSizeBytes());
+        });
     }
 
     private void registerProfileMetricsIfNeeded() {
@@ -323,31 +352,19 @@ public class CachingInternalValueState<K, N, V>
 
     // Aggregate helpers for gauges
     private long sumL1Entries() {
-        long total = 0L;
         try {
-            for (Map.Entry<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> e : namespaceCachesL1.entrySet()) {
-                CachePolicy<K, CacheEntry<V>> c = e.getValue();
-                if (c != null) {
-                    total += c.size();
-                }
-            }
+            return l1Cache.size();
         } catch (Throwable ignored) {
+            return 0L;
         }
-        return total;
     }
 
     private long sumL2Entries() {
-        long total = 0L;
         try {
-            for (Map.Entry<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> e : namespaceCachesL2.entrySet()) {
-                CachePolicy<K, CacheEntry<V>> c = e.getValue();
-                if (c != null) {
-                    total += c.size();
-                }
-            }
+            return l2Cache.size();
         } catch (Throwable ignored) {
+            return 0L;
         }
-        return total;
     }
 
     private void updateCacheBypassCondition(boolean resolvedByCache) {
@@ -407,80 +424,12 @@ public class CachingInternalValueState<K, N, V>
         return delegateState;
     }
 
-    private CachePolicy<K, CacheEntry<V>> getL1CacheForNamespace(N namespace) {
-        // Prefer cached StableNamespaceKey when namespace matches currentNamespace
-        StableNamespaceKey nsKey = (currentNamespaceStableKey != null
-                && (namespace == this.currentNamespace
-                    || (namespace != null && namespace.equals(this.currentNamespace))))
-                ? currentNamespaceStableKey
-                : StableNamespaceKey.fromNamespace(namespace, getNamespaceSerializer());
-        return namespaceCachesL1.computeIfAbsent(
-                nsKey,
-                stableKey -> createCachePolicyWithEvictionListener(l1CacheSizePerKeyPerNamespace,
-                        evictedL1Entry -> {
-                            // This is the L1 eviction listener for a specific key in a specific namespace.
-                            CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(namespaceKeyToNamespace(stableKey));
-                            K evictedKey = evictedL1Entry.getKey();
-                            CacheEntry<V> evictedValueWrapper = evictedL1Entry.getValue();
-                            V evictedValue = evictedValueWrapper.getValue();
-                            long estimatedSize = evictedValueWrapper.getEstimatedSizeBytes();
-
-                            backend.reportCacheMemoryReleased(estimatedSize); // Report L1 release
-
-                            if (evictedValueWrapper.isDirty()) {
-                                K originalKey = backend.getCurrentKey();
-                                N originalNamespace = this.currentNamespace; // do not mutate wrapper
-                                try {
-                                    backend.setCurrentKey(evictedKey);
-                                    delegateState.setCurrentNamespace(namespaceKeyToNamespace(stableKey)); // Set NS for delegate for this op
-                                    delegateState.update(evictedValue);
-                                    evictedValueWrapper.setDirty(false); // Mark as clean
-
-                                    // Move to L2 as clean after successful update
-                                    CacheEntry<V> entryToL2 = CacheEntry.clean(evictedValue); // Re-estimate size if value changed, though it shouldn't for ValueState here
-                                    CacheEntry<V> oldL2Entry = l2Cache.put(evictedKey, entryToL2);
-                                    if (oldL2Entry != null) { // If L2 already had an entry for this key (should be rare)
-                                        backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
-                                    }
-                                    backend.reportCacheMemoryAdded(entryToL2.getEstimatedSizeBytes()); // Report L2 add
-
-                                } catch (IOException e) {
-                                    // Failed to flush, so it's not moved to L2 and L1 release is final.
-                                    // The backend.reportCacheMemoryReleased(estimatedSize) done earlier stands.
-                                    throw new RuntimeException(
-                                            "Failed to flush L1 entry to delegate on L1 eviction for key: "
-                                                    + evictedKey + " in nsKey: " + nsKey,
-                                            e);
-                                } finally {
-                                    // Restore context
-                                    backend.setCurrentKey(originalKey);
-                                    if (originalNamespace != null) {
-                                        delegateState.setCurrentNamespace(originalNamespace);
-                                    }
-                                }
-                            } else {
-                                // Not dirty, just move to L2 (it's already clean)
-                                CacheEntry<V> oldL2Entry = l2Cache.put(evictedKey, evictedValueWrapper); // Use original wrapper
-                                if (oldL2Entry != null) {
-                                    backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
-                                }
-                                backend.reportCacheMemoryAdded(evictedValueWrapper.getEstimatedSizeBytes()); // Report L2 add
-                            }
-                        }));
+    private CachePolicy<CompositeKey, CacheEntry<V>> getL1CacheForNamespace(N namespace) {
+        return l1Cache;
     }
 
-    private CachePolicy<K, CacheEntry<V>> getL2CacheForNamespace(N namespace) {
-        // Prefer cached StableNamespaceKey when namespace matches currentNamespace
-        StableNamespaceKey nsKey = (currentNamespaceStableKey != null
-                && (namespace == this.currentNamespace
-                    || (namespace != null && namespace.equals(this.currentNamespace))))
-                ? currentNamespaceStableKey
-                : StableNamespaceKey.fromNamespace(namespace, getNamespaceSerializer());
-        return namespaceCachesL2.computeIfAbsent(
-                nsKey,
-                k -> new LRUMap<>(l2CacheSizePerKeyPerNamespace) // L2 is always LRU
-                // L2 eviction doesn't trigger further writes here
-                );
+    private CachePolicy<CompositeKey, CacheEntry<V>> getL2CacheForNamespace(N namespace) {
+        return l2Cache;
     }
 
     @Override
@@ -496,8 +445,10 @@ public class CachingInternalValueState<K, N, V>
                 return delegateState.value();
             }
 
-        CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        CacheEntry<V> l1Entry = l1Cache.get(currentKey);
+        CachePolicy<CompositeKey, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
+        int kg = backend.getKeyContext().getCurrentKeyGroupIndex();
+        CompositeKey ck = CompositeKey.from(currentKey, kg, currentNamespace, getKeySerializer(), getNamespaceSerializer());
+        CacheEntry<V> l1Entry = l1Cache.get(ck);
 
         if (l1Entry != null) {
             updateCacheBypassCondition(true);
@@ -511,8 +462,8 @@ public class CachingInternalValueState<K, N, V>
         l1ValueCacheMissCount.inc();
         valueStateL1CacheMissCount.inc();
 
-        CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
-        CacheEntry<V> l2Entry = l2Cache.get(currentKey);
+        CachePolicy<CompositeKey, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
+        CacheEntry<V> l2Entry = l2Cache.get(ck);
 
         if (l2Entry != null) {
             updateCacheBypassCondition(true);
@@ -523,13 +474,13 @@ public class CachingInternalValueState<K, N, V>
             // No memory change reported here as it's a move between caches of the same backend instance.
             // However, if L1.put causes an eviction, that eviction will report a release.
             // And this put will report an add.
-            l2Cache.remove(currentKey); // This remove itself doesn't release memory from the CachingKeyedStateBackend's perspective yet
+            l2Cache.remove(ck); // This remove itself doesn't release memory from the CachingKeyedStateBackend's perspective yet
             // The entry is still "in play" until it's re-added to L1 or discarded.
             // We don't report release for l2Entry removal & add for l1Cache.put here to avoid double counting
             // if l1Cache.put evicts something (which would report release) and then adds this (reporting add).
             // Instead, the L1 put will handle the accounting if it replaces something or just adds.
             CacheEntry<V> entryToL1 = CacheEntry.clean(l2Entry.getValue()); // Create a new entry for L1 if needed, or use l2Entry if suitable
-            CacheEntry<V> oldL1Entry = l1Cache.put(currentKey, entryToL1);
+            CacheEntry<V> oldL1Entry = l1Cache.put(ck, entryToL1);
             if (oldL1Entry != null) {
                 backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
             }
@@ -545,7 +496,7 @@ public class CachingInternalValueState<K, N, V>
         V valueFromDelegate = delegateState.value();
         if (valueFromDelegate != null) { // Only cache non-null
             CacheEntry<V> newEntry = CacheEntry.clean(valueFromDelegate);
-            CacheEntry<V> oldL1Entry = l1Cache.put(currentKey, newEntry);
+            CacheEntry<V> oldL1Entry = l1Cache.put(ck, newEntry);
             if (oldL1Entry != null) {
                 backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
             }
@@ -579,19 +530,21 @@ public class CachingInternalValueState<K, N, V>
                 cacheBypassActivations.inc();
                 delegateState.update(value);
                 // Invalidate caches to avoid stale flush later
-                CachePolicy<K, CacheEntry<V>> l1Bypass = getL1CacheForNamespace(currentNamespace);
-                CacheEntry<V> old1 = l1Bypass.remove(currentKey);
+                CachePolicy<CompositeKey, CacheEntry<V>> l1Bypass = getL1CacheForNamespace(currentNamespace);
+                int kgBypass = backend.getKeyContext().getCurrentKeyGroupIndex();
+                CompositeKey ckBypass = CompositeKey.from(currentKey, kgBypass, currentNamespace, getKeySerializer(), getNamespaceSerializer());
+                CacheEntry<V> old1 = l1Bypass.remove(ckBypass);
                 if (old1 != null) {
                     backend.reportCacheMemoryReleased(old1.getEstimatedSizeBytes());
                 }
-                CachePolicy<K, CacheEntry<V>> l2Bypass = getL2CacheForNamespace(currentNamespace);
-                CacheEntry<V> old2 = l2Bypass.remove(currentKey);
+                CachePolicy<CompositeKey, CacheEntry<V>> l2Bypass = getL2CacheForNamespace(currentNamespace);
+                CacheEntry<V> old2 = l2Bypass.remove(ckBypass);
                 if (old2 != null) {
                     backend.reportCacheMemoryReleased(old2.getEstimatedSizeBytes());
                 }
                 // Optionally cache a clean value in L1 for locality
                 CacheEntry<V> cleanEntry = CacheEntry.clean(value);
-                CacheEntry<V> prev = l1Bypass.put(currentKey, cleanEntry);
+                CacheEntry<V> prev = l1Bypass.put(ckBypass, cleanEntry);
                 if (prev != null) {
                     backend.reportCacheMemoryReleased(prev.getEstimatedSizeBytes());
                 }
@@ -604,15 +557,17 @@ public class CachingInternalValueState<K, N, V>
                 updateCacheBypassCondition(true);
                 cacheHits.inc();
                 delegateState.update(value);
-                CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
+                CachePolicy<CompositeKey, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
                 CacheEntry<V> clean = CacheEntry.clean(value);
-                CacheEntry<V> oldL1 = l1Cache.put(currentKey, clean);
+                int kgWt = backend.getKeyContext().getCurrentKeyGroupIndex();
+                CompositeKey ckWt = CompositeKey.from(currentKey, kgWt, currentNamespace, getKeySerializer(), getNamespaceSerializer());
+                CacheEntry<V> oldL1 = l1Cache.put(ckWt, clean);
                 if (oldL1 != null) {
                     backend.reportCacheMemoryReleased(oldL1.getEstimatedSizeBytes());
                 }
                 backend.reportCacheMemoryAdded(clean.getEstimatedSizeBytes());
-                CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
-                CacheEntry<V> oldL2 = l2Cache.remove(currentKey);
+                CachePolicy<CompositeKey, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
+                CacheEntry<V> oldL2 = l2Cache.remove(ckWt);
                 if (oldL2 != null) {
                     backend.reportCacheMemoryReleased(oldL2.getEstimatedSizeBytes());
                 }
@@ -621,9 +576,11 @@ public class CachingInternalValueState<K, N, V>
 
             updateCacheBypassCondition(true);
             cacheHits.inc();
-            CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
+            CachePolicy<CompositeKey, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
             CacheEntry<V> newEntry = CacheEntry.dirty(value);
-            CacheEntry<V> oldL1Entry = l1Cache.put(currentKey, newEntry);
+            int kgWb = backend.getKeyContext().getCurrentKeyGroupIndex();
+            CompositeKey ckWb = CompositeKey.from(currentKey, kgWb, currentNamespace, getKeySerializer(), getNamespaceSerializer());
+            CacheEntry<V> oldL1Entry = l1Cache.put(ckWb, newEntry);
             if (oldL1Entry != null) {
                 backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
             }
@@ -632,8 +589,8 @@ public class CachingInternalValueState<K, N, V>
             // L1 remains write-back tolerant even if write-behind is disabled; L2 will only contain clean entries via eviction path
 
             // If L2 had this key, it's now stale, remove it.
-            CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
-            CacheEntry<V> oldL2Entry = l2Cache.remove(currentKey);
+            CachePolicy<CompositeKey, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
+            CacheEntry<V> oldL2Entry = l2Cache.remove(ckWb);
             if (oldL2Entry != null) {
                 // L2 entries are implicitly managed by L1 evictions or direct stale removal like here.
                 // Their memory was accounted for when they moved from L1 to L2 (L1 released, L2 added - though we simplified this)
@@ -663,14 +620,16 @@ public class CachingInternalValueState<K, N, V>
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
-        CachePolicy<K, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        CacheEntry<V> oldL1Entry = l1Cache.remove(currentKey);
+        CachePolicy<CompositeKey, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
+        int kgCl = backend.getKeyContext().getCurrentKeyGroupIndex();
+        CompositeKey ckCl = CompositeKey.from(currentKey, kgCl, currentNamespace, getKeySerializer(), getNamespaceSerializer());
+        CacheEntry<V> oldL1Entry = l1Cache.remove(ckCl);
         if (oldL1Entry != null) {
             backend.reportCacheMemoryReleased(oldL1Entry.getEstimatedSizeBytes());
         }
 
-        CachePolicy<K, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
-        CacheEntry<V> oldL2Entry = l2Cache.remove(currentKey);
+        CachePolicy<CompositeKey, CacheEntry<V>> l2Cache = getL2CacheForNamespace(currentNamespace);
+        CacheEntry<V> oldL2Entry = l2Cache.remove(ckCl);
         if (oldL2Entry != null) {
             backend.reportCacheMemoryReleased(oldL2Entry.getEstimatedSizeBytes());
         }
@@ -690,33 +649,29 @@ public class CachingInternalValueState<K, N, V>
         N originalWrapperNs = this.currentNamespace; // keep wrapper stable
         N originalDelegateNs = originalWrapperNs;
         try {
-            // Flush L1 caches across all namespaces without mutating wrapper context
-            for (Map.Entry<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> nsEntry : namespaceCachesL1.entrySet()) {
-                StableNamespaceKey namespaceKey = nsEntry.getKey();
-                CachePolicy<K, CacheEntry<V>> l1Cache = nsEntry.getValue();
-                N ns = namespaceKey.deserialize(getNamespaceSerializer());
-                if (ns != null) delegateState.setCurrentNamespace(ns);
-
-                // Defensive copy to avoid CME
-                java.util.List<Map.Entry<K, CacheEntry<V>>> currentL1Entries = new java.util.ArrayList<>();
-                for (Map.Entry<K, CacheEntry<V>> e : l1Cache.entrySet()) {
-                    currentL1Entries.add(e);
-                }
-
-                for (Map.Entry<K, CacheEntry<V>> mapEntry : currentL1Entries) {
-                    K key = mapEntry.getKey();
-                    CacheEntry<V> entry = mapEntry.getValue();
-                    if (entry != null && entry.isDirty()) {
-                        V value = entry.getValue();
-                        if (key != null) {
-                            K prevKey = backend.getCurrentKey();
-                            try {
-                                backend.setCurrentKey(key);
-                                delegateState.update(value);
-                                entry.setDirty(false);
-                            } finally {
-                                backend.setCurrentKey(prevKey);
-                            }
+            // Flush dirty entries across L1 without mutating wrapper context
+            java.util.List<Map.Entry<CompositeKey, CacheEntry<V>>> snapshot = new java.util.ArrayList<>();
+            for (Map.Entry<CompositeKey, CacheEntry<V>> e : l1Cache.entrySet()) {
+                snapshot.add(e);
+            }
+            for (Map.Entry<CompositeKey, CacheEntry<V>> e : snapshot) {
+                CacheEntry<V> entry = e.getValue();
+                if (entry != null && entry.isDirty()) {
+                    CompositeKey ck = e.getKey();
+                    V value = entry.getValue();
+                    K prevKey = backend.getCurrentKey();
+                    N prevNs = this.currentNamespace;
+                    try {
+                        K key = ck.deserializeKey(getKeySerializer());
+                        N ns = ck.deserializeNamespace(getNamespaceSerializer());
+                        backend.setCurrentKey(key);
+                        delegateState.setCurrentNamespace(ns);
+                        delegateState.update(value);
+                        entry.setDirty(false);
+                    } finally {
+                        backend.setCurrentKey(prevKey);
+                        if (prevNs != null) {
+                            delegateState.setCurrentNamespace(prevNs);
                         }
                     }
                 }
@@ -806,94 +761,61 @@ public class CachingInternalValueState<K, N, V>
         long bytesFreed = 0;
         if (targetBytesToFreeThisState <= 0) return 0;
 
-        // Iterate over a snapshot of L2 namespaces to avoid concurrent modification if map supports it
-        List<StableNamespaceKey> l2Namespaces = new ArrayList<>();
-        for (Map.Entry<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> entry : namespaceCachesL2.entrySet()) {
-            l2Namespaces.add(entry.getKey());
+        // Phase 1: free from L2 (all clean)
+        Iterator<Map.Entry<CompositeKey, CacheEntry<V>>> l2Iter = l2Cache.entrySet().iterator();
+        while (l2Iter.hasNext() && bytesFreed < targetBytesToFreeThisState) {
+            Map.Entry<CompositeKey, CacheEntry<V>> e = l2Iter.next();
+            CacheEntry<V> cacheValue = e.getValue();
+            long estimatedSize = cacheValue.getEstimatedSizeBytes();
+            l2Iter.remove();
+            backend.reportCacheMemoryReleased(estimatedSize);
+            bytesFreed += estimatedSize;
         }
+        if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
 
-        for (StableNamespaceKey namespaceKey : l2Namespaces) {
-            CachePolicy<K, CacheEntry<V>> l2Cache = namespaceCachesL2.get(namespaceKey); // Re-fetch, could be removed by another thread
-            if (l2Cache == null || l2Cache.isEmpty()) continue; // Optimization: skip empty L2 caches
-
-            Iterator<Map.Entry<K, CacheEntry<V>>> l2Iter = l2Cache.entrySet().iterator();
-            while (l2Iter.hasNext() && bytesFreed < targetBytesToFreeThisState) {
-                Map.Entry<K, CacheEntry<V>> entry = l2Iter.next();
-                CacheEntry<V> cacheValue = entry.getValue(); // L2 entries are always clean
-                long estimatedSize = cacheValue.getEstimatedSizeBytes();
-                l2Iter.remove();
-                backend.reportCacheMemoryReleased(estimatedSize);
-                bytesFreed += estimatedSize;
+        // Phase 2: free clean from L1, collect dirty
+        java.util.List<Map.Entry<CompositeKey, CacheEntry<V>>> dirtyL1 = new java.util.ArrayList<>();
+        Iterator<Map.Entry<CompositeKey, CacheEntry<V>>> l1Iter = l1Cache.entrySet().iterator();
+        while (l1Iter.hasNext() && bytesFreed < targetBytesToFreeThisState) {
+            Map.Entry<CompositeKey, CacheEntry<V>> e = l1Iter.next();
+            CacheEntry<V> val = e.getValue();
+            if (!val.isDirty()) {
+                long est = val.getEstimatedSizeBytes();
+                l1Iter.remove();
+                backend.reportCacheMemoryReleased(est);
+                bytesFreed += est;
+            } else {
+                dirtyL1.add(e);
             }
-            if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
         }
+        if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
 
-        // Iterate over L1 namespaces
-        List<StableNamespaceKey> l1Namespaces = new ArrayList<>();
-        for (Map.Entry<StableNamespaceKey, CachePolicy<K, CacheEntry<V>>> entry : namespaceCachesL1.entrySet()) {
-            l1Namespaces.add(entry.getKey());
-        }
-
-        for (StableNamespaceKey namespaceKey : l1Namespaces) {
-            CachePolicy<K, CacheEntry<V>> l1Cache = namespaceCachesL1.get(namespaceKey);
-            if (l1Cache == null || l1Cache.isEmpty()) continue; // Optimization: skip empty L1 caches
-
-            // Evict clean L1 entries first
-            Iterator<Map.Entry<K, CacheEntry<V>>> l1IterClean = l1Cache.entrySet().iterator();
-            List<Map.Entry<K, CacheEntry<V>>> dirtyL1EntriesToConsider = new ArrayList<>();
-            while (l1IterClean.hasNext() && bytesFreed < targetBytesToFreeThisState) {
-                Map.Entry<K, CacheEntry<V>> entry = l1IterClean.next();
-                CacheEntry<V> cacheValue = entry.getValue();
-                if (!cacheValue.isDirty()) {
-                    long estimatedSize = cacheValue.getEstimatedSizeBytes();
-                    l1IterClean.remove();
-                    backend.reportCacheMemoryReleased(estimatedSize);
-                    bytesFreed += estimatedSize;
-                } else {
-                    dirtyL1EntriesToConsider.add(entry); // Collect dirty ones for later pass
+        // Phase 3: flush-and-remove dirty from L1
+        for (Map.Entry<CompositeKey, CacheEntry<V>> e : dirtyL1) {
+            if (bytesFreed >= targetBytesToFreeThisState) break;
+            CompositeKey ck = e.getKey();
+            CacheEntry<V> val = e.getValue();
+            long est = val.getEstimatedSizeBytes();
+            K prevKey = backend.getCurrentKey();
+            N prevNs = this.currentNamespace;
+            try {
+                K key = ck.deserializeKey(getKeySerializer());
+                N ns = ck.deserializeNamespace(getNamespaceSerializer());
+                backend.setCurrentKey(key);
+                delegateState.setCurrentNamespace(ns);
+                delegateState.update(val.getValue());
+                val.setDirty(false);
+                l1Cache.remove(ck);
+                backend.reportCacheMemoryReleased(est);
+                bytesFreed += est;
+            } catch (Exception ex) {
+                // best-effort
+            } finally {
+                backend.setCurrentKey(prevKey);
+                if (prevNs != null) {
+                    delegateState.setCurrentNamespace(prevNs);
                 }
             }
-            if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
-
-            // Evict dirty L1 entries if still needed (requires flushing)
-            // This is a simplified flush for the global eviction context.
-            // Proper context setting for delegateState.update is complex here.
-            // For a truly "lightweight" initial pass, one might choose to *not* evict dirty entries here,
-            // or only evict them without a guaranteed flush if that's acceptable for the memory cap goal.
-            Iterator<Map.Entry<K, CacheEntry<V>>> dirtyIter = dirtyL1EntriesToConsider.iterator(); // Use separate iterator if modifying original list
-            while (dirtyIter.hasNext() && bytesFreed < targetBytesToFreeThisState) {
-                Map.Entry<K, CacheEntry<V>> dirtyEntryTuple = dirtyIter.next();
-                K key = dirtyEntryTuple.getKey();
-                CacheEntry<V> dirtyEntry = dirtyEntryTuple.getValue();
-                V value = dirtyEntry.getValue();
-                long estimatedSize = dirtyEntry.getEstimatedSizeBytes();
-
-                N originalCurrentNamespace = this.currentNamespace; // Store current NS of this state object
-                K originalBackendKey = backend.getCurrentKey();
-                try {
-                    // Simplified: Attempt to flush. In a real scenario, this needs robust context management.
-                    backend.setCurrentKey(key);       // Set key for backend & delegate
-                    delegateState.setCurrentNamespace(namespaceKey.deserialize(getNamespaceSerializer())); // Set NS for delegate
-                    delegateState.update(value);    // Flush to delegate
-                    dirtyEntry.setDirty(false);     // Mark as clean if flush was successful
-
-                    // Now evict from L1
-                    l1Cache.remove(key); // Ensure removal, iterator might be tricky if map reorders
-                    backend.reportCacheMemoryReleased(estimatedSize);
-                    bytesFreed += estimatedSize;
-
-                } catch (Exception e) {
-                    // Log or handle: Failed to flush dirty entry, cannot evict it reliably to free memory yet.
-                    // System.err.println("Global eviction: Failed to flush/evict dirty L1 entry for key " + key + " in NS " + namespace + ": " + e.getMessage());
-                } finally {
-                    // Restore context
-                    if (originalCurrentNamespace != null) {
-                        delegateState.setCurrentNamespace(originalCurrentNamespace);
-                    }
-                    backend.setCurrentKey(originalBackendKey);
-                }
-            }
-            if (bytesFreed >= targetBytesToFreeThisState) return bytesFreed;
         }
         return bytesFreed;
     }
@@ -969,6 +891,82 @@ public class CachingInternalValueState<K, N, V>
 
     private N namespaceKeyToNamespace(StableNamespaceKey key) {
         return key.deserialize(getNamespaceSerializer());
+    }
+
+    /**
+     * Composite key for global caches: [ keyGroup:int32 | nsLen:int32 | nsBytes | keyBytes ].
+     */
+    private static final class CompositeKey {
+        private final byte[] bytes;
+
+        private CompositeKey(byte[] bytes) { this.bytes = bytes; }
+
+        static <K, N> CompositeKey from(K key, int keyGroup, N ns,
+                                        TypeSerializer<K> keySer,
+                                        TypeSerializer<N> nsSer) {
+            try {
+                DataOutputSerializer out = new DataOutputSerializer(256);
+                out.writeInt(keyGroup);
+                DataOutputSerializer nsOut = new DataOutputSerializer(128);
+                nsSer.serialize(ns, nsOut);
+                byte[] nsBytes = nsOut.getCopyOfBuffer();
+                out.writeInt(nsBytes.length);
+                out.write(nsBytes);
+                keySer.serialize(key, out);
+                return new CompositeKey(out.getCopyOfBuffer());
+            } catch (IOException e) {
+                throw new RuntimeException("CompositeKey serialization failed", e);
+            }
+        }
+
+        <K> K deserializeKey(TypeSerializer<K> keySer) {
+            try {
+                DataInputDeserializer in = new DataInputDeserializer(bytes);
+                in.readInt(); // keyGroup
+                int nsLen = in.readInt();
+                in.skipBytesToRead(nsLen);
+                return keySer.deserialize(in);
+            } catch (IOException e) {
+                throw new RuntimeException("CompositeKey key deserialization failed", e);
+            }
+        }
+
+        <N> N deserializeNamespace(TypeSerializer<N> nsSer) {
+            try {
+                DataInputDeserializer in = new DataInputDeserializer(bytes);
+                in.readInt(); // keyGroup
+                int nsLen = in.readInt();
+                byte[] nsBytes = new byte[nsLen];
+                in.read(nsBytes);
+                return nsSer.deserialize(new DataInputDeserializer(nsBytes));
+            } catch (IOException e) {
+                throw new RuntimeException("CompositeKey namespace deserialization failed", e);
+            }
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || this.getClass() != o.getClass()) return false;
+            CompositeKey that = (CompositeKey) o;
+            if (this.bytes.length != that.bytes.length) return false;
+            for (int i = 0; i < this.bytes.length; i++) {
+                if (this.bytes[i] != that.bytes[i]) return false;
+            }
+            return true;
+        }
+
+        @Override
+        public int hashCode() {
+            int result = 1;
+            for (byte element : bytes) {
+                result = 31 * result + element;
+            }
+            return result;
+        }
+
+        @Override
+        public String toString() { return "CompositeKey{" + bytes.length + "b}"; }
     }
 
     // No-op counter for when metrics group is absent
