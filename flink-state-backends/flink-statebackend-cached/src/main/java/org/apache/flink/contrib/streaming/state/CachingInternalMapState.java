@@ -46,6 +46,7 @@ import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.helpers.NOPLogger;
 
 /**
  * An {@link InternalMapState} that uses an L1/L2 cache for its entries. Caches individual (UK, UV)
@@ -65,7 +66,8 @@ public class CachingInternalMapState<K, N, UK, UV>
     // Flink's
     // Closeable
 
-    private static final Logger LOG = LoggerFactory.getLogger(CachingInternalMapState.class);
+    // private static final Logger LOG = LoggerFactory.getLogger(CachingInternalMapState.class);
+    private static final Logger LOG = NOPLogger.NOP_LOGGER;
     private final InternalMapState<K, N, UK, UV> delegateState;
     private final CachingKeyedStateBackend<K> backend;
     private N currentNamespace;
@@ -1577,11 +1579,11 @@ public class CachingInternalMapState<K, N, UK, UV>
 
     private void registerProfileMetricsIfNeeded() {
         if (profGetCalls != null) return; // already
-        LOG.info(
-            "Attempting to register profile metrics for MapState. profileEnabled={}, metricsIsNull={}",
-            profileEnabled,
-            metrics == null
-        );
+        // LOG.info(
+        //     "Attempting to register profile metrics for MapState. profileEnabled={}, metricsIsNull={}",
+        //     profileEnabled,
+        //     metrics == null
+        // );
         if (!profileEnabled || metrics == null) return;
         try {
             MetricGroup pg = metrics.addGroup("profile");
@@ -2311,7 +2313,7 @@ public class CachingInternalMapState<K, N, UK, UV>
 
         registerProfileMetricsIfNeeded();
         final long t0 = maybeStartTimer();
-        LOG.info("Putting value for key {}", userKey);
+        // LOG.info("Putting value for key {}", userKey);
         if (userKey == null) {
             /* let delegate handle or throw */ return;
         }

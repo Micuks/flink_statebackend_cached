@@ -35,6 +35,7 @@ import java.util.List;
 import java.util.ArrayList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.helpers.NOPLogger;
 
 /**
  * An {@link InternalValueState} that uses an L1/L2 cache for its values.
@@ -47,7 +48,7 @@ public class CachingInternalValueState<K, N, V>
         implements InternalValueState<K, N, V>,
                 CachingInternalState<K, N, V, InternalValueState<K, N, V>> {
 
-    private static final Logger LOG = LoggerFactory.getLogger(CachingInternalValueState.class);
+    private static final Logger LOG = NOPLogger.NOP_LOGGER;
     private final InternalValueState<K, N, V> delegateState;
     private final CachingKeyedStateBackend<K> backend; // For accessing current key
     // Single-layer global caches keyed by composite key (keyGroup + namespace + key)
@@ -72,6 +73,18 @@ public class CachingInternalValueState<K, N, V>
     private transient AtomicLong accessesForHitRateWindow;
     private transient AtomicLong hitsInHitRateWindow;
     private transient AtomicLong totalAccessesForBypassEligibility;
+    private transient AtomicLong accessSampler;
+    private static final int SAMPLING_RATE = 100; // 1%
+    // Hysteresis parameters for adaptive bypass
+    private final double lowHitRateThreshold; // enter bypass below this
+    private final double highHitRateThreshold; // exit bypass above this
+    private final int enterConsecutiveLowWindows = 1; // react quickly to poor locality
+    private final int exitConsecutiveHighWindows = 2; // require stability to re-enable cache
+    private final int cooldownWindowsAfterToggle = 2; // avoid thrashing after a decision
+    private transient long completedWindows = 0L;
+    private transient int consecutiveLow = 0;
+    private transient int consecutiveHigh = 0;
+    private transient int windowsSinceToggle = 0;
     // Metrics
     private final transient MetricGroup metrics;
     private final Counter cacheHits;                 // generic compatibility
@@ -134,6 +147,10 @@ public class CachingInternalValueState<K, N, V>
         this.bypassEnabled = bypassEnabled;
         this.writeBehindEnabled = writeBehindEnabled;
 
+        // Initialize hysteresis thresholds based on provided threshold
+        this.lowHitRateThreshold = Math.max(0.0, this.cacheHitRateThreshold - 0.10);
+        this.highHitRateThreshold = Math.min(1.0, this.cacheHitRateThreshold);
+
         // Initialize lightweight profiling configuration (must assign final fields)
         this.profileEnabled = backend != null && backend.isProfileEnabled();
         this.profileSampleRate = backend != null ? backend.getProfileSampleRate() : 1024;
@@ -142,10 +159,12 @@ public class CachingInternalValueState<K, N, V>
             this.accessesForHitRateWindow = new AtomicLong(0);
             this.hitsInHitRateWindow = new AtomicLong(0);
             this.totalAccessesForBypassEligibility = new AtomicLong(0);
+            this.accessSampler = new AtomicLong(0);
         } else {
             this.accessesForHitRateWindow = null;
             this.hitsInHitRateWindow = null;
             this.totalAccessesForBypassEligibility = null;
+            this.accessSampler = null;
         }
 
         // Initialize metrics
@@ -368,50 +387,88 @@ public class CachingInternalValueState<K, N, V>
     }
 
     private void updateCacheBypassCondition(boolean resolvedByCache) {
-        if (!bypassEnabled || cacheHitRateThreshold <= 0.0) {
+        updateCacheBypassConditionWeighted(resolvedByCache, 1);
+    }
+
+    // Weighted variant for adaptive bypass with hysteresis and cooldown.
+    private void updateCacheBypassConditionWeighted(boolean resolvedByCache, int weight) {
+        if (weight <= 0) {
+            return; // ignore non-positive weights
+        }
+        if (
+                !bypassEnabled ||
+                cacheHitRateThreshold <= 0.0 ||
+                accessesForHitRateWindow == null ||
+                hitsInHitRateWindow == null ||
+                totalAccessesForBypassEligibility == null
+        ) {
             this.bypassCache = false;
             return;
         }
 
         if (resolvedByCache) {
-            hitsInHitRateWindow.incrementAndGet();
+            hitsInHitRateWindow.addAndGet(weight);
         }
-        long currentWindowAccesses = accessesForHitRateWindow.incrementAndGet();
+        long currentWindowAccesses = accessesForHitRateWindow.addAndGet(weight);
 
         if (currentWindowAccesses >= this.cacheHitRateWindowSize) {
-            // Once the window is full, we perform the check and update total accesses.
-            // This moves one atomic operation from the hot path to here.
             long totalAccesses = totalAccessesForBypassEligibility.addAndGet(currentWindowAccesses);
 
             if (totalAccesses < this.cacheMinAccessesForBypassCheck) {
-                // Not enough total accesses yet to make a decision, but we reset the window.
                 accessesForHitRateWindow.set(0);
                 hitsInHitRateWindow.set(0);
-                this.bypassCache = false; // Ensure bypass is off
+                this.bypassCache = false;
                 return;
             }
 
             double currentHitRate = (double) hitsInHitRateWindow.get() / currentWindowAccesses;
-            this.bypassCache = currentHitRate < this.cacheHitRateThreshold;
-            if (this.bypassCache) {
-                cacheBypassActivations.inc();
-                LOG.info(
-                        "Cache bypass activated for value state. Hit rate {}% ({} hits / {} accesses) is below threshold {}%. Namespace: {}.",
-                        String.format("%.2f", currentHitRate * 100),
-                        hitsInHitRateWindow.get(),
-                        currentWindowAccesses, // Use the value we have
-                        String.format("%.2f", this.cacheHitRateThreshold * 100),
-                        getCurrentNamespace());
-            } else {
-                LOG.debug(
-                        "Cache bypass check for value state. Hit rate {}% ({} hits / {} accesses) is NOT below threshold {}%. Bypass remains {}. Namespace: {}.",
+
+            completedWindows++;
+            boolean inCooldown = windowsSinceToggle < cooldownWindowsAfterToggle;
+
+            if (currentHitRate < lowHitRateThreshold) {
+                consecutiveLow++;
+                consecutiveHigh = 0;
+                if (!inCooldown && !bypassCache && consecutiveLow >= enterConsecutiveLowWindows) {
+                    bypassCache = true; // enter bypass
+                    windowsSinceToggle = 0;
+                    consecutiveLow = 0;
+                    consecutiveHigh = 0;
+                    cacheBypassActivations.inc();
+                    LOG.info(
+                        "ValueState cache bypass ENTER. hitRate={}%, window={} hits/{} acc, ns={}.",
                         String.format("%.2f", currentHitRate * 100),
                         hitsInHitRateWindow.get(),
                         currentWindowAccesses,
-                        String.format("%.2f", this.cacheHitRateThreshold * 100),
-                        this.bypassCache,
-                        getCurrentNamespace());
+                        getCurrentNamespace()
+                    );
+                }
+            } else if (currentHitRate > highHitRateThreshold) {
+                consecutiveHigh++;
+                consecutiveLow = 0;
+                if (!inCooldown && bypassCache && consecutiveHigh >= exitConsecutiveHighWindows) {
+                    bypassCache = false; // exit bypass
+                    windowsSinceToggle = 0;
+                    consecutiveLow = 0;
+                    consecutiveHigh = 0;
+                    LOG.info(
+                        "ValueState cache bypass EXIT. hitRate={}%, window={} hits/{} acc, ns={}.",
+                        String.format("%.2f", currentHitRate * 100),
+                        hitsInHitRateWindow.get(),
+                        currentWindowAccesses,
+                        getCurrentNamespace()
+                    );
+                }
+            } else {
+                // Between thresholds: drift toward stability
+                consecutiveLow = 0;
+                consecutiveHigh = 0;
             }
+
+            if (windowsSinceToggle < cooldownWindowsAfterToggle) {
+                windowsSinceToggle++;
+            }
+
             // Reset for next window
             accessesForHitRateWindow.set(0);
             hitsInHitRateWindow.set(0);
@@ -440,9 +497,15 @@ public class CachingInternalValueState<K, N, V>
         N currentNamespace = getCurrentNamespace();
 
         try {
+            int decisionWeight = 1;
             if (bypassEnabled && bypassCache) {
-                updateCacheBypassCondition(false);
-                return delegateState.value();
+                boolean isSample = accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
+                if (!isSample) {
+                    // In bypass mode, do not count unsampled accesses toward the hit-rate window.
+                    delegateLookups.inc();
+                    return delegateState.value();
+                }
+                decisionWeight = SAMPLING_RATE; // sample represents multiple accesses
             }
 
         CachePolicy<CompositeKey, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
@@ -451,7 +514,7 @@ public class CachingInternalValueState<K, N, V>
         CacheEntry<V> l1Entry = l1Cache.get(ck);
 
         if (l1Entry != null) {
-            updateCacheBypassCondition(true);
+            updateCacheBypassConditionWeighted(true, decisionWeight);
             cacheHits.inc();
             l1ValueCacheHitCount.inc();
             valueStateL1CacheHitCount.inc();
@@ -466,7 +529,7 @@ public class CachingInternalValueState<K, N, V>
         CacheEntry<V> l2Entry = l2Cache.get(ck);
 
         if (l2Entry != null) {
-            updateCacheBypassCondition(true);
+            updateCacheBypassConditionWeighted(true, decisionWeight);
             cacheHits.inc();
             l2ValueCacheHitCount.inc();
             valueStateL2CacheHitCount.inc();
@@ -488,7 +551,7 @@ public class CachingInternalValueState<K, N, V>
             return entryToL1.getValue();
         }
 
-        updateCacheBypassCondition(false);
+        updateCacheBypassConditionWeighted(false, decisionWeight);
         cacheMisses.inc();
         l2ValueCacheMissCount.inc();
         valueStateL2CacheMissCount.inc();
@@ -526,8 +589,6 @@ public class CachingInternalValueState<K, N, V>
             }
 
             if (bypassEnabled && bypassCache) {
-                updateCacheBypassCondition(true);
-                cacheBypassActivations.inc();
                 delegateState.update(value);
                 // Invalidate caches to avoid stale flush later
                 CachePolicy<CompositeKey, CacheEntry<V>> l1Bypass = getL1CacheForNamespace(currentNamespace);
@@ -554,8 +615,6 @@ public class CachingInternalValueState<K, N, V>
 
             // Honor write-behind toggle: when disabled, perform write-through and keep L1 clean
             if (!writeBehindEnabled) {
-                updateCacheBypassCondition(true);
-                cacheHits.inc();
                 delegateState.update(value);
                 CachePolicy<CompositeKey, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
                 CacheEntry<V> clean = CacheEntry.clean(value);
@@ -574,8 +633,6 @@ public class CachingInternalValueState<K, N, V>
                 return;
             }
 
-            updateCacheBypassCondition(true);
-            cacheHits.inc();
             CachePolicy<CompositeKey, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
             CacheEntry<V> newEntry = CacheEntry.dirty(value);
             int kgWb = backend.getKeyContext().getCurrentKeyGroupIndex();
