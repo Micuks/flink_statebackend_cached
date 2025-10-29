@@ -173,6 +173,13 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .booleanType()
                     .defaultValue(true);
 
+    public static final ConfigOption<Boolean> AUTO_LEFT_BYPASS_ENABLED_CONFIG =
+            ConfigOptions.key("state.backend.cached.auto-left-bypass.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "Automatically bypass MapState caches for calls originating from the left input side of two-input operators.");
+
     // Value state caching configuration
     public static final ConfigOption<Boolean> VALUE_CACHE_ENABLED_CONFIG =
             ConfigOptions.key("state.backend.cached.value.enabled")
