@@ -132,6 +132,7 @@ public class CachingStateBackend extends AbstractStateBackend
         // Lightweight wrapper profiling defaults (disabled unless explicitly enabled via configure())
         cfg.set(CachingStateBackendFactory.PROFILE_ENABLED_CONFIG, false);
         cfg.set(CachingStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG, 1024);
+        cfg.set(CachingStateBackendFactory.AUTO_LEFT_BYPASS_ENABLED_CONFIG, true);
         // Defaults for ValueState: enabled with bypass off unless overridden by configure(path)
         cfg.set(CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG, true);
         cfg.set(CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG, true);
@@ -233,6 +234,9 @@ public class CachingStateBackend extends AbstractStateBackend
         this.listMaxActiveNamespaces = (int) Math.max(0, tmpListMaxNs);
         this.aggregatingMaxActiveNamespaces = (int) Math.max(0, tmpAggMaxNs);
 
+        boolean autoLeftBypassEnabled =
+                config.get(CachingStateBackendFactory.AUTO_LEFT_BYPASS_ENABLED_CONFIG);
+
         // Preserve full configuration relevant to keyed backend
         org.apache.flink.configuration.Configuration cfg = new org.apache.flink.configuration.Configuration();
         cfg.set(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG, config.get(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG));
@@ -245,6 +249,7 @@ public class CachingStateBackend extends AbstractStateBackend
         cfg.set(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG, this.l2ManagedMemoryEnabled);
         cfg.set(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX,
                 config.get(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX));
+        cfg.set(CachingStateBackendFactory.AUTO_LEFT_BYPASS_ENABLED_CONFIG, autoLeftBypassEnabled);
         // Lightweight wrapper profiling options (propagate exactly as configured)
         try {
             cfg.set(CachingStateBackendFactory.PROFILE_ENABLED_CONFIG, config.get(CachingStateBackendFactory.PROFILE_ENABLED_CONFIG));
