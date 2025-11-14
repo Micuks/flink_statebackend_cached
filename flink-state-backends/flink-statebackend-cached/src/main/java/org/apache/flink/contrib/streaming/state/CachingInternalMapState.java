@@ -353,7 +353,7 @@ public class CachingInternalMapState<K, N, UK, UV>
                         mapL1KeyPresenceCacheSize,
                         entry -> {
                             if (entry.getValue() != null) {
-                                ownerBackend.reportCacheMemoryAdded(16L);
+                                ownerBackend.reportCacheMemoryReleased(16L);
                             }
                         }
                     );
@@ -361,7 +361,7 @@ public class CachingInternalMapState<K, N, UK, UV>
                         mapL2KeyPresenceCacheSize,
                         entry -> {
                             if (entry.getValue() != null) {
-                                ownerBackend.reportCacheMemoryAdded(16L);
+                                ownerBackend.reportCacheMemoryReleased(16L);
                             }
                         }
                     );
@@ -372,13 +372,7 @@ public class CachingInternalMapState<K, N, UK, UV>
                     this.l1KeyPresenceCache = createCachePolicyInstance(
                         cachePolicyType,
                         mapL1KeyPresenceCacheSize,
-                        entry -> {
-                            if (entry.getValue() != null) {
-                                ownerBackend.reportCacheMemoryAdded(
-                                    ValueSizeUtils.estimate(Boolean.TRUE)
-                                );
-                            }
-                        },
+                        null,
                         ownerBackend,
                         true,
                         true
@@ -386,13 +380,7 @@ public class CachingInternalMapState<K, N, UK, UV>
                     this.l2KeyPresenceCache = createCachePolicyInstance(
                         cachePolicyType,
                         mapL2KeyPresenceCacheSize,
-                        entry -> {
-                            if (entry.getValue() != null) {
-                                ownerBackend.reportCacheMemoryAdded(
-                                    ValueSizeUtils.estimate(Boolean.TRUE)
-                                );
-                            }
-                        },
+                        null,
                         ownerBackend,
                         true,
                         true
@@ -880,8 +868,10 @@ public class CachingInternalMapState<K, N, UK, UV>
                 CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
             ) {
                 long fp = fingerprint(userKey);
-                l1PrimitivePresenceCache.remove(fp);
-                l2PrimitivePresenceCache.remove(fp);
+                Byte r1 = l1PrimitivePresenceCache.remove(fp);
+                if (r1 != null) ownerBackend.reportCacheMemoryReleased(16L);
+                Byte r2 = l2PrimitivePresenceCache.remove(fp);
+                if (r2 != null) ownerBackend.reportCacheMemoryReleased(16L);
             } else {
                 CacheEntry<Boolean> oldL1P = l1KeyPresenceCache.remove(userKey);
                 if (oldL1P != null) ownerBackend.reportCacheMemoryReleased(
@@ -2034,8 +2024,7 @@ public class CachingInternalMapState<K, N, UK, UV>
         if (
             forceBypassAlways ||
             Boolean.TRUE.equals(THREAD_LOCAL_BYPASS.get()) ||
-            GLOBAL_BYPASS ||
-            isAutoBypassActiveForThisCall()
+            GLOBAL_BYPASS
         ) {
             delegateLookups.inc();
             return delegateState.get(userKey);
@@ -2326,8 +2315,7 @@ public class CachingInternalMapState<K, N, UK, UV>
         if (
             forceBypassAlways ||
             Boolean.TRUE.equals(THREAD_LOCAL_BYPASS.get()) ||
-            GLOBAL_BYPASS ||
-            isAutoBypassActiveForThisCall()
+            GLOBAL_BYPASS
         ) {
             delegateState.put(userKey, userValue);
             return;
@@ -2398,8 +2386,7 @@ public class CachingInternalMapState<K, N, UK, UV>
         if (
             forceBypassAlways ||
             Boolean.TRUE.equals(THREAD_LOCAL_BYPASS.get()) ||
-            GLOBAL_BYPASS ||
-            isAutoBypassActiveForThisCall()
+            GLOBAL_BYPASS
         ) {
             delegateState.setCurrentNamespace(getCurrentNamespace());
             for (Map.Entry<UK, UV> entry : map.entrySet()) {
@@ -2436,8 +2423,7 @@ public class CachingInternalMapState<K, N, UK, UV>
         if (
             forceBypassAlways ||
             Boolean.TRUE.equals(THREAD_LOCAL_BYPASS.get()) ||
-            GLOBAL_BYPASS ||
-            isAutoBypassActiveForThisCall()
+            GLOBAL_BYPASS
         ) {
             delegateState.remove(userKey);
             return;
@@ -2501,8 +2487,7 @@ public class CachingInternalMapState<K, N, UK, UV>
         if (
             forceBypassAlways ||
             Boolean.TRUE.equals(THREAD_LOCAL_BYPASS.get()) ||
-            GLOBAL_BYPASS ||
-            isAutoBypassActiveForThisCall()
+            GLOBAL_BYPASS
         ) {
             return delegateState.contains(userKey);
         }
@@ -3067,21 +3052,7 @@ public class CachingInternalMapState<K, N, UK, UV>
 
     @Override
     public Iterator<Map.Entry<UK, UV>> iterator() throws Exception {
-        // Respect explicit/global/auto bypass for iteration to avoid touching caches
-        if (
-            forceBypassAlways ||
-            Boolean.TRUE.equals(THREAD_LOCAL_NO_TOUCH.get()) ||
-            Boolean.TRUE.equals(THREAD_LOCAL_BYPASS.get()) ||
-            GLOBAL_BYPASS ||
-            GLOBAL_NO_TOUCH ||
-            isAutoBypassActiveForThisCall()
-        ) {
-            delegateState.setCurrentNamespace(getCurrentNamespace());
-            final Iterable<Map.Entry<UK, UV>> delegateEntries = delegateState.entries();
-            return delegateEntries == null
-                ? java.util.Collections.<Map.Entry<UK, UV>>emptyList().iterator()
-                : delegateEntries.iterator();
-        }
+        // Do not bypass caches for iteration: reflect unflushed L1 changes/tombstones
 
         delegateState.setCurrentNamespace(getCurrentNamespace());
         final PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
