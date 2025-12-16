@@ -289,11 +289,13 @@ public class RocksDBStateUploaderTest extends TestLogger {
 
     private void assertStateContentEqual(Path stateFilePath, FSDataInputStream inputStream)
             throws IOException {
-        byte[] excepted = Files.readAllBytes(stateFilePath);
-        byte[] actual = new byte[excepted.length];
-        IOUtils.readFully(inputStream, actual, 0, actual.length);
-        assertThat(inputStream.read()).isEqualTo(-1);
-        assertThat(actual).isEqualTo(excepted);
+        try (FSDataInputStream in = inputStream) {
+            byte[] excepted = Files.readAllBytes(stateFilePath);
+            byte[] actual = new byte[excepted.length];
+            IOUtils.readFully(in, actual, 0, actual.length);
+            assertThat(in.read()).isEqualTo(-1);
+            assertThat(actual).isEqualTo(excepted);
+        }
     }
 
     private static class SpecifiedException extends IOException {

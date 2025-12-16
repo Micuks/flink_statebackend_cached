@@ -37,6 +37,7 @@ under the License.
 
 	<modules>
 		<module>flink-statebackend-cached</module>
+		<module>flink-statebackend-cachekit</module>
 		<module>flink-statebackend-rocksdb</module>
 		<module>flink-statebackend-heap-spillable</module>
 		<module>flink-statebackend-changelog</module>

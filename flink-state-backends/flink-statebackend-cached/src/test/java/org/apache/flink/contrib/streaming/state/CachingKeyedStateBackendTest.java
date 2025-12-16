@@ -238,14 +238,27 @@ class CachingKeyedStateBackendTest {
             20, // L2 cache size
             5,  // Max active namespaces
             1L, // Max cache memory MB
-            CachingStateBackendFactory.CachePolicyType.LRU, // Default policy
+            CachingStateBackendFactory.CachePolicyType.LRU, // value policy
+            CachingStateBackendFactory.CachePolicyType.LRU, // map policy
+            CachingStateBackendFactory.CachePolicyType.LRU, // list policy
+            CachingStateBackendFactory.CachePolicyType.LRU, // aggregating policy
             (int) mapL1KeyPresenceCacheSize,
             (int) mapL2KeyPresenceCacheSize,
             mapCacheHitRateThreshold,
             mapCacheHitRateWindowSize,
             mapCacheMinAccessesForBypassCheck,
             mapKeyPresenceCacheEnabled,
-            mapBypassEnabled
+            mapBypassEnabled,
+            CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+            false,
+            null,
+            new org.apache.flink.configuration.Configuration(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
         );
     }
 
@@ -596,13 +609,26 @@ class CachingKeyedStateBackendTest {
             5,
             1L,
             CachingStateBackendFactory.CachePolicyType.LRU,
+            CachingStateBackendFactory.CachePolicyType.LRU,
+            CachingStateBackendFactory.CachePolicyType.LRU,
+            CachingStateBackendFactory.CachePolicyType.LRU,
             (int) mapL1KeyPresenceCacheSize,
             (int) mapL2KeyPresenceCacheSize,
             mapCacheHitRateThreshold,
             mapCacheHitRateWindowSize,
             mapCacheMinAccessesForBypassCheck,
             mapKeyPresenceCacheEnabled,
-            mapBypassEnabled
+            mapBypassEnabled,
+            CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+            false,
+            null,
+            new org.apache.flink.configuration.Configuration(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
         );
 
         ValueStateDescriptor<String> descriptor = new ValueStateDescriptor<>("test", String.class);
@@ -643,10 +669,24 @@ class CachingKeyedStateBackendTest {
                 Collections.emptyList(),
                 closableRegistry,
                 mockDelegateBackend,
-                5, 10, 2, 1L, CachingStateBackendFactory.CachePolicyType.LRU,
+                5, 10, 2, 1L,
+                CachingStateBackendFactory.CachePolicyType.LRU,
+                CachingStateBackendFactory.CachePolicyType.LRU,
+                CachingStateBackendFactory.CachePolicyType.LRU,
+                CachingStateBackendFactory.CachePolicyType.LRU,
                 (int) mapL1KeyPresenceCacheSize, (int) mapL2KeyPresenceCacheSize,
                 mapCacheHitRateThreshold, mapCacheHitRateWindowSize, mapCacheMinAccessesForBypassCheck,
-                mapKeyPresenceCacheEnabled, mapBypassEnabled);
+                mapKeyPresenceCacheEnabled, mapBypassEnabled,
+                CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+                false,
+                null,
+                new org.apache.flink.configuration.Configuration(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0);
 
         ValueStateDescriptor<String> lruDesc = new ValueStateDescriptor<>("lruValue", String.class);
         lruBackend.setCurrentKey("lruKey");
@@ -670,10 +710,24 @@ class CachingKeyedStateBackendTest {
                 Collections.emptyList(),
                 closableRegistry,
                 mockDelegateBackend,
-                5, 10, 2, 1L, CachingStateBackendFactory.CachePolicyType.TINYLFU,
+                5, 10, 2, 1L,
+                CachingStateBackendFactory.CachePolicyType.TINYLFU,
+                CachingStateBackendFactory.CachePolicyType.TINYLFU,
+                CachingStateBackendFactory.CachePolicyType.TINYLFU,
+                CachingStateBackendFactory.CachePolicyType.TINYLFU,
                 (int) mapL1KeyPresenceCacheSize, (int) mapL2KeyPresenceCacheSize,
                 mapCacheHitRateThreshold, mapCacheHitRateWindowSize, mapCacheMinAccessesForBypassCheck,
-                mapKeyPresenceCacheEnabled, mapBypassEnabled);
+                mapKeyPresenceCacheEnabled, mapBypassEnabled,
+                CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+                false,
+                null,
+                new org.apache.flink.configuration.Configuration(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0);
 
         ValueStateDescriptor<String> tinyLfuDesc = new ValueStateDescriptor<>("tinyLfuValue", String.class);
         when(mockDelegateBackend.getOrCreateKeyedState(VoidNamespaceSerializer.INSTANCE, tinyLfuDesc)).thenReturn(mockValueStateTinyLFU);

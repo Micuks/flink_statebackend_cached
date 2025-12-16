@@ -132,13 +132,26 @@ class CachingInternalValueStateTest {
                         maxActiveNamespaces,
                         10L,
                         currentCachePolicyType,
+                        currentCachePolicyType,
+                        currentCachePolicyType,
+                        currentCachePolicyType,
                         (int) mapL1KeyPresenceCacheSize,
                         (int) mapL2KeyPresenceCacheSize,
                         mapCacheHitRateThreshold,
                         mapCacheHitRateWindowSize,
                         mapCacheMinAccessesForBypassCheck,
                         mapKeyPresenceCacheEnabled,
-                        mapBypassEnabled
+                        mapBypassEnabled,
+                        CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+                        false,
+                        null,
+                        new org.apache.flink.configuration.Configuration(),
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
                         );
         cachingKeyedStateBackend.setCurrentKey(testKey);
 
@@ -159,6 +172,7 @@ class CachingInternalValueStateTest {
                         mapCacheHitRateWindowSize,
                         mapCacheMinAccessesForBypassCheck,
                         mapBypassEnabled,
+                        false,
                         new UnregisteredMetricsGroup());
         cachingState.setCurrentNamespace(testNamespace);
     }

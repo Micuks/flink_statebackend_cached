@@ -90,13 +90,26 @@ class CachingKeyedStateBackendMetricTest {
                 new ExecutionConfig(), TtlTimeProvider.DEFAULT, metricsGroup,
                 Collections.emptyList(), new CloseableRegistry(), delegateBackend, 5, 5, 2, 1L,
                 CachingStateBackendFactory.CachePolicyType.LRU,
+                CachingStateBackendFactory.CachePolicyType.LRU,
+                CachingStateBackendFactory.CachePolicyType.LRU,
+                CachingStateBackendFactory.CachePolicyType.LRU,
                 (int) mapL1KeyPresenceCacheSize,
                 (int) mapL2KeyPresenceCacheSize,
                 mapCacheHitRateThreshold,
                 mapCacheHitRateWindowSize,
                 mapCacheMinAccessesForBypassCheck,
                 mapKeyPresenceCacheEnabled,
-                mapBypassEnabled
+                mapBypassEnabled,
+                CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+                false,
+                null,
+                new org.apache.flink.configuration.Configuration(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
                 );
         cachingBackend.setCurrentKey("testKey");
     }

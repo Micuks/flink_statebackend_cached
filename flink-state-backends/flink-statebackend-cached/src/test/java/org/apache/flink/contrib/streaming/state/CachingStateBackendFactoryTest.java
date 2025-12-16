@@ -53,7 +53,7 @@ public class CachingStateBackendFactoryTest {
         assertEquals(CachingStateBackendFactory.L2_CACHE_SIZE_CONFIG.defaultValue().longValue(), backend.getL2CacheSize());
         assertEquals(CachingStateBackendFactory.MAX_ACTIVE_NAMESPACES_CONFIG.defaultValue().longValue(), backend.getMaxActiveNamespaces());
         assertEquals(CachingStateBackendFactory.MAX_CACHE_MEMORY_MB_CONFIG.defaultValue().longValue(), backend.getMaxCacheMemoryMb());
-        assertEquals(CachingStateBackendFactory.CACHE_POLICY_CONFIG.defaultValue(), backend.getCachePolicyType());
+        assertEquals(CachingStateBackendFactory.CACHE_POLICY_CONFIG.defaultValue(), backend.getGlobalCachePolicyType());
         assertEquals(CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue().longValue(), backend.getMapL1KeyPresenceCacheSize());
         assertEquals(CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG.defaultValue().longValue(), backend.getMapL2KeyPresenceCacheSize());
 
@@ -99,7 +99,7 @@ public class CachingStateBackendFactoryTest {
         assertEquals(l2Size, backend.getL2CacheSize());
         assertEquals(maxActiveNs, backend.getMaxActiveNamespaces());
         assertEquals(maxMemMb, backend.getMaxCacheMemoryMb());
-        assertEquals(policy, backend.getCachePolicyType());
+        assertEquals(policy, backend.getGlobalCachePolicyType());
         assertEquals(mapL1Presence, backend.getMapL1KeyPresenceCacheSize());
         assertEquals(mapL2Presence, backend.getMapL2KeyPresenceCacheSize());
         assertEquals(hitRateThreshold, backend.getMapCacheHitRateThreshold(), 0.001);

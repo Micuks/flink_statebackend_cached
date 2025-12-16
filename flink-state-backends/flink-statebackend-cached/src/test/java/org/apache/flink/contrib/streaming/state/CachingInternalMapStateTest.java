@@ -165,7 +165,10 @@ class CachingInternalMapStateTest {
                 l2CacheSizePerMap, // l2CacheSizePerMap
                 maxActiveFlinkKeysWithActiveCachesPerNamespace, // maxActiveNamespaceOrPerKeyCacheContainers
                 maxCacheMemoryMb, // maxCacheMemoryMb
-                policyType, // cachePolicyType (use the passed-in policyType)
+                policyType, // value policy
+                policyType, // map policy
+                policyType, // list policy
+                policyType, // aggregating policy
                 mapL1KeyPresenceCacheSize, // mapL1KeyPresenceCacheSize
                 mapL2KeyPresenceCacheSize, // mapL2KeyPresenceCacheSize,
                 hitRateThreshold, // USE PARAMETER
@@ -173,7 +176,16 @@ class CachingInternalMapStateTest {
                 minAccessesForBypass, // USE PARAMETER
                 enableKeyPresenceCache, // mapKeyPresenceCacheEnabled
                 enableBypass, // mapBypassEnabled
-                CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP // mapPresenceCacheImpl
+                CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP, // mapPresenceCacheImpl
+                false,
+                null,
+                new org.apache.flink.configuration.Configuration(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
         ));
 
         MetricGroup mapMetrics = new UnregisteredMetricsGroup().addGroup("testState");
@@ -200,7 +212,11 @@ class CachingInternalMapStateTest {
                 hitRateWindowSize, // USE PARAMETER
                 minAccessesForBypass, // USE PARAMETER
                 enableKeyPresenceCache, // enableKeyPresenceCache
-                enableBypass // enableBypass
+                enableBypass, // enableBypass
+                CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP,
+                false,
+                false,
+                false
         );
         
         when(cachingKeyedStateBackend.getCurrentKey()).thenReturn(testFlinkKey);

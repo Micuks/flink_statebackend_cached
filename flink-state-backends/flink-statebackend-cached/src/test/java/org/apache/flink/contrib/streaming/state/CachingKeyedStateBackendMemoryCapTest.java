@@ -172,14 +172,27 @@ class CachingKeyedStateBackendMemoryCapTest {
                 10, // L2 cache size (entries)
                 3,  // max active namespaces (per-key caches for map state)
                 1L, // Pass 1MB to constructor, MUST BE LONG
-                currentCachePolicyType, // Use the current policy type
+                currentCachePolicyType, // value policy
+                currentCachePolicyType, // map policy
+                currentCachePolicyType, // list policy
+                currentCachePolicyType, // aggregating policy
                 (int) mapL1KeyPresenceCacheSize, // Added
                 (int) mapL2KeyPresenceCacheSize,  // Added
                 mapCacheHitRateThreshold, // Added
                 mapCacheHitRateWindowSize, // Added
                 mapCacheMinAccessesForBypassCheck, // Added
                 mapKeyPresenceCacheEnabled, // Added
-                mapBypassEnabled // Added
+                mapBypassEnabled, // Added
+                CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+                false,
+                null,
+                new org.apache.flink.configuration.Configuration(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
                 );
         
         // Spy the backend and mock getMaxConfiguredCacheSizeBytesValue to return our precise byte limit
