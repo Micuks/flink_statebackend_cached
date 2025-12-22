@@ -28,7 +28,8 @@ import java.util.Objects;
 /**
  * Minimal {@link InternalValueState} wrapper that adds a per-state LRU cache.
  *
- * <p>Keying: (currentKey, namespace).
+ * <p>
+ * Keying: (currentKey, namespace).
  */
 public final class CachedInternalValueState<K, N, V> implements InternalValueState<K, N, V> {
 
@@ -47,30 +48,30 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     @Override
     public V value() throws IOException {
-        KeyNamespaceKey<K, N> cacheKey =
-                new KeyNamespaceKey<>(currentKeyProvider.getCurrentKey(), currentNamespace);
+        KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKeyProvider.getCurrentKey(), currentNamespace);
         CachedValue<V> cached = cache.get(cacheKey);
         if (cached != null) {
             return cached.valueOrNull();
         }
         V loaded = delegate.value();
-        cache.put(cacheKey, CachedValue.of(loaded));
+        if (loaded != null) {
+            cache.put(cacheKey, CachedValue.of(loaded));
+        }
         return loaded;
     }
 
     @Override
     public void update(V value) throws IOException {
+        // TODO: update to write-back
         delegate.update(value);
-        KeyNamespaceKey<K, N> cacheKey =
-                new KeyNamespaceKey<>(currentKeyProvider.getCurrentKey(), currentNamespace);
+        KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKeyProvider.getCurrentKey(), currentNamespace);
         cache.put(cacheKey, CachedValue.of(value));
     }
 
     @Override
     public void clear() {
         delegate.clear();
-        KeyNamespaceKey<K, N> cacheKey =
-                new KeyNamespaceKey<>(currentKeyProvider.getCurrentKey(), currentNamespace);
+        KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKeyProvider.getCurrentKey(), currentNamespace);
         cache.remove(cacheKey);
     }
 
@@ -121,6 +122,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             this.namespace = namespace;
         }
 
+        // TODO: Binary RowData Deep Copy
+
         @Override
         public boolean equals(Object other) {
             if (this == other) {
@@ -164,4 +167,3 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
     }
 }
-

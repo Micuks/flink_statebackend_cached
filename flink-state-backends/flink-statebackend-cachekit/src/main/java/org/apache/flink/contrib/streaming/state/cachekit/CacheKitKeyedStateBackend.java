@@ -49,9 +49,12 @@ import java.util.concurrent.RunnableFuture;
 import org.apache.flink.api.java.tuple.Tuple2;
 
 /**
- * Minimal delegating {@link AbstractKeyedStateBackend} wrapper that adds caching for ValueState.
+ * Minimal delegating {@link AbstractKeyedStateBackend} wrapper that adds
+ * caching for ValueState.
  *
- * <p>This class is intentionally small and only intercepts {@link #getOrCreateKeyedState} to wrap
+ * <p>
+ * This class is intentionally small and only intercepts
+ * {@link #getOrCreateKeyedState} to wrap
  * {@link InternalValueState} instances.
  */
 public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
@@ -86,9 +89,15 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.valueCacheMaxEntries = valueCacheMaxEntries;
     }
 
+    @Override
+    public void setCurrentKey(K newKey) {
+        super.setCurrentKey(newKey);
+        delegate.setCurrentKey(newKey);
+    }
+
     @Nonnull
     @Override
-    @SuppressWarnings({"unchecked", "rawtypes"})
+    @SuppressWarnings({ "unchecked", "rawtypes" })
     public <N, S extends State, V> S getOrCreateKeyedState(
             TypeSerializer<N> namespaceSerializer, StateDescriptor<S, V> stateDescriptor)
             throws Exception {
@@ -110,8 +119,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
 
         InternalValueState<K, N, V> delegateValue = (InternalValueState<K, N, V>) internal;
-        CachedInternalValueState<K, N, V> wrapped =
-                new CachedInternalValueState<>(delegateValue, this::getCurrentKey, valueCacheMaxEntries);
+        CachedInternalValueState<K, N, V> wrapped = new CachedInternalValueState<>(delegateValue, this::getCurrentKey,
+                valueCacheMaxEntries);
         wrappersByDelegateIdentity.put(internal, wrapped);
         return (S) wrapped;
     }
@@ -132,40 +141,48 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     }
 
     @Override
-    public <
-                    N,
-                    SV,
-                    SEV,
-                    S extends State,
-                    IS extends S>
-            IS createOrUpdateInternalState(
-                    TypeSerializer<N> namespaceSerializer,
-                    StateDescriptor<S, SV> stateDesc,
-                    StateSnapshotTransformer.StateSnapshotTransformFactory<SEV>
-                            stateSnapshotTransformFactory)
-                    throws Exception {
-        return delegate.createOrUpdateInternalState(
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    public <N, SV, SEV, S extends State, IS extends S> IS createOrUpdateInternalState(
+            TypeSerializer<N> namespaceSerializer,
+            StateDescriptor<S, SV> stateDesc,
+            StateSnapshotTransformer.StateSnapshotTransformFactory<SEV> stateSnapshotTransformFactory)
+            throws Exception {
+        IS state = delegate.createOrUpdateInternalState(
                 namespaceSerializer, stateDesc, stateSnapshotTransformFactory);
+
+        // Wrap ValueState with cache layer
+        if (!(state instanceof InternalKvState)) {
+            return state;
+        }
+
+        InternalKvState<K, N, ?> internal = (InternalKvState<K, N, ?>) state;
+        if (stateDesc.getType() != StateDescriptor.Type.VALUE
+                || !(internal instanceof InternalValueState)
+                || valueCacheMaxEntries <= 0) {
+            return state;
+        }
+
+        Object existing = wrappersByDelegateIdentity.get(internal);
+        if (existing != null) {
+            return (IS) existing;
+        }
+
+        InternalValueState<K, N, SV> delegateValue = (InternalValueState<K, N, SV>) internal;
+        CachedInternalValueState<K, N, SV> wrapped = new CachedInternalValueState<>(
+                delegateValue, this::getCurrentKey, valueCacheMaxEntries);
+        wrappersByDelegateIdentity.put(internal, wrapped);
+        return (IS) wrapped;
     }
 
     @Override
-    public <
-                    T extends
-                            HeapPriorityQueueElement
-                                    & PriorityComparable<? super T>
-                                    & Keyed<?>>
-            KeyGroupedInternalPriorityQueue<T> create(String stateName, TypeSerializer<T> byteOrderedElementSerializer) {
+    public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>> KeyGroupedInternalPriorityQueue<T> create(
+            String stateName, TypeSerializer<T> byteOrderedElementSerializer) {
         return delegate.create(stateName, byteOrderedElementSerializer);
     }
 
     @Override
-    public <
-                    T extends
-                            HeapPriorityQueueElement
-                                    & PriorityComparable<? super T>
-                                    & Keyed<?>>
-            KeyGroupedInternalPriorityQueue<T> create(
-                    String stateName, TypeSerializer<T> byteOrderedElementSerializer, boolean allowFutureMetadataUpdates) {
+    public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>> KeyGroupedInternalPriorityQueue<T> create(
+            String stateName, TypeSerializer<T> byteOrderedElementSerializer, boolean allowFutureMetadataUpdates) {
         return delegate.create(stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
     }
 
