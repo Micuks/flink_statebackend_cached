@@ -24,17 +24,27 @@ public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
 
     private final int maxEntries;
     private final LinkedHashMap<K, V> map;
+    private final java.util.function.BiConsumer<K, V> evictionListener;
 
     public LruCachePolicy(int maxEntries) {
+        this(maxEntries, (k, v) -> {
+        });
+    }
+
+    public LruCachePolicy(int maxEntries, java.util.function.BiConsumer<K, V> evictionListener) {
         this.maxEntries = Math.max(0, maxEntries);
-        this.map =
-                new LinkedHashMap<K, V>(16, 0.75f, true) {
-                    @Override
-                    protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
-                        return LruCachePolicy.this.maxEntries > 0
-                                && size() > LruCachePolicy.this.maxEntries;
-                    }
-                };
+        this.evictionListener = evictionListener;
+        this.map = new LinkedHashMap<K, V>(16, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+                if (LruCachePolicy.this.maxEntries > 0
+                        && size() > LruCachePolicy.this.maxEntries) {
+                    LruCachePolicy.this.evictionListener.accept(eldest.getKey(), eldest.getValue());
+                    return true;
+                }
+                return false;
+            }
+        };
     }
 
     @Override

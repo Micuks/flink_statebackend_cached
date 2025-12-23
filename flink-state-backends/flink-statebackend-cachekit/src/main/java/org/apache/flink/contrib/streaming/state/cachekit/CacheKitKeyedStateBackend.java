@@ -120,6 +120,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         InternalValueState<K, N, V> delegateValue = (InternalValueState<K, N, V>) internal;
         CachedInternalValueState<K, N, V> wrapped = new CachedInternalValueState<>(delegateValue, this::getCurrentKey,
+                this::setCurrentKey,
                 valueCacheMaxEntries);
         wrappersByDelegateIdentity.put(internal, wrapped);
         return (S) wrapped;
@@ -169,7 +170,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         InternalValueState<K, N, SV> delegateValue = (InternalValueState<K, N, SV>) internal;
         CachedInternalValueState<K, N, SV> wrapped = new CachedInternalValueState<>(
-                delegateValue, this::getCurrentKey, valueCacheMaxEntries);
+                delegateValue, this::getCurrentKey, this::setCurrentKey, valueCacheMaxEntries);
         wrappersByDelegateIdentity.put(internal, wrapped);
         return (IS) wrapped;
     }
@@ -205,6 +206,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             @Nonnull CheckpointStreamFactory streamFactory,
             @Nonnull CheckpointOptions checkpointOptions)
             throws Exception {
+        for (Object wrapper : wrappersByDelegateIdentity.values()) {
+            if (wrapper instanceof CachedInternalValueState) {
+                ((CachedInternalValueState<?, ?, ?>) wrapper).flush();
+            }
+        }
         return delegate.snapshot(checkpointId, timestamp, streamFactory, checkpointOptions);
     }
 
