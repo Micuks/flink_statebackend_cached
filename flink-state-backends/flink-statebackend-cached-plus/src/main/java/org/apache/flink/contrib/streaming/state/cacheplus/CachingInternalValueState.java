@@ -63,7 +63,7 @@ public class CachingInternalValueState<K, N, V>
     private N currentNamespace;
     // Cached serialized form of current namespace to avoid re-serialization on hot paths
     private StableNamespaceKey currentNamespaceStableKey;
-    private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
+    private final CachingPlusStateBackendFactory.CachePolicyType cachePolicyType;
 
     // Configuration for cache bypass
     private final double cacheHitRateThreshold;
@@ -127,7 +127,7 @@ public class CachingInternalValueState<K, N, V>
             int l2CacheSize,
             int maxActiveNamespacesInCache,
             long maxCacheMemoryMb,
-            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            CachingPlusStateBackendFactory.CachePolicyType cachePolicyType,
             double cacheHitRateThreshold,
             long cacheHitRateWindowSize,
             long cacheMinAccessesForBypassCheck,

@@ -18,18 +18,17 @@ package org.apache.flink.contrib.streaming.state.cacheplus;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.ReadableConfig;
-import org.apache.flink.contrib.streaming.state.cacheplus.CachingStateBackend;
 import org.apache.flink.contrib.streaming.state.RocksDBStateBackendFactory;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.StateBackendFactory;
 import org.apache.flink.runtime.state.memory.MemoryStateBackendFactory;
 
 /**
- * A factory for creating {@link CachingStateBackend} instances. This factory allows configuring the
+ * A factory for creating {@link CachingPlusStateBackend} instances. This factory allows configuring the
  * CachingStateBackend with specific cache sizes and a delegate state backend (defaulting to
  * RocksDBStateBackend if not specified).
  */
-public class CachingStateBackendFactory implements StateBackendFactory<CachingStateBackend> {
+public class CachingPlusStateBackendFactory implements StateBackendFactory<CachingPlusStateBackend> {
 
     // Configuration keys for cache sizes
     public static final String L1_CACHE_SIZE_KEY_OLD_STRING = "state.backend.cached.l1.size";
@@ -305,7 +304,7 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
     // factory/options.
 
     @Override
-    public CachingStateBackend createFromConfig(ReadableConfig config, ClassLoader classLoader)
+    public CachingPlusStateBackend createFromConfig(ReadableConfig config, ClassLoader classLoader)
             throws IllegalStateException, java.io.IOException {
         
 
@@ -343,6 +342,6 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
         // long)
         // delegateBackend is already StateBackend. l1CacheSize, l2CacheSize, maxActiveNamespaces
         // are already long.
-        return new CachingStateBackend(delegateBackend, config);
+        return new CachingPlusStateBackend(delegateBackend, config);
     }
 }

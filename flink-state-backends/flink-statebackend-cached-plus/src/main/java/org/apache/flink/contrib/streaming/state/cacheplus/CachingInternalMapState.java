@@ -76,12 +76,12 @@ public class CachingInternalMapState<K, N, UK, UV>
     private final int maxFlinkKeysWithActiveCachesPerNamespace; // Max Flink Keys with active map
     // caches for a Namespace
     private final int maxActiveNamespacesInCache; // Max Namespaces with active caches
-    private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
+    private final CachingPlusStateBackendFactory.CachePolicyType cachePolicyType;
     private final int mapL1KeyPresenceCacheSize; // Added
     private final int mapL2KeyPresenceCacheSize; // Added
     private final boolean keyPresenceCacheEnabled;
     private final boolean bypassEnabled;
-    private final CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl;
+    private final CachingPlusStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl;
     private final boolean l2ManagedMemoryEnabled;
     private final boolean perKeyMetricsEnabled;
     private final boolean forceBypassAlways;
@@ -259,7 +259,7 @@ public class CachingInternalMapState<K, N, UK, UV>
         // new primitive presence caches
         final CachePolicy<Long, Byte> l1PrimitivePresenceCache;
         final CachePolicy<Long, Byte> l2PrimitivePresenceCache;
-        private final CachingStateBackendFactory.PresenceCacheImplementation presenceCacheImpl;
+        private final CachingPlusStateBackendFactory.PresenceCacheImplementation presenceCacheImpl;
         private final TypeSerializer<UK_C> userKeySerializer;
         private transient ThreadLocal<DataOutputSerializer> userKeySerializerView;
         private transient ThreadLocal<DataInputDeserializer> userKeyDeserializerView;
@@ -285,11 +285,11 @@ public class CachingInternalMapState<K, N, UK, UV>
             CachingPlusKeyedStateBackend<K_F> ownerBackend,
             K_F flinkKey,
             N_F cacheNamespace,
-            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            CachingPlusStateBackendFactory.CachePolicyType cachePolicyType,
             int mapL1KeyPresenceCacheSize,
             int mapL2KeyPresenceCacheSize,
             boolean keyPresenceCacheEnabled,
-            CachingStateBackendFactory.PresenceCacheImplementation presenceCacheImpl,
+            CachingPlusStateBackendFactory.PresenceCacheImplementation presenceCacheImpl,
             TypeSerializer<UK_C> userKeySerializer,
             TypeSerializer<UV_C> userValueSerializer,
             boolean l2ManagedMemoryEnabled

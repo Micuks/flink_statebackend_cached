@@ -52,11 +52,11 @@ public class CachingInternalListState<K, N, V_ELE> implements InternalListState<
     private final int l2CacheSizePerNamespace; // Max Flink Keys with cached lists in L2 for a
     // Namespace
     private final int maxActiveNamespacesInCache; // Max Namespaces with active caches
-    private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
+    private final CachingPlusStateBackendFactory.CachePolicyType cachePolicyType;
 
     public CachingInternalListState(InternalListState<K, N, V_ELE> delegateState,
             CachingPlusKeyedStateBackend<K> backend, int l1CacheSize, int l2CacheSize,
-            int maxActiveNamespaces, CachingStateBackendFactory.CachePolicyType cachePolicyType) {
+            int maxActiveNamespaces, CachingPlusStateBackendFactory.CachePolicyType cachePolicyType) {
         this.delegateState = delegateState;
         this.backend = backend;
         this.l1CacheSizePerNamespace = l1CacheSize; // Max K->List entries in L1 per Namespace

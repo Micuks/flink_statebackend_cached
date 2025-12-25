@@ -49,7 +49,7 @@ import java.util.Collection;
  * A state backend that wraps another state backend (e.g., RocksDBStateBackend) to provide an L1/L2
  * caching layer for deserialized objects.
  */
-public class CachingStateBackend extends AbstractStateBackend
+public class CachingPlusStateBackend extends AbstractStateBackend
         implements ConfigurableStateBackend, CheckpointStorage {
 
     private static final long serialVersionUID = 1L;
@@ -65,11 +65,11 @@ public class CachingStateBackend extends AbstractStateBackend
     private final long aggregatingMaxActiveNamespaces;
     private final long maxCacheMemoryMb;
     // Global and per-state cache policy types
-    private final CachingStateBackendFactory.CachePolicyType globalCachePolicyType;
-    private final CachingStateBackendFactory.CachePolicyType mapCachePolicyType;
-    private final CachingStateBackendFactory.CachePolicyType valueCachePolicyType;
-    private final CachingStateBackendFactory.CachePolicyType listCachePolicyType;
-    private final CachingStateBackendFactory.CachePolicyType aggregatingCachePolicyType;
+    private final CachingPlusStateBackendFactory.CachePolicyType globalCachePolicyType;
+    private final CachingPlusStateBackendFactory.CachePolicyType mapCachePolicyType;
+    private final CachingPlusStateBackendFactory.CachePolicyType valueCachePolicyType;
+    private final CachingPlusStateBackendFactory.CachePolicyType listCachePolicyType;
+    private final CachingPlusStateBackendFactory.CachePolicyType aggregatingCachePolicyType;
     private final long mapL1KeyPresenceCacheSize;
     private final long mapL2KeyPresenceCacheSize;
 
@@ -78,22 +78,22 @@ public class CachingStateBackend extends AbstractStateBackend
     private final long mapCacheMinAccessesForBypassCheck;
     private final boolean mapKeyPresenceCacheEnabled;
     private final boolean mapBypassEnabled;
-    private final CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl;
+    private final CachingPlusStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl;
     private final boolean l2ManagedMemoryEnabled;
     // Configuration to pass down to keyed backend for per-state toggles
     private final org.apache.flink.configuration.Configuration taskConfiguration;
 
-    public CachingStateBackend(
+    public CachingPlusStateBackend(
             StateBackend delegateBackend,
             long l1CacheSize,
             long l2CacheSize,
             long maxActiveNamespaces,
-            long maxCacheMemoryMb, CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            long maxCacheMemoryMb, CachingPlusStateBackendFactory.CachePolicyType cachePolicyType,
             long mapL1KeyPresenceCacheSize, long mapL2KeyPresenceCacheSize,
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
             boolean mapKeyPresenceCacheEnabled,
             boolean mapBypassEnabled,
-            CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
+            CachingPlusStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
             boolean l2ManagedMemoryEnabled) {
         this.delegateBackend = delegateBackend;
         this.l1CacheSize = l1CacheSize;
@@ -124,14 +124,14 @@ public class CachingStateBackend extends AbstractStateBackend
 
         // Build a minimal task configuration reflecting relevant options
         org.apache.flink.configuration.Configuration cfg = new org.apache.flink.configuration.Configuration();
-        cfg.set(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG, true);
-        cfg.set(CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG, this.mapBypassEnabled);
-        cfg.set(CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG, this.mapKeyPresenceCacheEnabled);
-        cfg.set(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG, this.mapCacheHitRateThreshold);
-        cfg.set(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, this.mapCacheHitRateWindowSize);
-        cfg.set(CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, this.mapCacheMinAccessesForBypassCheck);
-        cfg.set(CachingStateBackendFactory.MAP_PRESENCE_CACHE_IMPL, this.mapPresenceCacheImpl);
-        cfg.set(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG, this.l2ManagedMemoryEnabled);
+        cfg.set(CachingPlusStateBackendFactory.MAP_CACHE_ENABLED_CONFIG, true);
+        cfg.set(CachingPlusStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG, this.mapBypassEnabled);
+        cfg.set(CachingPlusStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG, this.mapKeyPresenceCacheEnabled);
+        cfg.set(CachingPlusStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG, this.mapCacheHitRateThreshold);
+        cfg.set(CachingPlusStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, this.mapCacheHitRateWindowSize);
+        cfg.set(CachingPlusStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, this.mapCacheMinAccessesForBypassCheck);
+        cfg.set(CachingPlusStateBackendFactory.MAP_PRESENCE_CACHE_IMPL, this.mapPresenceCacheImpl);
+        cfg.set(CachingPlusStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG, this.l2ManagedMemoryEnabled);
         // Lightweight wrapper profiling defaults (disabled unless explicitly enabled via configure())
         cfg.set(CachingStateBackendFactory.PROFILE_ENABLED_CONFIG, false);
         cfg.set(CachingStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG, 1024);
@@ -151,7 +151,7 @@ public class CachingStateBackend extends AbstractStateBackend
         }
     }
 
-    public CachingStateBackend(StateBackend delegateBackend, ReadableConfig config) {
+    public CachingPlusStateBackend(StateBackend delegateBackend, ReadableConfig config) {
         this.delegateBackend = delegateBackend;
         this.l1CacheSize = config.get(CachingStateBackendFactory.L1_CACHE_SIZE_CONFIG);
         this.l2CacheSize = config.get(CachingStateBackendFactory.L2_CACHE_SIZE_CONFIG);
@@ -465,9 +465,9 @@ public class CachingStateBackend extends AbstractStateBackend
             throws IllegalConfigurationException {
 
         if (delegateBackend instanceof ConfigurableStateBackend) {
-            return new CachingStateBackend(((ConfigurableStateBackend) delegateBackend).configure(config, classLoader), config);
+            return new CachingPlusStateBackend(((ConfigurableStateBackend) delegateBackend).configure(config, classLoader), config);
         } else {
-            return new CachingStateBackend(delegateBackend, config);
+            return new CachingPlusStateBackend(delegateBackend, config);
         }
     }
 }

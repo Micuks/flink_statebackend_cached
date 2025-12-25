@@ -54,7 +54,7 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
 
     private final int l1CacheSizePerKeyPerNamespace;
     private final int l2CacheSizePerKeyPerNamespace;
-    private final CachingStateBackendFactory.CachePolicyType cachePolicyType;
+    private final CachingPlusStateBackendFactory.CachePolicyType cachePolicyType;
 
     private N currentNamespace;
 
@@ -68,7 +68,7 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
             AggregateFunction<IN, ACC, OUT> aggFunction,
             int l1CacheSize,
             int l2CacheSize,
-            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            CachingPlusStateBackendFactory.CachePolicyType cachePolicyType,
             MetricGroup metricsGroup) {
         this.delegateState = delegateState;
         this.backend = backend;
@@ -105,7 +105,7 @@ public class CachingInternalAggregatingState<K, N, IN, ACC, OUT>
             AggregateFunction<IN, ACC, OUT> aggFunction,
             int l1CacheSize,
             int l2CacheSize,
-            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            CachingPlusStateBackendFactory.CachePolicyType cachePolicyType,
             MetricGroup metricsGroup,
             int maxActiveNamespaces) {
         this.delegateState = delegateState;
