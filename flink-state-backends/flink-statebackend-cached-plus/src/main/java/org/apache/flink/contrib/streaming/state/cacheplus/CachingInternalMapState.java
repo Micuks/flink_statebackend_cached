@@ -338,7 +338,7 @@ public class CachingInternalMapState<K, N, UK, UV>
             if (this.keyPresenceCacheEnabled) {
                 if (
                     presenceCacheImpl ==
-                    CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
+                    CachingPlusStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
                 ) {
                     this.l1PrimitivePresenceCache = new PrimitivePresenceCache(
                         mapL1KeyPresenceCacheSize,
@@ -575,7 +575,7 @@ public class CachingInternalMapState<K, N, UK, UV>
             CK,
             CacheEntry<CV_ENTRY_TYPE>
         > createCachePolicyInstance(
-            CachingStateBackendFactory.CachePolicyType policyType,
+            CachingPlusStateBackendFactory.CachePolicyType policyType,
             int capacity,
             Consumer<Map.Entry<CK, CacheEntry<CV_ENTRY_TYPE>>> evictionListener,
             CachingPlusKeyedStateBackend<?> ownerBackendForSize,
@@ -666,7 +666,7 @@ public class CachingInternalMapState<K, N, UK, UV>
             if (keyPresenceCacheEnabled) {
                 if (
                     presenceCacheImpl ==
-                    CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
+                    CachingPlusStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
                 ) {
                     this.l1PrimitivePresenceCache.clear();
                     this.l2PrimitivePresenceCache.clear();
@@ -743,7 +743,7 @@ public class CachingInternalMapState<K, N, UK, UV>
 
             if (
                 presenceCacheImpl ==
-                CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
+                CachingPlusStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
             ) {
                 long fp = fingerprint(userKey);
                 Byte l1Presence = l1PrimitivePresenceCache.get(fp);
@@ -787,7 +787,7 @@ public class CachingInternalMapState<K, N, UK, UV>
 
             if (
                 presenceCacheImpl ==
-                CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
+                CachingPlusStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
             ) {
                 long fp = fingerprint(userKey);
                 byte presence = valuePresentInValueCacheOrDelegate
@@ -812,7 +812,7 @@ public class CachingInternalMapState<K, N, UK, UV>
             if (!keyPresenceCacheEnabled) return;
             if (
                 presenceCacheImpl ==
-                CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
+                CachingPlusStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
             ) {
                 long fp = fingerprint(userKey);
                 Byte oldL1 = l1PrimitivePresenceCache.put(fp, PrimitivePresenceCache.PRESENT);
@@ -834,7 +834,7 @@ public class CachingInternalMapState<K, N, UK, UV>
             if (!keyPresenceCacheEnabled) return;
             if (
                 presenceCacheImpl ==
-                CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
+                CachingPlusStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
             ) {
                 long fp = fingerprint(userKey);
                 Byte oldL1 = l1PrimitivePresenceCache.put(fp, PrimitivePresenceCache.ABSENT);
@@ -856,7 +856,7 @@ public class CachingInternalMapState<K, N, UK, UV>
             if (!keyPresenceCacheEnabled) return;
             if (
                 presenceCacheImpl ==
-                CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
+                CachingPlusStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
             ) {
                 long fp = fingerprint(userKey);
                 Byte r1 = l1PrimitivePresenceCache.remove(fp);
@@ -891,7 +891,7 @@ public class CachingInternalMapState<K, N, UK, UV>
             if (!keyPresenceCacheEnabled) return 0;
             if (
                 presenceCacheImpl ==
-                CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
+                CachingPlusStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
             ) {
                 return l1PrimitivePresenceCache.size();
             }
@@ -902,7 +902,7 @@ public class CachingInternalMapState<K, N, UK, UV>
             if (!keyPresenceCacheEnabled) return 0;
             if (
                 presenceCacheImpl ==
-                CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
+                CachingPlusStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
             ) {
                 return l2PrimitivePresenceCache.size();
             }
@@ -978,7 +978,7 @@ public class CachingInternalMapState<K, N, UK, UV>
             if (keyPresenceCacheEnabled) {
                 if (
                     presenceCacheImpl ==
-                    CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
+                    CachingPlusStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
                 ) {
                     totalSize +=
                         (long) (l1PrimitivePresenceCache.size() + l2PrimitivePresenceCache.size()) *
@@ -1013,7 +1013,7 @@ public class CachingInternalMapState<K, N, UK, UV>
             if (keyPresenceCacheEnabled) {
                 if (
                     presenceCacheImpl ==
-                    CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
+                    CachingPlusStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
                 ) {
                     freedBytes += evictFromPrimitiveCache(
                         l2PrimitivePresenceCache,
@@ -1034,7 +1034,7 @@ public class CachingInternalMapState<K, N, UK, UV>
             if (keyPresenceCacheEnabled) {
                 if (
                     presenceCacheImpl ==
-                    CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
+                    CachingPlusStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
                 ) {
                     // Evicting from L1 primitive moves to L2, but if L2 is full, it evicts from L2, freeing memory.
                     freedBytes += evictFromPrimitiveCache(
@@ -1196,7 +1196,7 @@ public class CachingInternalMapState<K, N, UK, UV>
         int l2CacheSizePerMap,
         int maxFlinkKeysWithActiveCachesPerNamespace,
         long maxCacheMemoryMb,
-        CachingStateBackendFactory.CachePolicyType cachePolicyType,
+        CachingPlusStateBackendFactory.CachePolicyType cachePolicyType,
         int mapL1KeyPresenceCacheSize,
         int mapL2KeyPresenceCacheSize,
         MetricGroup metrics,
@@ -1205,7 +1205,7 @@ public class CachingInternalMapState<K, N, UK, UV>
         long mapCacheMinAccessesForBypassCheck,
         boolean enableKeyPresenceCache,
         boolean enableBypass,
-        CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
+        CachingPlusStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
         boolean l2ManagedMemoryEnabled,
         boolean perKeyMetricsEnabled,
         boolean forceBypassAlways
@@ -1606,7 +1606,7 @@ public class CachingInternalMapState<K, N, UK, UV>
         int l2CacheSizePerMap,
         int maxFlinkKeysWithActiveCachesPerNamespace,
         long maxCacheMemoryMb,
-        CachingStateBackendFactory.CachePolicyType cachePolicyType,
+        CachingPlusStateBackendFactory.CachePolicyType cachePolicyType,
         int mapL1KeyPresenceCacheSize,
         int mapL2KeyPresenceCacheSize,
         MetricGroup metrics,
@@ -1615,7 +1615,7 @@ public class CachingInternalMapState<K, N, UK, UV>
         long mapCacheMinAccessesForBypassCheck,
         boolean enableKeyPresenceCache,
         boolean enableBypass,
-        CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
+        CachingPlusStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
         boolean l2ManagedMemoryEnabled,
         boolean perKeyMetricsEnabled,
         boolean forceBypassAlways,

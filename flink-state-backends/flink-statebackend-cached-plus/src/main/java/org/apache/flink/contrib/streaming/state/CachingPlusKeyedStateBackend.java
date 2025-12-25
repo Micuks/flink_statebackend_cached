@@ -109,10 +109,10 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
     private final int maxActiveNamespaceOrPerKeyCacheContainers;
     private final long maxCacheMemoryMb;
     // Per-state cache policy types
-    private final CachingStateBackendFactory.CachePolicyType valueCachePolicyType;
-    private final CachingStateBackendFactory.CachePolicyType mapCachePolicyType;
-    private final CachingStateBackendFactory.CachePolicyType listCachePolicyType;
-    private final CachingStateBackendFactory.CachePolicyType aggregatingCachePolicyType;
+    private final CachingPlusStateBackendFactory.CachePolicyType valueCachePolicyType;
+    private final CachingPlusStateBackendFactory.CachePolicyType mapCachePolicyType;
+    private final CachingPlusStateBackendFactory.CachePolicyType listCachePolicyType;
+    private final CachingPlusStateBackendFactory.CachePolicyType aggregatingCachePolicyType;
     private final int mapL1KeyPresenceCacheSize;
     private final int mapL2KeyPresenceCacheSize;
     private final MetricGroup metricGroup;
@@ -122,7 +122,7 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
     private final long mapCacheMinAccessesForBypassCheck;
     private final boolean mapKeyPresenceCacheEnabled;
     private final boolean mapBypassEnabled;
-    private final CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl;
+    private final CachingPlusStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl;
     private final boolean l2ManagedMemoryEnabled;
     private final int mapSpecificL1EntryCacheSize;
     private final int mapSpecificL2EntryCacheSize;
@@ -173,13 +173,13 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
             int l2EntryCacheSize,
             int maxActiveNamespaceOrPerKeyCacheContainers,
             long maxCacheMemoryMb,
-            CachingStateBackendFactory.CachePolicyType valueCachePolicyType,
-            CachingStateBackendFactory.CachePolicyType mapCachePolicyType,
-            CachingStateBackendFactory.CachePolicyType listCachePolicyType,
-            CachingStateBackendFactory.CachePolicyType aggregatingCachePolicyType,
+            CachingPlusStateBackendFactory.CachePolicyType valueCachePolicyType,
+            CachingPlusStateBackendFactory.CachePolicyType mapCachePolicyType,
+            CachingPlusStateBackendFactory.CachePolicyType listCachePolicyType,
+            CachingPlusStateBackendFactory.CachePolicyType aggregatingCachePolicyType,
             int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
-            boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
+            boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingPlusStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
             boolean l2ManagedMemoryEnabled, MemoryManager memoryManager,
             org.apache.flink.configuration.Configuration taskConfiguration,
             int mapSpecificL1EntryCacheSize, int mapSpecificL2EntryCacheSize,
@@ -249,15 +249,15 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
         this.globalL2MapEntryCount = new AtomicLong(0L);
         // Initialize per-key metrics flag (default false to avoid high cardinality)
         this.perKeyMetricsEnabled = (this.taskConfiguration != null)
-                ? this.taskConfiguration.getBoolean(CachingStateBackendFactory.MAP_PER_KEY_METRICS_ENABLED)
+                ? this.taskConfiguration.getBoolean(CachingPlusStateBackendFactory.MAP_PER_KEY_METRICS_ENABLED)
                 : false;
         // Lightweight profiling flags (default off to avoid overhead)
         boolean pEnabled = false;
         int pRate = 1024;
         try {
             if (this.taskConfiguration != null) {
-                pEnabled = this.taskConfiguration.getBoolean(CachingStateBackendFactory.PROFILE_ENABLED_CONFIG);
-                pRate = Math.max(1, this.taskConfiguration.getInteger(CachingStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG));
+                pEnabled = this.taskConfiguration.getBoolean(CachingPlusStateBackendFactory.PROFILE_ENABLED_CONFIG);
+                pRate = Math.max(1, this.taskConfiguration.getInteger(CachingPlusStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG));
             }
         } catch (Throwable t) {
             // keep defaults on error
@@ -303,9 +303,9 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
         // Configure package logging level if requested
         try {
             boolean cachedLoggingEnabled = (this.taskConfiguration != null) &&
-                    this.taskConfiguration.getBoolean(CachingStateBackendFactory.LOGGING_ENABLED_CONFIG);
+                    this.taskConfiguration.getBoolean(CachingPlusStateBackendFactory.LOGGING_ENABLED_CONFIG);
             String cachedLoggingLevel = (this.taskConfiguration != null)
-                    ? this.taskConfiguration.get(CachingStateBackendFactory.LOGGING_LEVEL_CONFIG)
+                    ? this.taskConfiguration.get(CachingPlusStateBackendFactory.LOGGING_LEVEL_CONFIG)
                     : null;
             if (!cachedLoggingEnabled) {
                 String lvl = (cachedLoggingLevel == null || cachedLoggingLevel.isEmpty()) ? "ERROR" : cachedLoggingLevel;
@@ -355,13 +355,13 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
             int l2EntryCacheSize,
             int maxActiveNamespaceOrPerKeyCacheContainers,
             long maxCacheMemoryMb,
-            CachingStateBackendFactory.CachePolicyType valueCachePolicyType,
-            CachingStateBackendFactory.CachePolicyType mapCachePolicyType,
-            CachingStateBackendFactory.CachePolicyType listCachePolicyType,
-            CachingStateBackendFactory.CachePolicyType aggregatingCachePolicyType,
+            CachingPlusStateBackendFactory.CachePolicyType valueCachePolicyType,
+            CachingPlusStateBackendFactory.CachePolicyType mapCachePolicyType,
+            CachingPlusStateBackendFactory.CachePolicyType listCachePolicyType,
+            CachingPlusStateBackendFactory.CachePolicyType aggregatingCachePolicyType,
             int mapL1KeyPresenceCacheSize, int mapL2KeyPresenceCacheSize,
             double mapCacheHitRateThreshold, long mapCacheHitRateWindowSize, long mapCacheMinAccessesForBypassCheck,
-            boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
+            boolean mapKeyPresenceCacheEnabled, boolean mapBypassEnabled, CachingPlusStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl,
             boolean l2ManagedMemoryEnabled,
             MemoryManager memoryManager,
             org.apache.flink.configuration.Configuration taskConfiguration,
@@ -439,7 +439,7 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
         this.globalL2MapEntryCount = new AtomicLong(0L);
         // Initialize per-key metrics flag (default false to avoid high cardinality)
         this.perKeyMetricsEnabled = (this.taskConfiguration != null)
-                ? this.taskConfiguration.getBoolean(CachingStateBackendFactory.MAP_PER_KEY_METRICS_ENABLED)
+                ? this.taskConfiguration.getBoolean(CachingPlusStateBackendFactory.MAP_PER_KEY_METRICS_ENABLED)
                 : false;
 
         // Register memory usage gauge
@@ -464,8 +464,8 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
         int pRate = 1024;
         try {
             if (this.taskConfiguration != null) {
-                pEnabled = this.taskConfiguration.getBoolean(CachingStateBackendFactory.PROFILE_ENABLED_CONFIG);
-                pRate = Math.max(1, this.taskConfiguration.getInteger(CachingStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG));
+                pEnabled = this.taskConfiguration.getBoolean(CachingPlusStateBackendFactory.PROFILE_ENABLED_CONFIG);
+                pRate = Math.max(1, this.taskConfiguration.getInteger(CachingPlusStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG));
             }
         } catch (Throwable t) {
             // keep defaults on error
@@ -489,9 +489,9 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
         // Configure package logging level if requested
         try {
             boolean cachedLoggingEnabled = (this.taskConfiguration != null) &&
-                    this.taskConfiguration.getBoolean(CachingStateBackendFactory.LOGGING_ENABLED_CONFIG);
+                    this.taskConfiguration.getBoolean(CachingPlusStateBackendFactory.LOGGING_ENABLED_CONFIG);
             String cachedLoggingLevel = (this.taskConfiguration != null)
-                    ? this.taskConfiguration.get(CachingStateBackendFactory.LOGGING_LEVEL_CONFIG)
+                    ? this.taskConfiguration.get(CachingPlusStateBackendFactory.LOGGING_LEVEL_CONFIG)
                     : null;
             if (!cachedLoggingEnabled) {
                 String lvl = (cachedLoggingLevel == null || cachedLoggingLevel.isEmpty()) ? "ERROR" : cachedLoggingLevel;
@@ -604,17 +604,17 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
             try {
                 if (this.taskConfiguration != null) {
                     valueCacheEnabled = this.taskConfiguration.getBoolean(
-                            CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG);
+                            CachingPlusStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG);
                     valueHitRateThreshold = this.taskConfiguration.getDouble(
-                            CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG);
+                            CachingPlusStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG);
                     valueHitRateWindow = this.taskConfiguration.getLong(
-                            CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
+                            CachingPlusStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
                     valueMinAccessesForBypassCheck = this.taskConfiguration.getLong(
-                            CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
+                            CachingPlusStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
                     valueBypassEnabled = this.taskConfiguration.getBoolean(
-                            CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG);
+                            CachingPlusStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG);
                     writeBehindEnabled = this.taskConfiguration.getBoolean(
-                            CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG);
+                            CachingPlusStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG);
                 }
             } catch (Throwable t) {
                 // keep defaults
@@ -646,7 +646,7 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
                     writeBehindEnabled,
                     this.metricGroup.addGroup("state").addGroup(stateDescriptor.getName()));
         } else if (stateDescriptor.getType() == StateDescriptor.Type.MAP && actualStateRaw instanceof InternalMapState) {
-            boolean mapCacheEnabled = taskConfiguration.get(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG);
+            boolean mapCacheEnabled = taskConfiguration.get(CachingPlusStateBackendFactory.MAP_CACHE_ENABLED_CONFIG);
             if (!mapCacheEnabled) {
                 LOG.info("Map state caching is disabled by config. Returning raw state.");
                 return (S) actualStateRaw; // caching disabled by config
@@ -661,7 +661,7 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
 
             boolean forceBypass = false;
             try {
-                String pattern = this.taskConfiguration.getString(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX, "");
+                String pattern = this.taskConfiguration.getString(CachingPlusStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX, "");
                 forceBypass = pattern != null && stateName != null && stateName.matches(pattern);
             } catch (Throwable t) {
                 LOG.warn("Failed to parse force-bypass pattern for map state '{}'", stateName, t);
@@ -671,7 +671,7 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
             // guarantees vanilla behavior for these states.
             try {
                 boolean returnRawOnForceBypass = this.taskConfiguration.getBoolean(
-                        CachingStateBackendFactory.MAP_FORCE_BYPASS_RETURN_RAW);
+                        CachingPlusStateBackendFactory.MAP_FORCE_BYPASS_RETURN_RAW);
                 if (forceBypass && returnRawOnForceBypass) {
                     LOG.info("Map state '{}' matched force-bypass; returning raw delegate state.", stateName);
                     return (S) actualDelegateMapState;
@@ -813,17 +813,17 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
                 try {
                     if (this.taskConfiguration != null) {
                         valueCacheEnabled = this.taskConfiguration.getBoolean(
-                                CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG);
+                                CachingPlusStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG);
                         valueHitRateThreshold = this.taskConfiguration.getDouble(
-                                CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG);
+                                CachingPlusStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG);
                         valueHitRateWindow = this.taskConfiguration.getLong(
-                                CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
+                                CachingPlusStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
                         valueMinAccessesForBypassCheck = this.taskConfiguration.getLong(
-                                CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
+                                CachingPlusStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
                         valueBypassEnabled = this.taskConfiguration.getBoolean(
-                                CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG);
+                                CachingPlusStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG);
                         writeBehindEnabled = this.taskConfiguration.getBoolean(
-                                CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG);
+                                CachingPlusStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG);
                     }
                 } catch (Throwable t) {
                     // keep defaults
@@ -855,7 +855,7 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
                 break;
             }
             case MAP: {
-                boolean mapCacheEnabled = taskConfiguration.get(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG);
+                boolean mapCacheEnabled = taskConfiguration.get(CachingPlusStateBackendFactory.MAP_CACHE_ENABLED_CONFIG);
                 if (!mapCacheEnabled) {
                     return (S) actualStateRaw;
                 }
@@ -866,14 +866,14 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
                 int l2SizeForMap = mapSpecificL2EntryCacheSize > 0 ? mapSpecificL2EntryCacheSize : l2EntryCacheSize;
                 boolean forceBypass = false;
                 try {
-                    String pattern = this.taskConfiguration.getString(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX, "");
+                    String pattern = this.taskConfiguration.getString(CachingPlusStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX, "");
                     forceBypass = pattern != null && stateName != null && stateName.matches(pattern);
                 } catch (Throwable t) {
                     LOG.warn("Failed to parse force-bypass pattern for map state '{}'", stateName, t);
                 }
                 try {
                     boolean returnRawOnForceBypass = this.taskConfiguration.getBoolean(
-                            CachingStateBackendFactory.MAP_FORCE_BYPASS_RETURN_RAW);
+                            CachingPlusStateBackendFactory.MAP_FORCE_BYPASS_RETURN_RAW);
                     if (forceBypass && returnRawOnForceBypass) {
                         return (S) delegateMap;
                     }
@@ -1045,17 +1045,17 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
                 try {
                     if (this.taskConfiguration != null) {
                         valueCacheEnabled = this.taskConfiguration.getBoolean(
-                                CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG);
+                                CachingPlusStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG);
                         valueHitRateThreshold = this.taskConfiguration.getDouble(
-                                CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG);
+                                CachingPlusStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG);
                         valueHitRateWindow = this.taskConfiguration.getLong(
-                                CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
+                                CachingPlusStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
                         valueMinAccessesForBypassCheck = this.taskConfiguration.getLong(
-                                CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
+                                CachingPlusStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
                         valueBypassEnabled = this.taskConfiguration.getBoolean(
-                                CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG);
+                                CachingPlusStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG);
                         writeBehindEnabled = this.taskConfiguration.getBoolean(
-                                CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG);
+                                CachingPlusStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG);
                     }
                 } catch (Throwable t) {
                     // keep defaults
@@ -1082,7 +1082,7 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
                 break;
             }
             case MAP: {
-                boolean mapCacheEnabled = taskConfiguration.get(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG);
+                boolean mapCacheEnabled = taskConfiguration.get(CachingPlusStateBackendFactory.MAP_CACHE_ENABLED_CONFIG);
                 if (!mapCacheEnabled) {
                     return actual;
                 }
@@ -1094,14 +1094,14 @@ public class CachingPlusKeyedStateBackend<K> extends AbstractKeyedStateBackend<K
                 int l2SizeForMap = mapSpecificL2EntryCacheSize > 0 ? mapSpecificL2EntryCacheSize : l2EntryCacheSize;
             boolean forceBypass = false;
             try {
-                String pattern = this.taskConfiguration.getString(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX, "");
+                String pattern = this.taskConfiguration.getString(CachingPlusStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX, "");
                 forceBypass = pattern != null && stateName != null && stateName.matches(pattern);
             } catch (Throwable t) {
                 LOG.warn("Failed to parse force-bypass pattern for map state '{}'", stateName, t);
             }
             try {
                 boolean returnRawOnForceBypass = this.taskConfiguration.getBoolean(
-                        CachingStateBackendFactory.MAP_FORCE_BYPASS_RETURN_RAW);
+                        CachingPlusStateBackendFactory.MAP_FORCE_BYPASS_RETURN_RAW);
                 if (forceBypass && returnRawOnForceBypass) {
                     return actual;
                 }

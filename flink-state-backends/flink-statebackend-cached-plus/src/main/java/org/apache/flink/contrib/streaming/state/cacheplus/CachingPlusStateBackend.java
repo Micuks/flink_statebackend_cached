@@ -133,16 +133,16 @@ public class CachingPlusStateBackend extends AbstractStateBackend
         cfg.set(CachingPlusStateBackendFactory.MAP_PRESENCE_CACHE_IMPL, this.mapPresenceCacheImpl);
         cfg.set(CachingPlusStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG, this.l2ManagedMemoryEnabled);
         // Lightweight wrapper profiling defaults (disabled unless explicitly enabled via configure())
-        cfg.set(CachingStateBackendFactory.PROFILE_ENABLED_CONFIG, false);
-        cfg.set(CachingStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG, 1024);
-        cfg.set(CachingStateBackendFactory.AUTO_LEFT_BYPASS_ENABLED_CONFIG, true);
+        cfg.set(CachingPlusStateBackendFactory.PROFILE_ENABLED_CONFIG, false);
+        cfg.set(CachingPlusStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG, 1024);
+        cfg.set(CachingPlusStateBackendFactory.AUTO_LEFT_BYPASS_ENABLED_CONFIG, true);
         // Defaults for ValueState: enabled with bypass off unless overridden by configure(path)
-        cfg.set(CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG, true);
-        cfg.set(CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG, true);
-        cfg.set(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG, 0.0);
-        cfg.set(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, 1000L);
-        cfg.set(CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, 100L);
-        cfg.set(CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG, false);
+        cfg.set(CachingPlusStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG, true);
+        cfg.set(CachingPlusStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG, true);
+        cfg.set(CachingPlusStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG, 0.0);
+        cfg.set(CachingPlusStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, 1000L);
+        cfg.set(CachingPlusStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, 100L);
+        cfg.set(CachingPlusStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG, false);
         this.taskConfiguration = cfg;
 
         if (!(delegateBackend instanceof AbstractStateBackend)) {
@@ -153,49 +153,49 @@ public class CachingPlusStateBackend extends AbstractStateBackend
 
     public CachingPlusStateBackend(StateBackend delegateBackend, ReadableConfig config) {
         this.delegateBackend = delegateBackend;
-        this.l1CacheSize = config.get(CachingStateBackendFactory.L1_CACHE_SIZE_CONFIG);
-        this.l2CacheSize = config.get(CachingStateBackendFactory.L2_CACHE_SIZE_CONFIG);
-        this.maxActiveNamespaces = config.get(CachingStateBackendFactory.MAX_ACTIVE_NAMESPACES_CONFIG);
-        this.maxCacheMemoryMb = config.get(CachingStateBackendFactory.MAX_CACHE_MEMORY_MB_CONFIG);
+        this.l1CacheSize = config.get(CachingPlusStateBackendFactory.L1_CACHE_SIZE_CONFIG);
+        this.l2CacheSize = config.get(CachingPlusStateBackendFactory.L2_CACHE_SIZE_CONFIG);
+        this.maxActiveNamespaces = config.get(CachingPlusStateBackendFactory.MAX_ACTIVE_NAMESPACES_CONFIG);
+        this.maxCacheMemoryMb = config.get(CachingPlusStateBackendFactory.MAX_CACHE_MEMORY_MB_CONFIG);
         // Read global policy
-        this.globalCachePolicyType = config.get(CachingStateBackendFactory.CACHE_POLICY_CONFIG);
-        this.mapL1KeyPresenceCacheSize = config.get(CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG);
-        this.mapL2KeyPresenceCacheSize = config.get(CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG);
-        this.mapCacheHitRateThreshold = config.get(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG);
-        this.mapCacheHitRateWindowSize = config.get(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
-        this.mapCacheMinAccessesForBypassCheck = config.get(CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
-        this.mapKeyPresenceCacheEnabled = config.get(CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG);
-        this.mapBypassEnabled = config.get(CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG);
-        this.mapPresenceCacheImpl = config.get(CachingStateBackendFactory.MAP_PRESENCE_CACHE_IMPL);
+        this.globalCachePolicyType = config.get(CachingPlusStateBackendFactory.CACHE_POLICY_CONFIG);
+        this.mapL1KeyPresenceCacheSize = config.get(CachingPlusStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG);
+        this.mapL2KeyPresenceCacheSize = config.get(CachingPlusStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG);
+        this.mapCacheHitRateThreshold = config.get(CachingPlusStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG);
+        this.mapCacheHitRateWindowSize = config.get(CachingPlusStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
+        this.mapCacheMinAccessesForBypassCheck = config.get(CachingPlusStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
+        this.mapKeyPresenceCacheEnabled = config.get(CachingPlusStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG);
+        this.mapBypassEnabled = config.get(CachingPlusStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG);
+        this.mapPresenceCacheImpl = config.get(CachingPlusStateBackendFactory.MAP_PRESENCE_CACHE_IMPL);
         // Disable managed L2 when L2 capacity is zero to avoid unnecessary off-heap setup
-        boolean cfgL2Managed = config.get(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG);
+        boolean cfgL2Managed = config.get(CachingPlusStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG);
         this.l2ManagedMemoryEnabled = cfgL2Managed && this.l2CacheSize > 0;
         // Resolve per-state policies with fallback to the global policy when option is absent
-        CachingStateBackendFactory.CachePolicyType tmpMapPolicy = this.globalCachePolicyType;
-        CachingStateBackendFactory.CachePolicyType tmpValuePolicy = this.globalCachePolicyType;
-        CachingStateBackendFactory.CachePolicyType tmpListPolicy = this.globalCachePolicyType;
-        CachingStateBackendFactory.CachePolicyType tmpAggPolicy = this.globalCachePolicyType;
+        CachingPlusStateBackendFactory.CachePolicyType tmpMapPolicy = this.globalCachePolicyType;
+        CachingPlusStateBackendFactory.CachePolicyType tmpValuePolicy = this.globalCachePolicyType;
+        CachingPlusStateBackendFactory.CachePolicyType tmpListPolicy = this.globalCachePolicyType;
+        CachingPlusStateBackendFactory.CachePolicyType tmpAggPolicy = this.globalCachePolicyType;
         if (config instanceof Configuration) {
             Configuration conf = (Configuration) config;
-            if (conf.contains(CachingStateBackendFactory.MAP_CACHE_POLICY_CONFIG)) {
-                tmpMapPolicy = conf.get(CachingStateBackendFactory.MAP_CACHE_POLICY_CONFIG);
+            if (conf.contains(CachingPlusStateBackendFactory.MAP_CACHE_POLICY_CONFIG)) {
+                tmpMapPolicy = conf.get(CachingPlusStateBackendFactory.MAP_CACHE_POLICY_CONFIG);
             }
-            if (conf.contains(CachingStateBackendFactory.VALUE_CACHE_POLICY_CONFIG)) {
-                tmpValuePolicy = conf.get(CachingStateBackendFactory.VALUE_CACHE_POLICY_CONFIG);
+            if (conf.contains(CachingPlusStateBackendFactory.VALUE_CACHE_POLICY_CONFIG)) {
+                tmpValuePolicy = conf.get(CachingPlusStateBackendFactory.VALUE_CACHE_POLICY_CONFIG);
             }
-            if (conf.contains(CachingStateBackendFactory.LIST_CACHE_POLICY_CONFIG)) {
-                tmpListPolicy = conf.get(CachingStateBackendFactory.LIST_CACHE_POLICY_CONFIG);
+            if (conf.contains(CachingPlusStateBackendFactory.LIST_CACHE_POLICY_CONFIG)) {
+                tmpListPolicy = conf.get(CachingPlusStateBackendFactory.LIST_CACHE_POLICY_CONFIG);
             }
-            if (conf.contains(CachingStateBackendFactory.AGGREGATING_CACHE_POLICY_CONFIG)) {
-                tmpAggPolicy = conf.get(CachingStateBackendFactory.AGGREGATING_CACHE_POLICY_CONFIG);
+            if (conf.contains(CachingPlusStateBackendFactory.AGGREGATING_CACHE_POLICY_CONFIG)) {
+                tmpAggPolicy = conf.get(CachingPlusStateBackendFactory.AGGREGATING_CACHE_POLICY_CONFIG);
             }
         } else {
             // Best-effort fallback when we cannot check presence: use per-state value directly
             // which will be equal to its default if not set. This may not reflect global override.
-            tmpMapPolicy = config.get(CachingStateBackendFactory.MAP_CACHE_POLICY_CONFIG);
-            tmpValuePolicy = config.get(CachingStateBackendFactory.VALUE_CACHE_POLICY_CONFIG);
-            tmpListPolicy = config.get(CachingStateBackendFactory.LIST_CACHE_POLICY_CONFIG);
-            tmpAggPolicy = config.get(CachingStateBackendFactory.AGGREGATING_CACHE_POLICY_CONFIG);
+            tmpMapPolicy = config.get(CachingPlusStateBackendFactory.MAP_CACHE_POLICY_CONFIG);
+            tmpValuePolicy = config.get(CachingPlusStateBackendFactory.VALUE_CACHE_POLICY_CONFIG);
+            tmpListPolicy = config.get(CachingPlusStateBackendFactory.LIST_CACHE_POLICY_CONFIG);
+            tmpAggPolicy = config.get(CachingPlusStateBackendFactory.AGGREGATING_CACHE_POLICY_CONFIG);
         }
         this.mapCachePolicyType = tmpMapPolicy;
         this.valueCachePolicyType = tmpValuePolicy;
@@ -209,24 +209,24 @@ public class CachingPlusStateBackend extends AbstractStateBackend
         long tmpAggMaxNs = this.maxActiveNamespaces;
         if (config instanceof Configuration) {
             Configuration conf = (Configuration) config;
-            if (conf.contains(CachingStateBackendFactory.VALUE_MAX_ACTIVE_NAMESPACES_CONFIG)) {
-                tmpValueMaxNs = conf.get(CachingStateBackendFactory.VALUE_MAX_ACTIVE_NAMESPACES_CONFIG);
+            if (conf.contains(CachingPlusStateBackendFactory.VALUE_MAX_ACTIVE_NAMESPACES_CONFIG)) {
+                tmpValueMaxNs = conf.get(CachingPlusStateBackendFactory.VALUE_MAX_ACTIVE_NAMESPACES_CONFIG);
             }
-            if (conf.contains(CachingStateBackendFactory.MAP_MAX_ACTIVE_NAMESPACES_CONFIG)) {
-                tmpMapMaxNs = conf.get(CachingStateBackendFactory.MAP_MAX_ACTIVE_NAMESPACES_CONFIG);
+            if (conf.contains(CachingPlusStateBackendFactory.MAP_MAX_ACTIVE_NAMESPACES_CONFIG)) {
+                tmpMapMaxNs = conf.get(CachingPlusStateBackendFactory.MAP_MAX_ACTIVE_NAMESPACES_CONFIG);
             }
-            if (conf.contains(CachingStateBackendFactory.LIST_MAX_ACTIVE_NAMESPACES_CONFIG)) {
-                tmpListMaxNs = conf.get(CachingStateBackendFactory.LIST_MAX_ACTIVE_NAMESPACES_CONFIG);
+            if (conf.contains(CachingPlusStateBackendFactory.LIST_MAX_ACTIVE_NAMESPACES_CONFIG)) {
+                tmpListMaxNs = conf.get(CachingPlusStateBackendFactory.LIST_MAX_ACTIVE_NAMESPACES_CONFIG);
             }
-            if (conf.contains(CachingStateBackendFactory.AGGREGATING_MAX_ACTIVE_NAMESPACES_CONFIG)) {
-                tmpAggMaxNs = conf.get(CachingStateBackendFactory.AGGREGATING_MAX_ACTIVE_NAMESPACES_CONFIG);
+            if (conf.contains(CachingPlusStateBackendFactory.AGGREGATING_MAX_ACTIVE_NAMESPACES_CONFIG)) {
+                tmpAggMaxNs = conf.get(CachingPlusStateBackendFactory.AGGREGATING_MAX_ACTIVE_NAMESPACES_CONFIG);
             }
         } else {
             // Best-effort when presence cannot be checked
-            try { tmpValueMaxNs = config.get(CachingStateBackendFactory.VALUE_MAX_ACTIVE_NAMESPACES_CONFIG); } catch (Throwable ignore) {}
-            try { tmpMapMaxNs = config.get(CachingStateBackendFactory.MAP_MAX_ACTIVE_NAMESPACES_CONFIG); } catch (Throwable ignore) {}
-            try { tmpListMaxNs = config.get(CachingStateBackendFactory.LIST_MAX_ACTIVE_NAMESPACES_CONFIG); } catch (Throwable ignore) {}
-            try { tmpAggMaxNs = config.get(CachingStateBackendFactory.AGGREGATING_MAX_ACTIVE_NAMESPACES_CONFIG); } catch (Throwable ignore) {}
+            try { tmpValueMaxNs = config.get(CachingPlusStateBackendFactory.VALUE_MAX_ACTIVE_NAMESPACES_CONFIG); } catch (Throwable ignore) {}
+            try { tmpMapMaxNs = config.get(CachingPlusStateBackendFactory.MAP_MAX_ACTIVE_NAMESPACES_CONFIG); } catch (Throwable ignore) {}
+            try { tmpListMaxNs = config.get(CachingPlusStateBackendFactory.LIST_MAX_ACTIVE_NAMESPACES_CONFIG); } catch (Throwable ignore) {}
+            try { tmpAggMaxNs = config.get(CachingPlusStateBackendFactory.AGGREGATING_MAX_ACTIVE_NAMESPACES_CONFIG); } catch (Throwable ignore) {}
             if (tmpValueMaxNs == 0) tmpValueMaxNs = this.maxActiveNamespaces;
             if (tmpMapMaxNs == 0) tmpMapMaxNs = this.maxActiveNamespaces;
             if (tmpListMaxNs == 0) tmpListMaxNs = this.maxActiveNamespaces;
@@ -238,53 +238,53 @@ public class CachingPlusStateBackend extends AbstractStateBackend
         this.aggregatingMaxActiveNamespaces = (int) Math.max(0, tmpAggMaxNs);
 
         boolean autoLeftBypassEnabled =
-                config.get(CachingStateBackendFactory.AUTO_LEFT_BYPASS_ENABLED_CONFIG);
+                config.get(CachingPlusStateBackendFactory.AUTO_LEFT_BYPASS_ENABLED_CONFIG);
 
         // Preserve full configuration relevant to keyed backend
         org.apache.flink.configuration.Configuration cfg = new org.apache.flink.configuration.Configuration();
-        cfg.set(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG, config.get(CachingStateBackendFactory.MAP_CACHE_ENABLED_CONFIG));
-        cfg.set(CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG, this.mapBypassEnabled);
-        cfg.set(CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG, this.mapKeyPresenceCacheEnabled);
-        cfg.set(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG, this.mapCacheHitRateThreshold);
-        cfg.set(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, this.mapCacheHitRateWindowSize);
-        cfg.set(CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, this.mapCacheMinAccessesForBypassCheck);
-        cfg.set(CachingStateBackendFactory.MAP_PRESENCE_CACHE_IMPL, this.mapPresenceCacheImpl);
-        cfg.set(CachingStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG, this.l2ManagedMemoryEnabled);
-        cfg.set(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX,
-                config.get(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX));
-        cfg.set(CachingStateBackendFactory.AUTO_LEFT_BYPASS_ENABLED_CONFIG, autoLeftBypassEnabled);
+        cfg.set(CachingPlusStateBackendFactory.MAP_CACHE_ENABLED_CONFIG, config.get(CachingPlusStateBackendFactory.MAP_CACHE_ENABLED_CONFIG));
+        cfg.set(CachingPlusStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG, this.mapBypassEnabled);
+        cfg.set(CachingPlusStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG, this.mapKeyPresenceCacheEnabled);
+        cfg.set(CachingPlusStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG, this.mapCacheHitRateThreshold);
+        cfg.set(CachingPlusStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, this.mapCacheHitRateWindowSize);
+        cfg.set(CachingPlusStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, this.mapCacheMinAccessesForBypassCheck);
+        cfg.set(CachingPlusStateBackendFactory.MAP_PRESENCE_CACHE_IMPL, this.mapPresenceCacheImpl);
+        cfg.set(CachingPlusStateBackendFactory.L2_MANAGED_MEMORY_ENABLED_CONFIG, this.l2ManagedMemoryEnabled);
+        cfg.set(CachingPlusStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX,
+                config.get(CachingPlusStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX));
+        cfg.set(CachingPlusStateBackendFactory.AUTO_LEFT_BYPASS_ENABLED_CONFIG, autoLeftBypassEnabled);
         // Lightweight wrapper profiling options (propagate exactly as configured)
         try {
-            cfg.set(CachingStateBackendFactory.PROFILE_ENABLED_CONFIG, config.get(CachingStateBackendFactory.PROFILE_ENABLED_CONFIG));
-            cfg.set(CachingStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG, Math.max(1, config.get(CachingStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG)));
+            cfg.set(CachingPlusStateBackendFactory.PROFILE_ENABLED_CONFIG, config.get(CachingPlusStateBackendFactory.PROFILE_ENABLED_CONFIG));
+            cfg.set(CachingPlusStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG, Math.max(1, config.get(CachingPlusStateBackendFactory.PROFILE_SAMPLE_RATE_CONFIG)));
         } catch (Throwable t) {
             // Keep safe defaults if not present
         }
         // Expose resolved per-state policies to the keyed backend (for completeness/testing)
-        cfg.set(CachingStateBackendFactory.CACHE_POLICY_CONFIG, this.globalCachePolicyType);
-        cfg.set(CachingStateBackendFactory.MAP_CACHE_POLICY_CONFIG, this.mapCachePolicyType);
-        cfg.set(CachingStateBackendFactory.VALUE_CACHE_POLICY_CONFIG, this.valueCachePolicyType);
-        cfg.set(CachingStateBackendFactory.LIST_CACHE_POLICY_CONFIG, this.listCachePolicyType);
-        cfg.set(CachingStateBackendFactory.AGGREGATING_CACHE_POLICY_CONFIG, this.aggregatingCachePolicyType);
+        cfg.set(CachingPlusStateBackendFactory.CACHE_POLICY_CONFIG, this.globalCachePolicyType);
+        cfg.set(CachingPlusStateBackendFactory.MAP_CACHE_POLICY_CONFIG, this.mapCachePolicyType);
+        cfg.set(CachingPlusStateBackendFactory.VALUE_CACHE_POLICY_CONFIG, this.valueCachePolicyType);
+        cfg.set(CachingPlusStateBackendFactory.LIST_CACHE_POLICY_CONFIG, this.listCachePolicyType);
+        cfg.set(CachingPlusStateBackendFactory.AGGREGATING_CACHE_POLICY_CONFIG, this.aggregatingCachePolicyType);
         // Package-level logging controls
         try {
-            cfg.set(CachingStateBackendFactory.LOGGING_ENABLED_CONFIG, config.get(CachingStateBackendFactory.LOGGING_ENABLED_CONFIG));
-            String lvl = config.get(CachingStateBackendFactory.LOGGING_LEVEL_CONFIG);
-            if (lvl != null) { cfg.set(CachingStateBackendFactory.LOGGING_LEVEL_CONFIG, lvl); }
+            cfg.set(CachingPlusStateBackendFactory.LOGGING_ENABLED_CONFIG, config.get(CachingPlusStateBackendFactory.LOGGING_ENABLED_CONFIG));
+            String lvl = config.get(CachingPlusStateBackendFactory.LOGGING_LEVEL_CONFIG);
+            if (lvl != null) { cfg.set(CachingPlusStateBackendFactory.LOGGING_LEVEL_CONFIG, lvl); }
         } catch (Throwable t) {
             // ignore, keep defaults
         }
 
         // ValueState toggles
-        cfg.set(CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG, config.get(CachingStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG));
-        cfg.set(CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG, config.get(CachingStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG));
-        cfg.set(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG, config.get(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG));
-        cfg.set(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, config.get(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG));
-        cfg.set(CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, config.get(CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG));
-        cfg.set(CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG, config.get(CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG));
+        cfg.set(CachingPlusStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG, config.get(CachingPlusStateBackendFactory.VALUE_CACHE_ENABLED_CONFIG));
+        cfg.set(CachingPlusStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG, config.get(CachingPlusStateBackendFactory.VALUE_BYPASS_ENABLED_CONFIG));
+        cfg.set(CachingPlusStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG, config.get(CachingPlusStateBackendFactory.VALUE_CACHE_HIT_RATE_THRESHOLD_CONFIG));
+        cfg.set(CachingPlusStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, config.get(CachingPlusStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG));
+        cfg.set(CachingPlusStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, config.get(CachingPlusStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG));
+        cfg.set(CachingPlusStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG, config.get(CachingPlusStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG));
         // Force-bypass regex (if any)
-        cfg.set(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX,
-                config.get(CachingStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX));
+        cfg.set(CachingPlusStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX,
+                config.get(CachingPlusStateBackendFactory.MAP_FORCE_BYPASS_STATES_REGEX));
         // Advanced/kill-switch option left default true unless present elsewhere
         this.taskConfiguration = cfg;
     }
@@ -422,11 +422,11 @@ public class CachingPlusStateBackend extends AbstractStateBackend
         return maxCacheMemoryMb;
     }
 
-    public CachingStateBackendFactory.CachePolicyType getGlobalCachePolicyType() { return globalCachePolicyType; }
-    public CachingStateBackendFactory.CachePolicyType getMapCachePolicyType() { return mapCachePolicyType; }
-    public CachingStateBackendFactory.CachePolicyType getValueCachePolicyType() { return valueCachePolicyType; }
-    public CachingStateBackendFactory.CachePolicyType getListCachePolicyType() { return listCachePolicyType; }
-    public CachingStateBackendFactory.CachePolicyType getAggregatingCachePolicyType() { return aggregatingCachePolicyType; }
+    public CachingPlusStateBackendFactory.CachePolicyType getGlobalCachePolicyType() { return globalCachePolicyType; }
+    public CachingPlusStateBackendFactory.CachePolicyType getMapCachePolicyType() { return mapCachePolicyType; }
+    public CachingPlusStateBackendFactory.CachePolicyType getValueCachePolicyType() { return valueCachePolicyType; }
+    public CachingPlusStateBackendFactory.CachePolicyType getListCachePolicyType() { return listCachePolicyType; }
+    public CachingPlusStateBackendFactory.CachePolicyType getAggregatingCachePolicyType() { return aggregatingCachePolicyType; }
 
     public long getMapL1KeyPresenceCacheSize() {
         return mapL1KeyPresenceCacheSize;
