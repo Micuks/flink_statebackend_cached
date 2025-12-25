@@ -55,7 +55,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 
                 StateBackend delegate;
                 if (delegateClass == null || delegateClass.isBlank()) {
-                        // Default to RocksDB using factory pattern
+                        // Default to RocksDB using the factory pattern
                         try {
                                 RocksDBStateBackendFactory rocksFactory = new RocksDBStateBackendFactory();
                                 delegate = rocksFactory.createFromConfig(config, classLoader);
