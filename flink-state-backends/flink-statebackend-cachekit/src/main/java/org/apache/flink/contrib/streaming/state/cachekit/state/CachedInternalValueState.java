@@ -36,9 +36,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private final InternalValueState<K, N, V> delegate;
     private final CurrentKeyProvider<K> currentKeyProvider;
-    private final CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> cache;
+    private final CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> l1Cache;
+    private final CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> l2Cache;
 
     private N currentNamespace;
+
+    // Sticky Cache (L1)
+    private KeyNamespaceKey<K, N> lastAccessKey;
+    private CachedValue<V> lastAccessValue;
 
     private final java.util.function.Consumer<K> keyContextSetter;
 
@@ -50,32 +55,99 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
-        this.cache = new LruCachePolicy<>(maxEntries, this::onEviction);
+
+        // L1 Cache: ~20% of maxEntries or at least 128
+        int l1Size = Math.max(128, maxEntries / 5);
+        this.l1Cache = new LruCachePolicy<>(l1Size, this::onL1Eviction);
+
+        // L2 Cache: Remaining size (or full maxEntries if we treat L2 as the main
+        // capacity)
+        // Plan said: "use existing maxEntries for L2".
+        this.l2Cache = new LruCachePolicy<>(maxEntries, this::onL2Eviction);
     }
 
     @Override
     public V value() throws IOException {
-        KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKeyProvider.getCurrentKey(), currentNamespace);
-        CachedValue<V> cached = cache.get(cacheKey);
-        if (cached != null) {
-            return cached.valueOrNull();
+        K currentKey = currentKeyProvider.getCurrentKey();
+
+        // 1. Check Sticky Cache (Fast Path)
+        if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
+            return lastAccessValue.valueOrNull();
         }
+
+        KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
+
+        // 2. Check L1 Cache
+        CachedValue<V> l1Cached = l1Cache.get(probeKey);
+        if (l1Cached != null) {
+            updateSticky(probeKey, l1Cached);
+            return l1Cached.valueOrNull();
+        }
+
+        // 3. Check L2 Cache
+        CachedValue<V> l2Cached = l2Cache.get(probeKey);
+        if (l2Cached != null) {
+            // Promote to L1 (Clean)
+            // Note: This puts a clean entry in L1.
+            // If sticky is updated, next access hits sticky.
+            // If L1 eviction happens, clean entry might be demoted back to L2.
+            KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+            CachedValue<V> newValue = CachedValue.of(l2Cached.valueOrNull(), false);
+            l1Cache.put(storageKey, newValue);
+
+            updateSticky(storageKey, newValue);
+            return l2Cached.valueOrNull();
+        }
+
+        // 4. Load from Delegate
         V loaded = delegate.value();
-        // Load callback: put clean value
-        cache.put(cacheKey, CachedValue.of(loaded, false));
+
+        // 5. Update L1 (Clean) - commonly new hot data goes to L1
+        KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+        CachedValue<V> newValue = CachedValue.of(loaded, false);
+        l1Cache.put(storageKey, newValue);
+
+        // Also ensure it's in L2?
+        // Standard multi-level: Load -> L1. Evict L1 -> L2.
+        // So we don't put in L2 here.
+
+        updateSticky(storageKey, newValue);
         return loaded;
     }
 
     @Override
     public void update(V value) throws IOException {
-        KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKeyProvider.getCurrentKey(), currentNamespace);
-        cache.put(cacheKey, CachedValue.of(value, true));
+        K currentKey = currentKeyProvider.getCurrentKey();
+        KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+        CachedValue<V> newValue = CachedValue.of(value, true);
+
+        // Write-Back: Update L1 only (marked dirty)
+        l1Cache.put(cacheKey, newValue);
+
+        // Invalidate L2 to avoid stale data if L1 evicts later and L2 has older
+        // version?
+        // OR rely on L1 eviction overwriting L2.
+        // If L2 has it, it's now stale.
+        // Optimally: l2Cache.remove(cacheKey);
+        // But LruCachePolicy might not have efficient remove without key object match.
+        // Assuming put to L1 eventually flushes to L2.
+        // If L1 evicts, it will overwrite L2.
+        // However, if we possess a valid entry in L2, we should probably remove it or
+        // update it?
+        // Simpler: Just update L1. If L1 evicts, it pushes to L2.
+
+        updateSticky(cacheKey, newValue);
     }
 
     @Override
     public void clear() {
-        KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKeyProvider.getCurrentKey(), currentNamespace);
-        cache.put(cacheKey, CachedValue.of(null, true));
+        K currentKey = currentKeyProvider.getCurrentKey();
+        KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+        CachedValue<V> newValue = CachedValue.of(null, true);
+
+        l1Cache.put(cacheKey, newValue);
+
+        updateSticky(cacheKey, newValue);
     }
 
     @Override
@@ -106,6 +178,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             TypeSerializer<N> safeNamespaceSerializer,
             TypeSerializer<V> safeValueSerializer)
             throws Exception {
+        // Must flush to ensure delegate has latest state before serialization
+        flush();
         return delegate.getSerializedValue(
                 serializedKeyAndNamespace, safeKeySerializer, safeNamespaceSerializer, safeValueSerializer);
     }
@@ -113,54 +187,70 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     @Override
     public InternalKvState.StateIncrementalVisitor<K, N, V> getStateIncrementalVisitor(
             int recommendedMaxNumberOfReturnedRecords) {
+        // Visitor bypasses cache, so flush first
+        flush();
         return delegate.getStateIncrementalVisitor(recommendedMaxNumberOfReturnedRecords);
     }
 
     public void flush() {
+        // Flush L1 dirty entries to L2 (which writes through)
         java.util.List<java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>>> dirtyEntries = new java.util.ArrayList<>();
-        for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : cache.entries()) {
+        for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : l1Cache.entries()) {
             if (entry.getValue().dirty) {
                 dirtyEntries.add(entry);
             }
         }
         for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : dirtyEntries) {
             CachedValue<V> val = entry.getValue();
-            // Double check if still dirty (though likely unchanged)
             if (val.dirty) {
-                flushEntry(entry.getKey(), val);
-                cache.put(entry.getKey(), CachedValue.of(val.value, false));
+                // Push to L2 (Write-Through)
+                // We simulate eviction to L2
+                l2Cache.put(entry.getKey(), CachedValue.of(val.value, false)); // L2 holds clean
+                flushEntryToDelegate(entry.getKey(), val); // Write-through to delegate
+
+                // Mark L1 clean
+                l1Cache.put(entry.getKey(), CachedValue.of(val.value, false));
             }
         }
     }
 
-    private void onEviction(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
+    private void updateSticky(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
+        lastAccessKey = key;
+        lastAccessValue = value;
+    }
+
+    // L1 Eviction Listener
+    private void onL1Eviction(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
+        // Demote to L2
+
         if (value.dirty) {
-            // Save current context
-            K previousKey = currentKeyProvider.getCurrentKey();
-            // N previousNamespace = currentNamespace; // currentNamespace might track
-            // thread local, but delegate has its own
-            // We can't easily get 'currentNamespace' from provided N if it's not exposed.
-            // But we have 'currentNamespace' field in this class which tracks what we set.
-            // Be careful: 'currentNamespace' field tracks what user sets.
-            // When we switch key, we must also switch namespace to what the key expects?
-            // The KeyNamespaceKey has the namespace.
+            // Write-Back: Flush to Delegate first (because L2 is Write-Through / Clean)
+            // Or put to L2 and let L2 write-through?
+            // "L2 Write-Through" implies: Putting to L2 triggers write to delegate.
 
-            try {
-                flushEntry(key, value);
-            } finally {
-                // Restore context
-                keyContextSetter.accept(previousKey);
-                // delegate.setCurrentNamespace(previousNamespace);
-                // We must restore the namespace that was active before eviction!
-                // 'currentNamespace' field holds the arguably 'active' namespace for the user.
-                if (currentNamespace != null) {
-                    delegate.setCurrentNamespace(currentNamespace);
-                }
-            }
+            // 1. Write to Delegate
+            flushEntryToDelegate(key, value);
+
+            // 2. Put to L2 (Clean)
+            l2Cache.put(key, CachedValue.of(value.valueOrNull(), false));
+
+        } else {
+            // Clean L1 eviction: Just move to L2
+            l2Cache.put(key, value);
         }
     }
 
-    private void flushEntry(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
+    // L2 Eviction Listener
+    private void onL2Eviction(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
+        // L2 is clean (backed by delegate). Just drop.
+    }
+
+    private void flushEntryToDelegate(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
+        // Save current context
+        K previousKey = currentKeyProvider.getCurrentKey();
+        // We rely on 'currentNamespace' field in this class but it might have changed.
+        // We must use the namespace from the key.
+
         keyContextSetter.accept(key.key);
         delegate.setCurrentNamespace(key.namespace);
         try {
@@ -171,6 +261,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
         } catch (IOException e) {
             throw new RuntimeException("Failed to flush state to delegate interaction", e);
+        } finally {
+            // Restore context
+            keyContextSetter.accept(previousKey);
+            if (currentNamespace != null) {
+                delegate.setCurrentNamespace(currentNamespace);
+            }
         }
     }
 
@@ -178,20 +274,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         private final K key;
         private final N namespace;
 
-        private KeyNamespaceKey(K key, N namespace) {
-            if (key instanceof BinaryRowData) {
+        private KeyNamespaceKey(K key, N namespace, boolean deepCopy) {
+            if (deepCopy && key instanceof BinaryRowData) {
                 this.key = (K) ((BinaryRowData) key).copy();
             } else {
                 this.key = key;
             }
-            if (namespace instanceof BinaryRowData) {
+            if (deepCopy && namespace instanceof BinaryRowData) {
                 this.namespace = (N) ((BinaryRowData) namespace).copy();
             } else {
                 this.namespace = namespace;
             }
         }
 
-        // TODO: Binary RowData Deep Copy
+        boolean isSame(K otherKey, N otherNamespace) {
+            return Objects.equals(this.key, otherKey) && Objects.equals(this.namespace, otherNamespace);
+        }
 
         @Override
         public boolean equals(Object other) {
