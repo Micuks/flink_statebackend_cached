@@ -37,6 +37,7 @@ import org.apache.flink.runtime.state.OperatorStateHandle;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.delegate.DelegatingStateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 
 import javax.annotation.Nonnull;
 
@@ -61,10 +62,18 @@ public class CacheKitStateBackend extends AbstractStateBackend
 
     private final StateBackend delegateBackend;
     private final int valueCacheMaxEntries;
+    private final CachePolicyType valueCachePolicy;
+    private final int valueCacheLruOverflow;
 
-    public CacheKitStateBackend(StateBackend delegateBackend, int valueCacheMaxEntries) {
+    public CacheKitStateBackend(
+            StateBackend delegateBackend,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
+        this.valueCachePolicy = valueCachePolicy;
+        this.valueCacheLruOverflow = valueCacheLruOverflow;
     }
 
     @Override
@@ -74,6 +83,14 @@ public class CacheKitStateBackend extends AbstractStateBackend
 
     public int getValueCacheMaxEntries() {
         return valueCacheMaxEntries;
+    }
+
+    public CachePolicyType getValueCachePolicy() {
+        return valueCachePolicy;
+    }
+
+    public int getValueCacheLruOverflow() {
+        return valueCacheLruOverflow;
     }
 
     @Override
@@ -121,7 +138,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 executionConfig,
                 ttlTimeProvider,
                 cancelStreamRegistry,
-                valueCacheMaxEntries);
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow);
     }
 
     @Override
@@ -171,6 +190,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
 
         final int maxEntries =
                 Math.max(0, config.get(CacheKitStateBackendFactory.VALUE_CACHE_MAX_ENTRIES));
-        return new CacheKitStateBackend(configuredDelegate, maxEntries);
+        final CachePolicyType policyType = config.get(CacheKitStateBackendFactory.VALUE_CACHE_POLICY);
+        final int lruOverflow = Math.max(0, config.get(CacheKitStateBackendFactory.VALUE_CACHE_LRU_OVERFLOW));
+        return new CacheKitStateBackend(configuredDelegate, maxEntries, policyType, lruOverflow);
     }
 }

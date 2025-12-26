@@ -16,6 +16,8 @@ package org.apache.flink.contrib.streaming.state.cachekit.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.LruCachePolicy;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
@@ -38,6 +40,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final CurrentKeyProvider<K> currentKeyProvider;
     private final CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> l1Cache;
     private final CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> l2Cache;
+    private final CachePolicyType cachePolicyType;
+    private final int lruOverflow;
 
     private N currentNamespace;
 
@@ -51,19 +55,23 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             InternalValueState<K, N, V> delegate,
             CurrentKeyProvider<K> currentKeyProvider,
             java.util.function.Consumer<K> keyContextSetter,
-            int maxEntries) {
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
+        this.cachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
+        this.lruOverflow = Math.max(0, lruOverflow);
 
         // L1 Cache: ~20% of maxEntries or at least 128
         int l1Size = Math.max(128, maxEntries / 5);
-        this.l1Cache = new LruCachePolicy<>(l1Size, this::onL1Eviction);
+        this.l1Cache = createCachePolicy(l1Size, this::onL1Eviction);
 
         // L2 Cache: Remaining size (or full maxEntries if we treat L2 as the main
         // capacity)
         // Plan said: "use existing maxEntries for L2".
-        this.l2Cache = new LruCachePolicy<>(maxEntries, this::onL2Eviction);
+        this.l2Cache = createCachePolicy(maxEntries, this::onL2Eviction);
     }
 
     @Override
@@ -217,6 +225,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private void updateSticky(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
         lastAccessKey = key;
         lastAccessValue = value;
+    }
+
+    private CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> createCachePolicy(
+            int maxEntries,
+            java.util.function.BiConsumer<KeyNamespaceKey<K, N>, CachedValue<V>> evictionListener) {
+        if (cachePolicyType == CachePolicyType.CAFFEINE) {
+            return new CaffeineCachePolicy<>(maxEntries, evictionListener);
+        }
+        return new LruCachePolicy<>(maxEntries, lruOverflow, evictionListener);
     }
 
     // L1 Eviction Listener

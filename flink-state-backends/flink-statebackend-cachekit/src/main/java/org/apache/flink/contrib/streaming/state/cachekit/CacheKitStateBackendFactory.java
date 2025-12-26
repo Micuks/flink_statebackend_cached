@@ -18,6 +18,7 @@ package org.apache.flink.contrib.streaming.state.cachekit;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.RocksDBStateBackendFactory;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.StateBackendFactory;
@@ -40,6 +41,19 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         .defaultValue(1024)
                         .withDescription("Max entries for per-ValueState LRU cache.");
 
+        public static final ConfigOption<CachePolicyType> VALUE_CACHE_POLICY = ConfigOptions
+                        .key("state.backend.cachekit.value.cache.policy")
+                        .enumType(CachePolicyType.class)
+                        .defaultValue(CachePolicyType.LRU)
+                        .withDescription("Cache policy for ValueState (LRU or CAFFEINE).");
+
+        public static final ConfigOption<Integer> VALUE_CACHE_LRU_OVERFLOW = ConfigOptions
+                        .key("state.backend.cachekit.value.cache.lru.overflow")
+                        .intType()
+                        .defaultValue(256)
+                        .withDescription(
+                                        "Overflow entries for LRU before batch eviction triggers.");
+
         public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
                         .stringType()
                         .noDefaultValue()
@@ -51,6 +65,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
         public CacheKitStateBackend createFromConfig(ReadableConfig config, ClassLoader classLoader)
                         throws IOException {
                 final int maxEntries = Math.max(0, config.get(VALUE_CACHE_MAX_ENTRIES));
+                final CachePolicyType policyType = config.get(VALUE_CACHE_POLICY);
+                final int lruOverflow = Math.max(0, config.get(VALUE_CACHE_LRU_OVERFLOW));
                 final String delegateClass = config.get(DELEGATE_BACKEND);
 
                 StateBackend delegate;
@@ -71,7 +87,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         delegate = instantiateBackend(delegateClass, classLoader);
                 }
 
-                return new CacheKitStateBackend(delegate, maxEntries);
+                return new CacheKitStateBackend(delegate, maxEntries, policyType, lruOverflow);
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

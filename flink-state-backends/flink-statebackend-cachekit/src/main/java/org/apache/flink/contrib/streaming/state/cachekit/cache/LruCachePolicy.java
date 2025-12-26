@@ -23,28 +23,28 @@ import java.util.Objects;
 public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
 
     private final int maxEntries;
+    private final int maxEntriesWithOverflow;
     private final LinkedHashMap<K, V> map;
     private final java.util.function.BiConsumer<K, V> evictionListener;
 
     public LruCachePolicy(int maxEntries) {
-        this(maxEntries, (k, v) -> {
+        this(maxEntries, Math.max(1, maxEntries / 16), (k, v) -> {
         });
     }
 
     public LruCachePolicy(int maxEntries, java.util.function.BiConsumer<K, V> evictionListener) {
+        this(maxEntries, Math.max(1, maxEntries / 16), evictionListener);
+    }
+
+    public LruCachePolicy(
+            int maxEntries,
+            int overflowEntries,
+            java.util.function.BiConsumer<K, V> evictionListener) {
         this.maxEntries = Math.max(0, maxEntries);
+        int overflow = Math.max(0, overflowEntries);
+        this.maxEntriesWithOverflow = this.maxEntries > 0 ? this.maxEntries + overflow : 0;
         this.evictionListener = evictionListener;
-        this.map = new LinkedHashMap<K, V>(16, 0.75f, true) {
-            @Override
-            protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
-                if (LruCachePolicy.this.maxEntries > 0
-                        && size() > LruCachePolicy.this.maxEntries) {
-                    LruCachePolicy.this.evictionListener.accept(eldest.getKey(), eldest.getValue());
-                    return true;
-                }
-                return false;
-            }
-        };
+        this.map = new LinkedHashMap<K, V>(16, 0.75f, true);
     }
 
     @Override
@@ -55,7 +55,9 @@ public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
     @Override
     public V put(K key, V value) {
         Objects.requireNonNull(key, "key");
-        return map.put(key, value);
+        V previous = map.put(key, value);
+        evictIfNeeded();
+        return previous;
     }
 
     @Override
@@ -76,5 +78,19 @@ public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
     @Override
     public Iterable<Map.Entry<K, V>> entries() {
         return Collections.unmodifiableSet(map.entrySet());
+    }
+
+    private void evictIfNeeded() {
+        if (maxEntries <= 0 || map.size() <= maxEntriesWithOverflow) {
+            return;
+        }
+        java.util.Iterator<Map.Entry<K, V>> iterator = map.entrySet().iterator();
+        while (map.size() > maxEntries && iterator.hasNext()) {
+            Map.Entry<K, V> entry = iterator.next();
+            iterator.remove();
+            if (evictionListener != null) {
+                evictionListener.accept(entry.getKey(), entry.getValue());
+            }
+        }
     }
 }

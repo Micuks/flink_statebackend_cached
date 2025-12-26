@@ -20,6 +20,7 @@ import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalValueState;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.SavepointResources;
@@ -63,6 +64,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     private final AbstractKeyedStateBackend<K> delegate;
     private final int valueCacheMaxEntries;
+    private final CachePolicyType valueCachePolicy;
+    private final int valueCacheLruOverflow;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -73,7 +76,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             ExecutionConfig executionConfig,
             TtlTimeProvider ttlTimeProvider,
             CloseableRegistry cancelStreamRegistry,
-            int valueCacheMaxEntries) {
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -87,6 +92,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         this.delegate = delegate;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
+        this.valueCachePolicy = valueCachePolicy;
+        this.valueCacheLruOverflow = valueCacheLruOverflow;
     }
 
     @Override
@@ -121,7 +128,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         InternalValueState<K, N, V> delegateValue = (InternalValueState<K, N, V>) internal;
         CachedInternalValueState<K, N, V> wrapped = new CachedInternalValueState<>(delegateValue, this::getCurrentKey,
                 this::setCurrentKey,
-                valueCacheMaxEntries);
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow);
         wrappersByDelegateIdentity.put(internal, wrapped);
         return (S) wrapped;
     }
@@ -170,7 +179,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         InternalValueState<K, N, SV> delegateValue = (InternalValueState<K, N, SV>) internal;
         CachedInternalValueState<K, N, SV> wrapped = new CachedInternalValueState<>(
-                delegateValue, this::getCurrentKey, this::setCurrentKey, valueCacheMaxEntries);
+                delegateValue,
+                this::getCurrentKey,
+                this::setCurrentKey,
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow);
         wrappersByDelegateIdentity.put(internal, wrapped);
         return (IS) wrapped;
     }
