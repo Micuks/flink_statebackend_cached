@@ -324,6 +324,136 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         // this.valueSizeEstimator = ValueSizeUtils::estimate; // Example if Function was used
     }
 
+    /**
+     * Backward-compatible convenience constructor for tests/older call sites that configure a
+     * single cache policy for all state types and do not use managed off-heap L2.
+     *
+     * <p>This constructor keeps compatibility with earlier versions of the cached state backend
+     * where MapState-specific policy/managed-memory knobs did not exist.
+     */
+    public CachingKeyedStateBackend(
+            TaskKvStateRegistry kvStateRegistry,
+            TypeSerializer<K> keySerializer,
+            ClassLoader userCodeClassLoader,
+            ExecutionConfig executionConfig,
+            TtlTimeProvider ttlTimeProvider,
+            MetricGroup metricGroup,
+            @Nonnull Collection<KeyedStateHandle> stateHandles,
+            @Nonnull CloseableRegistry cancelStreamRegistry,
+            AbstractKeyedStateBackend<K> delegateKeyedStateBackend,
+            int l1EntryCacheSize,
+            int l2EntryCacheSize,
+            int maxActiveNamespaceOrPerKeyCacheContainers,
+            long maxCacheMemoryMb,
+            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            int mapL1KeyPresenceCacheSize,
+            int mapL2KeyPresenceCacheSize,
+            double mapCacheHitRateThreshold,
+            long mapCacheHitRateWindowSize,
+            long mapCacheMinAccessesForBypassCheck,
+            boolean mapKeyPresenceCacheEnabled,
+            boolean mapBypassEnabled) {
+        this(
+                kvStateRegistry,
+                keySerializer,
+                userCodeClassLoader,
+                executionConfig,
+                ttlTimeProvider,
+                metricGroup,
+                stateHandles,
+                cancelStreamRegistry,
+                delegateKeyedStateBackend,
+                l1EntryCacheSize,
+                l2EntryCacheSize,
+                maxActiveNamespaceOrPerKeyCacheContainers,
+                maxCacheMemoryMb,
+                cachePolicyType,
+                cachePolicyType,
+                cachePolicyType,
+                cachePolicyType,
+                mapL1KeyPresenceCacheSize,
+                mapL2KeyPresenceCacheSize,
+                mapCacheHitRateThreshold,
+                mapCacheHitRateWindowSize,
+                mapCacheMinAccessesForBypassCheck,
+                mapKeyPresenceCacheEnabled,
+                mapBypassEnabled,
+                CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+                false,
+                null,
+                new org.apache.flink.configuration.Configuration(),
+                l1EntryCacheSize,
+                l2EntryCacheSize,
+                0,
+                0,
+                0,
+                0);
+    }
+
+    /**
+     * Convenience constructor for call sites that provide a presence-cache implementation but do
+     * not use managed off-heap L2 or per-state policies.
+     */
+    public CachingKeyedStateBackend(
+            TaskKvStateRegistry kvStateRegistry,
+            TypeSerializer<K> keySerializer,
+            ClassLoader userCodeClassLoader,
+            ExecutionConfig executionConfig,
+            TtlTimeProvider ttlTimeProvider,
+            MetricGroup metricGroup,
+            @Nonnull Collection<KeyedStateHandle> stateHandles,
+            @Nonnull CloseableRegistry cancelStreamRegistry,
+            AbstractKeyedStateBackend<K> delegateKeyedStateBackend,
+            int l1EntryCacheSize,
+            int l2EntryCacheSize,
+            int maxActiveNamespaceOrPerKeyCacheContainers,
+            long maxCacheMemoryMb,
+            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            int mapL1KeyPresenceCacheSize,
+            int mapL2KeyPresenceCacheSize,
+            double mapCacheHitRateThreshold,
+            long mapCacheHitRateWindowSize,
+            long mapCacheMinAccessesForBypassCheck,
+            boolean mapKeyPresenceCacheEnabled,
+            boolean mapBypassEnabled,
+            CachingStateBackendFactory.PresenceCacheImplementation mapPresenceCacheImpl) {
+        this(
+                kvStateRegistry,
+                keySerializer,
+                userCodeClassLoader,
+                executionConfig,
+                ttlTimeProvider,
+                metricGroup,
+                stateHandles,
+                cancelStreamRegistry,
+                delegateKeyedStateBackend,
+                l1EntryCacheSize,
+                l2EntryCacheSize,
+                maxActiveNamespaceOrPerKeyCacheContainers,
+                maxCacheMemoryMb,
+                cachePolicyType,
+                cachePolicyType,
+                cachePolicyType,
+                cachePolicyType,
+                mapL1KeyPresenceCacheSize,
+                mapL2KeyPresenceCacheSize,
+                mapCacheHitRateThreshold,
+                mapCacheHitRateWindowSize,
+                mapCacheMinAccessesForBypassCheck,
+                mapKeyPresenceCacheEnabled,
+                mapBypassEnabled,
+                mapPresenceCacheImpl,
+                false,
+                null,
+                new org.apache.flink.configuration.Configuration(),
+                l1EntryCacheSize,
+                l2EntryCacheSize,
+                0,
+                0,
+                0,
+                0);
+    }
+
     // create a new RocksDB backend
     public CachingKeyedStateBackend(
             ClassLoader userCodeClassLoader,

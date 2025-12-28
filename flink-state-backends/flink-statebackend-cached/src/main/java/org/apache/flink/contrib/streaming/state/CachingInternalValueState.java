@@ -263,6 +263,38 @@ public class CachingInternalValueState<K, N, V>
         });
     }
 
+    /**
+     * Backward-compatible constructor for older tests/call sites that don't configure write-behind.
+     */
+    public CachingInternalValueState(
+            InternalValueState<K, N, V> delegateState,
+            CachingKeyedStateBackend<K> backend,
+            int l1CacheSize,
+            int l2CacheSize,
+            int maxActiveNamespacesInCache,
+            long maxCacheMemoryMb,
+            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            double cacheHitRateThreshold,
+            long cacheHitRateWindowSize,
+            long cacheMinAccessesForBypassCheck,
+            boolean bypassEnabled,
+            MetricGroup metricsGroup) {
+        this(
+                delegateState,
+                backend,
+                l1CacheSize,
+                l2CacheSize,
+                maxActiveNamespacesInCache,
+                maxCacheMemoryMb,
+                cachePolicyType,
+                cacheHitRateThreshold,
+                cacheHitRateWindowSize,
+                cacheMinAccessesForBypassCheck,
+                bypassEnabled,
+                false,
+                metricsGroup);
+    }
+
     private void registerProfileMetricsIfNeeded() {
         if (profGetCalls != null) return; // already registered
         LOG.info("Attempting to register profile metrics. profileEnabled={}, metricsIsNull={}", profileEnabled, metrics == null);
@@ -495,10 +527,35 @@ public class CachingInternalValueState<K, N, V>
         final long t0 = maybeStartTimer();
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
+        final int kg = backend.getKeyContext().getCurrentKeyGroupIndex();
+        final CompositeKey ck =
+                CompositeKey.from(
+                        currentKey,
+                        kg,
+                        currentNamespace,
+                        getKeySerializer(),
+                        getNamespaceSerializer());
 
         try {
             int decisionWeight = 1;
             if (bypassEnabled && bypassCache) {
+                // Correctness: with write-behind enabled, the latest value may exist only in the L1 cache
+                // as a dirty entry. In bypass mode, non-sampled reads must still observe these updates.
+                if (writeBehindEnabled) {
+                    CacheEntry<V> l1DirtyOrClean = l1Cache.get(ck);
+                    if (l1DirtyOrClean != null) {
+                        boolean isSample =
+                                accessSampler != null
+                                        && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
+                        if (isSample) {
+                            updateCacheBypassConditionWeighted(true, SAMPLING_RATE);
+                            cacheHits.inc();
+                            l1ValueCacheHitCount.inc();
+                            valueStateL1CacheHitCount.inc();
+                        }
+                        return l1DirtyOrClean.getValue();
+                    }
+                }
                 boolean isSample = accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
                 if (!isSample) {
                     // In bypass mode, do not count unsampled accesses toward the hit-rate window.
@@ -509,8 +566,6 @@ public class CachingInternalValueState<K, N, V>
             }
 
         CachePolicy<CompositeKey, CacheEntry<V>> l1Cache = getL1CacheForNamespace(currentNamespace);
-        int kg = backend.getKeyContext().getCurrentKeyGroupIndex();
-        CompositeKey ck = CompositeKey.from(currentKey, kg, currentNamespace, getKeySerializer(), getNamespaceSerializer());
         CacheEntry<V> l1Entry = l1Cache.get(ck);
 
         if (l1Entry != null) {

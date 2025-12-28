@@ -148,6 +148,42 @@ public class CachingStateBackend extends AbstractStateBackend
         }
     }
 
+    /**
+     * Backward-compatible convenience constructor for older call sites/tests that do not specify
+     * presence cache implementation and managed off-heap toggles.
+     */
+    public CachingStateBackend(
+            StateBackend delegateBackend,
+            long l1CacheSize,
+            long l2CacheSize,
+            long maxActiveNamespaces,
+            long maxCacheMemoryMb,
+            CachingStateBackendFactory.CachePolicyType cachePolicyType,
+            long mapL1KeyPresenceCacheSize,
+            long mapL2KeyPresenceCacheSize,
+            double mapCacheHitRateThreshold,
+            long mapCacheHitRateWindowSize,
+            long mapCacheMinAccessesForBypassCheck,
+            boolean mapKeyPresenceCacheEnabled,
+            boolean mapBypassEnabled) {
+        this(
+                delegateBackend,
+                l1CacheSize,
+                l2CacheSize,
+                maxActiveNamespaces,
+                maxCacheMemoryMb,
+                cachePolicyType,
+                mapL1KeyPresenceCacheSize,
+                mapL2KeyPresenceCacheSize,
+                mapCacheHitRateThreshold,
+                mapCacheHitRateWindowSize,
+                mapCacheMinAccessesForBypassCheck,
+                mapKeyPresenceCacheEnabled,
+                mapBypassEnabled,
+                CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+                false);
+    }
+
     public CachingStateBackend(StateBackend delegateBackend, ReadableConfig config) {
         this.delegateBackend = delegateBackend;
         this.l1CacheSize = config.get(CachingStateBackendFactory.L1_CACHE_SIZE_CONFIG);
@@ -424,6 +460,7 @@ public class CachingStateBackend extends AbstractStateBackend
     public CachingStateBackendFactory.CachePolicyType getValueCachePolicyType() { return valueCachePolicyType; }
     public CachingStateBackendFactory.CachePolicyType getListCachePolicyType() { return listCachePolicyType; }
     public CachingStateBackendFactory.CachePolicyType getAggregatingCachePolicyType() { return aggregatingCachePolicyType; }
+    public CachingStateBackendFactory.CachePolicyType getCachePolicyType() { return globalCachePolicyType; }
 
     public long getMapL1KeyPresenceCacheSize() {
         return mapL1KeyPresenceCacheSize;

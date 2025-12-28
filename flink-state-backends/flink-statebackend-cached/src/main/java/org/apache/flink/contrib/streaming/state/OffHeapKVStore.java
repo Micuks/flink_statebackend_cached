@@ -383,6 +383,9 @@ public class OffHeapKVStore implements Closeable {
     private int findPageFor(int requiredSize) throws IOException {
         for (int i = 0; i < pages.size(); i++) {
             MemorySegment page = pages.get(i);
+            if (page == null) {
+                continue;
+            }
             if (page.getInt(FREE_POINTER_OFFSET) + requiredSize <= pageSize) {
                 return i;
             }

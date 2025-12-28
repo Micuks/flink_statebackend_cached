@@ -41,7 +41,9 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.util.Collections;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
@@ -56,6 +58,7 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.never;
 
 @ExtendWith(MockitoExtension.class)
 class CachingInternalValueStateTest {
@@ -234,6 +237,53 @@ class CachingInternalValueStateTest {
 
         assertEquals(testValue1, retrievedValue, "Value from L2 hit should match original value");
         verify(mockDelegateState, times(3)).value();
+    }
+
+    @Test
+    void testValueGet_bypassModeWithWriteBehind_readsFromL1NotDelegate() throws Exception {
+        // Create a fresh ValueState wrapper with write-behind enabled and bypass logic enabled.
+        // We then force bypass mode and verify that reads still observe the unflushed (dirty) L1 value.
+        double threshold = 0.1;
+        long window = 10;
+        long minAccesses = 1;
+        boolean bypassEnabled = true;
+        boolean writeBehindEnabled = true;
+
+        CachingInternalValueState<String, String, String> writeBehindState =
+                new CachingInternalValueState<>(
+                        mockDelegateState,
+                        cachingKeyedStateBackend,
+                        l1CacheSize,
+                        l2CacheSize,
+                        maxActiveNamespaces,
+                        0L,
+                        currentCachePolicyType,
+                        threshold,
+                        window,
+                        minAccesses,
+                        bypassEnabled,
+                        writeBehindEnabled,
+                        new UnregisteredMetricsGroup());
+        writeBehindState.setCurrentNamespace(testNamespace);
+
+        // Write-behind update: should not write through to delegate.
+        writeBehindState.update(testValue1);
+        verify(mockDelegateState, never()).update(eq(testValue1));
+
+        // Force bypass mode and ensure the next access is treated as non-sampled.
+        Field bypassField = CachingInternalValueState.class.getDeclaredField("bypassCache");
+        bypassField.setAccessible(true);
+        bypassField.setBoolean(writeBehindState, true);
+
+        Field samplerField = CachingInternalValueState.class.getDeclaredField("accessSampler");
+        samplerField.setAccessible(true);
+        samplerField.set(writeBehindState, new AtomicLong(1));
+
+        lenient().when(mockDelegateState.value()).thenReturn(testValue2);
+
+        String v = writeBehindState.value();
+        assertEquals(testValue1, v, "Bypass reads must observe unflushed L1 (write-behind) updates");
+        verify(mockDelegateState, never()).value();
     }
 
     @ParameterizedTest

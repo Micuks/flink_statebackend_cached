@@ -1261,6 +1261,95 @@ public class CachingInternalMapState<K, N, UK, UV>
         );
     }
 
+    /**
+     * Backward-compatible constructor for older tests/call sites that do not specify presence cache
+     * implementation and advanced toggles.
+     */
+    public CachingInternalMapState(
+        InternalMapState<K, N, UK, UV> delegateState,
+        CachingKeyedStateBackend<K> backend,
+        int l1CacheSizePerMap,
+        int l2CacheSizePerMap,
+        int maxFlinkKeysWithActiveCachesPerNamespace,
+        long maxCacheMemoryMb,
+        CachingStateBackendFactory.CachePolicyType cachePolicyType,
+        int mapL1KeyPresenceCacheSize,
+        int mapL2KeyPresenceCacheSize,
+        MetricGroup metrics,
+        double mapCacheHitRateThreshold,
+        long mapCacheHitRateWindowSize,
+        long mapCacheMinAccessesForBypassCheck,
+        boolean enableKeyPresenceCache,
+        boolean enableBypass
+    ) {
+        this(
+            delegateState,
+            backend,
+            l1CacheSizePerMap,
+            l2CacheSizePerMap,
+            maxFlinkKeysWithActiveCachesPerNamespace,
+            maxCacheMemoryMb,
+            cachePolicyType,
+            mapL1KeyPresenceCacheSize,
+            mapL2KeyPresenceCacheSize,
+            metrics,
+            mapCacheHitRateThreshold,
+            mapCacheHitRateWindowSize,
+            mapCacheMinAccessesForBypassCheck,
+            enableKeyPresenceCache,
+            enableBypass,
+            CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+            false,
+            false,
+            false
+        );
+    }
+
+    private void updateCachesForBypassPut(UK userKey, UV userValue) {
+        PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
+        CacheEntry<UV> existing = perKeyCache.l1MapEntries.get(userKey);
+        if (existing != null) {
+            CacheEntry<UV> newEntry = CacheEntry.clean(userValue);
+            CacheEntry<UV> oldEntry = perKeyCache.l1MapEntries.put(userKey, newEntry);
+            if (oldEntry != null) {
+                perKeyCache.ownerBackend.reportCacheMemoryReleased(oldEntry.getEstimatedSizeBytes());
+            }
+            perKeyCache.ownerBackend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
+        }
+        removeL2Entry(perKeyCache, userKey);
+        perKeyCache.invalidatePresenceCache(userKey);
+        perKeyCache.fullyLoaded = false;
+    }
+
+    private void updateCachesForBypassRemove(UK userKey) {
+        PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
+        CacheEntry<UV> existing = perKeyCache.l1MapEntries.get(userKey);
+        if (existing != null) {
+            CacheEntry<UV> newEntry = CacheEntry.clean(null);
+            CacheEntry<UV> oldEntry = perKeyCache.l1MapEntries.put(userKey, newEntry);
+            if (oldEntry != null) {
+                perKeyCache.ownerBackend.reportCacheMemoryReleased(oldEntry.getEstimatedSizeBytes());
+            }
+            perKeyCache.ownerBackend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
+        }
+        removeL2Entry(perKeyCache, userKey);
+        perKeyCache.invalidatePresenceCache(userKey);
+        perKeyCache.fullyLoaded = false;
+    }
+
+    private void removeL2Entry(PerKeyMapCache<UK, UV, K, N> perKeyCache, UK userKey) {
+        try {
+            if (perKeyCache.l2ManagedMemoryEnabled && perKeyCache.l2MapEntriesOffHeap != null) {
+                byte[] serializedKey = serializeKey(userKey);
+                perKeyCache.l2MapEntriesOffHeap.remove(serializedKey);
+            } else {
+                perKeyCache.l2MapEntries.remove(userKey);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to serialize key for L2 remove", e);
+        }
+    }
+
     // Helper for non-CacheEntry valued caches (like namespaceCaches, keyCaches)
     private <CK, CV> CachePolicy<CK, CV> createCachePolicyForHierarchicalCache(
         int capacity,
@@ -2184,6 +2273,13 @@ public class CachingInternalMapState<K, N, UK, UV>
         delegateState.setCurrentNamespace(getCurrentNamespace());
 
         if (forceBypassAlways) {
+            // Correctness: MapState writes are cached (write-back). Even when bypassing, reads must
+            // reflect any unflushed L1 updates for this (flinkKey, namespace, userKey).
+            PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
+            CacheEntry<UV> l1Entry = perKeyCache.l1MapEntries.get(userKey);
+            if (l1Entry != null) {
+                return l1Entry.getValue();
+            }
             delegateLookups.inc();
             return delegateState.get(userKey);
         }
@@ -2195,6 +2291,11 @@ public class CachingInternalMapState<K, N, UK, UV>
             GLOBAL_BYPASS ||
             isAutoBypassActiveForThisCall()
         ) {
+            PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
+            CacheEntry<UV> l1Entry = perKeyCache.l1MapEntries.get(userKey);
+            if (l1Entry != null) {
+                return l1Entry.getValue();
+            }
             delegateLookups.inc();
             return delegateState.get(userKey);
         }
@@ -2204,6 +2305,12 @@ public class CachingInternalMapState<K, N, UK, UV>
             boolean isSample =
                 accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
             if (!isSample) {
+                // Correctness: bypass mode must still observe unflushed L1 writes.
+                PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
+                CacheEntry<UV> l1Entry = perKeyCache.l1MapEntries.get(userKey);
+                if (l1Entry != null) {
+                    return l1Entry.getValue();
+                }
                 delegateLookups.inc();
                 // In bypass mode, do not count unsampled accesses toward the hit-rate window to
                 // avoid biasing hit rate to zero.
@@ -2528,6 +2635,7 @@ public class CachingInternalMapState<K, N, UK, UV>
             isAutoBypassActiveForThisCall()
         ) {
             delegateState.put(userKey, userValue);
+            updateCachesForBypassPut(userKey, userValue);
             return;
         }
 
@@ -2536,6 +2644,7 @@ public class CachingInternalMapState<K, N, UK, UV>
                 accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
             if (!isSample) {
                 delegateState.put(userKey, userValue);
+                updateCachesForBypassPut(userKey, userValue);
                 // Do not update hit-rate window for unsampled bypass writes.
                 return;
             }
@@ -2652,6 +2761,7 @@ public class CachingInternalMapState<K, N, UK, UV>
             isAutoBypassActiveForThisCall()
         ) {
             delegateState.remove(userKey);
+            updateCachesForBypassRemove(userKey);
             return;
         }
 
@@ -2660,6 +2770,7 @@ public class CachingInternalMapState<K, N, UK, UV>
                 accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
             if (!isSample) {
                 delegateState.remove(userKey);
+                updateCachesForBypassRemove(userKey);
                 // Do not update hit-rate window for unsampled bypass removes.
                 return;
             }
@@ -2728,6 +2839,11 @@ public class CachingInternalMapState<K, N, UK, UV>
             GLOBAL_BYPASS ||
             isAutoBypassActiveForThisCall()
         ) {
+            PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
+            CacheEntry<UV> l1Entry = perKeyCache.l1MapEntries.get(userKey);
+            if (l1Entry != null) {
+                return l1Entry.getValue() != null;
+            }
             return delegateState.contains(userKey);
         }
 
@@ -2752,6 +2868,12 @@ public class CachingInternalMapState<K, N, UK, UV>
             boolean isSample =
                 accessSampler != null && (accessSampler.incrementAndGet() % SAMPLING_RATE == 0);
             if (!isSample) {
+                // Correctness: bypass mode must still observe unflushed L1 writes.
+                PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
+                CacheEntry<UV> l1Entry = perKeyCache.l1MapEntries.get(userKey);
+                if (l1Entry != null) {
+                    return l1Entry.getValue() != null;
+                }
                 // Do not skew hit rate with unsampled bypass reads
                 return delegateState.contains(userKey);
             }
