@@ -30,17 +30,20 @@ public final class CaffeineCachePolicy<K, V> implements CachePolicy<K, V> {
     public CaffeineCachePolicy(long maxEntries, java.util.function.BiConsumer<K, V> evictionListener) {
         Objects.requireNonNull(evictionListener, "evictionListener");
         if (maxEntries <= 0) {
-            this.cache = Caffeine.newBuilder().maximumSize(0).build();
+            this.cache = Caffeine.newBuilder().executor(Runnable::run).maximumSize(0).build();
             return;
         }
         long initialCapacity = Math.min(1024, Math.max(16, maxEntries));
         this.cache =
                 Caffeine.newBuilder()
+                        // CacheKit state backend isn't thread-safe; avoid invoking removal listener
+                        // on Caffeine's async executor (which can lead to off-thread RocksDB writes).
+                        .executor(Runnable::run)
                         .initialCapacity((int) Math.min(Integer.MAX_VALUE, initialCapacity))
                         .maximumSize(maxEntries)
                         .removalListener(
                                 (K key, V value, RemovalCause cause) -> {
-                                    if (cause.wasEvicted() && key != null) {
+                                    if (cause.wasEvicted() && key != null && value != null) {
                                         evictionListener.accept(key, value);
                                     }
                                 })
