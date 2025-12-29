@@ -43,6 +43,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final CachePolicyType cachePolicyType;
     private final int lruOverflow;
 
+    private final boolean bypassEnabled;
+    private final double hitRateThreshold;
+    private final int hitRateWindow;
+
     private N currentNamespace;
 
     // Sticky Cache (L1)
@@ -51,26 +55,36 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private final java.util.function.Consumer<K> keyContextSetter;
 
+    // Bypass State
+    private volatile boolean isBypassing = false;
+    private long currentWindowAccesses = 0;
+    private long currentWindowHits = 0;
+    private int opsSinceLastSample = 0;
+
     public CachedInternalValueState(
             InternalValueState<K, N, V> delegate,
             CurrentKeyProvider<K> currentKeyProvider,
             java.util.function.Consumer<K> keyContextSetter,
             int maxEntries,
             CachePolicyType cachePolicyType,
-            int lruOverflow) {
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
         this.cachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
         this.lruOverflow = Math.max(0, lruOverflow);
+        this.bypassEnabled = bypassEnabled;
+        this.hitRateThreshold = hitRateThreshold;
+        this.hitRateWindow = hitRateWindow;
 
         // L1 Cache: ~20% of maxEntries or at least 128
         int l1Size = Math.max(128, maxEntries / 5);
         this.l1Cache = createCachePolicy(l1Size, this::onL1Eviction);
 
-        // L2 Cache: Remaining size (or full maxEntries if we treat L2 as the main
-        // capacity)
-        // Plan said: "use existing maxEntries for L2".
+        // L2 Cache: Remaining size (or full maxEntries)
         this.l2Cache = createCachePolicy(maxEntries, this::onL2Eviction);
     }
 
@@ -78,46 +92,66 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     public V value() throws IOException {
         K currentKey = currentKeyProvider.getCurrentKey();
 
-        // 1. Check Sticky Cache (Fast Path)
+        // 1. Check Sticky Cache (Always Check L0 - Fast Path)
         if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
+            recordAccess(true); // Hit
             return lastAccessValue.valueOrNull();
+        }
+
+        // 2. Bypass Logic
+        if (bypassEnabled && isBypassing) {
+            // Sampling: Check cache every ~100 requests to see if we should re-enable
+            opsSinceLastSample++;
+            if (opsSinceLastSample < 100) {
+                // Bypass mode: Direct to Delegate
+                // Don't record access here to avoid skewing stats with 100% hits/misses?
+                // Actually, if we bypass, we assume it's a "Miss" for the cache utility?
+                // Or we just don't count it.
+                // If we don't count it, we never exit bypass?
+                // We MUST count it.
+                // In bypass, we assume we SAVED a cache lookup overhead.
+                // But to calculate "Hit Rate", we need to know if it WOULD have been a hit.
+                // We don't know.
+                // So we rely on the sample (below) to estimate hit rate.
+                // We behave as if we are not looking.
+                return delegate.value();
+            }
+            // Sample this request
+            opsSinceLastSample = 0;
         }
 
         KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
 
-        // 2. Check L1 Cache
+        // 3. Check L1 Cache
         CachedValue<V> l1Cached = l1Cache.get(probeKey);
         if (l1Cached != null) {
             updateSticky(probeKey, l1Cached);
+            recordAccess(true); // Hit
             return l1Cached.valueOrNull();
         }
 
-        // 3. Check L2 Cache
+        // 4. Check L2 Cache
         CachedValue<V> l2Cached = l2Cache.get(probeKey);
         if (l2Cached != null) {
             // Promote to L1 (Clean)
-            // Note: This puts a clean entry in L1.
-            // If sticky is updated, next access hits sticky.
-            // If L1 eviction happens, clean entry might be demoted back to L2.
             KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
             CachedValue<V> newValue = CachedValue.of(l2Cached.valueOrNull(), false);
             l1Cache.put(storageKey, newValue);
 
             updateSticky(storageKey, newValue);
+            recordAccess(true); // Hit
             return l2Cached.valueOrNull();
         }
 
-        // 4. Load from Delegate
+        // 5. Miss -> Load from Delegate
         V loaded = delegate.value();
+        recordAccess(false); // Miss
 
-        // 5. Update L1 (Clean) - commonly new hot data goes to L1
+        // 6. Update L1 (Clean)
+        // Even if bypassing (sampled), we populate L1 to allow hit rate recovery
         KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
         CachedValue<V> newValue = CachedValue.of(loaded, false);
         l1Cache.put(storageKey, newValue);
-
-        // Also ensure it's in L2?
-        // Standard multi-level: Load -> L1. Evict L1 -> L2.
-        // So we don't put in L2 here.
 
         updateSticky(storageKey, newValue);
         return loaded;
@@ -126,24 +160,27 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     @Override
     public void update(V value) throws IOException {
         K currentKey = currentKeyProvider.getCurrentKey();
+
+        if (bypassEnabled && isBypassing) {
+            // Write-Through (Bypass Mode)
+            delegate.update(value);
+
+            // Update L1 as Clean so subsequent reads (if sampled or re-enabled) find it.
+            // This also ensures cache coherence.
+            KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+            CachedValue<V> newValue = CachedValue.of(value, false); // Clean
+            l1Cache.put(cacheKey, newValue);
+            updateSticky(cacheKey, newValue);
+            return;
+        }
+
         KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
         CachedValue<V> newValue = CachedValue.of(value, true);
 
         // Write-Back: Update L1 only (marked dirty)
         l1Cache.put(cacheKey, newValue);
 
-        // Invalidate L2 to avoid stale data if L1 evicts later and L2 has older
-        // version?
-        // OR rely on L1 eviction overwriting L2.
-        // If L2 has it, it's now stale.
-        // Optimally: l2Cache.remove(cacheKey);
-        // But LruCachePolicy might not have efficient remove without key object match.
-        // Assuming put to L1 eventually flushes to L2.
-        // If L1 evicts, it will overwrite L2.
-        // However, if we possess a valid entry in L2, we should probably remove it or
-        // update it?
-        // Simpler: Just update L1. If L1 evicts, it pushes to L2.
-
+        // Optimistically update sticky
         updateSticky(cacheKey, newValue);
     }
 
@@ -262,6 +299,42 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // L2 is clean (backed by delegate). Just drop.
     }
 
+    private void recordAccess(boolean isHit) {
+        if (!bypassEnabled) {
+            return;
+        }
+        currentWindowAccesses++;
+        if (isHit) {
+            currentWindowHits++;
+        }
+
+        if (currentWindowAccesses >= hitRateWindow) {
+            double hitRate = (double) currentWindowHits / currentWindowAccesses;
+
+            boolean shouldBypass = hitRate < hitRateThreshold;
+
+            if (isBypassing) {
+                // If currently bypassing, we only switch BACK if hit rate > threshold
+                if (!shouldBypass) {
+                    isBypassing = false;
+                    // Reset sticky cache to avoid stale hits? No, sticky is updated on update()
+                    // Ops since last sample reset automatically
+                }
+            } else {
+                // If currently NOT bypassing, switch TO bypass if hit rate < threshold
+                if (shouldBypass) {
+                    isBypassing = true;
+                    flush(); // Essential: Flush dirty value to delegate before entering bypass
+                             // (Write-Through) mode
+                }
+            }
+
+            // Reset window
+            currentWindowAccesses = 0;
+            currentWindowHits = 0;
+        }
+    }
+
     private void flushEntryToDelegate(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
         // Save current context
         K previousKey = currentKeyProvider.getCurrentKey();
@@ -269,6 +342,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // We must use the namespace from the key.
 
         keyContextSetter.accept(key.key);
+        // delegate.setCurrentNamespace(key.namespace); // delegate namespace must be
+        // set before update
+        // The delegate might look at its own currentNamespace.
+        // However, 'key.namespace' is the correct one for this entry.
+        // We need to ensure we restore the *previous* namespace of the delegate if we
+        // change it.
+        // Actually, we don't have access to delegate's internal 'currentNamespace'
+        // easily to restore it?
+        // But 'setCurrentNamespace' updates 'delegate's currentNamespace.
+        // We can just rely on 'this.currentNamespace' being the "logic" current
+        // namespace,
+        // but 'flushEntryToDelegate' is called for arbitrary keys (eviction).
+        // So we must change it.
+        // And then restore it to 'this.currentNamespace' (which is what the user
+        // expects).
+
         delegate.setCurrentNamespace(key.namespace);
         try {
             if (value.isNull) {

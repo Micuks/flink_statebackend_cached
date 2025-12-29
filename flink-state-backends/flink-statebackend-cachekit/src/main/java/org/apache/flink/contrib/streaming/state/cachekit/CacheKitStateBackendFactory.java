@@ -54,6 +54,25 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         .withDescription(
                                         "Overflow entries for LRU before batch eviction triggers.");
 
+        public static final ConfigOption<Boolean> VALUE_BYPASS_ENABLED = ConfigOptions
+                        .key("state.backend.cachekit.value.bypass.enabled")
+                        .booleanType()
+                        .defaultValue(true)
+                        .withDescription("Enable adaptive bypass for ValueState caching based on hit rate.");
+
+        public static final ConfigOption<Double> VALUE_HIT_RATE_THRESHOLD = ConfigOptions
+                        .key("state.backend.cachekit.value.hit-rate.threshold")
+                        .doubleType()
+                        .defaultValue(0.05)
+                        .withDescription(
+                                        "Hit rate threshold (0.0 to 1.0) below which cache is bypassed. Default 0.05 (5%).");
+
+        public static final ConfigOption<Integer> VALUE_HIT_RATE_WINDOW = ConfigOptions
+                        .key("state.backend.cachekit.value.hit-rate.window")
+                        .intType()
+                        .defaultValue(1000)
+                        .withDescription("Number of accesses to calculate hit rate over.");
+
         public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
                         .stringType()
                         .noDefaultValue()
@@ -67,7 +86,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final int maxEntries = Math.max(0, config.get(VALUE_CACHE_MAX_ENTRIES));
                 final CachePolicyType policyType = config.get(VALUE_CACHE_POLICY);
                 final int lruOverflow = Math.max(0, config.get(VALUE_CACHE_LRU_OVERFLOW));
+                final boolean bypassEnabled = config.get(VALUE_BYPASS_ENABLED);
+                final double hitRateThreshold = config.get(VALUE_HIT_RATE_THRESHOLD);
+                final int hitRateWindow = config.get(VALUE_HIT_RATE_WINDOW);
                 final String delegateClass = config.get(DELEGATE_BACKEND);
+
+                System.out.printf(
+                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, delegate=%s%n",
+                                maxEntries, policyType, lruOverflow, bypassEnabled, hitRateThreshold, hitRateWindow,
+                                delegateClass);
 
                 StateBackend delegate;
                 if (delegateClass == null || delegateClass.isBlank()) {
@@ -87,7 +114,9 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         delegate = instantiateBackend(delegateClass, classLoader);
                 }
 
-                return new CacheKitStateBackend(delegate, maxEntries, policyType, lruOverflow);
+                return new CacheKitStateBackend(
+                                delegate, maxEntries, policyType, lruOverflow, bypassEnabled, hitRateThreshold,
+                                hitRateWindow);
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

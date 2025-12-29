@@ -45,14 +45,17 @@ import java.io.IOException;
 import java.util.Collection;
 
 /**
- * A minimal, extensible {@link StateBackend} wrapper used as the starting point for a production
+ * A minimal, extensible {@link StateBackend} wrapper used as the starting point
+ * for a production
  * caching framework.
  *
- * <p>Current scope:
+ * <p>
+ * Current scope:
  *
  * <ul>
- *   <li>Delegates persistence/checkpointing to a delegate {@link StateBackend}.
- *   <li>Adds LRU caching for {@code ValueState} via {@link CacheKitKeyedStateBackend}.
+ * <li>Delegates persistence/checkpointing to a delegate {@link StateBackend}.
+ * <li>Adds LRU caching for {@code ValueState} via
+ * {@link CacheKitKeyedStateBackend}.
  * </ul>
  */
 public class CacheKitStateBackend extends AbstractStateBackend
@@ -64,16 +67,25 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final int valueCacheMaxEntries;
     private final CachePolicyType valueCachePolicy;
     private final int valueCacheLruOverflow;
+    private final boolean valueBypassEnabled;
+    private final double valueHitRateThreshold;
+    private final int valueHitRateWindow;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
             int valueCacheMaxEntries,
             CachePolicyType valueCachePolicy,
-            int valueCacheLruOverflow) {
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
         this.valueCacheLruOverflow = valueCacheLruOverflow;
+        this.valueBypassEnabled = valueBypassEnabled;
+        this.valueHitRateThreshold = valueHitRateThreshold;
+        this.valueHitRateWindow = valueHitRateWindow;
     }
 
     @Override
@@ -109,20 +121,18 @@ public class CacheKitStateBackend extends AbstractStateBackend
             throws IOException {
         AbstractKeyedStateBackend<K> delegated;
         try {
-            delegated =
-                    (AbstractKeyedStateBackend<K>)
-                            delegateBackend.createKeyedStateBackend(
-                                    env,
-                                    jobID,
-                                    operatorIdentifier,
-                                    keySerializer,
-                                    numberOfKeyGroups,
-                                    keyGroupRange,
-                                    kvStateRegistry,
-                                    ttlTimeProvider,
-                                    metricGroup,
-                                    stateHandles,
-                                    cancelStreamRegistry);
+            delegated = (AbstractKeyedStateBackend<K>) delegateBackend.createKeyedStateBackend(
+                    env,
+                    jobID,
+                    operatorIdentifier,
+                    keySerializer,
+                    numberOfKeyGroups,
+                    keyGroupRange,
+                    kvStateRegistry,
+                    ttlTimeProvider,
+                    metricGroup,
+                    stateHandles,
+                    cancelStreamRegistry);
         } catch (Exception e) {
             throw new IOException("Failed to create delegate keyed state backend", e);
         }
@@ -140,7 +150,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 cancelStreamRegistry,
                 valueCacheMaxEntries,
                 valueCachePolicy,
-                valueCacheLruOverflow);
+                valueCacheLruOverflow,
+                valueBypassEnabled,
+                valueHitRateThreshold,
+                valueHitRateWindow);
     }
 
     @Override
@@ -183,15 +196,19 @@ public class CacheKitStateBackend extends AbstractStateBackend
     @Override
     public StateBackend configure(ReadableConfig config, ClassLoader classLoader)
             throws IllegalConfigurationException {
-        final StateBackend configuredDelegate =
-                delegateBackend instanceof ConfigurableStateBackend
-                        ? ((ConfigurableStateBackend) delegateBackend).configure(config, classLoader)
-                        : delegateBackend;
+        final StateBackend configuredDelegate = delegateBackend instanceof ConfigurableStateBackend
+                ? ((ConfigurableStateBackend) delegateBackend).configure(config, classLoader)
+                : delegateBackend;
 
-        final int maxEntries =
-                Math.max(0, config.get(CacheKitStateBackendFactory.VALUE_CACHE_MAX_ENTRIES));
+        final int maxEntries = Math.max(0, config.get(CacheKitStateBackendFactory.VALUE_CACHE_MAX_ENTRIES));
         final CachePolicyType policyType = config.get(CacheKitStateBackendFactory.VALUE_CACHE_POLICY);
         final int lruOverflow = Math.max(0, config.get(CacheKitStateBackendFactory.VALUE_CACHE_LRU_OVERFLOW));
-        return new CacheKitStateBackend(configuredDelegate, maxEntries, policyType, lruOverflow);
+        final boolean bypassEnabled = config.get(CacheKitStateBackendFactory.VALUE_BYPASS_ENABLED);
+        final double hitRateThreshold = config.get(CacheKitStateBackendFactory.VALUE_HIT_RATE_THRESHOLD);
+        final int hitRateWindow = config.get(CacheKitStateBackendFactory.VALUE_HIT_RATE_WINDOW);
+
+        return new CacheKitStateBackend(
+                configuredDelegate, maxEntries, policyType, lruOverflow, bypassEnabled, hitRateThreshold,
+                hitRateWindow);
     }
 }
