@@ -188,10 +188,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     public void clear() {
         K currentKey = currentKeyProvider.getCurrentKey();
         KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
-        CachedValue<V> newValue = CachedValue.of(null, true);
+        CachedValue<V> newValue;
+
+        if (bypassEnabled && isBypassing) {
+            delegate.clear();
+            newValue = CachedValue.of(null, false);
+        } else {
+            newValue = CachedValue.of(null, true);
+        }
 
         l1Cache.put(cacheKey, newValue);
-
         updateSticky(cacheKey, newValue);
     }
 

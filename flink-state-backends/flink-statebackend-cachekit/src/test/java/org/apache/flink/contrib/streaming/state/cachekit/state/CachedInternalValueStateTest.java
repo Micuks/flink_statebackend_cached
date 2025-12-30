@@ -48,7 +48,7 @@ class CachedInternalValueStateTest {
         // L1 size will be max(128, 100/5) = 128.
         CachedInternalValueState<String, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
                 currentKeyProvider, k -> {
-                }, 100, CachePolicyType.LRU, 0);
+                }, 100, CachePolicyType.LRU, 0, false, 0.05, 1000);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         // 1. First access loads from delegate
@@ -69,7 +69,7 @@ class CachedInternalValueStateTest {
 
         CachedInternalValueState<String, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
                 currentKeyProvider, k -> {
-                }, 100, CachePolicyType.LRU, 0);
+                }, 100, CachePolicyType.LRU, 0, false, 0.05, 1000);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         // Update
@@ -101,7 +101,7 @@ class CachedInternalValueStateTest {
 
         CachedInternalValueState<String, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
                 currentKeyProvider, k -> {
-                }, 650, CachePolicyType.LRU, 0);
+                }, 650, CachePolicyType.LRU, 0, false, 0.05, 1000);
         // L1 = 650/5 = 130.
 
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
@@ -140,7 +140,7 @@ class CachedInternalValueStateTest {
 
         CachedInternalValueState<String, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
                 currentKeyProvider, k -> {
-                }, 10, CachePolicyType.LRU, 0);
+                }, 10, CachePolicyType.LRU, 0, false, 0.05, 1000);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         // Fill with 200 items.
@@ -210,7 +210,7 @@ class CachedInternalValueStateTest {
 
         CachedInternalValueState<MutableKey, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
                 currentKey::get, k -> {
-                }, 100, CachePolicyType.LRU, 0);
+                }, 100, CachePolicyType.LRU, 0, false, 0.05, 1000);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.update(12345);
@@ -245,6 +245,35 @@ class CachedInternalValueStateTest {
         // break.
         // But the user constraint specifically mentioned BinaryRowData issues
         // previously.
+    }
+
+    @Test
+    void testBypassClearWritesThrough() throws IOException {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        CurrentKeyProvider<String> currentKeyProvider = currentKey::get;
+
+        InternalValueState<String, VoidNamespace, Integer> delegate = mock(InternalValueState.class);
+        when(delegate.value()).thenReturn(1);
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
+                currentKeyProvider, k -> {
+                }, 100, CachePolicyType.LRU, 0, true, 1.0, 1);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        // Trigger a miss so bypass activates (hit rate 0 < threshold 1.0).
+        assertEquals(1, state.value());
+        verify(delegate, times(1)).value();
+
+        org.mockito.Mockito.clearInvocations(delegate);
+
+        // In bypass mode, clear must write-through to delegate.
+        state.clear();
+        verify(delegate, times(1)).clear();
+
+        currentKey.set("k2");
+        when(delegate.value()).thenReturn(7);
+        assertEquals(7, state.value());
+        verify(delegate, times(1)).value();
     }
 
     // Adding a test for BinaryRowData specifically would be better if we can
