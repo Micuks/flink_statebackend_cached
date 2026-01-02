@@ -46,6 +46,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final boolean bypassEnabled;
     private final double hitRateThreshold;
     private final int hitRateWindow;
+    private final long bypassMinAccesses;
+    private final int bypassSampleEvery;
+    private final double lowHitRateThreshold;
+    private final double highHitRateThreshold;
+    private final int enterConsecutiveLowWindows;
+    private final int exitConsecutiveHighWindows;
+    private final int cooldownWindowsAfterToggle;
 
     private N currentNamespace;
 
@@ -60,6 +67,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private long currentWindowAccesses = 0;
     private long currentWindowHits = 0;
     private int opsSinceLastSample = 0;
+    private long totalAccesses = 0;
+    private int consecutiveLow = 0;
+    private int consecutiveHigh = 0;
+    private int windowsSinceToggle = 0;
 
     public CachedInternalValueState(
             InternalValueState<K, N, V> delegate,
@@ -79,6 +90,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.bypassEnabled = bypassEnabled;
         this.hitRateThreshold = hitRateThreshold;
         this.hitRateWindow = hitRateWindow;
+        this.bypassSampleEvery = 100;
+        this.bypassMinAccesses = Math.max(1000L, (long) hitRateWindow * 2L);
+        this.lowHitRateThreshold = Math.max(0.0d, hitRateThreshold - 0.01d);
+        this.highHitRateThreshold = Math.min(1.0d, hitRateThreshold + 0.02d);
+        this.enterConsecutiveLowWindows = 1;
+        this.exitConsecutiveHighWindows = 2;
+        this.cooldownWindowsAfterToggle = 2;
 
         // L1 Cache: ~20% of maxEntries or at least 128
         int l1Size = Math.max(128, maxEntries / 5);
@@ -98,36 +116,37 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return lastAccessValue.valueOrNull();
         }
 
-        // 2. Bypass Logic
+        int recordWeight = 1;
+        KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
+        CachedValue<V> l1Cached = null;
+        boolean l1Checked = false;
+
+        // 2. Bypass Logic with L1 probe and weighted sampling
         if (bypassEnabled && isBypassing) {
-            // Sampling: Check cache every ~100 requests to see if we should re-enable
+            l1Cached = l1Cache.get(probeKey);
+            l1Checked = true;
+            if (l1Cached != null) {
+                updateSticky(probeKey, l1Cached);
+                recordAccessWeighted(true, 1); // L1 hit in bypass
+                return l1Cached.valueOrNull();
+            }
+
             opsSinceLastSample++;
-            if (opsSinceLastSample < 100) {
-                // Bypass mode: Direct to Delegate
-                // Don't record access here to avoid skewing stats with 100% hits/misses?
-                // Actually, if we bypass, we assume it's a "Miss" for the cache utility?
-                // Or we just don't count it.
-                // If we don't count it, we never exit bypass?
-                // We MUST count it.
-                // In bypass, we assume we SAVED a cache lookup overhead.
-                // But to calculate "Hit Rate", we need to know if it WOULD have been a hit.
-                // We don't know.
-                // So we rely on the sample (below) to estimate hit rate.
-                // We behave as if we are not looking.
+            if (opsSinceLastSample < bypassSampleEvery) {
                 return delegate.value();
             }
-            // Sample this request
             opsSinceLastSample = 0;
+            recordWeight = bypassSampleEvery;
         }
 
-        KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
-
         // 3. Check L1 Cache
-        CachedValue<V> l1Cached = l1Cache.get(probeKey);
-        if (l1Cached != null) {
-            updateSticky(probeKey, l1Cached);
-            recordAccess(true); // Hit
-            return l1Cached.valueOrNull();
+        if (!l1Checked) {
+            l1Cached = l1Cache.get(probeKey);
+            if (l1Cached != null) {
+                updateSticky(probeKey, l1Cached);
+                recordAccessWeighted(true, 1); // Hit
+                return l1Cached.valueOrNull();
+            }
         }
 
         // 4. Check L2 Cache
@@ -139,13 +158,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             l1Cache.put(storageKey, newValue);
 
             updateSticky(storageKey, newValue);
-            recordAccess(true); // Hit
+            recordAccessWeighted(true, recordWeight); // Hit
             return l2Cached.valueOrNull();
         }
 
         // 5. Miss -> Load from Delegate
         V loaded = delegate.value();
-        recordAccess(false); // Miss
+        recordAccessWeighted(false, recordWeight); // Miss
 
         // 6. Update L1 (Clean)
         // Even if bypassing (sampled), we populate L1 to allow hit rate recovery
@@ -306,32 +325,69 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     private void recordAccess(boolean isHit) {
+        recordAccessWeighted(isHit, 1);
+    }
+
+    private void recordAccessWeighted(boolean isHit, int weight) {
         if (!bypassEnabled) {
             return;
         }
-        currentWindowAccesses++;
+        if (weight <= 0) {
+            return;
+        }
+        totalAccesses += weight;
+        currentWindowAccesses += weight;
         if (isHit) {
-            currentWindowHits++;
+            currentWindowHits += weight;
         }
 
         if (currentWindowAccesses >= hitRateWindow) {
             double hitRate = (double) currentWindowHits / currentWindowAccesses;
 
-            boolean shouldBypass = hitRate < hitRateThreshold;
+            if (totalAccesses >= bypassMinAccesses) {
+                boolean lowHitRate = hitRate < lowHitRateThreshold;
+                boolean highHitRate = hitRate > highHitRateThreshold;
+                boolean inCooldown = windowsSinceToggle < cooldownWindowsAfterToggle;
+                boolean toggled = false;
 
-            if (isBypassing) {
-                // If currently bypassing, we only switch BACK if hit rate > threshold
-                if (!shouldBypass) {
-                    isBypassing = false;
-                    // Reset sticky cache to avoid stale hits? No, sticky is updated on update()
-                    // Ops since last sample reset automatically
+                if (isBypassing) {
+                    if (!inCooldown) {
+                        if (highHitRate) {
+                            consecutiveHigh++;
+                            consecutiveLow = 0;
+                        } else if (lowHitRate) {
+                            consecutiveHigh = 0;
+                        }
+                        if (consecutiveHigh >= exitConsecutiveHighWindows) {
+                            isBypassing = false;
+                            toggled = true;
+                        }
+                    }
+                } else {
+                    if (!inCooldown) {
+                        if (lowHitRate) {
+                            consecutiveLow++;
+                            consecutiveHigh = 0;
+                        } else if (highHitRate) {
+                            consecutiveLow = 0;
+                        }
+                        if (consecutiveLow >= enterConsecutiveLowWindows) {
+                            isBypassing = true;
+                            toggled = true;
+                            flush(); // Flush dirty entries before bypassing cache
+                        }
+                    }
                 }
-            } else {
-                // If currently NOT bypassing, switch TO bypass if hit rate < threshold
-                if (shouldBypass) {
-                    isBypassing = true;
-                    flush(); // Essential: Flush dirty value to delegate before entering bypass
-                             // (Write-Through) mode
+
+                if (toggled) {
+                    windowsSinceToggle = 0;
+                    consecutiveLow = 0;
+                    consecutiveHigh = 0;
+                    opsSinceLastSample = 0;
+                }
+
+                if (windowsSinceToggle < cooldownWindowsAfterToggle) {
+                    windowsSinceToggle++;
                 }
             }
 
