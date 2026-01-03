@@ -66,7 +66,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int valueCacheMaxEntries;
     private final CachePolicyType valueCachePolicy;
     private final int valueCacheLruOverflow;
+    private final double valueCacheL1Ratio;
     private final boolean valueBypassEnabled;
+    private final long valueBypassMinAccesses;
+    private final int valueBypassSampleEvery;
+    private final double valueBypassHysteresis;
+    private final int valueBypassCooldownWindows;
     private final double valueHitRateThreshold;
     private final int valueHitRateWindow;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
@@ -82,7 +87,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int valueCacheMaxEntries,
             CachePolicyType valueCachePolicy,
             int valueCacheLruOverflow,
+            double valueCacheL1Ratio,
             boolean valueBypassEnabled,
+            long valueBypassMinAccesses,
+            int valueBypassSampleEvery,
+            double valueBypassHysteresis,
+            int valueBypassCooldownWindows,
             double valueHitRateThreshold,
             int valueHitRateWindow) {
         super(
@@ -100,7 +110,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
         this.valueCacheLruOverflow = valueCacheLruOverflow;
+        this.valueCacheL1Ratio = valueCacheL1Ratio;
         this.valueBypassEnabled = valueBypassEnabled;
+        this.valueBypassMinAccesses = valueBypassMinAccesses;
+        this.valueBypassSampleEvery = valueBypassSampleEvery;
+        this.valueBypassHysteresis = valueBypassHysteresis;
+        this.valueBypassCooldownWindows = valueBypassCooldownWindows;
         this.valueHitRateThreshold = valueHitRateThreshold;
         this.valueHitRateWindow = valueHitRateWindow;
     }
@@ -140,7 +155,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 valueCacheMaxEntries,
                 valueCachePolicy,
                 valueCacheLruOverflow,
+                valueCacheL1Ratio,
                 valueBypassEnabled,
+                valueBypassMinAccesses,
+                valueBypassSampleEvery,
+                valueBypassHysteresis,
+                valueBypassCooldownWindows,
                 valueHitRateThreshold,
                 valueHitRateWindow);
         wrappersByDelegateIdentity.put(internal, wrapped);
@@ -197,7 +217,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 valueCacheMaxEntries,
                 valueCachePolicy,
                 valueCacheLruOverflow,
+                valueCacheL1Ratio,
                 valueBypassEnabled,
+                valueBypassMinAccesses,
+                valueBypassSampleEvery,
+                valueBypassHysteresis,
+                valueBypassCooldownWindows,
                 valueHitRateThreshold,
                 valueHitRateWindow);
         wrappersByDelegateIdentity.put(internal, wrapped);

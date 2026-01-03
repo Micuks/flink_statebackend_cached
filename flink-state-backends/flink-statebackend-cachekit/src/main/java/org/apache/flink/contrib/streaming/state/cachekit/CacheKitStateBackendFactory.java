@@ -54,11 +54,43 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         .withDescription(
                                         "Overflow entries for LRU before batch eviction triggers.");
 
+        public static final ConfigOption<Double> VALUE_CACHE_L1_RATIO = ConfigOptions
+                        .key("state.backend.cachekit.value.cache.l1.ratio")
+                        .doubleType()
+                        .defaultValue(0.2)
+                        .withDescription("Ratio of max-entries allocated to L1 cache (0.0 to 1.0).");
+
         public static final ConfigOption<Boolean> VALUE_BYPASS_ENABLED = ConfigOptions
                         .key("state.backend.cachekit.value.bypass.enabled")
                         .booleanType()
                         .defaultValue(true)
                         .withDescription("Enable adaptive bypass for ValueState caching based on hit rate.");
+
+        public static final ConfigOption<Long> VALUE_BYPASS_MIN_ACCESSES = ConfigOptions
+                        .key("state.backend.cachekit.value.bypass.min-accesses")
+                        .longType()
+                        .defaultValue(1000L)
+                        .withDescription("Minimum accesses before bypass decisions are applied.");
+
+        public static final ConfigOption<Integer> VALUE_BYPASS_SAMPLE_EVERY = ConfigOptions
+                        .key("state.backend.cachekit.value.bypass.sample-every")
+                        .intType()
+                        .defaultValue(512)
+                        .withDescription("Sample every N accesses while bypassing to re-evaluate hit rate.");
+
+        public static final ConfigOption<Double> VALUE_BYPASS_HYSTERESIS = ConfigOptions
+                        .key("state.backend.cachekit.value.bypass.hysteresis")
+                        .doubleType()
+                        .defaultValue(0.10)
+                        .withDescription(
+                                        "Hysteresis applied to hit-rate threshold to avoid thrashing. "
+                                                        + "The enter-bypass threshold is (threshold - hysteresis).");
+
+        public static final ConfigOption<Integer> VALUE_BYPASS_COOLDOWN_WINDOWS = ConfigOptions
+                        .key("state.backend.cachekit.value.bypass.cooldown-windows")
+                        .intType()
+                        .defaultValue(2)
+                        .withDescription("Cooldown windows after a bypass toggle before another switch is allowed.");
 
         public static final ConfigOption<Double> VALUE_HIT_RATE_THRESHOLD = ConfigOptions
                         .key("state.backend.cachekit.value.hit-rate.threshold")
@@ -86,15 +118,22 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final int maxEntries = Math.max(0, config.get(VALUE_CACHE_MAX_ENTRIES));
                 final CachePolicyType policyType = config.get(VALUE_CACHE_POLICY);
                 final int lruOverflow = Math.max(0, config.get(VALUE_CACHE_LRU_OVERFLOW));
+                final double l1Ratio =
+                                Math.max(0.0, Math.min(1.0, config.get(VALUE_CACHE_L1_RATIO)));
                 final boolean bypassEnabled = config.get(VALUE_BYPASS_ENABLED);
+                final long bypassMinAccesses = Math.max(0L, config.get(VALUE_BYPASS_MIN_ACCESSES));
+                final int bypassSampleEvery = Math.max(1, config.get(VALUE_BYPASS_SAMPLE_EVERY));
+                final double bypassHysteresis = Math.max(0.0, Math.min(1.0, config.get(VALUE_BYPASS_HYSTERESIS)));
+                final int bypassCooldownWindows = Math.max(0, config.get(VALUE_BYPASS_COOLDOWN_WINDOWS));
                 final double hitRateThreshold = config.get(VALUE_HIT_RATE_THRESHOLD);
-                final int hitRateWindow = config.get(VALUE_HIT_RATE_WINDOW);
+                final int hitRateWindow = Math.max(1, config.get(VALUE_HIT_RATE_WINDOW));
                 final String delegateClass = config.get(DELEGATE_BACKEND);
 
                 System.out.printf(
-                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, delegate=%s%n",
-                                maxEntries, policyType, lruOverflow, bypassEnabled, hitRateThreshold, hitRateWindow,
-                                delegateClass);
+                                "CacheKit Factory: maxEntries=%d, l1Ratio=%.2f, policy=%s, lruOverflow=%d, bypass=%s, minAccesses=%d, sampleEvery=%d, hysteresis=%.2f, cooldown=%d, threshold=%.2f, window=%d, delegate=%s%n",
+                                maxEntries, l1Ratio, policyType, lruOverflow, bypassEnabled, bypassMinAccesses,
+                                bypassSampleEvery, bypassHysteresis, bypassCooldownWindows, hitRateThreshold,
+                                hitRateWindow, delegateClass);
 
                 StateBackend delegate;
                 if (delegateClass == null || delegateClass.isBlank()) {
@@ -115,7 +154,17 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 }
 
                 return new CacheKitStateBackend(
-                                delegate, maxEntries, policyType, lruOverflow, bypassEnabled, hitRateThreshold,
+                                delegate,
+                                maxEntries,
+                                policyType,
+                                lruOverflow,
+                                l1Ratio,
+                                bypassEnabled,
+                                bypassMinAccesses,
+                                bypassSampleEvery,
+                                bypassHysteresis,
+                                bypassCooldownWindows,
+                                hitRateThreshold,
                                 hitRateWindow);
         }
 

@@ -67,7 +67,12 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final int valueCacheMaxEntries;
     private final CachePolicyType valueCachePolicy;
     private final int valueCacheLruOverflow;
+    private final double valueCacheL1Ratio;
     private final boolean valueBypassEnabled;
+    private final long valueBypassMinAccesses;
+    private final int valueBypassSampleEvery;
+    private final double valueBypassHysteresis;
+    private final int valueBypassCooldownWindows;
     private final double valueHitRateThreshold;
     private final int valueHitRateWindow;
 
@@ -76,14 +81,24 @@ public class CacheKitStateBackend extends AbstractStateBackend
             int valueCacheMaxEntries,
             CachePolicyType valueCachePolicy,
             int valueCacheLruOverflow,
+            double valueCacheL1Ratio,
             boolean valueBypassEnabled,
+            long valueBypassMinAccesses,
+            int valueBypassSampleEvery,
+            double valueBypassHysteresis,
+            int valueBypassCooldownWindows,
             double valueHitRateThreshold,
             int valueHitRateWindow) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
         this.valueCacheLruOverflow = valueCacheLruOverflow;
+        this.valueCacheL1Ratio = valueCacheL1Ratio;
         this.valueBypassEnabled = valueBypassEnabled;
+        this.valueBypassMinAccesses = valueBypassMinAccesses;
+        this.valueBypassSampleEvery = valueBypassSampleEvery;
+        this.valueBypassHysteresis = valueBypassHysteresis;
+        this.valueBypassCooldownWindows = valueBypassCooldownWindows;
         this.valueHitRateThreshold = valueHitRateThreshold;
         this.valueHitRateWindow = valueHitRateWindow;
     }
@@ -151,7 +166,12 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 valueCacheMaxEntries,
                 valueCachePolicy,
                 valueCacheLruOverflow,
+                valueCacheL1Ratio,
                 valueBypassEnabled,
+                valueBypassMinAccesses,
+                valueBypassSampleEvery,
+                valueBypassHysteresis,
+                valueBypassCooldownWindows,
                 valueHitRateThreshold,
                 valueHitRateWindow);
     }
@@ -203,12 +223,32 @@ public class CacheKitStateBackend extends AbstractStateBackend
         final int maxEntries = Math.max(0, config.get(CacheKitStateBackendFactory.VALUE_CACHE_MAX_ENTRIES));
         final CachePolicyType policyType = config.get(CacheKitStateBackendFactory.VALUE_CACHE_POLICY);
         final int lruOverflow = Math.max(0, config.get(CacheKitStateBackendFactory.VALUE_CACHE_LRU_OVERFLOW));
+        final double l1Ratio =
+                Math.max(0.0, Math.min(1.0, config.get(CacheKitStateBackendFactory.VALUE_CACHE_L1_RATIO)));
         final boolean bypassEnabled = config.get(CacheKitStateBackendFactory.VALUE_BYPASS_ENABLED);
+        final long bypassMinAccesses = Math.max(
+                0L, config.get(CacheKitStateBackendFactory.VALUE_BYPASS_MIN_ACCESSES));
+        final int bypassSampleEvery = Math.max(
+                1, config.get(CacheKitStateBackendFactory.VALUE_BYPASS_SAMPLE_EVERY));
+        final double bypassHysteresis = Math.max(
+                0.0, Math.min(1.0, config.get(CacheKitStateBackendFactory.VALUE_BYPASS_HYSTERESIS)));
+        final int bypassCooldownWindows = Math.max(
+                0, config.get(CacheKitStateBackendFactory.VALUE_BYPASS_COOLDOWN_WINDOWS));
         final double hitRateThreshold = config.get(CacheKitStateBackendFactory.VALUE_HIT_RATE_THRESHOLD);
-        final int hitRateWindow = config.get(CacheKitStateBackendFactory.VALUE_HIT_RATE_WINDOW);
+        final int hitRateWindow = Math.max(1, config.get(CacheKitStateBackendFactory.VALUE_HIT_RATE_WINDOW));
 
         return new CacheKitStateBackend(
-                configuredDelegate, maxEntries, policyType, lruOverflow, bypassEnabled, hitRateThreshold,
+                configuredDelegate,
+                maxEntries,
+                policyType,
+                lruOverflow,
+                l1Ratio,
+                bypassEnabled,
+                bypassMinAccesses,
+                bypassSampleEvery,
+                bypassHysteresis,
+                bypassCooldownWindows,
+                hitRateThreshold,
                 hitRateWindow);
     }
 }

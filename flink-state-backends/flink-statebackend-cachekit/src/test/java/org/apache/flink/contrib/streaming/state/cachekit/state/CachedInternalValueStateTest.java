@@ -48,7 +48,7 @@ class CachedInternalValueStateTest {
         // L1 size will be max(128, 100/5) = 128.
         CachedInternalValueState<String, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
                 currentKeyProvider, k -> {
-                }, 100, CachePolicyType.LRU, 0, false, 0.05, 1000);
+                }, 100, CachePolicyType.LRU, 0, 0.2, false, 0L, 512, 0.05, 2, 0.05, 1000);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         // 1. First access loads from delegate
@@ -69,7 +69,7 @@ class CachedInternalValueStateTest {
 
         CachedInternalValueState<String, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
                 currentKeyProvider, k -> {
-                }, 100, CachePolicyType.LRU, 0, false, 0.05, 1000);
+                }, 100, CachePolicyType.LRU, 0, 0.2, false, 0L, 512, 0.05, 2, 0.05, 1000);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         // Update
@@ -101,7 +101,7 @@ class CachedInternalValueStateTest {
 
         CachedInternalValueState<String, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
                 currentKeyProvider, k -> {
-                }, 650, CachePolicyType.LRU, 0, false, 0.05, 1000);
+                }, 650, CachePolicyType.LRU, 0, 0.2, false, 0L, 512, 0.05, 2, 0.05, 1000);
         // L1 = 650/5 = 130.
 
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
@@ -140,7 +140,7 @@ class CachedInternalValueStateTest {
 
         CachedInternalValueState<String, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
                 currentKeyProvider, k -> {
-                }, 10, CachePolicyType.LRU, 0, false, 0.05, 1000);
+                }, 10, CachePolicyType.LRU, 0, 0.2, false, 0L, 512, 0.05, 2, 0.05, 1000);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         // Fill with 200 items.
@@ -210,7 +210,7 @@ class CachedInternalValueStateTest {
 
         CachedInternalValueState<MutableKey, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
                 currentKey::get, k -> {
-                }, 100, CachePolicyType.LRU, 0, false, 0.05, 1000);
+                }, 100, CachePolicyType.LRU, 0, 0.2, false, 0L, 512, 0.05, 2, 0.05, 1000);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.update(12345);
@@ -257,7 +257,7 @@ class CachedInternalValueStateTest {
 
         CachedInternalValueState<String, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
                 currentKeyProvider, k -> {
-                }, 100, CachePolicyType.LRU, 0, true, 1.0, 1);
+                }, 100, CachePolicyType.LRU, 0, 0.2, true, 0L, 1, 0.0, 0, 1.0, 1);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         // Trigger a miss so bypass activates (hit rate 0 < threshold 1.0).

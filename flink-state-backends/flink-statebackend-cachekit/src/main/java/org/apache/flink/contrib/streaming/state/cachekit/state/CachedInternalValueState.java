@@ -42,23 +42,27 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> l2Cache;
     private final CachePolicyType cachePolicyType;
     private final int lruOverflow;
+    private final double l1Ratio;
 
     private final boolean bypassEnabled;
-    private final double hitRateThreshold;
-    private final int hitRateWindow;
     private final long bypassMinAccesses;
     private final int bypassSampleEvery;
-    private final double lowHitRateThreshold;
-    private final double highHitRateThreshold;
+    private final double bypassHysteresis;
+    private final int bypassCooldownWindows;
+    private final double hitRateThreshold;
+    private final double hitRateLowThreshold;
+    private final double hitRateHighThreshold;
+    private final int hitRateWindow;
     private final int enterConsecutiveLowWindows;
     private final int exitConsecutiveHighWindows;
-    private final int cooldownWindowsAfterToggle;
 
     private N currentNamespace;
 
     // Sticky Cache (L1)
     private KeyNamespaceKey<K, N> lastAccessKey;
     private CachedValue<V> lastAccessValue;
+
+    private final ReusableKeyNamespaceKey<K, N> probeKey = new ReusableKeyNamespaceKey<>();
 
     private final java.util.function.Consumer<K> keyContextSetter;
 
@@ -79,7 +83,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             int maxEntries,
             CachePolicyType cachePolicyType,
             int lruOverflow,
+            double l1Ratio,
             boolean bypassEnabled,
+            long bypassMinAccesses,
+            int bypassSampleEvery,
+            double bypassHysteresis,
+            int bypassCooldownWindows,
             double hitRateThreshold,
             int hitRateWindow) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
@@ -87,23 +96,32 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
         this.cachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
         this.lruOverflow = Math.max(0, lruOverflow);
+        this.l1Ratio = Math.max(0.0, Math.min(1.0, l1Ratio));
         this.bypassEnabled = bypassEnabled;
+        this.bypassMinAccesses = Math.max(0L, bypassMinAccesses);
+        this.bypassSampleEvery = Math.max(1, bypassSampleEvery);
+        this.bypassHysteresis = Math.max(0.0, Math.min(1.0, bypassHysteresis));
+        this.bypassCooldownWindows = Math.max(0, bypassCooldownWindows);
         this.hitRateThreshold = hitRateThreshold;
+        this.hitRateLowThreshold = Math.max(0.0, this.hitRateThreshold - this.bypassHysteresis);
+        this.hitRateHighThreshold = Math.min(1.0, this.hitRateThreshold + this.bypassHysteresis);
         this.hitRateWindow = hitRateWindow;
-        this.bypassSampleEvery = 100;
-        this.bypassMinAccesses = Math.max(1000L, (long) hitRateWindow * 2L);
-        this.lowHitRateThreshold = Math.max(0.0d, hitRateThreshold - 0.01d);
-        this.highHitRateThreshold = Math.min(1.0d, hitRateThreshold + 0.02d);
         this.enterConsecutiveLowWindows = 1;
         this.exitConsecutiveHighWindows = 2;
-        this.cooldownWindowsAfterToggle = 2;
 
-        // L1 Cache: ~20% of maxEntries or at least 128
-        int l1Size = Math.max(128, maxEntries / 5);
+        int l1Size;
+        int l2Size;
+        if (maxEntries <= 0) {
+            l1Size = 0;
+            l2Size = 0;
+        } else {
+            int minL1 = Math.min(128, maxEntries);
+            l1Size = Math.max(minL1, (int) Math.floor(maxEntries * this.l1Ratio));
+            l1Size = Math.min(l1Size, maxEntries);
+            l2Size = Math.max(0, maxEntries - l1Size);
+        }
         this.l1Cache = createCachePolicy(l1Size, this::onL1Eviction);
-
-        // L2 Cache: Remaining size (or full maxEntries)
-        this.l2Cache = createCachePolicy(maxEntries, this::onL2Eviction);
+        this.l2Cache = createCachePolicy(l2Size, this::onL2Eviction);
     }
 
     @Override
@@ -112,12 +130,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         // 1. Check Sticky Cache (Always Check L0 - Fast Path)
         if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
-            recordAccess(true); // Hit
+            recordAccessWeighted(true, 1); // Hit
             return lastAccessValue.valueOrNull();
         }
 
         int recordWeight = 1;
-        KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
+        probeKey.set(currentKey, currentNamespace);
         CachedValue<V> l1Cached = null;
         boolean l1Checked = false;
 
@@ -126,7 +144,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             l1Cached = l1Cache.get(probeKey);
             l1Checked = true;
             if (l1Cached != null) {
-                updateSticky(probeKey, l1Cached);
+                updateSticky(new KeyNamespaceKey<>(currentKey, currentNamespace, false), l1Cached);
                 recordAccessWeighted(true, 1); // L1 hit in bypass
                 return l1Cached.valueOrNull();
             }
@@ -143,7 +161,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (!l1Checked) {
             l1Cached = l1Cache.get(probeKey);
             if (l1Cached != null) {
-                updateSticky(probeKey, l1Cached);
+                updateSticky(new KeyNamespaceKey<>(currentKey, currentNamespace, false), l1Cached);
                 recordAccessWeighted(true, 1); // Hit
                 return l1Cached.valueOrNull();
             }
@@ -264,7 +282,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     public void flush() {
         // Flush L1 dirty entries to L2 (which writes through)
-        java.util.List<java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>>> dirtyEntries = new java.util.ArrayList<>();
+        java.util.List<java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>>> dirtyEntries =
+                new java.util.ArrayList<>();
         for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : l1Cache.entries()) {
             if (entry.getValue().dirty) {
                 dirtyEntries.add(entry);
@@ -343,11 +362,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         if (currentWindowAccesses >= hitRateWindow) {
             double hitRate = (double) currentWindowHits / currentWindowAccesses;
-
             if (totalAccesses >= bypassMinAccesses) {
-                boolean lowHitRate = hitRate < lowHitRateThreshold;
-                boolean highHitRate = hitRate > highHitRateThreshold;
-                boolean inCooldown = windowsSinceToggle < cooldownWindowsAfterToggle;
+                boolean lowHitRate = hitRate < hitRateLowThreshold;
+                boolean highHitRate = hitRate > hitRateHighThreshold;
+                boolean inCooldown = windowsSinceToggle < bypassCooldownWindows;
                 boolean toggled = false;
 
                 if (isBypassing) {
@@ -386,12 +404,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     opsSinceLastSample = 0;
                 }
 
-                if (windowsSinceToggle < cooldownWindowsAfterToggle) {
+                if (windowsSinceToggle < bypassCooldownWindows) {
                     windowsSinceToggle++;
                 }
             }
 
-            // Reset window
             currentWindowAccesses = 0;
             currentWindowHits = 0;
         }
@@ -438,11 +455,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
     }
 
-    private static final class KeyNamespaceKey<K, N> {
-        private final K key;
-        private final N namespace;
+    private static class KeyNamespaceKey<K, N> {
+        protected K key;
+        protected N namespace;
 
-        private KeyNamespaceKey(K key, N namespace, boolean deepCopy) {
+        protected KeyNamespaceKey() {
+        }
+
+        protected KeyNamespaceKey(K key, N namespace, boolean deepCopy) {
             if (deepCopy && key instanceof BinaryRowData) {
                 this.key = (K) ((BinaryRowData) key).copy();
             } else {
@@ -474,6 +494,17 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         @Override
         public int hashCode() {
             return Objects.hash(key, namespace);
+        }
+    }
+
+    private static final class ReusableKeyNamespaceKey<K, N> extends KeyNamespaceKey<K, N> {
+        private ReusableKeyNamespaceKey() {
+            super();
+        }
+
+        void set(K key, N namespace) {
+            this.key = key;
+            this.namespace = namespace;
         }
     }
 

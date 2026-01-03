@@ -49,12 +49,18 @@ public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
 
     @Override
     public V get(K key) {
+        if (maxEntries <= 0) {
+            return null;
+        }
         return map.get(key);
     }
 
     @Override
     public V put(K key, V value) {
         Objects.requireNonNull(key, "key");
+        if (maxEntries <= 0) {
+            return null;
+        }
         V previous = map.put(key, value);
         evictIfNeeded();
         return previous;
@@ -62,6 +68,9 @@ public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
 
     @Override
     public V remove(K key) {
+        if (maxEntries <= 0) {
+            return null;
+        }
         return map.remove(key);
     }
 
