@@ -15,25 +15,26 @@
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
+import org.apache.flink.api.common.typeutils.SimpleTypeSerializerSnapshot;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.core.memory.DataInputView;
+import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.runtime.state.VoidNamespace;
+import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 
 import org.junit.jupiter.api.Test;
-import org.mockito.InOrder;
 
 import java.io.IOException;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.inOrder;
 
 class CachedInternalValueStateTest {
 
@@ -43,6 +44,7 @@ class CachedInternalValueStateTest {
         CurrentKeyProvider<String> currentKeyProvider = currentKey::get;
 
         InternalValueState<String, VoidNamespace, Integer> delegate = mock(InternalValueState.class);
+        stubSerializers(delegate, StringSerializer.INSTANCE, VoidNamespaceSerializer.INSTANCE);
         when(delegate.value()).thenReturn(42);
 
         // L1 size will be max(128, 100/5) = 128.
@@ -66,6 +68,7 @@ class CachedInternalValueStateTest {
         CurrentKeyProvider<String> currentKeyProvider = currentKey::get;
 
         InternalValueState<String, VoidNamespace, Integer> delegate = mock(InternalValueState.class);
+        stubSerializers(delegate, StringSerializer.INSTANCE, VoidNamespaceSerializer.INSTANCE);
 
         CachedInternalValueState<String, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
                 currentKeyProvider, k -> {
@@ -92,6 +95,7 @@ class CachedInternalValueStateTest {
         CurrentKeyProvider<String> currentKeyProvider = currentKey::get;
 
         InternalValueState<String, VoidNamespace, Integer> delegate = mock(InternalValueState.class);
+        stubSerializers(delegate, StringSerializer.INSTANCE, VoidNamespaceSerializer.INSTANCE);
 
         // Use small maxEntries to force small L1.
         // Logic: L1 size = max(128, maxEntries/5).
@@ -123,6 +127,7 @@ class CachedInternalValueStateTest {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
         CurrentKeyProvider<String> currentKeyProvider = currentKey::get;
         InternalValueState<String, VoidNamespace, Integer> delegate = mock(InternalValueState.class);
+        stubSerializers(delegate, StringSerializer.INSTANCE, VoidNamespaceSerializer.INSTANCE);
 
         // Max entries 10. L1 will be small (max(128, 2)=128).
         // Wait, if L1 min is 128, then "max entries 10" is tricky.
@@ -181,32 +186,12 @@ class CachedInternalValueStateTest {
 
     @Test
     void testMutableKeyIsolation() throws IOException {
-        // Simulate a mutable key like BinaryRowData (simulated here with a
-        // StringBuilder wrapper or just AtomicReference passed as key?)
-        // The test uses String which is immutable. We need a mutable key class.
-
-        class MutableKey {
-            int id;
-
-            MutableKey(int id) {
-                this.id = id;
-            }
-
-            @Override
-            public int hashCode() {
-                return id;
-            }
-
-            @Override
-            public boolean equals(Object o) {
-                return o instanceof MutableKey && ((MutableKey) o).id == id;
-            }
-        }
-
+        // Simulate a mutable key like BinaryRowData (represented here with a mutable id).
         final MutableKey keyInstance = new MutableKey(1);
         AtomicReference<MutableKey> currentKey = new AtomicReference<>(keyInstance);
 
         InternalValueState<MutableKey, VoidNamespace, Integer> delegate = mock(InternalValueState.class);
+        stubSerializers(delegate, new MutableKeySerializer(), VoidNamespaceSerializer.INSTANCE);
 
         CachedInternalValueState<MutableKey, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
                 currentKey::get, k -> {
@@ -253,6 +238,7 @@ class CachedInternalValueStateTest {
         CurrentKeyProvider<String> currentKeyProvider = currentKey::get;
 
         InternalValueState<String, VoidNamespace, Integer> delegate = mock(InternalValueState.class);
+        stubSerializers(delegate, StringSerializer.INSTANCE, VoidNamespaceSerializer.INSTANCE);
         when(delegate.value()).thenReturn(1);
 
         CachedInternalValueState<String, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
@@ -274,6 +260,214 @@ class CachedInternalValueStateTest {
         when(delegate.value()).thenReturn(7);
         assertEquals(7, state.value());
         verify(delegate, times(1)).value();
+    }
+
+    @Test
+    void testSerializedKeyStabilityWithMutableKeyAndNamespace() throws IOException {
+        AtomicReference<MutableKey> currentKey = new AtomicReference<>(new MutableKey(1));
+        CurrentKeyProvider<MutableKey> currentKeyProvider = currentKey::get;
+        MutableNamespace namespace = new MutableNamespace(7);
+
+        InternalValueState<MutableKey, MutableNamespace, Integer> delegate = mock(InternalValueState.class);
+        stubSerializers(delegate, new MutableKeySerializer(), new MutableNamespaceSerializer());
+
+        CachedInternalValueState<MutableKey, MutableNamespace, Integer> state = new CachedInternalValueState<>(delegate,
+                currentKeyProvider, k -> {
+                }, 100, CachePolicyType.LRU, 0, 0.2, false, 0L, 512, 0.05, 2, 0.05, 1000);
+        state.setCurrentNamespace(namespace);
+
+        state.update(123);
+
+        currentKey.get().id = 999;
+        namespace.id = 42;
+
+        currentKey.set(new MutableKey(1));
+        state.setCurrentNamespace(new MutableNamespace(7));
+
+        assertEquals(123, state.value());
+        verify(delegate, times(0)).value();
+    }
+
+    private static <K, N> void stubSerializers(
+            InternalValueState<K, N, Integer> delegate,
+            TypeSerializer<K> keySerializer,
+            TypeSerializer<N> namespaceSerializer) {
+        when(delegate.getKeySerializer()).thenReturn(keySerializer);
+        when(delegate.getNamespaceSerializer()).thenReturn(namespaceSerializer);
+    }
+
+    private static final class MutableKey {
+        int id;
+
+        MutableKey(int id) {
+            this.id = id;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof MutableKey && ((MutableKey) other).id == id;
+        }
+
+        @Override
+        public int hashCode() {
+            return id;
+        }
+    }
+
+    private static final class MutableNamespace {
+        int id;
+
+        MutableNamespace(int id) {
+            this.id = id;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof MutableNamespace && ((MutableNamespace) other).id == id;
+        }
+
+        @Override
+        public int hashCode() {
+            return id;
+        }
+    }
+
+    private static final class MutableKeySerializer extends TypeSerializer<MutableKey> {
+        @Override
+        public boolean isImmutableType() {
+            return false;
+        }
+
+        @Override
+        public TypeSerializer<MutableKey> duplicate() {
+            return this;
+        }
+
+        @Override
+        public MutableKey createInstance() {
+            return new MutableKey(0);
+        }
+
+        @Override
+        public MutableKey copy(MutableKey from) {
+            return new MutableKey(from.id);
+        }
+
+        @Override
+        public MutableKey copy(MutableKey from, MutableKey reuse) {
+            reuse.id = from.id;
+            return reuse;
+        }
+
+        @Override
+        public int getLength() {
+            return 4;
+        }
+
+        @Override
+        public void serialize(MutableKey record, DataOutputView target) throws IOException {
+            target.writeInt(record.id);
+        }
+
+        @Override
+        public MutableKey deserialize(DataInputView source) throws IOException {
+            return new MutableKey(source.readInt());
+        }
+
+        @Override
+        public MutableKey deserialize(MutableKey reuse, DataInputView source) throws IOException {
+            reuse.id = source.readInt();
+            return reuse;
+        }
+
+        @Override
+        public void copy(DataInputView source, DataOutputView target) throws IOException {
+            target.writeInt(source.readInt());
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            return obj instanceof MutableKeySerializer;
+        }
+
+        @Override
+        public int hashCode() {
+            return 1;
+        }
+
+        @Override
+        public SimpleTypeSerializerSnapshot<MutableKey> snapshotConfiguration() {
+            return new SimpleTypeSerializerSnapshot<>(MutableKeySerializer::new) {};
+        }
+    }
+
+    private static final class MutableNamespaceSerializer extends TypeSerializer<MutableNamespace> {
+        @Override
+        public boolean isImmutableType() {
+            return false;
+        }
+
+        @Override
+        public TypeSerializer<MutableNamespace> duplicate() {
+            return this;
+        }
+
+        @Override
+        public MutableNamespace createInstance() {
+            return new MutableNamespace(0);
+        }
+
+        @Override
+        public MutableNamespace copy(MutableNamespace from) {
+            return new MutableNamespace(from.id);
+        }
+
+        @Override
+        public MutableNamespace copy(MutableNamespace from, MutableNamespace reuse) {
+            reuse.id = from.id;
+            return reuse;
+        }
+
+        @Override
+        public int getLength() {
+            return 4;
+        }
+
+        @Override
+        public void serialize(MutableNamespace record, DataOutputView target) throws IOException {
+            target.writeInt(record.id);
+        }
+
+        @Override
+        public MutableNamespace deserialize(DataInputView source) throws IOException {
+            return new MutableNamespace(source.readInt());
+        }
+
+        @Override
+        public MutableNamespace deserialize(MutableNamespace reuse, DataInputView source) throws IOException {
+            reuse.id = source.readInt();
+            return reuse;
+        }
+
+        @Override
+        public void copy(DataInputView source, DataOutputView target) throws IOException {
+            target.writeInt(source.readInt());
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            return obj instanceof MutableNamespaceSerializer;
+        }
+
+        @Override
+        public int hashCode() {
+            return 2;
+        }
+
+        @Override
+        public SimpleTypeSerializerSnapshot<MutableNamespace> snapshotConfiguration() {
+            return new SimpleTypeSerializerSnapshot<>(MutableNamespaceSerializer::new) {};
+        }
     }
 
     // Adding a test for BinaryRowData specifically would be better if we can
