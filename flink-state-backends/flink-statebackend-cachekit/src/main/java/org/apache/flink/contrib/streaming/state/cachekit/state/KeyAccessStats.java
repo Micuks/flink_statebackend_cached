@@ -15,20 +15,15 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
-import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.Map;
 
 public final class KeyAccessStats<T> {
-    private final int windowSize;
-    private final ArrayDeque<T> window;
     private final Map<T, Integer> counts;
     private long totalAccesses;
     private long repeatAccesses;
 
     public KeyAccessStats(int windowSize) {
-        this.windowSize = Math.max(1, windowSize);
-        this.window = new ArrayDeque<>(this.windowSize);
         this.counts = new HashMap<>();
     }
 
@@ -41,18 +36,6 @@ public final class KeyAccessStats<T> {
         } else {
             counts.put(key, 1);
         }
-        window.addLast(key);
-        if (window.size() > windowSize) {
-            T evicted = window.removeFirst();
-            Integer evictedCount = counts.get(evicted);
-            if (evictedCount != null) {
-                if (evictedCount <= 1) {
-                    counts.remove(evicted);
-                } else {
-                    counts.put(evicted, evictedCount - 1);
-                }
-            }
-        }
     }
 
     public long getTotalAccesses() {
@@ -64,7 +47,7 @@ public final class KeyAccessStats<T> {
     }
 
     public int getWindowedAccesses() {
-        return window.size();
+        return (int) Math.min(Integer.MAX_VALUE, totalAccesses);
     }
 
     public int getWindowedUniqueKeys() {
@@ -72,19 +55,16 @@ public final class KeyAccessStats<T> {
     }
 
     public double getWindowedRepeatRatio() {
-        int windowedAccesses = window.size();
-        if (windowedAccesses == 0) {
+        if (totalAccesses == 0) {
             return 0.0d;
         }
-        long windowedRepeats = Math.max(0, windowedAccesses - counts.size());
-        return (double) windowedRepeats / windowedAccesses;
+        return (double) repeatAccesses / totalAccesses;
     }
 
     public double getWindowedUniqueRatio() {
-        int windowedAccesses = window.size();
-        if (windowedAccesses == 0) {
+        if (totalAccesses == 0) {
             return 0.0d;
         }
-        return (double) counts.size() / windowedAccesses;
+        return (double) counts.size() / totalAccesses;
     }
 }
