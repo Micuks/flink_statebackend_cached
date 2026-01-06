@@ -20,6 +20,7 @@ import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalValueState;
+import org.apache.flink.contrib.streaming.state.cachekit.state.KeyAccessStats;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
@@ -38,6 +39,7 @@ import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.PriorityComparable;
 import org.apache.flink.util.Preconditions;
+import org.apache.flink.metrics.MetricGroup;
 
 import javax.annotation.Nonnull;
 
@@ -69,6 +71,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean valueBypassEnabled;
     private final double valueHitRateThreshold;
     private final int valueHitRateWindow;
+    private final int keyStatsWindow;
+    private final MetricGroup metricGroup;
+    private final KeyAccessStats<K> globalKeyAccessStats;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -84,7 +89,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int valueCacheLruOverflow,
             boolean valueBypassEnabled,
             double valueHitRateThreshold,
-            int valueHitRateWindow) {
+            int valueHitRateWindow,
+            MetricGroup metricGroup) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -103,6 +109,18 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.valueBypassEnabled = valueBypassEnabled;
         this.valueHitRateThreshold = valueHitRateThreshold;
         this.valueHitRateWindow = valueHitRateWindow;
+        this.keyStatsWindow = Math.max(1, valueHitRateWindow);
+        this.metricGroup = metricGroup == null ? null : metricGroup.addGroup("cachekit");
+        if (this.metricGroup != null) {
+            MetricGroup keyGroup = this.metricGroup.addGroup("keys");
+            this.globalKeyAccessStats = new KeyAccessStats<>(keyStatsWindow);
+            keyGroup.gauge("window_accesses", () -> globalKeyAccessStats.getWindowedAccesses());
+            keyGroup.gauge("window_unique_keys", () -> globalKeyAccessStats.getWindowedUniqueKeys());
+            keyGroup.gauge("window_repeat_ratio", () -> globalKeyAccessStats.getWindowedRepeatRatio());
+            keyGroup.gauge("window_unique_ratio", () -> globalKeyAccessStats.getWindowedUniqueRatio());
+        } else {
+            this.globalKeyAccessStats = null;
+        }
     }
 
     @Override
@@ -142,7 +160,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 valueCacheLruOverflow,
                 valueBypassEnabled,
                 valueHitRateThreshold,
-                valueHitRateWindow);
+                valueHitRateWindow,
+                metricGroup,
+                stateDescriptor.getName(),
+                globalKeyAccessStats,
+                keyStatsWindow);
         wrappersByDelegateIdentity.put(internal, wrapped);
         return (S) wrapped;
     }
@@ -199,7 +221,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 valueCacheLruOverflow,
                 valueBypassEnabled,
                 valueHitRateThreshold,
-                valueHitRateWindow);
+                valueHitRateWindow,
+                metricGroup,
+                stateDesc.getName(),
+                globalKeyAccessStats,
+                keyStatsWindow);
         wrappersByDelegateIdentity.put(internal, wrapped);
         return (IS) wrapped;
     }

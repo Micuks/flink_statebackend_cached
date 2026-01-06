@@ -153,7 +153,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 valueCacheLruOverflow,
                 valueBypassEnabled,
                 valueHitRateThreshold,
-                valueHitRateWindow);
+                valueHitRateWindow,
+                metricGroup);
     }
 
     @Override
