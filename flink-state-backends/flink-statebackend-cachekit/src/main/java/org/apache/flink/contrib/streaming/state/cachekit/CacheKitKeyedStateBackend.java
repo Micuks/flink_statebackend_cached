@@ -114,10 +114,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         if (this.metricGroup != null) {
             MetricGroup keyGroup = this.metricGroup.addGroup("keys");
             this.globalKeyAccessStats = new KeyAccessStats<>(keyStatsWindow);
-            keyGroup.gauge("window_accesses", () -> globalKeyAccessStats.getWindowedAccesses());
-            keyGroup.gauge("window_unique_keys", () -> globalKeyAccessStats.getWindowedUniqueKeys());
-            keyGroup.gauge("window_repeat_ratio", () -> globalKeyAccessStats.getWindowedRepeatRatio());
-            keyGroup.gauge("window_unique_ratio", () -> globalKeyAccessStats.getWindowedUniqueRatio());
+            keyGroup.gauge("total_accesses", () -> globalKeyAccessStats.getWindowedAccesses());
+            keyGroup.gauge("total_unique_keys", () -> globalKeyAccessStats.getWindowedUniqueKeys());
+            keyGroup.gauge("total_repeat_ratio", () -> globalKeyAccessStats.getWindowedRepeatRatio());
+            keyGroup.gauge("total_unique_ratio", () -> globalKeyAccessStats.getWindowedUniqueRatio());
         } else {
             this.globalKeyAccessStats = null;
         }

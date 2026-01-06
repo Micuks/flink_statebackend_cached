@@ -155,10 +155,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
             MetricGroup keyGroup = stateMetrics.addGroup("keys");
             keyAccessStats = new KeyAccessStats<>(keyStatsWindow);
-            keyGroup.gauge("window_accesses", () -> keyAccessStats.getWindowedAccesses());
-            keyGroup.gauge("window_unique_keys", () -> keyAccessStats.getWindowedUniqueKeys());
-            keyGroup.gauge("window_repeat_ratio", () -> keyAccessStats.getWindowedRepeatRatio());
-            keyGroup.gauge("window_unique_ratio", () -> keyAccessStats.getWindowedUniqueRatio());
+            keyGroup.gauge("total_accesses", () -> keyAccessStats.getWindowedAccesses());
+            keyGroup.gauge("total_unique_keys", () -> keyAccessStats.getWindowedUniqueKeys());
+            keyGroup.gauge("total_repeat_ratio", () -> keyAccessStats.getWindowedRepeatRatio());
+            keyGroup.gauge("total_unique_ratio", () -> keyAccessStats.getWindowedUniqueRatio());
         } else {
             valueCalls = null;
             updateCalls = null;
