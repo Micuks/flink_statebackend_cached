@@ -71,6 +71,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private final KeyAccessStats<KeyNamespaceKey<K, N>> keyAccessStats;
     private final KeyAccessStats<K> globalKeyAccessStats;
+    private final KeyAccessLogger<K, N> keyAccessLogger;
 
     // Bypass State
     private volatile boolean isBypassing = false;
@@ -101,7 +102,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 null,
                 null,
                 null,
-                hitRateWindow);
+                hitRateWindow,
+                null,
+                null,
+                null);
     }
 
     public CachedInternalValueState(
@@ -117,7 +121,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             MetricGroup metricGroup,
             String stateName,
             KeyAccessStats<K> globalKeyAccessStats,
-            int keyStatsWindow) {
+            int keyStatsWindow,
+            String keyLogDir,
+            String operatorIdentifier,
+            String taskNameWithSubtasks) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -188,6 +195,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             keyAccessStats = null;
         }
         this.globalKeyAccessStats = globalKeyAccessStats;
+        this.keyAccessLogger = KeyAccessLogger.create(keyLogDir, operatorIdentifier, taskNameWithSubtasks, stateName);
     }
 
     @Override
@@ -502,6 +510,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (globalKeyAccessStats != null) {
             globalKeyAccessStats.record(currentKey);
         }
+        if (keyAccessLogger != null) {
+            keyAccessLogger.log(getKeySerializer(), getNamespaceSerializer(), key.key, key.namespace);
+        }
     }
 
     private void recordWriteCacheAccess(K currentKey) {
@@ -540,6 +551,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return 0.0d;
         }
         return 1.0d - ((double) delegateCounter.getCount() / total);
+    }
+
+    public void close() {
+        if (keyAccessLogger != null) {
+            keyAccessLogger.close();
+        }
     }
 
     private void flushEntryToDelegate(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
@@ -591,6 +608,85 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         V valueOrNull() {
             return isNull ? null : value;
+        }
+    }
+
+    private static final class KeyAccessLogger<K, N> {
+        private final java.io.BufferedWriter writer;
+
+        private KeyAccessLogger(java.io.BufferedWriter writer) {
+            this.writer = writer;
+        }
+
+        static <K, N> KeyAccessLogger<K, N> create(
+                String baseDir,
+                String operatorIdentifier,
+                String taskNameWithSubtasks,
+                String stateName) {
+            if (baseDir == null || baseDir.isBlank() || stateName == null) {
+                return null;
+            }
+            String task = sanitize(taskNameWithSubtasks);
+            String operator = sanitize(operatorIdentifier);
+            String state = sanitize(stateName);
+            java.nio.file.Path dir = java.nio.file.Paths.get(baseDir, task, operator);
+            java.nio.file.Path file = dir.resolve(state + ".log");
+            try {
+                java.nio.file.Files.createDirectories(dir);
+                java.io.BufferedWriter bw = java.nio.file.Files.newBufferedWriter(
+                        file,
+                        java.nio.charset.StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.APPEND);
+                return new KeyAccessLogger<>(bw);
+            } catch (Exception e) {
+                return null;
+            }
+        }
+
+        void log(TypeSerializer<K> keySerializer, TypeSerializer<N> namespaceSerializer, K key, N namespace) {
+            if (writer == null) {
+                return;
+            }
+            try {
+                String keyHex = serializeToHex(keySerializer, key);
+                String nsHex = serializeToHex(namespaceSerializer, namespace);
+                writer.write(keyHex);
+                writer.write('\t');
+                writer.write(nsHex);
+                writer.write('\n');
+            } catch (Exception e) {
+                // best-effort logging only
+            }
+        }
+
+        void close() {
+            try {
+                writer.flush();
+                writer.close();
+            } catch (Exception e) {
+                // best-effort close
+            }
+        }
+
+        private static String sanitize(String value) {
+            if (value == null || value.isEmpty()) {
+                return "unknown";
+            }
+            String sanitized = value.replaceAll("[^A-Za-z0-9._-]", "_");
+            return sanitized.isEmpty() ? "unknown" : sanitized;
+        }
+
+        private static <T> String serializeToHex(TypeSerializer<T> serializer, T value) throws Exception {
+            org.apache.flink.core.memory.DataOutputSerializer out = new org.apache.flink.core.memory.DataOutputSerializer(64);
+            serializer.serialize(value, out);
+            byte[] bytes = out.getCopyOfBuffer();
+            StringBuilder sb = new StringBuilder(bytes.length * 2);
+            for (byte b : bytes) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+                sb.append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
         }
     }
 }

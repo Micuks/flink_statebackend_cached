@@ -74,6 +74,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int keyStatsWindow;
     private final MetricGroup metricGroup;
     private final KeyAccessStats<K> globalKeyAccessStats;
+    private final String keyLogDir;
+    private final String operatorIdentifier;
+    private final String taskNameWithSubtasks;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -90,7 +93,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean valueBypassEnabled,
             double valueHitRateThreshold,
             int valueHitRateWindow,
-            MetricGroup metricGroup) {
+            MetricGroup metricGroup,
+            String keyLogDir,
+            String operatorIdentifier,
+            String taskNameWithSubtasks) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -111,6 +117,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.valueHitRateWindow = valueHitRateWindow;
         this.keyStatsWindow = Math.max(1, valueHitRateWindow);
         this.metricGroup = metricGroup == null ? null : metricGroup.addGroup("cachekit");
+        this.keyLogDir = keyLogDir;
+        this.operatorIdentifier = operatorIdentifier;
+        this.taskNameWithSubtasks = taskNameWithSubtasks;
         if (this.metricGroup != null) {
             MetricGroup keyGroup = this.metricGroup.addGroup("keys");
             this.globalKeyAccessStats = new KeyAccessStats<>(keyStatsWindow);
@@ -164,7 +173,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 metricGroup,
                 stateDescriptor.getName(),
                 globalKeyAccessStats,
-                keyStatsWindow);
+                keyStatsWindow,
+                keyLogDir,
+                operatorIdentifier,
+                taskNameWithSubtasks);
         wrappersByDelegateIdentity.put(internal, wrapped);
         return (S) wrapped;
     }
@@ -225,7 +237,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 metricGroup,
                 stateDesc.getName(),
                 globalKeyAccessStats,
-                keyStatsWindow);
+                keyStatsWindow,
+                keyLogDir,
+                operatorIdentifier,
+                taskNameWithSubtasks);
         wrappersByDelegateIdentity.put(internal, wrapped);
         return (IS) wrapped;
     }
@@ -244,14 +259,24 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @Override
     public void dispose() {
+        closeWrappers();
         wrappersByDelegateIdentity.clear();
         delegate.dispose();
     }
 
     @Override
     public void close() throws IOException {
+        closeWrappers();
         wrappersByDelegateIdentity.clear();
         delegate.close();
+    }
+
+    private void closeWrappers() {
+        for (Object wrapper : wrappersByDelegateIdentity.values()) {
+            if (wrapper instanceof CachedInternalValueState) {
+                ((CachedInternalValueState<?, ?, ?>) wrapper).close();
+            }
+        }
     }
 
     @Override

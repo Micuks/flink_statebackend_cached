@@ -80,6 +80,12 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         "Optional fully-qualified StateBackend class name used as delegate. "
                                                         + "If absent, EmbeddedRocksDBStateBackend is used.");
 
+        public static final ConfigOption<String> KEY_LOG_DIR = ConfigOptions
+                        .key("state.backend.cachekit.keylog.dir")
+                        .stringType()
+                        .noDefaultValue()
+                        .withDescription("Optional directory to log per-state key accesses (full log).");
+
         @Override
         public CacheKitStateBackend createFromConfig(ReadableConfig config, ClassLoader classLoader)
                         throws IOException {
@@ -90,6 +96,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final double hitRateThreshold = config.get(VALUE_HIT_RATE_THRESHOLD);
                 final int hitRateWindow = config.get(VALUE_HIT_RATE_WINDOW);
                 final String delegateClass = config.get(DELEGATE_BACKEND);
+                final String keyLogDir = config.get(KEY_LOG_DIR);
 
                 System.out.printf(
                                 "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, delegate=%s%n",
@@ -116,7 +123,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 
                 return new CacheKitStateBackend(
                                 delegate, maxEntries, policyType, lruOverflow, bypassEnabled, hitRateThreshold,
-                                hitRateWindow);
+                                hitRateWindow, keyLogDir);
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

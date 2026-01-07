@@ -70,6 +70,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final boolean valueBypassEnabled;
     private final double valueHitRateThreshold;
     private final int valueHitRateWindow;
+    private final String keyLogDir;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -78,7 +79,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
             int valueCacheLruOverflow,
             boolean valueBypassEnabled,
             double valueHitRateThreshold,
-            int valueHitRateWindow) {
+            int valueHitRateWindow,
+            String keyLogDir) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -86,6 +88,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.valueBypassEnabled = valueBypassEnabled;
         this.valueHitRateThreshold = valueHitRateThreshold;
         this.valueHitRateWindow = valueHitRateWindow;
+        this.keyLogDir = keyLogDir;
     }
 
     @Override
@@ -154,7 +157,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 valueBypassEnabled,
                 valueHitRateThreshold,
                 valueHitRateWindow,
-                metricGroup);
+                metricGroup,
+                keyLogDir,
+                operatorIdentifier,
+                env.getTaskInfo().getTaskNameWithSubtasks());
     }
 
     @Override
@@ -207,9 +213,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
         final boolean bypassEnabled = config.get(CacheKitStateBackendFactory.VALUE_BYPASS_ENABLED);
         final double hitRateThreshold = config.get(CacheKitStateBackendFactory.VALUE_HIT_RATE_THRESHOLD);
         final int hitRateWindow = config.get(CacheKitStateBackendFactory.VALUE_HIT_RATE_WINDOW);
+        final String keyLogDir = config.get(CacheKitStateBackendFactory.KEY_LOG_DIR);
 
         return new CacheKitStateBackend(
                 configuredDelegate, maxEntries, policyType, lruOverflow, bypassEnabled, hitRateThreshold,
-                hitRateWindow);
+                hitRateWindow, keyLogDir);
     }
 }
