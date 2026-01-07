@@ -511,7 +511,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             globalKeyAccessStats.record(currentKey);
         }
         if (keyAccessLogger != null) {
-            keyAccessLogger.log(getKeySerializer(), getNamespaceSerializer(), key.key, key.namespace);
+            keyAccessLogger.log(key.key, key.namespace);
         }
     }
 
@@ -644,16 +644,17 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
         }
 
-        void log(TypeSerializer<K> keySerializer, TypeSerializer<N> namespaceSerializer, K key, N namespace) {
+        void log(K key, N namespace) {
             if (writer == null) {
                 return;
             }
             try {
-                String keyHex = serializeToHex(keySerializer, key);
-                String nsHex = serializeToHex(namespaceSerializer, namespace);
-                writer.write(keyHex);
+                long ts = System.currentTimeMillis();
+                writer.write(Long.toString(ts));
                 writer.write('\t');
-                writer.write(nsHex);
+                writer.write(String.valueOf(key));
+                writer.write('\t');
+                writer.write(String.valueOf(namespace));
                 writer.write('\n');
             } catch (Exception e) {
                 // best-effort logging only
@@ -677,16 +678,5 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return sanitized.isEmpty() ? "unknown" : sanitized;
         }
 
-        private static <T> String serializeToHex(TypeSerializer<T> serializer, T value) throws Exception {
-            org.apache.flink.core.memory.DataOutputSerializer out = new org.apache.flink.core.memory.DataOutputSerializer(64);
-            serializer.serialize(value, out);
-            byte[] bytes = out.getCopyOfBuffer();
-            StringBuilder sb = new StringBuilder(bytes.length * 2);
-            for (byte b : bytes) {
-                sb.append(Character.forDigit((b >> 4) & 0xF, 16));
-                sb.append(Character.forDigit(b & 0xF, 16));
-            }
-            return sb.toString();
-        }
     }
 }

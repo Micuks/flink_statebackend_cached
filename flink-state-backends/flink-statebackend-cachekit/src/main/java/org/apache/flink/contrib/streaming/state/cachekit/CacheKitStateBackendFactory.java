@@ -83,8 +83,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
         public static final ConfigOption<String> KEY_LOG_DIR = ConfigOptions
                         .key("state.backend.cachekit.keylog.dir")
                         .stringType()
-                        .noDefaultValue()
-                        .withDescription("Optional directory to log per-state key accesses (full log).");
+                        .defaultValue("/tmp/cachekit-keylog")
+                        .withDescription("Directory to log per-state key accesses (full log).");
 
         @Override
         public CacheKitStateBackend createFromConfig(ReadableConfig config, ClassLoader classLoader)
