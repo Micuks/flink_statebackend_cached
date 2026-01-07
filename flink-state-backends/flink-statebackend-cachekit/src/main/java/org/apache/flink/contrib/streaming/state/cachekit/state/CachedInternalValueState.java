@@ -554,10 +554,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         try {
             if (value.isNull) {
                 delegate.clear();
-                delegateClearCalls.inc();
+                if (delegateClearCalls != null) {
+                    delegateClearCalls.inc();
+                }
             } else {
                 delegate.update(value.value);
-                delegateUpdateCalls.inc();
+                if (delegateUpdateCalls != null) {
+                    delegateUpdateCalls.inc();
+                }
             }
         } catch (IOException e) {
             throw new RuntimeException("Failed to flush state to delegate interaction", e);
