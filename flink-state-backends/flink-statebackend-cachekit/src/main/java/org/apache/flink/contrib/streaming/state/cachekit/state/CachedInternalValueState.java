@@ -513,28 +513,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // We must use the namespace from the key.
 
         keyContextSetter.accept(key.key);
-        // delegate.setCurrentNamespace(key.namespace); // delegate namespace must be
-        // set before update
-        // The delegate might look at its own currentNamespace.
-        // However, 'key.namespace' is the correct one for this entry.
-        // We need to ensure we restore the *previous* namespace of the delegate if we
-        // change it.
-        // Actually, we don't have access to delegate's internal 'currentNamespace'
-        // easily to restore it?
-        // But 'setCurrentNamespace' updates 'delegate's currentNamespace.
-        // We can just rely on 'this.currentNamespace' being the "logic" current
-        // namespace,
-        // but 'flushEntryToDelegate' is called for arbitrary keys (eviction).
-        // So we must change it.
-        // And then restore it to 'this.currentNamespace' (which is what the user
-        // expects).
 
         delegate.setCurrentNamespace(key.namespace);
         try {
             if (value.isNull) {
                 delegate.clear();
+                delegateClearCalls.inc();
             } else {
                 delegate.update(value.value);
+                delegateUpdateCalls.inc();
             }
         } catch (IOException e) {
             throw new RuntimeException("Failed to flush state to delegate interaction", e);
