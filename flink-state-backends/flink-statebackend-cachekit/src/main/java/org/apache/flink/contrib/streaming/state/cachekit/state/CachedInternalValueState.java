@@ -127,6 +127,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.hitRateThreshold = hitRateThreshold;
         this.hitRateWindow = hitRateWindow;
 
+        // L1 Cache: ~20% of maxEntries or at least 128
+        int l1Size = Math.max(128, maxEntries / 5);
+        this.l1Cache = createCachePolicy(l1Size, this::onL1Eviction);
+
+        // L2 Cache: Remaining size (or full maxEntries)
+        this.l2Cache = createCachePolicy(maxEntries, this::onL2Eviction);
+
         MetricGroup stateMetrics = null;
         if (metricGroup != null && stateName != null) {
             stateMetrics = metricGroup.addGroup("value_state").addGroup(stateName);
@@ -181,13 +188,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             keyAccessStats = null;
         }
         this.globalKeyAccessStats = globalKeyAccessStats;
-
-        // L1 Cache: ~20% of maxEntries or at least 128
-        int l1Size = Math.max(128, maxEntries / 5);
-        this.l1Cache = createCachePolicy(l1Size, this::onL1Eviction);
-
-        // L2 Cache: Remaining size (or full maxEntries)
-        this.l2Cache = createCachePolicy(maxEntries, this::onL2Eviction);
     }
 
     @Override
