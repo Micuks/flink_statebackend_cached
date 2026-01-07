@@ -281,6 +281,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         K currentKey = currentKeyProvider.getCurrentKey();
         KeyNamespaceKey<K, N> statsKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
         recordKeyAccess(statsKey, currentKey);
+        recordWriteCacheAccess(currentKey);
 
         if (bypassEnabled && isBypassing) {
             // Write-Through (Bypass Mode)
@@ -316,6 +317,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         K currentKey = currentKeyProvider.getCurrentKey();
         KeyNamespaceKey<K, N> statsKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
         recordKeyAccess(statsKey, currentKey);
+        recordWriteCacheAccess(currentKey);
         KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
         CachedValue<V> newValue;
 
@@ -499,6 +501,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         if (globalKeyAccessStats != null) {
             globalKeyAccessStats.record(currentKey);
+        }
+    }
+
+    private void recordWriteCacheAccess(K currentKey) {
+        if (cacheHits == null && cacheMisses == null) {
+            return;
+        }
+        if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
+            recordAccess(true);
+            return;
+        }
+        KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
+        if (l1Cache.get(probeKey) != null || l2Cache.get(probeKey) != null) {
+            recordAccess(true);
+        } else {
+            recordAccess(false);
         }
     }
 
