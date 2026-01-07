@@ -66,6 +66,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final Counter cacheHits;
     private final Counter cacheMisses;
     private final Counter bypassValueCalls;
+    private final Counter l1Evictions;
+    private final Counter l2Evictions;
 
     private final KeyAccessStats<KeyNamespaceKey<K, N>> keyAccessStats;
     private final KeyAccessStats<K> globalKeyAccessStats;
@@ -146,6 +148,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             cacheHits = cacheGroup.counter("hits");
             cacheMisses = cacheGroup.counter("misses");
             bypassValueCalls = cacheGroup.counter("bypass");
+            l1Evictions = cacheGroup.counter("l1_evictions");
+            l2Evictions = cacheGroup.counter("l2_evictions");
+            cacheGroup.gauge("l1_size", () -> l1Cache.size());
+            cacheGroup.gauge("l2_size", () -> l2Cache.size());
             cacheGroup.gauge(
                     "value_delegate_ratio",
                     () -> ratio(delegateValueCalls, valueCalls));
@@ -170,6 +176,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             cacheHits = null;
             cacheMisses = null;
             bypassValueCalls = null;
+            l1Evictions = null;
+            l2Evictions = null;
             keyAccessStats = null;
         }
         this.globalKeyAccessStats = globalKeyAccessStats;
@@ -404,6 +412,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     // L1 Eviction Listener
     private void onL1Eviction(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
+        if (l1Evictions != null) {
+            l1Evictions.inc();
+        }
         // Demote to L2
 
         if (value.dirty) {
@@ -425,6 +436,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     // L2 Eviction Listener
     private void onL2Eviction(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
+        if (l2Evictions != null) {
+            l2Evictions.inc();
+        }
         // L2 is clean (backed by delegate). Just drop.
     }
 
