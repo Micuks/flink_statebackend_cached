@@ -159,6 +159,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     @Override
     public void update(V value) throws IOException {
+        if (value == null) {
+            clear();
+            return;
+        }
         K currentKey = currentKeyProvider.getCurrentKey();
 
         if (bypassEnabled && isBypassing) {
@@ -188,11 +192,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     public void clear() {
         K currentKey = currentKeyProvider.getCurrentKey();
         KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+        CachedValue<V> existing = findCachedValue(currentKey);
         CachedValue<V> newValue;
 
         if (bypassEnabled && isBypassing) {
             delegate.clear();
             newValue = CachedValue.of(null, false);
+        } else if (existing != null && existing.isNull && !existing.dirty) {
+            // Known clean null: avoid scheduling an extra delete.
+            newValue = existing;
         } else {
             newValue = CachedValue.of(null, true);
         }
@@ -268,6 +276,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private void updateSticky(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
         lastAccessKey = key;
         lastAccessValue = value;
+    }
+
+    private CachedValue<V> findCachedValue(K currentKey) {
+        if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
+            return lastAccessValue;
+        }
+        KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
+        CachedValue<V> l1Value = l1Cache.get(probeKey);
+        if (l1Value != null) {
+            return l1Value;
+        }
+        return l2Cache.get(probeKey);
     }
 
     private CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> createCachePolicy(
