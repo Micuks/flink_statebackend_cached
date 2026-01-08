@@ -286,6 +286,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (updateCalls != null) {
             updateCalls.inc();
         }
+        if (value == null) {
+            clear();
+            return;
+        }
         K currentKey = currentKeyProvider.getCurrentKey();
         KeyNamespaceKey<K, N> statsKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
         recordKeyAccess(statsKey, currentKey);
@@ -327,6 +331,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         recordKeyAccess(statsKey, currentKey);
         recordWriteCacheAccess(currentKey);
         KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+        CachedValue<V> existing = findCachedValue(currentKey);
         CachedValue<V> newValue;
 
         if (bypassEnabled && isBypassing) {
@@ -335,6 +340,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 delegateClearCalls.inc();
             }
             newValue = CachedValue.of(null, false);
+        } else if (existing != null && existing.isNull && !existing.dirty) {
+            // Known clean null: avoid scheduling an extra delete.
+            newValue = existing;
         } else {
             newValue = CachedValue.of(null, true);
         }
@@ -529,6 +537,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         } else {
             recordAccess(false);
         }
+    }
+
+    private CachedValue<V> findCachedValue(K currentKey) {
+        if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
+            return lastAccessValue;
+        }
+        KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
+        CachedValue<V> l1Value = l1Cache.get(probeKey);
+        if (l1Value != null) {
+            return l1Value;
+        }
+        return l2Cache.get(probeKey);
     }
 
     private static double ratio(Counter numerator, Counter denominator) {
