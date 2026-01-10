@@ -25,7 +25,12 @@ import org.apache.flink.table.data.binary.BinaryRowData;
 
 import javax.annotation.Nonnull;
 
+import java.io.BufferedWriter;
+import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Objects;
 
 /**
@@ -38,7 +43,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private final InternalValueState<K, N, V> delegate;
     private final CurrentKeyProvider<K> currentKeyProvider;
-    private final CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> l1Cache;
+    private final <KeyNamespaceKey<K, N>, CachedValue<V>> l1Cache;
     private final CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> l2Cache;
     private final CachePolicyType cachePolicyType;
     private final int lruOverflow;
@@ -51,6 +56,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private final java.util.function.Consumer<K> keyContextSetter;
 
+    // Access logging
+    private final String logFilePath;
+    private final BufferedWriter logWriter;
+    private final Object logLock = new Object();
+
+    /** Access event type enumeration. */
+    public enum AccessEventType {
+        VALUE_READ,
+        VALUE_UPDATE,
+        VALUE_CLEAR,
+        VALUE_READ_STICKY_HIT,
+        VALUE_READ_L1_HIT,
+        VALUE_READ_L2_HIT,
+        VALUE_READ_DELEGATE_LOAD
+    }
+
     public CachedInternalValueState(
             InternalValueState<K, N, V> delegate,
             CurrentKeyProvider<K> currentKeyProvider,
@@ -58,11 +79,23 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             int maxEntries,
             CachePolicyType cachePolicyType,
             int lruOverflow) {
+        this(delegate, currentKeyProvider, keyContextSetter, maxEntries, cachePolicyType, lruOverflow, null);
+    }
+
+    public CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            ) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
         this.cachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
         this.lruOverflow = Math.max(0, lruOverflow);
+        this.logFilePath = "./value_state_access_log.txt";
 
         // L1 Cache: ~20% of maxEntries or at least 128
         int l1Size = Math.max(128, maxEntries / 5);
@@ -72,6 +105,28 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // capacity)
         // Plan said: "use existing maxEntries for L2".
         this.l2Cache = createCachePolicy(maxEntries, this::onL2Eviction);
+
+        // Initialize log writer if log file path is provided
+        if (logFilePath != null && !logFilePath.isEmpty()) {
+            try {
+                Path path = Paths.get(logFilePath);
+                // Create parent directories if they don't exist
+                if (path.getParent() != null) {
+                    Files.createDirectories(path.getParent());
+                }
+                this.logWriter = new BufferedWriter(new FileWriter(logFilePath, true));
+                // Write header
+                synchronized (logLock) {
+                    logWriter.write("# timestamp\tkey\tnamespace\tevent_type\tcache_level");
+                    logWriter.newLine();
+                    logWriter.flush();
+                }
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to initialize log file: " + logFilePath, e);
+            }
+        } else {
+            this.logWriter = null;
+        }
     }
 
     @Override
@@ -80,6 +135,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         // 1. Check Sticky Cache (Fast Path)
         if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
+            recordAccess(currentKey, currentNamespace, AccessEventType.VALUE_READ_STICKY_HIT, "STICKY");
             return lastAccessValue.valueOrNull();
         }
 
@@ -88,6 +144,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // 2. Check L1 Cache
         CachedValue<V> l1Cached = l1Cache.get(probeKey);
         if (l1Cached != null) {
+            recordAccess(currentKey, currentNamespace, AccessEventType.VALUE_READ_L1_HIT, "L1");
             updateSticky(probeKey, l1Cached);
             return l1Cached.valueOrNull();
         }
@@ -95,6 +152,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // 3. Check L2 Cache
         CachedValue<V> l2Cached = l2Cache.get(probeKey);
         if (l2Cached != null) {
+            recordAccess(currentKey, currentNamespace, AccessEventType.VALUE_READ_L2_HIT, "L2");
             // Promote to L1 (Clean)
             // Note: This puts a clean entry in L1.
             // If sticky is updated, next access hits sticky.
@@ -108,6 +166,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
 
         // 4. Load from Delegate
+        recordAccess(currentKey, currentNamespace, AccessEventType.VALUE_READ_DELEGATE_LOAD, "DELEGATE");
         V loaded = delegate.value();
 
         // 5. Update L1 (Clean) - commonly new hot data goes to L1
@@ -126,6 +185,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     @Override
     public void update(V value) throws IOException {
         K currentKey = currentKeyProvider.getCurrentKey();
+        recordAccess(currentKey, currentNamespace, AccessEventType.VALUE_UPDATE, "L1");
         KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
         CachedValue<V> newValue = CachedValue.of(value, true);
 
@@ -150,6 +210,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     @Override
     public void clear() {
         K currentKey = currentKeyProvider.getCurrentKey();
+        recordAccess(currentKey, currentNamespace, AccessEventType.VALUE_CLEAR, "L1");
         KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
         CachedValue<V> newValue = CachedValue.of(null, true);
 
@@ -225,6 +286,52 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private void updateSticky(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
         lastAccessKey = key;
         lastAccessValue = value;
+    }
+
+    /**
+     * Records an access event for the given key and namespace.
+     *
+     * @param key the key being accessed
+     * @param namespace the namespace being accessed
+     * @param eventType the type of access event
+     * @param cacheLevel the cache level where the access occurred
+     */
+    private void recordAccess(K key, N namespace, AccessEventType eventType, String cacheLevel) {
+        if (logWriter == null) {
+            return;
+        }
+
+        long timestamp = System.currentTimeMillis();
+        String keyStr = key != null ? key.toString() : "null";
+        String namespaceStr = namespace != null ? namespace.toString() : "null";
+
+        synchronized (logLock) {
+            try {
+                logWriter.write(String.format("%d\t%s\t%s\t%s\t%s%n",
+                        timestamp, keyStr, namespaceStr, eventType, cacheLevel));
+                logWriter.flush();
+            } catch (IOException e) {
+                // Log error but don't throw to avoid breaking cache operations
+                System.err.println("Failed to write to access log file: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Closes the log file writer if it was opened.
+     * Should be called when the state is no longer needed to ensure all data is flushed.
+     */
+    public void close() {
+        if (logWriter != null) {
+            synchronized (logLock) {
+                try {
+                    logWriter.flush();
+                    logWriter.close();
+                } catch (IOException e) {
+                    System.err.println("Failed to close access log file: " + e.getMessage());
+                }
+            }
+        }
     }
 
     private CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> createCachePolicy(
