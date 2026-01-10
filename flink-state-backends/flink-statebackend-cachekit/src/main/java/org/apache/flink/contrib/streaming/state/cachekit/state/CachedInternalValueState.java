@@ -43,7 +43,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private final InternalValueState<K, N, V> delegate;
     private final CurrentKeyProvider<K> currentKeyProvider;
-    private final <KeyNamespaceKey<K, N>, CachedValue<V>> l1Cache;
+    private final CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> l1Cache;
     private final CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> l2Cache;
     private final CachePolicyType cachePolicyType;
     private final int lruOverflow;
@@ -79,17 +79,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             int maxEntries,
             CachePolicyType cachePolicyType,
             int lruOverflow) {
-        this(delegate, currentKeyProvider, keyContextSetter, maxEntries, cachePolicyType, lruOverflow, null);
-    }
-
-    public CachedInternalValueState(
-            InternalValueState<K, N, V> delegate,
-            CurrentKeyProvider<K> currentKeyProvider,
-            java.util.function.Consumer<K> keyContextSetter,
-            int maxEntries,
-            CachePolicyType cachePolicyType,
-            int lruOverflow,
-            ) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
