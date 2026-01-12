@@ -38,6 +38,7 @@ import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.delegate.DelegatingStateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 
 import javax.annotation.Nonnull;
 
@@ -70,6 +71,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final boolean valueBypassEnabled;
     private final double valueHitRateThreshold;
     private final int valueHitRateWindow;
+    private final int mapPresenceCacheMaxEntries;
+    private final CachePolicyType mapPresenceCachePolicy;
+    private final int mapPresenceCacheLruOverflow;
+    private final PresenceCacheImplementation mapPresenceCacheImplementation;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -78,7 +83,11 @@ public class CacheKitStateBackend extends AbstractStateBackend
             int valueCacheLruOverflow,
             boolean valueBypassEnabled,
             double valueHitRateThreshold,
-            int valueHitRateWindow) {
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -86,6 +95,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.valueBypassEnabled = valueBypassEnabled;
         this.valueHitRateThreshold = valueHitRateThreshold;
         this.valueHitRateWindow = valueHitRateWindow;
+        this.mapPresenceCacheMaxEntries = mapPresenceCacheMaxEntries;
+        this.mapPresenceCachePolicy = mapPresenceCachePolicy;
+        this.mapPresenceCacheLruOverflow = mapPresenceCacheLruOverflow;
+        this.mapPresenceCacheImplementation = mapPresenceCacheImplementation;
     }
 
     @Override
@@ -153,7 +166,11 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 valueCacheLruOverflow,
                 valueBypassEnabled,
                 valueHitRateThreshold,
-                valueHitRateWindow);
+                valueHitRateWindow,
+                mapPresenceCacheMaxEntries,
+                mapPresenceCachePolicy,
+                mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation);
     }
 
     @Override
@@ -206,9 +223,26 @@ public class CacheKitStateBackend extends AbstractStateBackend
         final boolean bypassEnabled = config.get(CacheKitStateBackendFactory.VALUE_BYPASS_ENABLED);
         final double hitRateThreshold = config.get(CacheKitStateBackendFactory.VALUE_HIT_RATE_THRESHOLD);
         final int hitRateWindow = config.get(CacheKitStateBackendFactory.VALUE_HIT_RATE_WINDOW);
+        final int mapPresenceMaxEntries =
+                Math.max(0, config.get(CacheKitStateBackendFactory.MAP_PRESENCE_CACHE_MAX_ENTRIES));
+        final CachePolicyType mapPresencePolicy =
+                config.get(CacheKitStateBackendFactory.MAP_PRESENCE_CACHE_POLICY);
+        final int mapPresenceLruOverflow =
+                Math.max(0, config.get(CacheKitStateBackendFactory.MAP_PRESENCE_CACHE_LRU_OVERFLOW));
+        final PresenceCacheImplementation mapPresenceImpl =
+                config.get(CacheKitStateBackendFactory.MAP_PRESENCE_CACHE_IMPLEMENTATION);
 
         return new CacheKitStateBackend(
-                configuredDelegate, maxEntries, policyType, lruOverflow, bypassEnabled, hitRateThreshold,
-                hitRateWindow);
+                configuredDelegate,
+                maxEntries,
+                policyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                mapPresenceMaxEntries,
+                mapPresencePolicy,
+                mapPresenceLruOverflow,
+                mapPresenceImpl);
     }
 }

@@ -19,8 +19,10 @@ import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMapState;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalValueState;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.SavepointResources;
@@ -32,6 +34,7 @@ import org.apache.flink.runtime.state.SnapshotResult;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.state.StateSnapshotTransformer;
 import org.apache.flink.runtime.state.internal.InternalKvState;
+import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
@@ -69,6 +72,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean valueBypassEnabled;
     private final double valueHitRateThreshold;
     private final int valueHitRateWindow;
+    private final int mapPresenceCacheMaxEntries;
+    private final CachePolicyType mapPresenceCachePolicy;
+    private final int mapPresenceCacheLruOverflow;
+    private final PresenceCacheImplementation mapPresenceCacheImplementation;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -84,7 +91,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int valueCacheLruOverflow,
             boolean valueBypassEnabled,
             double valueHitRateThreshold,
-            int valueHitRateWindow) {
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -103,6 +114,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.valueBypassEnabled = valueBypassEnabled;
         this.valueHitRateThreshold = valueHitRateThreshold;
         this.valueHitRateWindow = valueHitRateWindow;
+        this.mapPresenceCacheMaxEntries = mapPresenceCacheMaxEntries;
+        this.mapPresenceCachePolicy = mapPresenceCachePolicy;
+        this.mapPresenceCacheLruOverflow = mapPresenceCacheLruOverflow;
+        this.mapPresenceCacheImplementation = mapPresenceCacheImplementation;
     }
 
     @Override
@@ -123,28 +138,48 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
 
         InternalKvState<K, N, ?> internal = (InternalKvState<K, N, ?>) state;
-        if (stateDescriptor.getType() != StateDescriptor.Type.VALUE
-                || !(internal instanceof InternalValueState)
-                || valueCacheMaxEntries <= 0) {
-            return state;
+        if (stateDescriptor.getType() == StateDescriptor.Type.VALUE
+                && internal instanceof InternalValueState
+                && valueCacheMaxEntries > 0) {
+            Object existing = wrappersByDelegateIdentity.get(internal);
+            if (existing != null) {
+                return (S) existing;
+            }
+            InternalValueState<K, N, V> delegateValue = (InternalValueState<K, N, V>) internal;
+            CachedInternalValueState<K, N, V> wrapped = new CachedInternalValueState<>(
+                    delegateValue,
+                    this::getCurrentKey,
+                    this::setCurrentKey,
+                    valueCacheMaxEntries,
+                    valueCachePolicy,
+                    valueCacheLruOverflow,
+                    valueBypassEnabled,
+                    valueHitRateThreshold,
+                    valueHitRateWindow);
+            wrappersByDelegateIdentity.put(internal, wrapped);
+            return (S) wrapped;
         }
 
-        Object existing = wrappersByDelegateIdentity.get(internal);
-        if (existing != null) {
-            return (S) existing;
+        if (stateDescriptor.getType() == StateDescriptor.Type.MAP
+                && internal instanceof InternalMapState
+                && mapPresenceCacheMaxEntries > 0) {
+            Object existing = wrappersByDelegateIdentity.get(internal);
+            if (existing != null) {
+                return (S) existing;
+            }
+            InternalMapState<K, N, Object, Object> delegateMap = (InternalMapState<K, N, Object, Object>) internal;
+            CachedInternalMapState<K, N, Object, Object> wrapped = new CachedInternalMapState<>(
+                    delegateMap,
+                    this::getCurrentKey,
+                    mapPresenceCacheMaxEntries,
+                    mapPresenceCachePolicy,
+                    mapPresenceCacheLruOverflow,
+                    mapPresenceCacheImplementation);
+            wrappersByDelegateIdentity.put(internal, wrapped);
+            return (S) wrapped;
         }
 
-        InternalValueState<K, N, V> delegateValue = (InternalValueState<K, N, V>) internal;
-        CachedInternalValueState<K, N, V> wrapped = new CachedInternalValueState<>(delegateValue, this::getCurrentKey,
-                this::setCurrentKey,
-                valueCacheMaxEntries,
-                valueCachePolicy,
-                valueCacheLruOverflow,
-                valueBypassEnabled,
-                valueHitRateThreshold,
-                valueHitRateWindow);
-        wrappersByDelegateIdentity.put(internal, wrapped);
-        return (S) wrapped;
+        return state;
     }
 
     @Override
@@ -178,30 +213,48 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
 
         InternalKvState<K, N, ?> internal = (InternalKvState<K, N, ?>) state;
-        if (stateDesc.getType() != StateDescriptor.Type.VALUE
-                || !(internal instanceof InternalValueState)
-                || valueCacheMaxEntries <= 0) {
-            return state;
+        if (stateDesc.getType() == StateDescriptor.Type.VALUE
+                && internal instanceof InternalValueState
+                && valueCacheMaxEntries > 0) {
+            Object existing = wrappersByDelegateIdentity.get(internal);
+            if (existing != null) {
+                return (IS) existing;
+            }
+            InternalValueState<K, N, SV> delegateValue = (InternalValueState<K, N, SV>) internal;
+            CachedInternalValueState<K, N, SV> wrapped = new CachedInternalValueState<>(
+                    delegateValue,
+                    this::getCurrentKey,
+                    this::setCurrentKey,
+                    valueCacheMaxEntries,
+                    valueCachePolicy,
+                    valueCacheLruOverflow,
+                    valueBypassEnabled,
+                    valueHitRateThreshold,
+                    valueHitRateWindow);
+            wrappersByDelegateIdentity.put(internal, wrapped);
+            return (IS) wrapped;
         }
 
-        Object existing = wrappersByDelegateIdentity.get(internal);
-        if (existing != null) {
-            return (IS) existing;
+        if (stateDesc.getType() == StateDescriptor.Type.MAP
+                && internal instanceof InternalMapState
+                && mapPresenceCacheMaxEntries > 0) {
+            Object existing = wrappersByDelegateIdentity.get(internal);
+            if (existing != null) {
+                return (IS) existing;
+            }
+            InternalMapState<K, N, Object, Object> delegateMap = (InternalMapState<K, N, Object, Object>) internal;
+            CachedInternalMapState<K, N, Object, Object> wrapped = new CachedInternalMapState<>(
+                    delegateMap,
+                    this::getCurrentKey,
+                    mapPresenceCacheMaxEntries,
+                    mapPresenceCachePolicy,
+                    mapPresenceCacheLruOverflow,
+                    mapPresenceCacheImplementation);
+            wrappersByDelegateIdentity.put(internal, wrapped);
+            return (IS) wrapped;
         }
 
-        InternalValueState<K, N, SV> delegateValue = (InternalValueState<K, N, SV>) internal;
-        CachedInternalValueState<K, N, SV> wrapped = new CachedInternalValueState<>(
-                delegateValue,
-                this::getCurrentKey,
-                this::setCurrentKey,
-                valueCacheMaxEntries,
-                valueCachePolicy,
-                valueCacheLruOverflow,
-                valueBypassEnabled,
-                valueHitRateThreshold,
-                valueHitRateWindow);
-        wrappersByDelegateIdentity.put(internal, wrapped);
-        return (IS) wrapped;
+        return state;
     }
 
     @Override

@@ -19,6 +19,7 @@ import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.contrib.streaming.state.RocksDBStateBackendFactory;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.StateBackendFactory;
@@ -73,6 +74,32 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         .defaultValue(1000)
                         .withDescription("Number of accesses to calculate hit rate over.");
 
+        public static final ConfigOption<Integer> MAP_PRESENCE_CACHE_MAX_ENTRIES = ConfigOptions
+                        .key("state.backend.cachekit.map.presence.cache.max-entries")
+                        .intType()
+                        .defaultValue(8192)
+                        .withDescription("Max entries for per-MapState key presence cache.");
+
+        public static final ConfigOption<CachePolicyType> MAP_PRESENCE_CACHE_POLICY = ConfigOptions
+                        .key("state.backend.cachekit.map.presence.cache.policy")
+                        .enumType(CachePolicyType.class)
+                        .defaultValue(CachePolicyType.LRU)
+                        .withDescription("Cache policy for MapState key presence cache (LRU or CAFFEINE).");
+
+        public static final ConfigOption<Integer> MAP_PRESENCE_CACHE_LRU_OVERFLOW = ConfigOptions
+                        .key("state.backend.cachekit.map.presence.cache.lru.overflow")
+                        .intType()
+                        .defaultValue(256)
+                        .withDescription(
+                                        "Overflow entries for MapState key presence LRU before batch eviction triggers.");
+
+        public static final ConfigOption<PresenceCacheImplementation> MAP_PRESENCE_CACHE_IMPLEMENTATION = ConfigOptions
+                        .key("state.backend.cachekit.map.presence.cache.impl")
+                        .enumType(PresenceCacheImplementation.class)
+                        .defaultValue(PresenceCacheImplementation.PRIMITIVE)
+                        .withDescription(
+                                        "Presence cache implementation for MapState (PRIMITIVE or OBJECT).");
+
         public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
                         .stringType()
                         .noDefaultValue()
@@ -89,11 +116,24 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final boolean bypassEnabled = config.get(VALUE_BYPASS_ENABLED);
                 final double hitRateThreshold = config.get(VALUE_HIT_RATE_THRESHOLD);
                 final int hitRateWindow = config.get(VALUE_HIT_RATE_WINDOW);
+                final int mapPresenceMaxEntries = Math.max(0, config.get(MAP_PRESENCE_CACHE_MAX_ENTRIES));
+                final CachePolicyType mapPresencePolicy = config.get(MAP_PRESENCE_CACHE_POLICY);
+                final int mapPresenceLruOverflow = Math.max(0, config.get(MAP_PRESENCE_CACHE_LRU_OVERFLOW));
+                final PresenceCacheImplementation mapPresenceImpl = config.get(MAP_PRESENCE_CACHE_IMPLEMENTATION);
                 final String delegateClass = config.get(DELEGATE_BACKEND);
 
                 System.out.printf(
-                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, delegate=%s%n",
-                                maxEntries, policyType, lruOverflow, bypassEnabled, hitRateThreshold, hitRateWindow,
+                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, delegate=%s%n",
+                                maxEntries,
+                                policyType,
+                                lruOverflow,
+                                bypassEnabled,
+                                hitRateThreshold,
+                                hitRateWindow,
+                                mapPresenceMaxEntries,
+                                mapPresencePolicy,
+                                mapPresenceLruOverflow,
+                                mapPresenceImpl,
                                 delegateClass);
 
                 StateBackend delegate;
@@ -115,8 +155,17 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 }
 
                 return new CacheKitStateBackend(
-                                delegate, maxEntries, policyType, lruOverflow, bypassEnabled, hitRateThreshold,
-                                hitRateWindow);
+                                delegate,
+                                maxEntries,
+                                policyType,
+                                lruOverflow,
+                                bypassEnabled,
+                                hitRateThreshold,
+                                hitRateWindow,
+                                mapPresenceMaxEntries,
+                                mapPresencePolicy,
+                                mapPresenceLruOverflow,
+                                mapPresenceImpl);
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {
