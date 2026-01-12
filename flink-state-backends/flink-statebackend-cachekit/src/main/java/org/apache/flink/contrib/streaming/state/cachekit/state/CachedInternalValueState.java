@@ -290,7 +290,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return;
         }
 
-        long timestamp = System.currentTimeMillis();
+        long timestamp = System.nanoTime();
         String keyStr = key != null ? key.toString() : "null";
         String namespaceStr = namespace != null ? namespace.toString() : "null";
 
