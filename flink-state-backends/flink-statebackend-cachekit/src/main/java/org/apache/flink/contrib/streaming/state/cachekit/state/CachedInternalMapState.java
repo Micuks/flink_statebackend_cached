@@ -78,6 +78,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final Counter delegateRemoveCalls;
     private final Counter delegateContainsCalls;
     private final Counter delegateClearCalls;
+    private final Counter delegateGetMisses;
+    private final Counter delegateContainsMisses;
     private final Counter presenceLookups;
     private final Counter presenceHits;
     private final Counter presenceMisses;
@@ -86,6 +88,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final Counter presenceUpdates;
     private final Counter getShortCircuits;
     private final Counter containsShortCircuits;
+    private final Counter getAbsentShortCircuits;
+    private final Counter containsPresentShortCircuits;
+    private final Counter containsAbsentShortCircuits;
     private final Counter l1Evictions;
     private final Counter l2Evictions;
     private final KeyAccessStats<KeyNamespaceUserKey<K, N, UK>> keyAccessStats;
@@ -205,6 +210,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             delegateRemoveCalls = delegateGroup.counter("remove");
             delegateContainsCalls = delegateGroup.counter("contains");
             delegateClearCalls = delegateGroup.counter("clear");
+            delegateGetMisses = delegateGroup.counter("get_miss");
+            delegateContainsMisses = delegateGroup.counter("contains_miss");
 
             MetricGroup presenceGroup = stateMetrics.addGroup("presence");
             presenceLookups = presenceGroup.counter("lookups");
@@ -215,6 +222,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             presenceUpdates = presenceGroup.counter("updates");
             getShortCircuits = presenceGroup.counter("get_short_circuit");
             containsShortCircuits = presenceGroup.counter("contains_short_circuit");
+            getAbsentShortCircuits = presenceGroup.counter("get_absent_short_circuit");
+            containsPresentShortCircuits = presenceGroup.counter("contains_present_short_circuit");
+            containsAbsentShortCircuits = presenceGroup.counter("contains_absent_short_circuit");
             l1Evictions = presenceGroup.counter("l1_evictions");
             l2Evictions = presenceGroup.counter("l2_evictions");
             presenceGroup.gauge("l1_size", this::l1PresenceSize);
@@ -256,6 +266,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             delegateRemoveCalls = null;
             delegateContainsCalls = null;
             delegateClearCalls = null;
+            delegateGetMisses = null;
+            delegateContainsMisses = null;
             presenceLookups = null;
             presenceHits = null;
             presenceMisses = null;
@@ -264,6 +276,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             presenceUpdates = null;
             getShortCircuits = null;
             containsShortCircuits = null;
+            getAbsentShortCircuits = null;
+            containsPresentShortCircuits = null;
+            containsAbsentShortCircuits = null;
             l1Evictions = null;
             l2Evictions = null;
             keyAccessStats = null;
@@ -293,6 +308,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 if (getShortCircuits != null) {
                     getShortCircuits.inc();
                 }
+                if (getAbsentShortCircuits != null) {
+                    getAbsentShortCircuits.inc();
+                }
                 logAccess("get", userKey, present, false, false);
                 return null;
             }
@@ -300,6 +318,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         UV value = delegate.get(userKey);
         if (delegateGetCalls != null) {
             delegateGetCalls.inc();
+        }
+        if (value == null && delegateGetMisses != null) {
+            delegateGetMisses.inc();
         }
         if (presenceCacheEnabled) {
             updatePresence(userKey, value != null);
@@ -395,6 +416,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 if (containsShortCircuits != null) {
                     containsShortCircuits.inc();
                 }
+                if (present && containsPresentShortCircuits != null) {
+                    containsPresentShortCircuits.inc();
+                } else if (!present && containsAbsentShortCircuits != null) {
+                    containsAbsentShortCircuits.inc();
+                }
                 logAccess("contains", userKey, present, false, present);
                 return present;
             }
@@ -402,6 +428,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         boolean exists = delegate.contains(userKey);
         if (delegateContainsCalls != null) {
             delegateContainsCalls.inc();
+        }
+        if (!exists && delegateContainsMisses != null) {
+            delegateContainsMisses.inc();
         }
         if (presenceCacheEnabled) {
             updatePresence(userKey, exists);
