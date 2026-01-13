@@ -294,12 +294,18 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             long fp = fingerprint(currentKey, currentNamespace, userKey);
             Byte l1 = l1PrimitivePresenceCache.get(fp);
             if (l1 != null) {
-                return l1 == PrimitivePresenceCache.PRESENT;
+                if (l1 == PrimitivePresenceCache.ABSENT) {
+                    return false;
+                }
+                l1PrimitivePresenceCache.remove(fp);
             }
             Byte l2 = l2PrimitivePresenceCache.get(fp);
             if (l2 != null) {
-                l1PrimitivePresenceCache.put(fp, l2);
-                return l2 == PrimitivePresenceCache.PRESENT;
+                if (l2 == PrimitivePresenceCache.ABSENT) {
+                    l1PrimitivePresenceCache.put(fp, l2);
+                    return false;
+                }
+                l2PrimitivePresenceCache.remove(fp);
             }
             return null;
         }
@@ -308,15 +314,25 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 new KeyNamespaceUserKey<>(currentKey, currentNamespace, userKey, false);
         Boolean present = l1PresenceCache.get(probe);
         if (present != null) {
-            return present;
+            if (!present) {
+                return false;
+            }
+            KeyNamespaceUserKey<K, N, UK> storage =
+                    new KeyNamespaceUserKey<>(currentKey, currentNamespace, userKey, true);
+            l1PresenceCache.remove(storage);
+            return null;
         }
         present = l2PresenceCache.get(probe);
         if (present != null) {
             KeyNamespaceUserKey<K, N, UK> storage =
                     new KeyNamespaceUserKey<>(currentKey, currentNamespace, userKey, true);
-            l1PresenceCache.put(storage, present);
+            if (!present) {
+                l1PresenceCache.put(storage, false);
+                return false;
+            }
+            l2PresenceCache.remove(storage);
         }
-        return present;
+        return null;
     }
 
     private void updatePresence(UK userKey, boolean present) {
@@ -326,14 +342,24 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         if (usePrimitivePresenceCache) {
             long fp = fingerprint(currentKey, currentNamespace, userKey);
-            l1PrimitivePresenceCache.put(fp, present
-                    ? PrimitivePresenceCache.PRESENT
-                    : PrimitivePresenceCache.ABSENT);
+            if (present) {
+                l1PrimitivePresenceCache.remove(fp);
+                l2PrimitivePresenceCache.remove(fp);
+                return;
+            }
+            l2PrimitivePresenceCache.remove(fp);
+            l1PrimitivePresenceCache.put(fp, PrimitivePresenceCache.ABSENT);
             return;
         }
         KeyNamespaceUserKey<K, N, UK> storage =
                 new KeyNamespaceUserKey<>(currentKey, currentNamespace, userKey, true);
-        l1PresenceCache.put(storage, present);
+        if (present) {
+            l1PresenceCache.remove(storage);
+            l2PresenceCache.remove(storage);
+            return;
+        }
+        l2PresenceCache.remove(storage);
+        l1PresenceCache.put(storage, false);
     }
 
     private void clearPresenceCaches() {
@@ -373,7 +399,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private void onL1Eviction(KeyNamespaceUserKey<K, N, UK> key, Boolean value) {
-        if (key == null || value == null) {
+        if (key == null || value == null || value) {
             return;
         }
         l2PresenceCache.put(key, value);
@@ -384,7 +410,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private void onL1PrimitiveEviction(Long key, Byte value) {
-        if (key == null || value == null) {
+        if (key == null || value == null || value.byteValue() != PrimitivePresenceCache.ABSENT) {
             return;
         }
         l2PrimitivePresenceCache.put(key, value);
