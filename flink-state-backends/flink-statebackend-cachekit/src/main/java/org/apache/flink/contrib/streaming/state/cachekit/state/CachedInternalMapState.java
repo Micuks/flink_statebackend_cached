@@ -203,28 +203,24 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     @Override
     public Iterable<Map.Entry<UK, UV>> entries() throws Exception {
         ensureDelegateNamespace();
-        clearPresenceCaches();
         return delegate.entries();
     }
 
     @Override
     public Iterable<UK> keys() throws Exception {
         ensureDelegateNamespace();
-        clearPresenceCaches();
         return delegate.keys();
     }
 
     @Override
     public Iterable<UV> values() throws Exception {
         ensureDelegateNamespace();
-        clearPresenceCaches();
         return delegate.values();
     }
 
     @Override
     public Iterator<Map.Entry<UK, UV>> iterator() throws Exception {
         ensureDelegateNamespace();
-        clearPresenceCaches();
         return delegate.iterator();
     }
 
