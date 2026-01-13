@@ -21,7 +21,8 @@ import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePoli
 import org.apache.flink.contrib.streaming.state.cachekit.cache.LruCachePolicy;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
-import org.apache.flink.table.data.binary.BinaryRowData;
+import org.apache.flink.metrics.Counter;
+import org.apache.flink.metrics.MetricGroup;
 
 import javax.annotation.Nonnull;
 
@@ -55,6 +56,23 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private final java.util.function.Consumer<K> keyContextSetter;
 
+    private final Counter valueCalls;
+    private final Counter updateCalls;
+    private final Counter clearCalls;
+    private final Counter getSerializedValueCalls;
+    private final Counter delegateValueCalls;
+    private final Counter delegateUpdateCalls;
+    private final Counter delegateClearCalls;
+    private final Counter cacheHits;
+    private final Counter cacheMisses;
+    private final Counter bypassValueCalls;
+    private final Counter l1Evictions;
+    private final Counter l2Evictions;
+
+    private final KeyAccessStats<KeyNamespaceKey<K, N>> keyAccessStats;
+    private final KeyAccessStats<K> globalKeyAccessStats;
+    private final KeyAccessLogger<K, N> keyAccessLogger;
+
     // Bypass State
     private volatile boolean isBypassing = false;
     private long currentWindowAccesses = 0;
@@ -71,6 +89,42 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             boolean bypassEnabled,
             double hitRateThreshold,
             int hitRateWindow) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                null,
+                null,
+                null,
+                hitRateWindow,
+                null,
+                null,
+                null);
+    }
+
+    public CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            MetricGroup metricGroup,
+            String stateName,
+            KeyAccessStats<K> globalKeyAccessStats,
+            int keyStatsWindow,
+            String keyLogDir,
+            String operatorIdentifier,
+            String taskNameWithSubtasks) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -86,11 +140,74 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         // L2 Cache: Remaining size (or full maxEntries)
         this.l2Cache = createCachePolicy(maxEntries, this::onL2Eviction);
+
+        MetricGroup stateMetrics = null;
+        if (metricGroup != null && stateName != null) {
+            stateMetrics = metricGroup.addGroup("value_state").addGroup(stateName);
+        }
+
+        if (stateMetrics != null) {
+            MetricGroup callGroup = stateMetrics.addGroup("calls");
+            valueCalls = callGroup.counter("value");
+            updateCalls = callGroup.counter("update");
+            clearCalls = callGroup.counter("clear");
+            getSerializedValueCalls = callGroup.counter("get_serialized_value");
+
+            MetricGroup delegateGroup = stateMetrics.addGroup("delegate");
+            delegateValueCalls = delegateGroup.counter("value");
+            delegateUpdateCalls = delegateGroup.counter("update");
+            delegateClearCalls = delegateGroup.counter("clear");
+
+            MetricGroup cacheGroup = stateMetrics.addGroup("cache");
+            cacheHits = cacheGroup.counter("hits");
+            cacheMisses = cacheGroup.counter("misses");
+            bypassValueCalls = cacheGroup.counter("bypass");
+            l1Evictions = cacheGroup.counter("l1_evictions");
+            l2Evictions = cacheGroup.counter("l2_evictions");
+            cacheGroup.gauge("l1_size", () -> l1Cache.size());
+            cacheGroup.gauge("l2_size", () -> l2Cache.size());
+            cacheGroup.gauge(
+                    "value_delegate_ratio",
+                    () -> ratio(delegateValueCalls, valueCalls));
+            cacheGroup.gauge(
+                    "value_delegate_savings_ratio",
+                    () -> savingsRatio(delegateValueCalls, valueCalls));
+
+            MetricGroup keyGroup = stateMetrics.addGroup("keys");
+            keyAccessStats = new KeyAccessStats<>(keyStatsWindow);
+            keyGroup.gauge("total_accesses", () -> keyAccessStats.getWindowedAccesses());
+            keyGroup.gauge("total_unique_keys", () -> keyAccessStats.getWindowedUniqueKeys());
+            keyGroup.gauge("total_repeat_ratio", () -> keyAccessStats.getWindowedRepeatRatio());
+            keyGroup.gauge("total_unique_ratio", () -> keyAccessStats.getWindowedUniqueRatio());
+        } else {
+            valueCalls = null;
+            updateCalls = null;
+            clearCalls = null;
+            getSerializedValueCalls = null;
+            delegateValueCalls = null;
+            delegateUpdateCalls = null;
+            delegateClearCalls = null;
+            cacheHits = null;
+            cacheMisses = null;
+            bypassValueCalls = null;
+            l1Evictions = null;
+            l2Evictions = null;
+            keyAccessStats = null;
+        }
+        this.globalKeyAccessStats = globalKeyAccessStats;
+        this.keyAccessLogger = KeyAccessLogger.create(keyLogDir, operatorIdentifier, taskNameWithSubtasks, stateName);
     }
 
     @Override
     public V value() throws IOException {
+        if (valueCalls != null) {
+            valueCalls.inc();
+        }
+
         K currentKey = currentKeyProvider.getCurrentKey();
+        KeyNamespaceKey<K, N> statsKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+        recordKeyAccess(statsKey, currentKey);
+        KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
 
         // 1. Check Sticky Cache (Always Check L0 - Fast Path)
         if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
@@ -103,6 +220,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             // Sampling: Check cache every ~100 requests to see if we should re-enable
             opsSinceLastSample++;
             if (opsSinceLastSample < 100) {
+                if (bypassValueCalls != null) {
+                    bypassValueCalls.inc();
+                }
+                if (delegateValueCalls != null) {
+                    delegateValueCalls.inc();
+                }
                 // Bypass mode: Direct to Delegate
                 // Don't record access here to avoid skewing stats with 100% hits/misses?
                 // Actually, if we bypass, we assume it's a "Miss" for the cache utility?
@@ -119,8 +242,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             // Sample this request
             opsSinceLastSample = 0;
         }
-
-        KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
 
         // 3. Check L1 Cache
         CachedValue<V> l1Cached = l1Cache.get(probeKey);
@@ -145,6 +266,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         // 5. Miss -> Load from Delegate
         V loaded = delegate.value();
+        if (delegateValueCalls != null) {
+            delegateValueCalls.inc();
+        }
         recordAccess(false); // Miss
 
         // 6. Update L1 (Clean)
@@ -159,15 +283,24 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     @Override
     public void update(V value) throws IOException {
+        if (updateCalls != null) {
+            updateCalls.inc();
+        }
         if (value == null) {
             clear();
             return;
         }
         K currentKey = currentKeyProvider.getCurrentKey();
+        KeyNamespaceKey<K, N> statsKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+        recordKeyAccess(statsKey, currentKey);
+        recordWriteCacheAccess(currentKey);
 
         if (bypassEnabled && isBypassing) {
             // Write-Through (Bypass Mode)
             delegate.update(value);
+            if (delegateUpdateCalls != null) {
+                delegateUpdateCalls.inc();
+            }
 
             // Update L1 as Clean so subsequent reads (if sampled or re-enabled) find it.
             // This also ensures cache coherence.
@@ -190,13 +323,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     @Override
     public void clear() {
+        if (clearCalls != null) {
+            clearCalls.inc();
+        }
         K currentKey = currentKeyProvider.getCurrentKey();
+        KeyNamespaceKey<K, N> statsKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+        recordKeyAccess(statsKey, currentKey);
+        recordWriteCacheAccess(currentKey);
         KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
         CachedValue<V> existing = findCachedValue(currentKey);
         CachedValue<V> newValue;
 
         if (bypassEnabled && isBypassing) {
             delegate.clear();
+            if (delegateClearCalls != null) {
+                delegateClearCalls.inc();
+            }
             newValue = CachedValue.of(null, false);
         } else if (existing != null && existing.isNull && !existing.dirty) {
             // Known clean null: avoid scheduling an extra delete.
@@ -237,6 +379,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             TypeSerializer<N> safeNamespaceSerializer,
             TypeSerializer<V> safeValueSerializer)
             throws Exception {
+        if (getSerializedValueCalls != null) {
+            getSerializedValueCalls.inc();
+        }
         // Must flush to ensure delegate has latest state before serialization
         flush();
         return delegate.getSerializedValue(
@@ -278,18 +423,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         lastAccessValue = value;
     }
 
-    private CachedValue<V> findCachedValue(K currentKey) {
-        if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
-            return lastAccessValue;
-        }
-        KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
-        CachedValue<V> l1Value = l1Cache.get(probeKey);
-        if (l1Value != null) {
-            return l1Value;
-        }
-        return l2Cache.get(probeKey);
-    }
-
     private CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> createCachePolicy(
             int maxEntries,
             java.util.function.BiConsumer<KeyNamespaceKey<K, N>, CachedValue<V>> evictionListener) {
@@ -301,6 +434,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     // L1 Eviction Listener
     private void onL1Eviction(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
+        if (l1Evictions != null) {
+            l1Evictions.inc();
+        }
         // Demote to L2
 
         if (value.dirty) {
@@ -322,13 +458,27 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     // L2 Eviction Listener
     private void onL2Eviction(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
+        if (l2Evictions != null) {
+            l2Evictions.inc();
+        }
         // L2 is clean (backed by delegate). Just drop.
     }
 
     private void recordAccess(boolean isHit) {
+        if (isHit) {
+            if (cacheHits != null) {
+                cacheHits.inc();
+            }
+        } else {
+            if (cacheMisses != null) {
+                cacheMisses.inc();
+            }
+        }
+
         if (!bypassEnabled) {
             return;
         }
+
         currentWindowAccesses++;
         if (isHit) {
             currentWindowHits++;
@@ -361,6 +511,74 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
     }
 
+    private void recordKeyAccess(KeyNamespaceKey<K, N> key, K currentKey) {
+        if (keyAccessStats != null) {
+            keyAccessStats.record(key);
+        }
+        if (globalKeyAccessStats != null) {
+            globalKeyAccessStats.record(currentKey);
+        }
+        if (keyAccessLogger != null) {
+            keyAccessLogger.log(key.key, key.namespace);
+        }
+    }
+
+    private void recordWriteCacheAccess(K currentKey) {
+        if (cacheHits == null && cacheMisses == null) {
+            return;
+        }
+        if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
+            recordAccess(true);
+            return;
+        }
+        KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
+        if (l1Cache.get(probeKey) != null || l2Cache.get(probeKey) != null) {
+            recordAccess(true);
+        } else {
+            recordAccess(false);
+        }
+    }
+
+    private CachedValue<V> findCachedValue(K currentKey) {
+        if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
+            return lastAccessValue;
+        }
+        KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
+        CachedValue<V> l1Value = l1Cache.get(probeKey);
+        if (l1Value != null) {
+            return l1Value;
+        }
+        return l2Cache.get(probeKey);
+    }
+
+    private static double ratio(Counter numerator, Counter denominator) {
+        if (numerator == null || denominator == null) {
+            return 0.0d;
+        }
+        long total = denominator.getCount();
+        if (total <= 0) {
+            return 0.0d;
+        }
+        return (double) numerator.getCount() / total;
+    }
+
+    private static double savingsRatio(Counter delegateCounter, Counter totalCounter) {
+        if (delegateCounter == null || totalCounter == null) {
+            return 0.0d;
+        }
+        long total = totalCounter.getCount();
+        if (total <= 0) {
+            return 0.0d;
+        }
+        return 1.0d - ((double) delegateCounter.getCount() / total);
+    }
+
+    public void close() {
+        if (keyAccessLogger != null) {
+            keyAccessLogger.close();
+        }
+    }
+
     private void flushEntryToDelegate(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
         // Save current context
         K previousKey = currentKeyProvider.getCurrentKey();
@@ -368,28 +586,19 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // We must use the namespace from the key.
 
         keyContextSetter.accept(key.key);
-        // delegate.setCurrentNamespace(key.namespace); // delegate namespace must be
-        // set before update
-        // The delegate might look at its own currentNamespace.
-        // However, 'key.namespace' is the correct one for this entry.
-        // We need to ensure we restore the *previous* namespace of the delegate if we
-        // change it.
-        // Actually, we don't have access to delegate's internal 'currentNamespace'
-        // easily to restore it?
-        // But 'setCurrentNamespace' updates 'delegate's currentNamespace.
-        // We can just rely on 'this.currentNamespace' being the "logic" current
-        // namespace,
-        // but 'flushEntryToDelegate' is called for arbitrary keys (eviction).
-        // So we must change it.
-        // And then restore it to 'this.currentNamespace' (which is what the user
-        // expects).
 
         delegate.setCurrentNamespace(key.namespace);
         try {
             if (value.isNull) {
                 delegate.clear();
+                if (delegateClearCalls != null) {
+                    delegateClearCalls.inc();
+                }
             } else {
                 delegate.update(value.value);
+                if (delegateUpdateCalls != null) {
+                    delegateUpdateCalls.inc();
+                }
             }
         } catch (IOException e) {
             throw new RuntimeException("Failed to flush state to delegate interaction", e);
@@ -399,45 +608,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (currentNamespace != null) {
                 delegate.setCurrentNamespace(currentNamespace);
             }
-        }
-    }
-
-    private static final class KeyNamespaceKey<K, N> {
-        private final K key;
-        private final N namespace;
-
-        private KeyNamespaceKey(K key, N namespace, boolean deepCopy) {
-            if (deepCopy && key instanceof BinaryRowData) {
-                this.key = (K) ((BinaryRowData) key).copy();
-            } else {
-                this.key = key;
-            }
-            if (deepCopy && namespace instanceof BinaryRowData) {
-                this.namespace = (N) ((BinaryRowData) namespace).copy();
-            } else {
-                this.namespace = namespace;
-            }
-        }
-
-        boolean isSame(K otherKey, N otherNamespace) {
-            return Objects.equals(this.key, otherKey) && Objects.equals(this.namespace, otherNamespace);
-        }
-
-        @Override
-        public boolean equals(Object other) {
-            if (this == other) {
-                return true;
-            }
-            if (!(other instanceof KeyNamespaceKey)) {
-                return false;
-            }
-            KeyNamespaceKey<?, ?> that = (KeyNamespaceKey<?, ?>) other;
-            return Objects.equals(key, that.key) && Objects.equals(namespace, that.namespace);
-        }
-
-        @Override
-        public int hashCode() {
-            return Objects.hash(key, namespace);
         }
     }
 
@@ -459,5 +629,74 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         V valueOrNull() {
             return isNull ? null : value;
         }
+    }
+
+    private static final class KeyAccessLogger<K, N> {
+        private final java.io.BufferedWriter writer;
+
+        private KeyAccessLogger(java.io.BufferedWriter writer) {
+            this.writer = writer;
+        }
+
+        static <K, N> KeyAccessLogger<K, N> create(
+                String baseDir,
+                String operatorIdentifier,
+                String taskNameWithSubtasks,
+                String stateName) {
+            if (baseDir == null || baseDir.isBlank() || stateName == null) {
+                return null;
+            }
+            String task = sanitize(taskNameWithSubtasks);
+            String operator = sanitize(operatorIdentifier);
+            String state = sanitize(stateName);
+            java.nio.file.Path dir = java.nio.file.Paths.get(baseDir, task, operator);
+            java.nio.file.Path file = dir.resolve(state + ".log");
+            try {
+                java.nio.file.Files.createDirectories(dir);
+                java.io.BufferedWriter bw = java.nio.file.Files.newBufferedWriter(
+                        file,
+                        java.nio.charset.StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.APPEND);
+                return new KeyAccessLogger<>(bw);
+            } catch (Exception e) {
+                return null;
+            }
+        }
+
+        void log(K key, N namespace) {
+            if (writer == null) {
+                return;
+            }
+            try {
+                long ts = System.currentTimeMillis();
+                writer.write(Long.toString(ts));
+                writer.write('\t');
+                writer.write(String.valueOf(key));
+                writer.write('\t');
+                writer.write(String.valueOf(namespace));
+                writer.write('\n');
+            } catch (Exception e) {
+                // best-effort logging only
+            }
+        }
+
+        void close() {
+            try {
+                writer.flush();
+                writer.close();
+            } catch (Exception e) {
+                // best-effort close
+            }
+        }
+
+        private static String sanitize(String value) {
+            if (value == null || value.isEmpty()) {
+                return "unknown";
+            }
+            String sanitized = value.replaceAll("[^A-Za-z0-9._-]", "_");
+            return sanitized.isEmpty() ? "unknown" : sanitized;
+        }
+
     }
 }

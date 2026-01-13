@@ -75,6 +75,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final CachePolicyType mapPresenceCachePolicy;
     private final int mapPresenceCacheLruOverflow;
     private final PresenceCacheImplementation mapPresenceCacheImplementation;
+    private final String keyLogDir;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -87,7 +88,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
             int mapPresenceCacheMaxEntries,
             CachePolicyType mapPresenceCachePolicy,
             int mapPresenceCacheLruOverflow,
-            PresenceCacheImplementation mapPresenceCacheImplementation) {
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            String keyLogDir) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -99,6 +101,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.mapPresenceCachePolicy = mapPresenceCachePolicy;
         this.mapPresenceCacheLruOverflow = mapPresenceCacheLruOverflow;
         this.mapPresenceCacheImplementation = mapPresenceCacheImplementation;
+        this.keyLogDir = keyLogDir;
     }
 
     @Override
@@ -170,7 +173,11 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapPresenceCacheMaxEntries,
                 mapPresenceCachePolicy,
                 mapPresenceCacheLruOverflow,
-                mapPresenceCacheImplementation);
+                mapPresenceCacheImplementation,
+                metricGroup,
+                keyLogDir,
+                operatorIdentifier,
+                env.getTaskInfo().getTaskNameWithSubtasks());
     }
 
     @Override
@@ -231,6 +238,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 Math.max(0, config.get(CacheKitStateBackendFactory.MAP_PRESENCE_CACHE_LRU_OVERFLOW));
         final PresenceCacheImplementation mapPresenceImpl =
                 config.get(CacheKitStateBackendFactory.MAP_PRESENCE_CACHE_IMPLEMENTATION);
+        final String keyLogDir = config.get(CacheKitStateBackendFactory.KEY_LOG_DIR);
 
         return new CacheKitStateBackend(
                 configuredDelegate,
@@ -243,6 +251,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapPresenceMaxEntries,
                 mapPresencePolicy,
                 mapPresenceLruOverflow,
-                mapPresenceImpl);
+                mapPresenceImpl,
+                keyLogDir);
     }
 }

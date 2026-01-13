@@ -21,6 +21,7 @@ import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMapState;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalValueState;
+import org.apache.flink.contrib.streaming.state.cachekit.state.KeyAccessStats;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.core.fs.CloseableRegistry;
@@ -41,6 +42,7 @@ import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.PriorityComparable;
 import org.apache.flink.util.Preconditions;
+import org.apache.flink.metrics.MetricGroup;
 
 import javax.annotation.Nonnull;
 
@@ -76,6 +78,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final CachePolicyType mapPresenceCachePolicy;
     private final int mapPresenceCacheLruOverflow;
     private final PresenceCacheImplementation mapPresenceCacheImplementation;
+    private final int keyStatsWindow;
+    private final MetricGroup metricGroup;
+    private final KeyAccessStats<K> globalKeyAccessStats;
+    private final String keyLogDir;
+    private final String operatorIdentifier;
+    private final String taskNameWithSubtasks;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -95,7 +103,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int mapPresenceCacheMaxEntries,
             CachePolicyType mapPresenceCachePolicy,
             int mapPresenceCacheLruOverflow,
-            PresenceCacheImplementation mapPresenceCacheImplementation) {
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            MetricGroup metricGroup,
+            String keyLogDir,
+            String operatorIdentifier,
+            String taskNameWithSubtasks) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -118,6 +130,21 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapPresenceCachePolicy = mapPresenceCachePolicy;
         this.mapPresenceCacheLruOverflow = mapPresenceCacheLruOverflow;
         this.mapPresenceCacheImplementation = mapPresenceCacheImplementation;
+        this.keyStatsWindow = Math.max(1, valueHitRateWindow);
+        this.metricGroup = metricGroup == null ? null : metricGroup.addGroup("cachekit");
+        this.keyLogDir = keyLogDir;
+        this.operatorIdentifier = operatorIdentifier;
+        this.taskNameWithSubtasks = taskNameWithSubtasks;
+        if (this.metricGroup != null) {
+            MetricGroup keyGroup = this.metricGroup.addGroup("keys");
+            this.globalKeyAccessStats = new KeyAccessStats<>(keyStatsWindow);
+            keyGroup.gauge("total_accesses", () -> globalKeyAccessStats.getWindowedAccesses());
+            keyGroup.gauge("total_unique_keys", () -> globalKeyAccessStats.getWindowedUniqueKeys());
+            keyGroup.gauge("total_repeat_ratio", () -> globalKeyAccessStats.getWindowedRepeatRatio());
+            keyGroup.gauge("total_unique_ratio", () -> globalKeyAccessStats.getWindowedUniqueRatio());
+        } else {
+            this.globalKeyAccessStats = null;
+        }
     }
 
     @Override
@@ -155,7 +182,14 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueCacheLruOverflow,
                     valueBypassEnabled,
                     valueHitRateThreshold,
-                    valueHitRateWindow);
+                    valueHitRateWindow,
+                    metricGroup,
+                    stateDescriptor.getName(),
+                    globalKeyAccessStats,
+                    keyStatsWindow,
+                    keyLogDir,
+                    operatorIdentifier,
+                    taskNameWithSubtasks);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -174,11 +208,17 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapPresenceCacheMaxEntries,
                     mapPresenceCachePolicy,
                     mapPresenceCacheLruOverflow,
-                    mapPresenceCacheImplementation);
+                    mapPresenceCacheImplementation,
+                    metricGroup,
+                    stateDescriptor.getName(),
+                    globalKeyAccessStats,
+                    keyStatsWindow,
+                    keyLogDir,
+                    operatorIdentifier,
+                    taskNameWithSubtasks);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
-
         return state;
     }
 
@@ -230,7 +270,14 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueCacheLruOverflow,
                     valueBypassEnabled,
                     valueHitRateThreshold,
-                    valueHitRateWindow);
+                    valueHitRateWindow,
+                    metricGroup,
+                    stateDesc.getName(),
+                    globalKeyAccessStats,
+                    keyStatsWindow,
+                    keyLogDir,
+                    operatorIdentifier,
+                    taskNameWithSubtasks);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
@@ -249,11 +296,17 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapPresenceCacheMaxEntries,
                     mapPresenceCachePolicy,
                     mapPresenceCacheLruOverflow,
-                    mapPresenceCacheImplementation);
+                    mapPresenceCacheImplementation,
+                    metricGroup,
+                    stateDesc.getName(),
+                    globalKeyAccessStats,
+                    keyStatsWindow,
+                    keyLogDir,
+                    operatorIdentifier,
+                    taskNameWithSubtasks);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
-
         return state;
     }
 
@@ -271,14 +324,26 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @Override
     public void dispose() {
+        closeWrappers();
         wrappersByDelegateIdentity.clear();
         delegate.dispose();
     }
 
     @Override
     public void close() throws IOException {
+        closeWrappers();
         wrappersByDelegateIdentity.clear();
         delegate.close();
+    }
+
+    private void closeWrappers() {
+        for (Object wrapper : wrappersByDelegateIdentity.values()) {
+            if (wrapper instanceof CachedInternalValueState) {
+                ((CachedInternalValueState<?, ?, ?>) wrapper).close();
+            } else if (wrapper instanceof CachedInternalMapState) {
+                ((CachedInternalMapState<?, ?, ?, ?>) wrapper).close();
+            }
+        }
     }
 
     @Override
