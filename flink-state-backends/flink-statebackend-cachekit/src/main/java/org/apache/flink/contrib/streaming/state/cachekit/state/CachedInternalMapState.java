@@ -91,6 +91,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final Counter getAbsentShortCircuits;
     private final Counter containsPresentShortCircuits;
     private final Counter containsAbsentShortCircuits;
+    private final Counter presencePresentDelegateCalls;
+    private final Counter presencePresentDelegateHits;
+    private final Counter presencePresentDelegateMisses;
     private final Counter l1Evictions;
     private final Counter l2Evictions;
     private final KeyAccessStats<KeyNamespaceUserKey<K, N, UK>> keyAccessStats;
@@ -225,6 +228,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             getAbsentShortCircuits = presenceGroup.counter("get_absent_short_circuit");
             containsPresentShortCircuits = presenceGroup.counter("contains_present_short_circuit");
             containsAbsentShortCircuits = presenceGroup.counter("contains_absent_short_circuit");
+            presencePresentDelegateCalls = presenceGroup.counter("present_delegate_calls");
+            presencePresentDelegateHits = presenceGroup.counter("present_delegate_hits");
+            presencePresentDelegateMisses = presenceGroup.counter("present_delegate_misses");
             l1Evictions = presenceGroup.counter("l1_evictions");
             l2Evictions = presenceGroup.counter("l2_evictions");
             presenceGroup.gauge("l1_size", this::l1PresenceSize);
@@ -279,6 +285,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             getAbsentShortCircuits = null;
             containsPresentShortCircuits = null;
             containsAbsentShortCircuits = null;
+            presencePresentDelegateCalls = null;
+            presencePresentDelegateHits = null;
+            presencePresentDelegateMisses = null;
             l1Evictions = null;
             l2Evictions = null;
             keyAccessStats = null;
@@ -318,6 +327,16 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         UV value = delegate.get(userKey);
         if (delegateGetCalls != null) {
             delegateGetCalls.inc();
+        }
+        if (Boolean.TRUE.equals(present) && presencePresentDelegateCalls != null) {
+            presencePresentDelegateCalls.inc();
+            if (value != null) {
+                if (presencePresentDelegateHits != null) {
+                    presencePresentDelegateHits.inc();
+                }
+            } else if (presencePresentDelegateMisses != null) {
+                presencePresentDelegateMisses.inc();
+            }
         }
         if (value == null && delegateGetMisses != null) {
             delegateGetMisses.inc();
