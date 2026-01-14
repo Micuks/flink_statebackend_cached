@@ -2670,8 +2670,16 @@ public class CachingInternalMapState<K, N, UK, UV>
             perKeyCache.l2MapEntries.clear(); // Will trigger memory release via listeners
         }
         if (this.keyPresenceCacheEnabled) {
-            perKeyCache.l1KeyPresenceCache.clear(); // Will trigger memory release
-            perKeyCache.l2KeyPresenceCache.clear(); // Will trigger memory release
+            if (
+                perKeyCache.presenceCacheImpl ==
+                CachingStateBackendFactory.PresenceCacheImplementation.PRIMITIVE_MAP
+            ) {
+                perKeyCache.l1PrimitivePresenceCache.clear();
+                perKeyCache.l2PrimitivePresenceCache.clear();
+            } else {
+                perKeyCache.l1KeyPresenceCache.clear(); // Will trigger memory release
+                perKeyCache.l2KeyPresenceCache.clear(); // Will trigger memory release
+            }
         }
 
         delegateLookups.inc();
@@ -3052,18 +3060,16 @@ public class CachingInternalMapState<K, N, UK, UV>
 
     @Override
     public Iterator<Map.Entry<UK, UV>> iterator() throws Exception {
-        // Do not bypass caches for iteration: reflect unflushed L1 changes/tombstones
-
+        // Do not bypass caches for iteration: reflect unflushed L1 changes/tombstones.
         delegateState.setCurrentNamespace(getCurrentNamespace());
         final PerKeyMapCache<UK, UV, K, N> perKeyCache = getOrCreatePerKeyMapCache();
 
-        // If we must consult the delegate, we need its entries.
-        // This is the only place that should request a full iterator from the delegate state.
-        final Iterable<Map.Entry<UK, UV>> delegateEntries = perKeyCache.fullyLoaded
-            ? null
-            : delegateState.entries();
+        // Load full map content into cache on first iteration to enable full-cache behavior.
+        if (!perKeyCache.fullyLoaded) {
+            loadAllEntriesToCache(perKeyCache);
+        }
 
-        return new UnionIterator(perKeyCache, delegateEntries);
+        return new UnionIterator(perKeyCache, null);
     }
 
     private static final class VisitedKeySet {
