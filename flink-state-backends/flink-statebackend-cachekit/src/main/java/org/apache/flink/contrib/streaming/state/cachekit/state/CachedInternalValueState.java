@@ -55,6 +55,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private CachedValue<V> lastAccessValue;
 
     private final java.util.function.Consumer<K> keyContextSetter;
+    private final String operatorIdentifier;
 
     // Access logging
     private final String logFilePath;
@@ -78,13 +79,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.function.Consumer<K> keyContextSetter,
             int maxEntries,
             CachePolicyType cachePolicyType,
-            int lruOverflow) {
+            int lruOverflow,
+            String operatorIdentifier) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
         this.cachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
         this.lruOverflow = Math.max(0, lruOverflow);
-        this.logFilePath = "./value_state_access_log.txt";
+        this.operatorIdentifier = operatorIdentifier != null ? operatorIdentifier : "unknown";
+        this.logFilePath = "/home/wutb/value_state_access_log.txt";
 
         // L1 Cache: ~20% of maxEntries or at least 128
         int l1Size = Math.max(128, maxEntries / 5);
@@ -106,7 +109,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 this.logWriter = new BufferedWriter(new FileWriter(logFilePath, true));
                 // Write header
                 synchronized (logLock) {
-                    logWriter.write("# timestamp\tkey\tnamespace\tevent_type\tcache_level");
+                    logWriter.write("# timestamp\tkey\tnamespace\tevent_type\tcache_level\toperator");
                     logWriter.newLine();
                     logWriter.flush();
                 }
@@ -296,8 +299,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         synchronized (logLock) {
             try {
-                logWriter.write(String.format("%d\t%s\t%s\t%s\t%s%n",
-                        timestamp, keyStr, namespaceStr, eventType, cacheLevel));
+                logWriter.write(String.format("%d\t%s\t%s\t%s\t%s\t%s%n",
+                        timestamp, keyStr, namespaceStr, eventType, cacheLevel, operatorIdentifier));
                 logWriter.flush();
             } catch (IOException e) {
                 // Log error but don't throw to avoid breaking cache operations
