@@ -66,6 +66,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int valueCacheMaxEntries;
     private final CachePolicyType valueCachePolicy;
     private final int valueCacheLruOverflow;
+    private final String operatorIdentifier;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -78,7 +79,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             CloseableRegistry cancelStreamRegistry,
             int valueCacheMaxEntries,
             CachePolicyType valueCachePolicy,
-            int valueCacheLruOverflow) {
+            int valueCacheLruOverflow,
+            String operatorIdentifier) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -94,6 +96,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
         this.valueCacheLruOverflow = valueCacheLruOverflow;
+        this.operatorIdentifier = operatorIdentifier;
     }
 
     @Override
@@ -130,7 +133,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 this::setCurrentKey,
                 valueCacheMaxEntries,
                 valueCachePolicy,
-                valueCacheLruOverflow);
+                valueCacheLruOverflow,
+                operatorIdentifier);
         wrappersByDelegateIdentity.put(internal, wrapped);
         return (S) wrapped;
     }
@@ -184,7 +188,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 this::setCurrentKey,
                 valueCacheMaxEntries,
                 valueCachePolicy,
-                valueCacheLruOverflow);
+                valueCacheLruOverflow,
+                operatorIdentifier);
         wrappersByDelegateIdentity.put(internal, wrapped);
         return (IS) wrapped;
     }

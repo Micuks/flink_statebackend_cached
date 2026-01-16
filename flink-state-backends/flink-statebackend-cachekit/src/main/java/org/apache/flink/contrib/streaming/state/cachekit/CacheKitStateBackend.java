@@ -140,7 +140,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 cancelStreamRegistry,
                 valueCacheMaxEntries,
                 valueCachePolicy,
-                valueCacheLruOverflow);
+                valueCacheLruOverflow,
+                operatorIdentifier);
     }
 
     @Override
