@@ -90,14 +90,14 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
     public static final ConfigOption<Long> MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG =
             ConfigOptions.key("state.backend.cached.map.l1.key-presence.size.entries")
                     .longType()
-                    .defaultValue(2048L) // Default, can be tuned
+                    .defaultValue(0L) // Disabled by default when key presence cache is off
                     .withDescription(
                             "The number of entries for the L1 key presence cache per MapState instance (per Flink key/namespace). Stores boolean presence.");
 
     public static final ConfigOption<Long> MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG =
             ConfigOptions.key("state.backend.cached.map.l2.key-presence.size.entries")
                     .longType()
-                    .defaultValue(8192L) // Default, can be tuned
+                    .defaultValue(0L) // Disabled by default when key presence cache is off
                     .withDescription(
                             "The number of entries for the L2 key presence cache per MapState instance (per Flink key/namespace). Stores boolean presence.");
 
@@ -165,7 +165,7 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
     public static final ConfigOption<Boolean> MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG =
             ConfigOptions.key("state.backend.cached.map.key-presence.enabled")
                     .booleanType()
-                    .defaultValue(true)
+                    .defaultValue(false)
                     .withDescription("Enable key presence cache for MapState to optimize contains() and get() operations.");
 
     public static final ConfigOption<Boolean> MAP_BYPASS_ENABLED_CONFIG =

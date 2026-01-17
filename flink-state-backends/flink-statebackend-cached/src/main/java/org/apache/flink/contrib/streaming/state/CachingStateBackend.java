@@ -108,12 +108,13 @@ public class CachingStateBackend extends AbstractStateBackend
         this.valueCachePolicyType = cachePolicyType;
         this.listCachePolicyType = cachePolicyType;
         this.aggregatingCachePolicyType = cachePolicyType;
-        this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
-        this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
+        // Key presence cache is disabled for map-only cache variant.
+        this.mapL1KeyPresenceCacheSize = 0;
+        this.mapL2KeyPresenceCacheSize = 0;
         this.mapCacheHitRateThreshold = mapCacheHitRateThreshold;
         this.mapCacheHitRateWindowSize = mapCacheHitRateWindowSize;
         this.mapCacheMinAccessesForBypassCheck = mapCacheMinAccessesForBypassCheck;
-        this.mapKeyPresenceCacheEnabled = mapKeyPresenceCacheEnabled;
+        this.mapKeyPresenceCacheEnabled = false;
         this.mapBypassEnabled = mapBypassEnabled;
         this.mapPresenceCacheImpl = mapPresenceCacheImpl;
         // Disable managed L2 when L2 capacity is zero to avoid unnecessary off-heap setup
@@ -156,12 +157,13 @@ public class CachingStateBackend extends AbstractStateBackend
         this.maxCacheMemoryMb = config.get(CachingStateBackendFactory.MAX_CACHE_MEMORY_MB_CONFIG);
         // Read global policy
         this.globalCachePolicyType = config.get(CachingStateBackendFactory.CACHE_POLICY_CONFIG);
-        this.mapL1KeyPresenceCacheSize = config.get(CachingStateBackendFactory.MAP_L1_KEY_PRESENCE_CACHE_SIZE_CONFIG);
-        this.mapL2KeyPresenceCacheSize = config.get(CachingStateBackendFactory.MAP_L2_KEY_PRESENCE_CACHE_SIZE_CONFIG);
+        // Key presence cache is disabled for map-only cache variant.
+        this.mapL1KeyPresenceCacheSize = 0;
+        this.mapL2KeyPresenceCacheSize = 0;
         this.mapCacheHitRateThreshold = config.get(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_THRESHOLD_CONFIG);
         this.mapCacheHitRateWindowSize = config.get(CachingStateBackendFactory.MAP_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG);
         this.mapCacheMinAccessesForBypassCheck = config.get(CachingStateBackendFactory.MAP_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG);
-        this.mapKeyPresenceCacheEnabled = config.get(CachingStateBackendFactory.MAP_KEY_PRESENCE_CACHE_ENABLED_CONFIG);
+        this.mapKeyPresenceCacheEnabled = false;
         this.mapBypassEnabled = config.get(CachingStateBackendFactory.MAP_BYPASS_ENABLED_CONFIG);
         this.mapPresenceCacheImpl = config.get(CachingStateBackendFactory.MAP_PRESENCE_CACHE_IMPL);
         // Disable managed L2 when L2 capacity is zero to avoid unnecessary off-heap setup
