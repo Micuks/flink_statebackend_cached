@@ -76,6 +76,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final CachePolicyType mapPresenceCachePolicy;
     private final int mapPresenceCacheLruOverflow;
     private final PresenceCacheImplementation mapPresenceCacheImplementation;
+    private final int mapCacheMaxEntries;
+    private final CachePolicyType mapCachePolicy;
+    private final int mapCacheLruOverflow;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -95,7 +98,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int mapPresenceCacheMaxEntries,
             CachePolicyType mapPresenceCachePolicy,
             int mapPresenceCacheLruOverflow,
-            PresenceCacheImplementation mapPresenceCacheImplementation) {
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -118,6 +124,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapPresenceCachePolicy = mapPresenceCachePolicy;
         this.mapPresenceCacheLruOverflow = mapPresenceCacheLruOverflow;
         this.mapPresenceCacheImplementation = mapPresenceCacheImplementation;
+        this.mapCacheMaxEntries = mapCacheMaxEntries;
+        this.mapCachePolicy = mapCachePolicy;
+        this.mapCacheLruOverflow = mapCacheLruOverflow;
     }
 
     @Override
@@ -162,7 +171,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         if (stateDescriptor.getType() == StateDescriptor.Type.MAP
                 && internal instanceof InternalMapState
-                && mapPresenceCacheMaxEntries > 0) {
+                && (mapPresenceCacheMaxEntries > 0 || mapCacheMaxEntries > 0)) {
             Object existing = wrappersByDelegateIdentity.get(internal);
             if (existing != null) {
                 return (S) existing;
@@ -174,7 +183,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapPresenceCacheMaxEntries,
                     mapPresenceCachePolicy,
                     mapPresenceCacheLruOverflow,
-                    mapPresenceCacheImplementation);
+                    mapPresenceCacheImplementation,
+                    mapCacheMaxEntries,
+                    mapCachePolicy,
+                    mapCacheLruOverflow);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -237,7 +249,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         if (stateDesc.getType() == StateDescriptor.Type.MAP
                 && internal instanceof InternalMapState
-                && mapPresenceCacheMaxEntries > 0) {
+                && (mapPresenceCacheMaxEntries > 0 || mapCacheMaxEntries > 0)) {
             Object existing = wrappersByDelegateIdentity.get(internal);
             if (existing != null) {
                 return (IS) existing;
@@ -249,7 +261,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapPresenceCacheMaxEntries,
                     mapPresenceCachePolicy,
                     mapPresenceCacheLruOverflow,
-                    mapPresenceCacheImplementation);
+                    mapPresenceCacheImplementation,
+                    mapCacheMaxEntries,
+                    mapCachePolicy,
+                    mapCacheLruOverflow);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }

@@ -75,6 +75,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final CachePolicyType mapPresenceCachePolicy;
     private final int mapPresenceCacheLruOverflow;
     private final PresenceCacheImplementation mapPresenceCacheImplementation;
+    private final int mapCacheMaxEntries;
+    private final CachePolicyType mapCachePolicy;
+    private final int mapCacheLruOverflow;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -87,7 +90,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
             int mapPresenceCacheMaxEntries,
             CachePolicyType mapPresenceCachePolicy,
             int mapPresenceCacheLruOverflow,
-            PresenceCacheImplementation mapPresenceCacheImplementation) {
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -99,6 +105,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.mapPresenceCachePolicy = mapPresenceCachePolicy;
         this.mapPresenceCacheLruOverflow = mapPresenceCacheLruOverflow;
         this.mapPresenceCacheImplementation = mapPresenceCacheImplementation;
+        this.mapCacheMaxEntries = mapCacheMaxEntries;
+        this.mapCachePolicy = mapCachePolicy;
+        this.mapCacheLruOverflow = mapCacheLruOverflow;
     }
 
     @Override
@@ -170,7 +179,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapPresenceCacheMaxEntries,
                 mapPresenceCachePolicy,
                 mapPresenceCacheLruOverflow,
-                mapPresenceCacheImplementation);
+                mapPresenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow);
     }
 
     @Override
@@ -231,6 +243,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 Math.max(0, config.get(CacheKitStateBackendFactory.MAP_PRESENCE_CACHE_LRU_OVERFLOW));
         final PresenceCacheImplementation mapPresenceImpl =
                 config.get(CacheKitStateBackendFactory.MAP_PRESENCE_CACHE_IMPLEMENTATION);
+        final int mapCacheMaxEntries = Math.max(0, config.get(CacheKitStateBackendFactory.MAP_CACHE_MAX_ENTRIES));
+        final CachePolicyType mapCachePolicy = config.get(CacheKitStateBackendFactory.MAP_CACHE_POLICY);
+        final int mapCacheLruOverflow = Math.max(0, config.get(CacheKitStateBackendFactory.MAP_CACHE_LRU_OVERFLOW));
 
         return new CacheKitStateBackend(
                 configuredDelegate,
@@ -243,6 +258,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapPresenceMaxEntries,
                 mapPresencePolicy,
                 mapPresenceLruOverflow,
-                mapPresenceImpl);
+                mapPresenceImpl,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow);
     }
 }

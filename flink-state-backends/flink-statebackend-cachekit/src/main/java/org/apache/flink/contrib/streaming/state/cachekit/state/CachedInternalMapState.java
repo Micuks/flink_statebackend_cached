@@ -36,7 +36,7 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Minimal {@link InternalMapState} wrapper that adds a per-state key presence cache.
+ * Minimal {@link InternalMapState} wrapper that adds a per-state cache for entries and presence.
  *
  * <p>
  * Keying: (currentKey, namespace, userKey).
@@ -45,14 +45,19 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
     private final InternalMapState<K, N, UK, UV> delegate;
     private final CurrentKeyProvider<K> currentKeyProvider;
+    private final CachePolicy<KeyNamespaceUserKey<K, N, UK>, CachedMapValue<UV>> l1ValueCache;
+    private final CachePolicy<KeyNamespaceUserKey<K, N, UK>, CachedMapValue<UV>> l2ValueCache;
     private final CachePolicy<KeyNamespaceUserKey<K, N, UK>, Boolean> l1PresenceCache;
     private final CachePolicy<KeyNamespaceUserKey<K, N, UK>, Boolean> l2PresenceCache;
     private final CachePolicy<Long, Byte> l1PrimitivePresenceCache;
     private final CachePolicy<Long, Byte> l2PrimitivePresenceCache;
-    private final CachePolicyType cachePolicyType;
-    private final int lruOverflow;
+    private final CachePolicyType presenceCachePolicyType;
+    private final int presenceCacheLruOverflow;
     private final boolean presenceCacheEnabled;
     private final PresenceCacheImplementation presenceCacheImplementation;
+    private final boolean mapCacheEnabled;
+    private final CachePolicyType mapCachePolicyType;
+    private final int mapCacheLruOverflow;
     private final boolean usePrimitivePresenceCache;
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
@@ -67,14 +72,20 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             int maxEntries,
             CachePolicyType cachePolicyType,
             int lruOverflow,
-            PresenceCacheImplementation presenceCacheImplementation) {
+            PresenceCacheImplementation presenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicyType,
+            int mapCacheLruOverflow) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
-        this.cachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
-        this.lruOverflow = Math.max(0, lruOverflow);
+        this.presenceCachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
+        this.presenceCacheLruOverflow = Math.max(0, lruOverflow);
         this.presenceCacheEnabled = maxEntries > 0;
         this.presenceCacheImplementation = Objects.requireNonNull(
                 presenceCacheImplementation, "presenceCacheImplementation");
+        this.mapCacheEnabled = mapCacheMaxEntries > 0;
+        this.mapCachePolicyType = Objects.requireNonNull(mapCachePolicyType, "mapCachePolicyType");
+        this.mapCacheLruOverflow = Math.max(0, mapCacheLruOverflow);
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
         TypeSerializer<UK> resolvedUserKeySerializer = null;
@@ -104,8 +115,10 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 this.l1PresenceCache = new NoOpCachePolicy<>();
                 this.l2PresenceCache = new NoOpCachePolicy<>();
             } else {
-                this.l1PresenceCache = createCachePolicy(l1Size, this::onL1Eviction);
-                this.l2PresenceCache = createCachePolicy(maxEntries, this::onL2Eviction);
+                this.l1PresenceCache = createCachePolicy(
+                        l1Size, presenceCachePolicyType, presenceCacheLruOverflow, this::onL1Eviction);
+                this.l2PresenceCache = createCachePolicy(
+                        maxEntries, presenceCachePolicyType, presenceCacheLruOverflow, this::onL2Eviction);
                 this.l1PrimitivePresenceCache = new NoOpCachePolicy<>();
                 this.l2PrimitivePresenceCache = new NoOpCachePolicy<>();
             }
@@ -115,6 +128,17 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             this.l1PrimitivePresenceCache = new NoOpCachePolicy<>();
             this.l2PrimitivePresenceCache = new NoOpCachePolicy<>();
         }
+
+        if (mapCacheEnabled) {
+            int l1Size = Math.max(128, mapCacheMaxEntries / 5);
+            this.l1ValueCache = createCachePolicy(
+                    l1Size, mapCachePolicyType, mapCacheLruOverflow, this::onValueL1Eviction);
+            this.l2ValueCache = createCachePolicy(
+                    mapCacheMaxEntries, mapCachePolicyType, mapCacheLruOverflow, this::onValueL2Eviction);
+        } else {
+            this.l1ValueCache = new NoOpCachePolicy<>();
+            this.l2ValueCache = new NoOpCachePolicy<>();
+        }
     }
 
     @Override
@@ -123,6 +147,12 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             return null;
         }
         ensureDelegateNamespace();
+        if (mapCacheEnabled) {
+            CachedMapValue<UV> cached = getCachedValue(userKey);
+            if (cached != null) {
+                return cached.valueOrNull();
+            }
+        }
         if (presenceCacheEnabled) {
             Boolean present = getPresence(userKey);
             if (present != null && !present) {
@@ -130,6 +160,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             }
         }
         UV value = delegate.get(userKey);
+        if (mapCacheEnabled) {
+            updateValueCache(userKey, value);
+        }
         if (presenceCacheEnabled) {
             updatePresence(userKey, value != null);
         }
@@ -147,6 +180,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             return;
         }
         delegate.put(userKey, userValue);
+        if (mapCacheEnabled) {
+            updateValueCache(userKey, userValue);
+        }
         if (presenceCacheEnabled) {
             updatePresence(userKey, true);
         }
@@ -159,11 +195,14 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         ensureDelegateNamespace();
         delegate.putAll(map);
-        if (presenceCacheEnabled) {
-            for (Map.Entry<UK, UV> entry : map.entrySet()) {
-                if (entry.getKey() == null) {
-                    continue;
-                }
+        for (Map.Entry<UK, UV> entry : map.entrySet()) {
+            if (entry.getKey() == null) {
+                continue;
+            }
+            if (mapCacheEnabled) {
+                updateValueCache(entry.getKey(), entry.getValue());
+            }
+            if (presenceCacheEnabled) {
                 updatePresence(entry.getKey(), entry.getValue() != null);
             }
         }
@@ -176,6 +215,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         ensureDelegateNamespace();
         delegate.remove(userKey);
+        if (mapCacheEnabled) {
+            updateValueCache(userKey, null);
+        }
         if (presenceCacheEnabled) {
             updatePresence(userKey, false);
         }
@@ -187,6 +229,12 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             return false;
         }
         ensureDelegateNamespace();
+        if (mapCacheEnabled) {
+            CachedMapValue<UV> cached = getCachedValue(userKey);
+            if (cached != null) {
+                return !cached.isNull();
+            }
+        }
         if (presenceCacheEnabled) {
             Boolean present = getPresence(userKey);
             if (present != null) {
@@ -194,6 +242,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             }
         }
         boolean exists = delegate.contains(userKey);
+        if (mapCacheEnabled && !exists) {
+            updateValueCache(userKey, null);
+        }
         if (presenceCacheEnabled) {
             updatePresence(userKey, exists);
         }
@@ -203,25 +254,41 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     @Override
     public Iterable<Map.Entry<UK, UV>> entries() throws Exception {
         ensureDelegateNamespace();
-        return delegate.entries();
+        Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
+        if (!mapCacheEnabled && !presenceCacheEnabled) {
+            return entries;
+        }
+        return cacheEntries(entries);
     }
 
     @Override
     public Iterable<UK> keys() throws Exception {
         ensureDelegateNamespace();
-        return delegate.keys();
+        if (!mapCacheEnabled && !presenceCacheEnabled) {
+            return delegate.keys();
+        }
+        Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
+        return cacheKeys(entries);
     }
 
     @Override
     public Iterable<UV> values() throws Exception {
         ensureDelegateNamespace();
-        return delegate.values();
+        if (!mapCacheEnabled && !presenceCacheEnabled) {
+            return delegate.values();
+        }
+        Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
+        return cacheValues(entries);
     }
 
     @Override
     public Iterator<Map.Entry<UK, UV>> iterator() throws Exception {
         ensureDelegateNamespace();
-        return delegate.iterator();
+        Iterator<Map.Entry<UK, UV>> iterator = delegate.iterator();
+        if (!mapCacheEnabled && !presenceCacheEnabled) {
+            return iterator;
+        }
+        return new CachingEntryIterator(iterator);
     }
 
     @Override
@@ -235,6 +302,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         ensureDelegateNamespace();
         delegate.clear();
         clearPresenceCaches();
+        clearValueCaches();
     }
 
     @Override
@@ -372,10 +440,109 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         l2PrimitivePresenceCache.clear();
     }
 
-    private CachePolicy<KeyNamespaceUserKey<K, N, UK>, Boolean> createCachePolicy(
+    private void clearValueCaches() {
+        if (!mapCacheEnabled) {
+            return;
+        }
+        l1ValueCache.clear();
+        l2ValueCache.clear();
+    }
+
+    private CachedMapValue<UV> getCachedValue(UK userKey) {
+        K currentKey = currentKeyProvider.getCurrentKey();
+        if (currentKey == null || currentNamespace == null) {
+            return null;
+        }
+        KeyNamespaceUserKey<K, N, UK> probe =
+                new KeyNamespaceUserKey<>(currentKey, currentNamespace, userKey, false);
+        CachedMapValue<UV> cached = l1ValueCache.get(probe);
+        if (cached != null) {
+            return cached;
+        }
+        cached = l2ValueCache.get(probe);
+        if (cached != null) {
+            KeyNamespaceUserKey<K, N, UK> storage =
+                    new KeyNamespaceUserKey<>(currentKey, currentNamespace, userKey, true);
+            l1ValueCache.put(storage, cached);
+            l2ValueCache.remove(storage);
+        }
+        return cached;
+    }
+
+    private void updateValueCache(UK userKey, UV userValue) {
+        K currentKey = currentKeyProvider.getCurrentKey();
+        if (currentKey == null || currentNamespace == null) {
+            return;
+        }
+        KeyNamespaceUserKey<K, N, UK> storage =
+                new KeyNamespaceUserKey<>(currentKey, currentNamespace, userKey, true);
+        CachedMapValue<UV> cached = CachedMapValue.of(userValue);
+        l1ValueCache.put(storage, cached);
+        l2ValueCache.remove(storage);
+    }
+
+    private Iterable<Map.Entry<UK, UV>> cacheEntries(Iterable<Map.Entry<UK, UV>> entries) {
+        return () -> new CachingEntryIterator(entries.iterator());
+    }
+
+    private Iterable<UK> cacheKeys(Iterable<Map.Entry<UK, UV>> entries) {
+        return () -> new Iterator<UK>() {
+            private final Iterator<Map.Entry<UK, UV>> delegateIterator = entries.iterator();
+
+            @Override
+            public boolean hasNext() {
+                return delegateIterator.hasNext();
+            }
+
+            @Override
+            public UK next() {
+                Map.Entry<UK, UV> entry = delegateIterator.next();
+                cacheEntry(entry);
+                return entry.getKey();
+            }
+        };
+    }
+
+    private Iterable<UV> cacheValues(Iterable<Map.Entry<UK, UV>> entries) {
+        return () -> new Iterator<UV>() {
+            private final Iterator<Map.Entry<UK, UV>> delegateIterator = entries.iterator();
+
+            @Override
+            public boolean hasNext() {
+                return delegateIterator.hasNext();
+            }
+
+            @Override
+            public UV next() {
+                Map.Entry<UK, UV> entry = delegateIterator.next();
+                cacheEntry(entry);
+                return entry.getValue();
+            }
+        };
+    }
+
+    private void cacheEntry(Map.Entry<UK, UV> entry) {
+        if (entry == null) {
+            return;
+        }
+        UK userKey = entry.getKey();
+        if (userKey == null) {
+            return;
+        }
+        if (mapCacheEnabled) {
+            updateValueCache(userKey, entry.getValue());
+        }
+        if (presenceCacheEnabled) {
+            updatePresence(userKey, entry.getValue() != null);
+        }
+    }
+
+    private <V> CachePolicy<KeyNamespaceUserKey<K, N, UK>, V> createCachePolicy(
             int maxEntries,
-            java.util.function.BiConsumer<KeyNamespaceUserKey<K, N, UK>, Boolean> evictionListener) {
-        if (cachePolicyType == CachePolicyType.CAFFEINE) {
+            CachePolicyType policyType,
+            int lruOverflow,
+            java.util.function.BiConsumer<KeyNamespaceUserKey<K, N, UK>, V> evictionListener) {
+        if (policyType == CachePolicyType.CAFFEINE) {
             return new CaffeineCachePolicy<>(maxEntries, evictionListener);
         }
         return new LruCachePolicy<>(maxEntries, lruOverflow, evictionListener);
@@ -418,6 +585,17 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
     private void onL2PrimitiveEviction(Long key, Byte value) {
         // Presence cache doesn't need flush on L2 eviction.
+    }
+
+    private void onValueL1Eviction(KeyNamespaceUserKey<K, N, UK> key, CachedMapValue<UV> value) {
+        if (key == null || value == null) {
+            return;
+        }
+        l2ValueCache.put(key, value);
+    }
+
+    private void onValueL2Eviction(KeyNamespaceUserKey<K, N, UK> key, CachedMapValue<UV> value) {
+        // MapState cache doesn't need flush on L2 eviction.
     }
 
     private static final class KeyNamespaceUserKey<K, N, UK> {
@@ -491,6 +669,48 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         @Override
         public Iterable<Map.Entry<K, V>> entries() {
             return Collections.emptyList();
+        }
+    }
+
+    private final class CachingEntryIterator implements Iterator<Map.Entry<UK, UV>> {
+        private final Iterator<Map.Entry<UK, UV>> delegateIterator;
+
+        private CachingEntryIterator(Iterator<Map.Entry<UK, UV>> delegateIterator) {
+            this.delegateIterator = delegateIterator;
+        }
+
+        @Override
+        public boolean hasNext() {
+            return delegateIterator.hasNext();
+        }
+
+        @Override
+        public Map.Entry<UK, UV> next() {
+            Map.Entry<UK, UV> entry = delegateIterator.next();
+            cacheEntry(entry);
+            return entry;
+        }
+    }
+
+    private static final class CachedMapValue<V> {
+        private final V value;
+        private final boolean isNull;
+
+        private CachedMapValue(V value, boolean isNull) {
+            this.value = value;
+            this.isNull = isNull;
+        }
+
+        static <V> CachedMapValue<V> of(V value) {
+            return new CachedMapValue<>(value, value == null);
+        }
+
+        V valueOrNull() {
+            return isNull ? null : value;
+        }
+
+        boolean isNull() {
+            return isNull;
         }
     }
 }

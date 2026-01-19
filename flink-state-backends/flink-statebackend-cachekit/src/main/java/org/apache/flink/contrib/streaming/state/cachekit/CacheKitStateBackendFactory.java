@@ -100,6 +100,25 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         .withDescription(
                                         "Presence cache implementation for MapState (PRIMITIVE or OBJECT).");
 
+        public static final ConfigOption<Integer> MAP_CACHE_MAX_ENTRIES = ConfigOptions
+                        .key("state.backend.cachekit.map.cache.max-entries")
+                        .intType()
+                        .defaultValue(4096)
+                        .withDescription("Max entries for per-MapState cache.");
+
+        public static final ConfigOption<CachePolicyType> MAP_CACHE_POLICY = ConfigOptions
+                        .key("state.backend.cachekit.map.cache.policy")
+                        .enumType(CachePolicyType.class)
+                        .defaultValue(CachePolicyType.LRU)
+                        .withDescription("Cache policy for MapState (LRU or CAFFEINE).");
+
+        public static final ConfigOption<Integer> MAP_CACHE_LRU_OVERFLOW = ConfigOptions
+                        .key("state.backend.cachekit.map.cache.lru.overflow")
+                        .intType()
+                        .defaultValue(256)
+                        .withDescription(
+                                        "Overflow entries for MapState LRU before batch eviction triggers.");
+
         public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
                         .stringType()
                         .noDefaultValue()
@@ -120,10 +139,13 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final CachePolicyType mapPresencePolicy = config.get(MAP_PRESENCE_CACHE_POLICY);
                 final int mapPresenceLruOverflow = Math.max(0, config.get(MAP_PRESENCE_CACHE_LRU_OVERFLOW));
                 final PresenceCacheImplementation mapPresenceImpl = config.get(MAP_PRESENCE_CACHE_IMPLEMENTATION);
+                final int mapCacheMaxEntries = Math.max(0, config.get(MAP_CACHE_MAX_ENTRIES));
+                final CachePolicyType mapCachePolicy = config.get(MAP_CACHE_POLICY);
+                final int mapCacheLruOverflow = Math.max(0, config.get(MAP_CACHE_LRU_OVERFLOW));
                 final String delegateClass = config.get(DELEGATE_BACKEND);
 
                 System.out.printf(
-                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, delegate=%s%n",
+                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, delegate=%s%n",
                                 maxEntries,
                                 policyType,
                                 lruOverflow,
@@ -134,6 +156,9 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 mapPresencePolicy,
                                 mapPresenceLruOverflow,
                                 mapPresenceImpl,
+                                mapCacheMaxEntries,
+                                mapCachePolicy,
+                                mapCacheLruOverflow,
                                 delegateClass);
 
                 StateBackend delegate;
@@ -165,7 +190,10 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 mapPresenceMaxEntries,
                                 mapPresencePolicy,
                                 mapPresenceLruOverflow,
-                                mapPresenceImpl);
+                                mapPresenceImpl,
+                                mapCacheMaxEntries,
+                                mapCachePolicy,
+                                mapCacheLruOverflow);
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {
