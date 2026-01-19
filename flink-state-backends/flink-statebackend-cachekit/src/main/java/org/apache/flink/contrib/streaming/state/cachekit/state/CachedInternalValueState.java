@@ -21,7 +21,6 @@ import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePoli
 import org.apache.flink.contrib.streaming.state.cachekit.cache.LruCachePolicy;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
-import org.apache.flink.table.data.binary.BinaryRowData;
 
 import javax.annotation.Nonnull;
 
@@ -47,11 +46,17 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final double hitRateThreshold;
     private final int hitRateWindow;
 
+    private final TypeSerializer<K> keySerializer;
+    private final TypeSerializer<N> namespaceSerializer;
+
     private N currentNamespace;
 
     // Sticky Cache (L1)
     private KeyNamespaceKey<K, N> lastAccessKey;
     private CachedValue<V> lastAccessValue;
+
+    // Reusable lookup key
+    private final KeyNamespaceKey<K, N> lookupKey = new KeyNamespaceKey<>(null, null);
 
     private final java.util.function.Consumer<K> keyContextSetter;
 
@@ -80,6 +85,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.hitRateThreshold = hitRateThreshold;
         this.hitRateWindow = hitRateWindow;
 
+        this.keySerializer = delegate.getKeySerializer();
+        this.namespaceSerializer = delegate.getNamespaceSerializer();
+
         // L1 Cache: ~20% of maxEntries or at least 128
         int l1Size = Math.max(128, maxEntries / 5);
         this.l1Cache = createCachePolicy(l1Size, this::onL1Eviction);
@@ -88,11 +96,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.l2Cache = createCachePolicy(maxEntries, this::onL2Eviction);
     }
 
+    private void setLookupKey(K key, N namespace) {
+        lookupKey.key = key;
+        lookupKey.namespace = namespace;
+    }
+
     @Override
     public V value() throws IOException {
         K currentKey = currentKeyProvider.getCurrentKey();
 
         // 1. Check Sticky Cache (Always Check L0 - Fast Path)
+        // Use direct comparison if possible or rely on isSame with current objects (no
+        // allocation)
         if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
             recordAccess(true); // Hit
             return lastAccessValue.valueOrNull();
@@ -103,38 +118,38 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             // Sampling: Check cache every ~100 requests to see if we should re-enable
             opsSinceLastSample++;
             if (opsSinceLastSample < 100) {
-                // Bypass mode: Direct to Delegate
-                // Don't record access here to avoid skewing stats with 100% hits/misses?
-                // Actually, if we bypass, we assume it's a "Miss" for the cache utility?
-                // Or we just don't count it.
-                // If we don't count it, we never exit bypass?
-                // We MUST count it.
-                // In bypass, we assume we SAVED a cache lookup overhead.
-                // But to calculate "Hit Rate", we need to know if it WOULD have been a hit.
-                // We don't know.
-                // So we rely on the sample (below) to estimate hit rate.
-                // We behave as if we are not looking.
                 return delegate.value();
             }
             // Sample this request
             opsSinceLastSample = 0;
         }
 
-        KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
-
         // 3. Check L1 Cache
-        CachedValue<V> l1Cached = l1Cache.get(probeKey);
+        // Use reusable key for lookup
+        setLookupKey(currentKey, currentNamespace);
+
+        CachedValue<V> l1Cached = l1Cache.get(lookupKey);
         if (l1Cached != null) {
-            updateSticky(probeKey, l1Cached);
+            // Sticky update needs an immutable/storage key.
+            // If we found it in L1, the key in L1 IS a storage key.
+            // BUT we don't have access to the entry's key directly from .get() value.
+            // We have to create a new key OR look it up from entries (inefficient).
+            // Actually, for sticky cache, we just need A key copy.
+            // Creating a new storage key is unavoidable if we want to store it in sticky.
+            KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
+                    namespaceSerializer);
+            updateSticky(storageKey, l1Cached);
+
             recordAccess(true); // Hit
             return l1Cached.valueOrNull();
         }
 
         // 4. Check L2 Cache
-        CachedValue<V> l2Cached = l2Cache.get(probeKey);
+        CachedValue<V> l2Cached = l2Cache.get(lookupKey);
         if (l2Cached != null) {
             // Promote to L1 (Clean)
-            KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+            KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
+                    namespaceSerializer);
             CachedValue<V> newValue = CachedValue.of(l2Cached.valueOrNull(), false);
             l1Cache.put(storageKey, newValue);
 
@@ -149,7 +164,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         // 6. Update L1 (Clean)
         // Even if bypassing (sampled), we populate L1 to allow hit rate recovery
-        KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+        KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
+                namespaceSerializer);
         CachedValue<V> newValue = CachedValue.of(loaded, false);
         l1Cache.put(storageKey, newValue);
 
@@ -165,20 +181,38 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         K currentKey = currentKeyProvider.getCurrentKey();
 
+        // Optimistic Sticky Update (Check L0 first)
+        // If current key matches sticky key, we can update in place without new
+        // allocation
+        if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
+            CachedValue<V> newValue;
+            if (bypassEnabled && isBypassing) {
+                delegate.update(value);
+                newValue = CachedValue.of(value, false); // Clean because written to delegate
+            } else {
+                newValue = CachedValue.of(value, true); // Dirty
+            }
+            // Update L1
+            l1Cache.put(lastAccessKey, newValue);
+            updateSticky(lastAccessKey, newValue);
+            return;
+        }
+
         if (bypassEnabled && isBypassing) {
             // Write-Through (Bypass Mode)
             delegate.update(value);
 
             // Update L1 as Clean so subsequent reads (if sampled or re-enabled) find it.
-            // This also ensures cache coherence.
-            KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+            KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
+                    namespaceSerializer);
             CachedValue<V> newValue = CachedValue.of(value, false); // Clean
             l1Cache.put(cacheKey, newValue);
             updateSticky(cacheKey, newValue);
             return;
         }
 
-        KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+        KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
+                namespaceSerializer);
         CachedValue<V> newValue = CachedValue.of(value, true);
 
         // Write-Back: Update L1 only (marked dirty)
@@ -191,7 +225,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     @Override
     public void clear() {
         K currentKey = currentKeyProvider.getCurrentKey();
-        KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, true);
+        KeyNamespaceKey<K, N> cacheKey;
+        // Reuse sticky key if possible
+        if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
+            cacheKey = lastAccessKey;
+        } else {
+            cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer, namespaceSerializer);
+        }
+
         CachedValue<V> existing = findCachedValue(currentKey);
         CachedValue<V> newValue;
 
@@ -282,12 +323,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
             return lastAccessValue;
         }
-        KeyNamespaceKey<K, N> probeKey = new KeyNamespaceKey<>(currentKey, currentNamespace, false);
-        CachedValue<V> l1Value = l1Cache.get(probeKey);
+        setLookupKey(currentKey, currentNamespace);
+        CachedValue<V> l1Value = l1Cache.get(lookupKey);
         if (l1Value != null) {
             return l1Value;
         }
-        return l2Cache.get(probeKey);
+        return l2Cache.get(lookupKey);
     }
 
     private CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> createCachePolicy(
@@ -403,20 +444,20 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     private static final class KeyNamespaceKey<K, N> {
-        private final K key;
-        private final N namespace;
+        private K key;
+        private N namespace;
 
-        private KeyNamespaceKey(K key, N namespace, boolean deepCopy) {
-            if (deepCopy && key instanceof BinaryRowData) {
-                this.key = (K) ((BinaryRowData) key).copy();
-            } else {
-                this.key = key;
-            }
-            if (deepCopy && namespace instanceof BinaryRowData) {
-                this.namespace = (N) ((BinaryRowData) namespace).copy();
-            } else {
-                this.namespace = namespace;
-            }
+        // Mutable constructor
+        private KeyNamespaceKey(K key, N namespace) {
+            this.key = key;
+            this.namespace = namespace;
+        }
+
+        // Storage constructor (Deep Copy)
+        private KeyNamespaceKey(K key, N namespace, TypeSerializer<K> keySerializer,
+                TypeSerializer<N> namespaceSerializer) {
+            this.key = keySerializer != null ? keySerializer.copy(key) : key;
+            this.namespace = namespaceSerializer != null ? namespaceSerializer.copy(namespace) : namespace;
         }
 
         boolean isSame(K otherKey, N otherNamespace) {
