@@ -138,6 +138,12 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         .defaultValue(1000)
                         .withDescription("Number of MapState accesses to calculate hit rate over.");
 
+        public static final ConfigOption<Boolean> MAP_ITERATION_CACHE_FILL_ENABLED = ConfigOptions
+                        .key("state.backend.cachekit.map.iteration.cache-fill.enabled")
+                        .booleanType()
+                        .defaultValue(true)
+                        .withDescription("Enable cache backfill during MapState iteration.");
+
         public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
                         .stringType()
                         .noDefaultValue()
@@ -164,10 +170,11 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final boolean mapBypassEnabled = config.get(MAP_BYPASS_ENABLED);
                 final double mapHitRateThreshold = config.get(MAP_HIT_RATE_THRESHOLD);
                 final int mapHitRateWindow = config.get(MAP_HIT_RATE_WINDOW);
+                final boolean mapIterationCacheFillEnabled = config.get(MAP_ITERATION_CACHE_FILL_ENABLED);
                 final String delegateClass = config.get(DELEGATE_BACKEND);
 
                 System.out.printf(
-                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, delegate=%s%n",
+                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, delegate=%s%n",
                                 maxEntries,
                                 policyType,
                                 lruOverflow,
@@ -184,6 +191,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 mapBypassEnabled,
                                 mapHitRateThreshold,
                                 mapHitRateWindow,
+                                mapIterationCacheFillEnabled,
                                 delegateClass);
 
                 StateBackend delegate;
@@ -221,7 +229,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 mapCacheLruOverflow,
                                 mapBypassEnabled,
                                 mapHitRateThreshold,
-                                mapHitRateWindow);
+                                mapHitRateWindow,
+                                mapIterationCacheFillEnabled);
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

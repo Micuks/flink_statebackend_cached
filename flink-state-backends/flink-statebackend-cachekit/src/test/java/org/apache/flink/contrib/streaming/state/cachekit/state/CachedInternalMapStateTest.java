@@ -21,6 +21,7 @@ import org.apache.flink.runtime.state.internal.InternalMapState;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -53,7 +54,8 @@ class CachedInternalMapStateTest {
                 0,
                 false,
                 0.0,
-                1);
+                1,
+                true);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         assertFalse(state.contains("uk1"));
@@ -79,7 +81,8 @@ class CachedInternalMapStateTest {
                 0,
                 false,
                 0.0,
-                1);
+                1,
+                true);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.put("uk1", 1);
@@ -110,7 +113,8 @@ class CachedInternalMapStateTest {
                 0,
                 false,
                 0.0,
-                1);
+                1,
+                true);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         assertFalse(state.contains("uk1"));
@@ -138,7 +142,8 @@ class CachedInternalMapStateTest {
                 0,
                 true,
                 0.5,
-                1);
+                1,
+                true);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.get("u1");
@@ -158,5 +163,38 @@ class CachedInternalMapStateTest {
         clearInvocations(delegate);
         state.get("hot");
         verify(delegate, times(0)).get("hot");
+    }
+
+    @Test
+    void testIterationCacheFillToggleDisablesBackfill() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        Map<String, Integer> entries = new java.util.HashMap<>();
+        entries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(entries.entrySet());
+        when(delegate.contains("uk1")).thenReturn(true);
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
+                delegate,
+                currentKey::get,
+                100,
+                CachePolicyType.LRU,
+                0,
+                PresenceCacheImplementation.PRIMITIVE,
+                0,
+                CachePolicyType.LRU,
+                0,
+                false,
+                0.0,
+                1,
+                false);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        for (Map.Entry<String, Integer> ignored : state.entries()) {
+            // Consume iterator
+        }
+
+        state.contains("uk1");
+        verify(delegate, times(1)).contains("uk1");
     }
 }

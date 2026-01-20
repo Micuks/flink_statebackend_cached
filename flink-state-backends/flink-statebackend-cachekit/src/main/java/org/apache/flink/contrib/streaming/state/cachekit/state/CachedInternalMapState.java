@@ -61,6 +61,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final boolean bypassEnabled;
     private final double hitRateThreshold;
     private final int hitRateWindow;
+    private final boolean iterationCacheFillEnabled;
     private final boolean usePrimitivePresenceCache;
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
@@ -87,7 +88,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             int mapCacheLruOverflow,
             boolean bypassEnabled,
             double hitRateThreshold,
-            int hitRateWindow) {
+            int hitRateWindow,
+            boolean iterationCacheFillEnabled) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.presenceCachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
@@ -101,6 +103,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         this.bypassEnabled = bypassEnabled;
         this.hitRateThreshold = hitRateThreshold;
         this.hitRateWindow = hitRateWindow;
+        this.iterationCacheFillEnabled = iterationCacheFillEnabled;
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
         TypeSerializer<UK> resolvedUserKeySerializer = null;
@@ -313,6 +316,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (!mapCacheEnabled && !presenceCacheEnabled) {
             return entries;
         }
+        if (!iterationCacheFillEnabled) {
+            return entries;
+        }
         return cacheEntries(entries);
     }
 
@@ -320,6 +326,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     public Iterable<UK> keys() throws Exception {
         ensureDelegateNamespace(null);
         if (!mapCacheEnabled && !presenceCacheEnabled) {
+            return delegate.keys();
+        }
+        if (!iterationCacheFillEnabled) {
             return delegate.keys();
         }
         Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
@@ -332,6 +341,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (!mapCacheEnabled && !presenceCacheEnabled) {
             return delegate.values();
         }
+        if (!iterationCacheFillEnabled) {
+            return delegate.values();
+        }
         Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
         return cacheValues(entries);
     }
@@ -341,6 +353,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         ensureDelegateNamespace(null);
         Iterator<Map.Entry<UK, UV>> iterator = delegate.iterator();
         if (!mapCacheEnabled && !presenceCacheEnabled) {
+            return iterator;
+        }
+        if (!iterationCacheFillEnabled) {
             return iterator;
         }
         return new CachingEntryIterator(iterator);

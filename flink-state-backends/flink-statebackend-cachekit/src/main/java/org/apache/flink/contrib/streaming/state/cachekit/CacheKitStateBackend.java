@@ -81,6 +81,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final boolean mapBypassEnabled;
     private final double mapHitRateThreshold;
     private final int mapHitRateWindow;
+    private final boolean mapIterationCacheFillEnabled;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -99,7 +100,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
             int mapCacheLruOverflow,
             boolean mapBypassEnabled,
             double mapHitRateThreshold,
-            int mapHitRateWindow) {
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -117,6 +119,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.mapBypassEnabled = mapBypassEnabled;
         this.mapHitRateThreshold = mapHitRateThreshold;
         this.mapHitRateWindow = mapHitRateWindow;
+        this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
     }
 
     @Override
@@ -194,7 +197,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapCacheLruOverflow,
                 mapBypassEnabled,
                 mapHitRateThreshold,
-                mapHitRateWindow);
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled);
     }
 
     @Override
@@ -261,6 +265,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
         final boolean mapBypassEnabled = config.get(CacheKitStateBackendFactory.MAP_BYPASS_ENABLED);
         final double mapHitRateThreshold = config.get(CacheKitStateBackendFactory.MAP_HIT_RATE_THRESHOLD);
         final int mapHitRateWindow = config.get(CacheKitStateBackendFactory.MAP_HIT_RATE_WINDOW);
+        final boolean mapIterationCacheFillEnabled =
+                config.get(CacheKitStateBackendFactory.MAP_ITERATION_CACHE_FILL_ENABLED);
 
         return new CacheKitStateBackend(
                 configuredDelegate,
@@ -279,6 +285,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapCacheLruOverflow,
                 mapBypassEnabled,
                 mapHitRateThreshold,
-                mapHitRateWindow);
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled);
     }
 }

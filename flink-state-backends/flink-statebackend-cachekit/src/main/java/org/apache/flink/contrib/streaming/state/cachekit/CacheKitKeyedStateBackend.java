@@ -82,6 +82,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean mapBypassEnabled;
     private final double mapHitRateThreshold;
     private final int mapHitRateWindow;
+    private final boolean mapIterationCacheFillEnabled;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -107,7 +108,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int mapCacheLruOverflow,
             boolean mapBypassEnabled,
             double mapHitRateThreshold,
-            int mapHitRateWindow) {
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -136,6 +138,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapBypassEnabled = mapBypassEnabled;
         this.mapHitRateThreshold = mapHitRateThreshold;
         this.mapHitRateWindow = mapHitRateWindow;
+        this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
     }
 
     @Override
@@ -198,7 +201,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapCacheLruOverflow,
                     mapBypassEnabled,
                     mapHitRateThreshold,
-                    mapHitRateWindow);
+                    mapHitRateWindow,
+                    mapIterationCacheFillEnabled);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -279,7 +283,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapCacheLruOverflow,
                     mapBypassEnabled,
                     mapHitRateThreshold,
-                    mapHitRateWindow);
+                    mapHitRateWindow,
+                    mapIterationCacheFillEnabled);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
