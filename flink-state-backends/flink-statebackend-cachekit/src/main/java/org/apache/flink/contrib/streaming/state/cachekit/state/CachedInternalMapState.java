@@ -58,6 +58,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final boolean mapCacheEnabled;
     private final CachePolicyType mapCachePolicyType;
     private final int mapCacheLruOverflow;
+    private final boolean bypassEnabled;
+    private final double hitRateThreshold;
+    private final int hitRateWindow;
     private final boolean usePrimitivePresenceCache;
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
@@ -66,6 +69,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
     private N currentNamespace;
     private final KeyNamespaceUserKey<K, N, UK> lookupKey = new KeyNamespaceUserKey<>(null, null, null);
+
+    private volatile boolean isBypassing = false;
+    private long currentWindowAccesses = 0;
+    private long currentWindowHits = 0;
+    private int opsSinceLastSample = 0;
 
     public CachedInternalMapState(
             InternalMapState<K, N, UK, UV> delegate,
@@ -76,7 +84,10 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             PresenceCacheImplementation presenceCacheImplementation,
             int mapCacheMaxEntries,
             CachePolicyType mapCachePolicyType,
-            int mapCacheLruOverflow) {
+            int mapCacheLruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.presenceCachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
@@ -87,6 +98,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         this.mapCacheEnabled = mapCacheMaxEntries > 0;
         this.mapCachePolicyType = Objects.requireNonNull(mapCachePolicyType, "mapCachePolicyType");
         this.mapCacheLruOverflow = Math.max(0, mapCacheLruOverflow);
+        this.bypassEnabled = bypassEnabled;
+        this.hitRateThreshold = hitRateThreshold;
+        this.hitRateWindow = hitRateWindow;
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
         TypeSerializer<UK> resolvedUserKeySerializer = null;
@@ -160,19 +174,26 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         // Use reusable key for lookups
         setLookupKey(currentKey, currentNamespace, userKey);
 
+        if (bypassEnabled && isBypassing && shouldBypassRead()) {
+            return delegate.get(userKey);
+        }
+
         if (mapCacheEnabled) {
             CachedMapValue<UV> cached = getCachedValue(currentKey); // Optimize getCachedValue to use lookupKey
             if (cached != null) {
+                recordAccess(true);
                 return cached.valueOrNull();
             }
         }
         if (presenceCacheEnabled) {
             Boolean present = getPresence(currentKey, userKey); // Optimize getPresence
             if (present != null && !present) {
+                recordAccess(true);
                 return null;
             }
         }
         UV value = delegate.get(userKey);
+        recordAccess(false);
         if (mapCacheEnabled) {
             updateValueCache(currentKey, userKey, value);
         }
@@ -256,19 +277,26 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         // Use reusable key for lookups
         setLookupKey(currentKey, currentNamespace, userKey);
 
+        if (bypassEnabled && isBypassing && shouldBypassRead()) {
+            return delegate.contains(userKey);
+        }
+
         if (mapCacheEnabled) {
             CachedMapValue<UV> cached = getCachedValue(currentKey);
             if (cached != null) {
+                recordAccess(true);
                 return !cached.isNull();
             }
         }
         if (presenceCacheEnabled) {
             Boolean present = getPresence(currentKey, userKey);
             if (present != null) {
+                recordAccess(true);
                 return present;
             }
         }
         boolean exists = delegate.contains(userKey);
+        recordAccess(false);
         if (mapCacheEnabled && !exists) {
             updateValueCache(currentKey, userKey, null);
         }
@@ -391,15 +419,17 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 if (l1 == PrimitivePresenceCache.ABSENT) {
                     return false;
                 }
-                l1PrimitivePresenceCache.remove(fp);
+                if (l1 == PrimitivePresenceCache.PRESENT) {
+                    return true;
+                }
             }
             Byte l2 = l2PrimitivePresenceCache.get(fp);
             if (l2 != null) {
-                if (l2 == PrimitivePresenceCache.ABSENT) {
+                if (l2 == PrimitivePresenceCache.ABSENT || l2 == PrimitivePresenceCache.PRESENT) {
+                    l2PrimitivePresenceCache.remove(fp);
                     l1PrimitivePresenceCache.put(fp, l2);
-                    return false;
+                    return l2 == PrimitivePresenceCache.PRESENT;
                 }
-                l2PrimitivePresenceCache.remove(fp);
             }
             return null;
         }
@@ -407,24 +437,15 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         // Use lookupKey which has been set by calling method
         Boolean present = l1PresenceCache.get(lookupKey);
         if (present != null) {
-            if (!present) {
-                return false;
-            }
-            // Need immutable key for removal? remove() also uses equals/hashcode, so
-            // lookupKey is fine!
-            l1PresenceCache.remove(lookupKey);
-            return null;
+            return present;
         }
         present = l2PresenceCache.get(lookupKey);
         if (present != null) {
-            if (!present) {
-                // Must create immutable key for storage
-                KeyNamespaceUserKey<K, N, UK> storage = new KeyNamespaceUserKey<>(currentKey, currentNamespace, userKey,
-                        keySerializer, namespaceSerializer, userKeySerializer);
-                l1PresenceCache.put(storage, false);
-                return false;
-            }
             l2PresenceCache.remove(lookupKey);
+            KeyNamespaceUserKey<K, N, UK> storage = new KeyNamespaceUserKey<>(currentKey, currentNamespace, userKey,
+                    keySerializer, namespaceSerializer, userKeySerializer);
+            l1PresenceCache.put(storage, present);
+            return present;
         }
         return null;
     }
@@ -436,8 +457,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (usePrimitivePresenceCache) {
             long fp = fingerprint(currentKey, currentNamespace, userKey);
             if (present) {
-                l1PrimitivePresenceCache.remove(fp);
                 l2PrimitivePresenceCache.remove(fp);
+                l1PrimitivePresenceCache.put(fp, PrimitivePresenceCache.PRESENT);
                 return;
             }
             l2PrimitivePresenceCache.remove(fp);
@@ -448,17 +469,12 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         // Need immutable key for storage? Yes.
         setLookupKey(currentKey, currentNamespace, userKey);
 
-        if (present) {
-            l1PresenceCache.remove(lookupKey);
-            l2PresenceCache.remove(lookupKey);
-            return;
-        }
         l2PresenceCache.remove(lookupKey);
 
         // Storage requries deep copy
         KeyNamespaceUserKey<K, N, UK> storage = new KeyNamespaceUserKey<>(currentKey, currentNamespace, userKey,
                 keySerializer, namespaceSerializer, userKeySerializer);
-        l1PresenceCache.put(storage, false);
+        l1PresenceCache.put(storage, present);
     }
 
     private void clearPresenceCaches() {
@@ -598,7 +614,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private void onL1Eviction(KeyNamespaceUserKey<K, N, UK> key, Boolean value) {
-        if (key == null || value == null || value) {
+        if (key == null || value == null) {
             return;
         }
         l2PresenceCache.put(key, value);
@@ -609,7 +625,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private void onL1PrimitiveEviction(Long key, Byte value) {
-        if (key == null || value == null || value.byteValue() != PrimitivePresenceCache.ABSENT) {
+        if (key == null || value == null) {
             return;
         }
         l2PrimitivePresenceCache.put(key, value);
@@ -628,6 +644,42 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
     private void onValueL2Eviction(KeyNamespaceUserKey<K, N, UK> key, CachedMapValue<UV> value) {
         // MapState cache doesn't need flush on L2 eviction.
+    }
+
+    private boolean shouldBypassRead() {
+        opsSinceLastSample++;
+        if (opsSinceLastSample < 100) {
+            return true;
+        }
+        opsSinceLastSample = 0;
+        return false;
+    }
+
+    private void recordAccess(boolean isHit) {
+        if (!bypassEnabled) {
+            return;
+        }
+        currentWindowAccesses++;
+        if (isHit) {
+            currentWindowHits++;
+        }
+        if (currentWindowAccesses >= hitRateWindow) {
+            double hitRate = (double) currentWindowHits / currentWindowAccesses;
+            boolean shouldBypass = hitRate < hitRateThreshold;
+
+            if (isBypassing) {
+                if (!shouldBypass) {
+                    isBypassing = false;
+                    opsSinceLastSample = 0;
+                }
+            } else if (shouldBypass) {
+                isBypassing = true;
+                opsSinceLastSample = 0;
+            }
+
+            currentWindowAccesses = 0;
+            currentWindowHits = 0;
+        }
     }
 
     private static final class KeyNamespaceUserKey<K, N, UK> {

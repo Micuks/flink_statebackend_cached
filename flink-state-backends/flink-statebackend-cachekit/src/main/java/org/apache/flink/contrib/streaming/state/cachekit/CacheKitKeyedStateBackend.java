@@ -79,6 +79,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int mapCacheMaxEntries;
     private final CachePolicyType mapCachePolicy;
     private final int mapCacheLruOverflow;
+    private final boolean mapBypassEnabled;
+    private final double mapHitRateThreshold;
+    private final int mapHitRateWindow;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -101,7 +104,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             PresenceCacheImplementation mapPresenceCacheImplementation,
             int mapCacheMaxEntries,
             CachePolicyType mapCachePolicy,
-            int mapCacheLruOverflow) {
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -127,6 +133,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapCacheMaxEntries = mapCacheMaxEntries;
         this.mapCachePolicy = mapCachePolicy;
         this.mapCacheLruOverflow = mapCacheLruOverflow;
+        this.mapBypassEnabled = mapBypassEnabled;
+        this.mapHitRateThreshold = mapHitRateThreshold;
+        this.mapHitRateWindow = mapHitRateWindow;
     }
 
     @Override
@@ -186,7 +195,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapPresenceCacheImplementation,
                     mapCacheMaxEntries,
                     mapCachePolicy,
-                    mapCacheLruOverflow);
+                    mapCacheLruOverflow,
+                    mapBypassEnabled,
+                    mapHitRateThreshold,
+                    mapHitRateWindow);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -264,7 +276,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapPresenceCacheImplementation,
                     mapCacheMaxEntries,
                     mapCachePolicy,
-                    mapCacheLruOverflow);
+                    mapCacheLruOverflow,
+                    mapBypassEnabled,
+                    mapHitRateThreshold,
+                    mapHitRateWindow);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }

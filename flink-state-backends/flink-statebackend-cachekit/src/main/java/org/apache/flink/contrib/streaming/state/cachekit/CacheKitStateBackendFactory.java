@@ -119,6 +119,25 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         .withDescription(
                                         "Overflow entries for MapState LRU before batch eviction triggers.");
 
+        public static final ConfigOption<Boolean> MAP_BYPASS_ENABLED = ConfigOptions
+                        .key("state.backend.cachekit.map.bypass.enabled")
+                        .booleanType()
+                        .defaultValue(false)
+                        .withDescription("Enable adaptive bypass for MapState caching based on hit rate.");
+
+        public static final ConfigOption<Double> MAP_HIT_RATE_THRESHOLD = ConfigOptions
+                        .key("state.backend.cachekit.map.hit-rate.threshold")
+                        .doubleType()
+                        .defaultValue(0.05)
+                        .withDescription(
+                                        "Hit rate threshold (0.0 to 1.0) below which MapState cache is bypassed.");
+
+        public static final ConfigOption<Integer> MAP_HIT_RATE_WINDOW = ConfigOptions
+                        .key("state.backend.cachekit.map.hit-rate.window")
+                        .intType()
+                        .defaultValue(1000)
+                        .withDescription("Number of MapState accesses to calculate hit rate over.");
+
         public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
                         .stringType()
                         .noDefaultValue()
@@ -142,10 +161,13 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final int mapCacheMaxEntries = Math.max(0, config.get(MAP_CACHE_MAX_ENTRIES));
                 final CachePolicyType mapCachePolicy = config.get(MAP_CACHE_POLICY);
                 final int mapCacheLruOverflow = Math.max(0, config.get(MAP_CACHE_LRU_OVERFLOW));
+                final boolean mapBypassEnabled = config.get(MAP_BYPASS_ENABLED);
+                final double mapHitRateThreshold = config.get(MAP_HIT_RATE_THRESHOLD);
+                final int mapHitRateWindow = config.get(MAP_HIT_RATE_WINDOW);
                 final String delegateClass = config.get(DELEGATE_BACKEND);
 
                 System.out.printf(
-                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, delegate=%s%n",
+                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, delegate=%s%n",
                                 maxEntries,
                                 policyType,
                                 lruOverflow,
@@ -159,6 +181,9 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 mapCacheMaxEntries,
                                 mapCachePolicy,
                                 mapCacheLruOverflow,
+                                mapBypassEnabled,
+                                mapHitRateThreshold,
+                                mapHitRateWindow,
                                 delegateClass);
 
                 StateBackend delegate;
@@ -193,7 +218,10 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 mapPresenceImpl,
                                 mapCacheMaxEntries,
                                 mapCachePolicy,
-                                mapCacheLruOverflow);
+                                mapCacheLruOverflow,
+                                mapBypassEnabled,
+                                mapHitRateThreshold,
+                                mapHitRateWindow);
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

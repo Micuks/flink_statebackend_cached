@@ -50,7 +50,10 @@ class CachedInternalMapStateTest {
                 PresenceCacheImplementation.PRIMITIVE,
                 0,
                 CachePolicyType.LRU,
-                0);
+                0,
+                false,
+                0.0,
+                1);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         assertFalse(state.contains("uk1"));
@@ -73,7 +76,10 @@ class CachedInternalMapStateTest {
                 PresenceCacheImplementation.PRIMITIVE,
                 0,
                 CachePolicyType.LRU,
-                0);
+                0,
+                false,
+                0.0,
+                1);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.put("uk1", 1);
@@ -101,7 +107,10 @@ class CachedInternalMapStateTest {
                 PresenceCacheImplementation.PRIMITIVE,
                 0,
                 CachePolicyType.LRU,
-                0);
+                0,
+                false,
+                0.0,
+                1);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         assertFalse(state.contains("uk1"));
@@ -109,5 +118,45 @@ class CachedInternalMapStateTest {
 
         assertNull(state.get("uk1"));
         verify(delegate, times(0)).get(any());
+    }
+
+    @Test
+    void testBypassEntersAndExitsOnHitRate() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        when(delegate.get(any())).thenReturn(1);
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
+                delegate,
+                currentKey::get,
+                0,
+                CachePolicyType.LRU,
+                0,
+                PresenceCacheImplementation.PRIMITIVE,
+                100,
+                CachePolicyType.LRU,
+                0,
+                true,
+                0.5,
+                1);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        state.get("u1");
+
+        clearInvocations(delegate);
+        state.get("u1");
+        verify(delegate, times(1)).get("u1");
+
+        state.put("hot", 42);
+        clearInvocations(delegate);
+        for (int i = 0; i < 98; i++) {
+            state.get("hot");
+        }
+        state.get("hot");
+        verify(delegate, times(98)).get("hot");
+
+        clearInvocations(delegate);
+        state.get("hot");
+        verify(delegate, times(0)).get("hot");
     }
 }

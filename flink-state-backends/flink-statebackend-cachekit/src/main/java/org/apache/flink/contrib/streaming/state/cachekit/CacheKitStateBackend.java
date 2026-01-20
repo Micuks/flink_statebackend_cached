@@ -78,6 +78,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final int mapCacheMaxEntries;
     private final CachePolicyType mapCachePolicy;
     private final int mapCacheLruOverflow;
+    private final boolean mapBypassEnabled;
+    private final double mapHitRateThreshold;
+    private final int mapHitRateWindow;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -93,7 +96,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
             PresenceCacheImplementation mapPresenceCacheImplementation,
             int mapCacheMaxEntries,
             CachePolicyType mapCachePolicy,
-            int mapCacheLruOverflow) {
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -108,6 +114,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.mapCacheMaxEntries = mapCacheMaxEntries;
         this.mapCachePolicy = mapCachePolicy;
         this.mapCacheLruOverflow = mapCacheLruOverflow;
+        this.mapBypassEnabled = mapBypassEnabled;
+        this.mapHitRateThreshold = mapHitRateThreshold;
+        this.mapHitRateWindow = mapHitRateWindow;
     }
 
     @Override
@@ -182,7 +191,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapPresenceCacheImplementation,
                 mapCacheMaxEntries,
                 mapCachePolicy,
-                mapCacheLruOverflow);
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow);
     }
 
     @Override
@@ -246,6 +258,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
         final int mapCacheMaxEntries = Math.max(0, config.get(CacheKitStateBackendFactory.MAP_CACHE_MAX_ENTRIES));
         final CachePolicyType mapCachePolicy = config.get(CacheKitStateBackendFactory.MAP_CACHE_POLICY);
         final int mapCacheLruOverflow = Math.max(0, config.get(CacheKitStateBackendFactory.MAP_CACHE_LRU_OVERFLOW));
+        final boolean mapBypassEnabled = config.get(CacheKitStateBackendFactory.MAP_BYPASS_ENABLED);
+        final double mapHitRateThreshold = config.get(CacheKitStateBackendFactory.MAP_HIT_RATE_THRESHOLD);
+        final int mapHitRateWindow = config.get(CacheKitStateBackendFactory.MAP_HIT_RATE_WINDOW);
 
         return new CacheKitStateBackend(
                 configuredDelegate,
@@ -261,6 +276,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapPresenceImpl,
                 mapCacheMaxEntries,
                 mapCachePolicy,
-                mapCacheLruOverflow);
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow);
     }
 }
