@@ -1,0 +1,139 @@
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::staticFieldBase has been called by com.google.inject.internal.aop.HiddenClassDefiner (file:/C:/Users/Louis%20Wu/scoop/apps/maven/current/lib/guice-5.1.0-classes.jar)
+WARNING: Please consider reporting this to the maintainers of class com.google.inject.internal.aop.HiddenClassDefiner
+WARNING: sun.misc.Unsafe::staticFieldBase will be removed in a future release
+[INFO] Error stacktraces are turned on.
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] ------------< org.apache.flink:flink-statebackend-cachekit >------------
+[INFO] Building Flink : State backends : CacheKit 1.16-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- clean:3.1.0:clean (default-clean) @ flink-statebackend-cachekit ---
+[INFO] Deleting C:\Users\Louis Wu\Dev\flink_statebackend_cached\flink-state-backends\flink-statebackend-cachekit\target
+[INFO] 
+[INFO] --- checkstyle:3.1.2:check (validate) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- spotless:2.13.0:check (spotless-check) @ flink-statebackend-cachekit ---
+[INFO] Spotless check skipped
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (enforce-maven-version) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (enforce-maven) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (ban-unsafe-snakeyaml) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (ban-unsafe-jackson) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (forbid-log4j-1) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (forbid-direct-akka-rpc-dependencies) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (forbid-direct-table-planner-dependencies) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (enforce-versions) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- directory:0.1:directory-of (directories) @ flink-statebackend-cachekit ---
+[INFO] Directory of org.apache.flink:flink-parent set to: C:\Users\Louis Wu\Dev\flink_statebackend_cached
+[INFO] 
+[INFO] --- remote-resources:1.5:process (process-resource-bundles) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- resources:3.1.0:resources (default-resources) @ flink-statebackend-cachekit ---
+[INFO] Using 'UTF-8' encoding to copy filtered resources.
+[INFO] skip non existing resourceDirectory C:\Users\Louis Wu\Dev\flink_statebackend_cached\flink-state-backends\flink-statebackend-cachekit\src\main\resources
+[INFO] Copying 3 resources
+[INFO] 
+[INFO] --- compiler:3.8.0:compile (default-compile) @ flink-statebackend-cachekit ---
+[INFO] Compiling 13 source files to C:\Users\Louis Wu\Dev\flink_statebackend_cached\flink-state-backends\flink-statebackend-cachekit\target\classes
+[INFO] /C:/Users/Louis Wu/Dev/flink_statebackend_cached/flink-state-backends/flink-statebackend-cachekit/src/main/java/org/apache/flink/contrib/streaming/state/cachekit/cache/PrimitivePresenceCache.java: C:\Users\Louis Wu\Dev\flink_statebackend_cached\flink-state-backends\flink-statebackend-cachekit\src\main\java\org\apache\flink\contrib\streaming\state\cachekit\cache\PrimitivePresenceCache.java uses unchecked or unsafe operations.
+[INFO] /C:/Users/Louis Wu/Dev/flink_statebackend_cached/flink-state-backends/flink-statebackend-cachekit/src/main/java/org/apache/flink/contrib/streaming/state/cachekit/cache/PrimitivePresenceCache.java: Recompile with -Xlint:unchecked for details.
+[INFO] -------------------------------------------------------------
+[ERROR] COMPILATION ERROR : 
+[INFO] -------------------------------------------------------------
+[ERROR] /C:/Users/Louis Wu/Dev/flink_statebackend_cached/flink-state-backends/flink-statebackend-cachekit/src/main/java/org/apache/flink/contrib/streaming/state/cachekit/CacheKitStateBackend.java:[189,16] cannot infer type arguments for org.apache.flink.contrib.streaming.state.cachekit.CacheKitKeyedStateBackend<>
+  reason: cannot infer type-variable(s) K
+    (actual and formal argument lists differ in length)
+[ERROR] /C:/Users/Louis Wu/Dev/flink_statebackend_cached/flink-state-backends/flink-statebackend-cachekit/src/main/java/org/apache/flink/contrib/streaming/state/cachekit/CacheKitKeyedStateBackend.java:[205,68] cannot infer type arguments for org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMapState<>
+  reason: cannot infer type-variable(s) K,N,UK,UV
+    (actual and formal argument lists differ in length)
+[ERROR] /C:/Users/Louis Wu/Dev/flink_statebackend_cached/flink-state-backends/flink-statebackend-cachekit/src/main/java/org/apache/flink/contrib/streaming/state/cachekit/CacheKitKeyedStateBackend.java:[290,68] cannot infer type arguments for org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMapState<>
+  reason: cannot infer type-variable(s) K,N,UK,UV
+    (actual and formal argument lists differ in length)
+[INFO] 3 errors 
+[INFO] -------------------------------------------------------------
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  4.014 s
+[INFO] Finished at: 2026-01-23T11:43:17+08:00
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.8.0:compile (default-compile) on project flink-statebackend-cachekit: Compilation failure: Compilation failure: 
+[ERROR] /C:/Users/Louis Wu/Dev/flink_statebackend_cached/flink-state-backends/flink-statebackend-cachekit/src/main/java/org/apache/flink/contrib/streaming/state/cachekit/CacheKitStateBackend.java:[189,16] cannot infer type arguments for org.apache.flink.contrib.streaming.state.cachekit.CacheKitKeyedStateBackend<>
+[ERROR]   reason: cannot infer type-variable(s) K
+[ERROR]     (actual and formal argument lists differ in length)
+[ERROR] /C:/Users/Louis Wu/Dev/flink_statebackend_cached/flink-state-backends/flink-statebackend-cachekit/src/main/java/org/apache/flink/contrib/streaming/state/cachekit/CacheKitKeyedStateBackend.java:[205,68] cannot infer type arguments for org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMapState<>
+[ERROR]   reason: cannot infer type-variable(s) K,N,UK,UV
+[ERROR]     (actual and formal argument lists differ in length)
+[ERROR] /C:/Users/Louis Wu/Dev/flink_statebackend_cached/flink-state-backends/flink-statebackend-cachekit/src/main/java/org/apache/flink/contrib/streaming/state/cachekit/CacheKitKeyedStateBackend.java:[290,68] cannot infer type arguments for org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMapState<>
+[ERROR]   reason: cannot infer type-variable(s) K,N,UK,UV
+[ERROR]     (actual and formal argument lists differ in length)
+[ERROR] -> [Help 1]
+org.apache.maven.lifecycle.LifecycleExecutionException: Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.8.0:compile (default-compile) on project flink-statebackend-cachekit: Compilation failure
+    at org.apache.maven.lifecycle.internal.MojoExecutor.doExecute2 (MojoExecutor.java:333)
+    at org.apache.maven.lifecycle.internal.MojoExecutor.doExecute (MojoExecutor.java:316)
+    at org.apache.maven.lifecycle.internal.MojoExecutor.execute (MojoExecutor.java:212)
+    at org.apache.maven.lifecycle.internal.MojoExecutor.execute (MojoExecutor.java:174)
+    at org.apache.maven.lifecycle.internal.MojoExecutor.access$000 (MojoExecutor.java:75)
+    at org.apache.maven.lifecycle.internal.MojoExecutor$1.run (MojoExecutor.java:162)
+    at org.apache.maven.plugin.DefaultMojosExecutionStrategy.execute (DefaultMojosExecutionStrategy.java:39)
+    at org.apache.maven.lifecycle.internal.MojoExecutor.execute (MojoExecutor.java:159)
+    at org.apache.maven.lifecycle.internal.LifecycleModuleBuilder.buildProject (LifecycleModuleBuilder.java:105)
+    at org.apache.maven.lifecycle.internal.LifecycleModuleBuilder.buildProject (LifecycleModuleBuilder.java:73)
+    at org.apache.maven.lifecycle.internal.builder.singlethreaded.SingleThreadedBuilder.build (SingleThreadedBuilder.java:53)
+    at org.apache.maven.lifecycle.internal.LifecycleStarter.execute (LifecycleStarter.java:118)
+    at org.apache.maven.DefaultMaven.doExecute (DefaultMaven.java:261)
+    at org.apache.maven.DefaultMaven.doExecute (DefaultMaven.java:173)
+    at org.apache.maven.DefaultMaven.execute (DefaultMaven.java:101)
+    at org.apache.maven.cli.MavenCli.execute (MavenCli.java:906)
+    at org.apache.maven.cli.MavenCli.doMain (MavenCli.java:283)
+    at org.apache.maven.cli.MavenCli.main (MavenCli.java:206)
+    at jdk.internal.reflect.DirectMethodHandleAccessor.invoke (DirectMethodHandleAccessor.java:104)
+    at java.lang.reflect.Method.invoke (Method.java:565)
+    at org.codehaus.plexus.classworlds.launcher.Launcher.launchEnhanced (Launcher.java:255)
+    at org.codehaus.plexus.classworlds.launcher.Launcher.launch (Launcher.java:201)
+    at org.codehaus.plexus.classworlds.launcher.Launcher.mainWithExitCode (Launcher.java:361)
+    at org.codehaus.plexus.classworlds.launcher.Launcher.main (Launcher.java:314)
+Caused by: org.apache.maven.plugin.compiler.CompilationFailureException: Compilation failure
+    at org.apache.maven.plugin.compiler.AbstractCompilerMojo.execute (AbstractCompilerMojo.java:1215)
+    at org.apache.maven.plugin.compiler.CompilerMojo.execute (CompilerMojo.java:188)
+    at org.apache.maven.plugin.DefaultBuildPluginManager.executeMojo (DefaultBuildPluginManager.java:126)
+    at org.apache.maven.lifecycle.internal.MojoExecutor.doExecute2 (MojoExecutor.java:328)
+    at org.apache.maven.lifecycle.internal.MojoExecutor.doExecute (MojoExecutor.java:316)
+    at org.apache.maven.lifecycle.internal.MojoExecutor.execute (MojoExecutor.java:212)
+    at org.apache.maven.lifecycle.internal.MojoExecutor.execute (MojoExecutor.java:174)
+    at org.apache.maven.lifecycle.internal.MojoExecutor.access$000 (MojoExecutor.java:75)
+    at org.apache.maven.lifecycle.internal.MojoExecutor$1.run (MojoExecutor.java:162)
+    at org.apache.maven.plugin.DefaultMojosExecutionStrategy.execute (DefaultMojosExecutionStrategy.java:39)
+    at org.apache.maven.lifecycle.internal.MojoExecutor.execute (MojoExecutor.java:159)
+    at org.apache.maven.lifecycle.internal.LifecycleModuleBuilder.buildProject (LifecycleModuleBuilder.java:105)
+    at org.apache.maven.lifecycle.internal.LifecycleModuleBuilder.buildProject (LifecycleModuleBuilder.java:73)
+    at org.apache.maven.lifecycle.internal.builder.singlethreaded.SingleThreadedBuilder.build (SingleThreadedBuilder.java:53)
+    at org.apache.maven.lifecycle.internal.LifecycleStarter.execute (LifecycleStarter.java:118)
+    at org.apache.maven.DefaultMaven.doExecute (DefaultMaven.java:261)
+    at org.apache.maven.DefaultMaven.doExecute (DefaultMaven.java:173)
+    at org.apache.maven.DefaultMaven.execute (DefaultMaven.java:101)
+    at org.apache.maven.cli.MavenCli.execute (MavenCli.java:906)
+    at org.apache.maven.cli.MavenCli.doMain (MavenCli.java:283)
+    at org.apache.maven.cli.MavenCli.main (MavenCli.java:206)
+    at jdk.internal.reflect.DirectMethodHandleAccessor.invoke (DirectMethodHandleAccessor.java:104)
+    at java.lang.reflect.Method.invoke (Method.java:565)
+    at org.codehaus.plexus.classworlds.launcher.Launcher.launchEnhanced (Launcher.java:255)
+    at org.codehaus.plexus.classworlds.launcher.Launcher.launch (Launcher.java:201)
+    at org.codehaus.plexus.classworlds.launcher.Launcher.mainWithExitCode (Launcher.java:361)
+    at org.codehaus.plexus.classworlds.launcher.Launcher.main (Launcher.java:314)
+[ERROR] 
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoFailureException

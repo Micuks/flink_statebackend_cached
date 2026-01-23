@@ -144,6 +144,30 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         .defaultValue(true)
                         .withDescription("Enable cache backfill during MapState iteration.");
 
+        public static final ConfigOption<Boolean> MAP_ITERATOR_CACHE_ENABLED = ConfigOptions
+                        .key("state.backend.cachekit.map.iterator.cache.enabled")
+                        .booleanType()
+                        .defaultValue(false)
+                        .withDescription("Enable full MapState cache for iteration (avoids seek if map is small).");
+
+        public static final ConfigOption<Integer> MAP_ITERATOR_CACHE_MAX_ENTRIES = ConfigOptions
+                        .key("state.backend.cachekit.map.iterator.cache.max-entries")
+                        .intType()
+                        .defaultValue(1024)
+                        .withDescription("Max number of MapStates to cache fully for iteration.");
+
+        public static final ConfigOption<CachePolicyType> MAP_ITERATOR_CACHE_POLICY = ConfigOptions
+                        .key("state.backend.cachekit.map.iterator.cache.policy")
+                        .enumType(CachePolicyType.class)
+                        .defaultValue(CachePolicyType.LRU)
+                        .withDescription("Cache policy for MapState iterator cache.");
+
+        public static final ConfigOption<Integer> MAP_ITERATOR_CACHE_MAX_MAP_SIZE = ConfigOptions
+                        .key("state.backend.cachekit.map.iterator.cache.max-map-size")
+                        .intType()
+                        .defaultValue(1000)
+                        .withDescription("Max entries in a single MapState to allow caching for iteration.");
+
         public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
                         .stringType()
                         .noDefaultValue()
@@ -171,10 +195,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final double mapHitRateThreshold = config.get(MAP_HIT_RATE_THRESHOLD);
                 final int mapHitRateWindow = config.get(MAP_HIT_RATE_WINDOW);
                 final boolean mapIterationCacheFillEnabled = config.get(MAP_ITERATION_CACHE_FILL_ENABLED);
+                final boolean mapIteratorCacheEnabled = config.get(MAP_ITERATOR_CACHE_ENABLED);
+                final int mapIteratorCacheMaxEntries = Math.max(0, config.get(MAP_ITERATOR_CACHE_MAX_ENTRIES));
+                final CachePolicyType mapIteratorCachePolicy = config.get(MAP_ITERATOR_CACHE_POLICY);
+                final int mapIteratorCacheMaxMapSize = Math.max(0, config.get(MAP_ITERATOR_CACHE_MAX_MAP_SIZE));
+
                 final String delegateClass = config.get(DELEGATE_BACKEND);
 
                 System.out.printf(
-                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, delegate=%s%n",
+                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapIterCache=%s, mapIterCacheMax=%d, mapIterCachePolicy=%s, mapIterCacheMapSize=%d, delegate=%s%n",
                                 maxEntries,
                                 policyType,
                                 lruOverflow,
@@ -192,6 +221,10 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 mapHitRateThreshold,
                                 mapHitRateWindow,
                                 mapIterationCacheFillEnabled,
+                                mapIteratorCacheEnabled,
+                                mapIteratorCacheMaxEntries,
+                                mapIteratorCachePolicy,
+                                mapIteratorCacheMaxMapSize,
                                 delegateClass);
 
                 StateBackend delegate;
@@ -230,7 +263,11 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 mapBypassEnabled,
                                 mapHitRateThreshold,
                                 mapHitRateWindow,
-                                mapIterationCacheFillEnabled);
+                                mapIterationCacheFillEnabled,
+                                mapIteratorCacheEnabled,
+                                mapIteratorCacheMaxEntries,
+                                mapIteratorCachePolicy,
+                                mapIteratorCacheMaxMapSize);
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

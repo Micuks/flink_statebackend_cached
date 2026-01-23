@@ -21,6 +21,7 @@ import org.apache.flink.runtime.state.internal.InternalMapState;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -29,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -55,7 +57,8 @@ class CachedInternalMapStateTest {
                 false,
                 0.0,
                 1,
-                true);
+                true,
+                false, 0, null, 0);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         assertFalse(state.contains("uk1"));
@@ -82,7 +85,8 @@ class CachedInternalMapStateTest {
                 false,
                 0.0,
                 1,
-                true);
+                true,
+                false, 0, null, 0);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.put("uk1", 1);
@@ -114,7 +118,8 @@ class CachedInternalMapStateTest {
                 false,
                 0.0,
                 1,
-                true);
+                true,
+                false, 0, null, 0);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         assertFalse(state.contains("uk1"));
@@ -143,7 +148,8 @@ class CachedInternalMapStateTest {
                 true,
                 0.5,
                 1,
-                true);
+                true,
+                false, 0, null, 0);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.get("u1");
@@ -172,7 +178,7 @@ class CachedInternalMapStateTest {
         Map<String, Integer> entries = new java.util.HashMap<>();
         entries.put("uk1", 1);
         when(delegate.entries()).thenReturn(entries.entrySet());
-        when(delegate.contains("uk1")).thenReturn(true);
+        when(delegate.iterator()).thenReturn(Collections.emptyIterator());
 
         CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
                 delegate,
@@ -187,7 +193,8 @@ class CachedInternalMapStateTest {
                 false,
                 0.0,
                 1,
-                false);
+                false,
+                false, 0, null, 0);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         for (Map.Entry<String, Integer> ignored : state.entries()) {
@@ -196,5 +203,82 @@ class CachedInternalMapStateTest {
 
         state.contains("uk1");
         verify(delegate, times(1)).contains("uk1");
+    }
+
+    @Test
+    void testIteratorServedFromCache() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        Map<String, Integer> mockEntries = new java.util.HashMap<>();
+        mockEntries.put("A", 1);
+        mockEntries.put("B", 2);
+        when(delegate.iterator()).thenAnswer(i -> mockEntries.entrySet().iterator());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
+                delegate,
+                currentKey::get,
+                100, CachePolicyType.LRU, 0, PresenceCacheImplementation.PRIMITIVE,
+                0, CachePolicyType.LRU, 0, false, 0.0, 1, true,
+                true, 100, CachePolicyType.LRU, 1000);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        // First iteration: populates cache
+        int count1 = 0;
+        for (Map.Entry<String, Integer> ignored : state.entries()) {
+            count1++;
+        }
+        verify(delegate, times(1)).iterator();
+
+        // Second iteration: should be from cache
+        clearInvocations(delegate);
+        int count2 = 0;
+        for (Map.Entry<String, Integer> ignored : state.entries()) {
+            count2++;
+        }
+        // delegate.iterator() should NOT be called again
+        verify(delegate, times(0)).iterator();
+    }
+
+    @Test
+    void testIteratorCacheUpdates() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        Map<String, Integer> mockEntries = new java.util.HashMap<>();
+        mockEntries.put("A", 1);
+        when(delegate.iterator()).thenAnswer(i -> mockEntries.entrySet().iterator());
+        doAnswer(invocation -> {
+            mockEntries.put(invocation.getArgument(0), invocation.getArgument(1));
+            return null;
+        }).when(delegate).put(any(), any());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
+                delegate,
+                currentKey::get,
+                100, CachePolicyType.LRU, 0, PresenceCacheImplementation.PRIMITIVE,
+                0, CachePolicyType.LRU, 0, false, 0.0, 1, true,
+                true, 100, CachePolicyType.LRU, 1000);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        // Populate cache
+        for (Map.Entry<String, Integer> ignored : state.entries()) {
+        }
+
+        // Add new item
+        state.put("B", 2);
+        // Delegate put OK to be called
+        verify(delegate, times(1)).put("B", 2);
+
+        // Iterate again
+        clearInvocations(delegate);
+        Map<String, Integer> result = new java.util.HashMap<>();
+        for (Map.Entry<String, Integer> e : state.entries()) {
+            result.put(e.getKey(), e.getValue());
+        }
+
+        // Should contain both
+        assertTrue(result.containsKey("A"));
+        assertTrue(result.containsKey("B"));
+        // Should not call delegate iterator
+        verify(delegate, times(0)).iterator();
     }
 }

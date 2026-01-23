@@ -83,6 +83,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final double mapHitRateThreshold;
     private final int mapHitRateWindow;
     private final boolean mapIterationCacheFillEnabled;
+    private final boolean mapIteratorCacheEnabled;
+    private final int mapIteratorCacheMaxEntries;
+    private final CachePolicyType mapIteratorCachePolicy;
+    private final int mapIteratorCacheMaxMapSize;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -109,7 +113,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean mapBypassEnabled,
             double mapHitRateThreshold,
             int mapHitRateWindow,
-            boolean mapIterationCacheFillEnabled) {
+            boolean mapIterationCacheFillEnabled,
+            boolean mapIteratorCacheEnabled,
+            int mapIteratorCacheMaxEntries,
+            CachePolicyType mapIteratorCachePolicy,
+            int mapIteratorCacheMaxMapSize) {
+
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -139,6 +148,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapHitRateThreshold = mapHitRateThreshold;
         this.mapHitRateWindow = mapHitRateWindow;
         this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
+        this.mapIteratorCacheEnabled = mapIteratorCacheEnabled;
+        this.mapIteratorCacheMaxEntries = mapIteratorCacheMaxEntries;
+        this.mapIteratorCachePolicy = mapIteratorCachePolicy;
+        this.mapIteratorCacheMaxMapSize = mapIteratorCacheMaxMapSize;
     }
 
     @Override
@@ -202,7 +215,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapBypassEnabled,
                     mapHitRateThreshold,
                     mapHitRateWindow,
-                    mapIterationCacheFillEnabled);
+                    mapIterationCacheFillEnabled,
+                    mapIteratorCacheEnabled,
+                    mapIteratorCacheMaxEntries,
+                    mapIteratorCachePolicy,
+                    mapIteratorCacheMaxMapSize);
+
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -284,7 +302,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapBypassEnabled,
                     mapHitRateThreshold,
                     mapHitRateWindow,
-                    mapIterationCacheFillEnabled);
+                    mapIterationCacheFillEnabled,
+                    mapIteratorCacheEnabled,
+                    mapIteratorCacheMaxEntries,
+                    mapIteratorCachePolicy,
+                    mapIteratorCacheMaxMapSize);
+
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }

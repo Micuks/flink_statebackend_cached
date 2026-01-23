@@ -1,0 +1,56 @@
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::staticFieldBase has been called by com.google.inject.internal.aop.HiddenClassDefiner (file:/C:/Users/Louis%20Wu/scoop/apps/maven/current/lib/guice-5.1.0-classes.jar)
+WARNING: Please consider reporting this to the maintainers of class com.google.inject.internal.aop.HiddenClassDefiner
+WARNING: sun.misc.Unsafe::staticFieldBase will be removed in a future release
+[INFO] Error stacktraces are turned on.
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] ------------< org.apache.flink:flink-statebackend-cachekit >------------
+[INFO] Building Flink : State backends : CacheKit 1.16-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- clean:3.1.0:clean (default-clean) @ flink-statebackend-cachekit ---
+[INFO] Deleting C:\Users\Louis Wu\Dev\flink_statebackend_cached\flink-state-backends\flink-statebackend-cachekit\target
+[INFO] 
+[INFO] --- checkstyle:3.1.2:check (validate) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- spotless:2.13.0:check (spotless-check) @ flink-statebackend-cachekit ---
+[INFO] Spotless check skipped
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (enforce-maven-version) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (enforce-maven) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (ban-unsafe-snakeyaml) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (ban-unsafe-jackson) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (forbid-log4j-1) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (forbid-direct-akka-rpc-dependencies) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (forbid-direct-table-planner-dependencies) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- enforcer:3.0.0-M1:enforce (enforce-versions) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- directory:0.1:directory-of (directories) @ flink-statebackend-cachekit ---
+[INFO] Directory of org.apache.flink:flink-parent set to: C:\Users\Louis Wu\Dev\flink_statebackend_cached
+[INFO] 
+[INFO] --- remote-resources:1.5:process (process-resource-bundles) @ flink-statebackend-cachekit ---
+[INFO] 
+[INFO] --- resources:3.1.0:resources (default-resources) @ flink-statebackend-cachekit ---
+[INFO] Using 'UTF-8' encoding to copy filtered resources.
+[INFO] skip non existing resourceDirectory C:\Users\Louis Wu\Dev\flink_statebackend_cached\flink-state-backends\flink-statebackend-cachekit\src\main\resources
+[INFO] Copying 3 resources
+[INFO] 
+[INFO] --- compiler:3.8.0:compile (default-compile) @ flink-statebackend-cachekit ---
+[INFO] Compiling 13 source files to C:\Users\Louis Wu\Dev\flink_statebackend_cached\flink-state-backends\flink-statebackend-cachekit\target\classes
+[INFO] /C:/Users/Louis Wu/Dev/flink_statebackend_cached/flink-state-backends/flink-statebackend-cachekit/src/main/java/org/apache/flink/contrib/streaming/state/cachekit/cache/PrimitivePresenceCache.java: C:\Users\Louis Wu\Dev\flink_statebackend_cached\flink-state-backends\flink-statebackend-cachekit\src\main\java\org\apache\flink\contrib\streaming\state\cachekit\cache\PrimitivePresenceCache.java uses unchecked or unsafe operations.
+[INFO] /C:/Users/Louis Wu/Dev/flink_statebackend_cached/flink-state-backends/flink-statebackend-cachekit/src/main/java/org/apache/flink/contrib/streaming/state/cachekit/cache/PrimitivePresenceCache.java: Recompile with -Xlint:unchecked for details.
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  16.570 s
+[INFO] Finished at: 2026-01-23T11:53:55+08:00
+[INFO] ------------------------------------------------------------------------

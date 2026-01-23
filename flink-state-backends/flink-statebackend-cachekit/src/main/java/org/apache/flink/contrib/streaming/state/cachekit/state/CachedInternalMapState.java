@@ -70,6 +70,13 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
     private N currentNamespace;
     private final KeyNamespaceUserKey<K, N, UK> lookupKey = new KeyNamespaceUserKey<>(null, null, null);
+    private final KeyNamespace<K, N> iteratorLookupKey = new KeyNamespace<>(null, null);
+
+    private final boolean iteratorCacheEnabled;
+    private final int iteratorCacheMaxEntries;
+    private final CachePolicyType iteratorCachePolicyType;
+    private final int iteratorCacheMaxMapSize;
+    private final CachePolicy<KeyNamespace<K, N>, Map<UK, UV>> l1IteratorCache;
 
     private volatile boolean isBypassing = false;
     private long currentWindowAccesses = 0;
@@ -89,7 +96,12 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             boolean bypassEnabled,
             double hitRateThreshold,
             int hitRateWindow,
-            boolean iterationCacheFillEnabled) {
+            boolean iterationCacheFillEnabled,
+            boolean iteratorCacheEnabled,
+            int iteratorCacheMaxEntries,
+            CachePolicyType iteratorCachePolicyType,
+            int iteratorCacheMaxMapSize) {
+
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.presenceCachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
@@ -104,6 +116,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         this.hitRateThreshold = hitRateThreshold;
         this.hitRateWindow = hitRateWindow;
         this.iterationCacheFillEnabled = iterationCacheFillEnabled;
+        this.iteratorCacheEnabled = iteratorCacheEnabled && iteratorCacheMaxEntries > 0;
+        this.iteratorCacheMaxEntries = iteratorCacheMaxEntries;
+        this.iteratorCachePolicyType = iteratorCachePolicyType != null ? iteratorCachePolicyType : CachePolicyType.LRU;
+        this.iteratorCacheMaxMapSize = iteratorCacheMaxMapSize;
+
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
         TypeSerializer<UK> resolvedUserKeySerializer = null;
@@ -156,6 +173,13 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             this.l1ValueCache = new NoOpCachePolicy<>();
             this.l2ValueCache = new NoOpCachePolicy<>();
         }
+
+        if (this.iteratorCacheEnabled) {
+            this.l1IteratorCache = createIteratorCachePolicy(
+                    iteratorCacheMaxEntries, this.iteratorCachePolicyType, 0, this::onIteratorCacheEviction);
+        } else {
+            this.l1IteratorCache = new NoOpCachePolicy<>();
+        }
     }
 
     // Helper to update lookup key safely without allocation
@@ -163,6 +187,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         lookupKey.key = key;
         lookupKey.namespace = namespace;
         lookupKey.userKey = userKey;
+    }
+
+    private void setIteratorLookupKey(K key, N namespace) {
+        iteratorLookupKey.key = key;
+        iteratorLookupKey.namespace = namespace;
     }
 
     @Override
@@ -227,6 +256,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, true);
         }
+        if (iteratorCacheEnabled) {
+            updateIteratorCache(currentKey, userKey, userValue);
+        }
     }
 
     @Override
@@ -249,7 +281,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             if (presenceCacheEnabled) {
                 updatePresence(currentKey, uKey, entry.getValue() != null);
             }
+            if (iteratorCacheEnabled) {
+                updateIteratorCache(currentKey, uKey, entry.getValue());
+            }
         }
+
     }
 
     @Override
@@ -266,6 +302,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, false);
+        }
+        if (iteratorCacheEnabled) {
+            updateIteratorCache(currentKey, userKey, null);
         }
     }
 
@@ -311,53 +350,91 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
     @Override
     public Iterable<Map.Entry<UK, UV>> entries() throws Exception {
-        ensureDelegateNamespace(null); // Key not needed for this check
-        Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
-        if (!mapCacheEnabled && !presenceCacheEnabled) {
-            return entries;
-        }
-        if (!iterationCacheFillEnabled) {
-            return entries;
-        }
-        return cacheEntries(entries);
+        return () -> {
+            try {
+                return iterator();
+            } catch (Exception e) {
+                // Determine if we should wrap or if there's a specific Flink exception to use
+                throw new RuntimeException("Error while iterating over map state", e);
+            }
+        };
     }
 
     @Override
     public Iterable<UK> keys() throws Exception {
-        ensureDelegateNamespace(null);
-        if (!mapCacheEnabled && !presenceCacheEnabled) {
-            return delegate.keys();
-        }
-        if (!iterationCacheFillEnabled) {
-            return delegate.keys();
-        }
-        Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
-        return cacheKeys(entries);
+        return () -> {
+            try {
+                final Iterator<Map.Entry<UK, UV>> iterator = iterator();
+                return new Iterator<UK>() {
+                    @Override
+                    public boolean hasNext() {
+                        return iterator.hasNext();
+                    }
+
+                    @Override
+                    public UK next() {
+                        return iterator.next().getKey();
+                    }
+                };
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        };
     }
 
     @Override
     public Iterable<UV> values() throws Exception {
-        ensureDelegateNamespace(null);
-        if (!mapCacheEnabled && !presenceCacheEnabled) {
-            return delegate.values();
-        }
-        if (!iterationCacheFillEnabled) {
-            return delegate.values();
-        }
-        Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
-        return cacheValues(entries);
+        return () -> {
+            try {
+                final Iterator<Map.Entry<UK, UV>> iterator = iterator();
+                return new Iterator<UV>() {
+                    @Override
+                    public boolean hasNext() {
+                        return iterator.hasNext();
+                    }
+
+                    @Override
+                    public UV next() {
+                        return iterator.next().getValue();
+                    }
+                };
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        };
     }
 
     @Override
     public Iterator<Map.Entry<UK, UV>> iterator() throws Exception {
         ensureDelegateNamespace(null);
+
+        // 1. Check Iterator Cache (L1)
+        if (iteratorCacheEnabled) {
+            K currentKey = currentKeyProvider.getCurrentKey();
+            setIteratorLookupKey(currentKey, currentNamespace);
+            Map<UK, UV> cachedMap = l1IteratorCache.get(iteratorLookupKey);
+            if (cachedMap != null) {
+                // Return iterator from cached map
+                return cachedMap.entrySet().iterator();
+            }
+        }
+
         Iterator<Map.Entry<UK, UV>> iterator = delegate.iterator();
-        if (!mapCacheEnabled && !presenceCacheEnabled) {
+
+        if (!mapCacheEnabled && !presenceCacheEnabled && !iteratorCacheEnabled) {
             return iterator;
         }
+
+        if (iteratorCacheEnabled && iterationCacheFillEnabled) {
+            // If not in cache, use a collecting iterator that populates the cache
+            K currentKey = currentKeyProvider.getCurrentKey();
+            return new CachePopulatingEntryIterator(iterator, currentKey, currentNamespace);
+        }
+
         if (!iterationCacheFillEnabled) {
             return iterator;
         }
+
         return new CachingEntryIterator(iterator);
     }
 
@@ -373,6 +450,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         delegate.clear();
         clearPresenceCaches();
         clearValueCaches();
+        clearIteratorCache();
     }
 
     @Override
@@ -697,7 +775,120 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
     }
 
+    private void clearIteratorCache() {
+        if (!iteratorCacheEnabled) {
+            return;
+        }
+        l1IteratorCache.clear();
+    }
+
+    private <V> CachePolicy<KeyNamespace<K, N>, V> createIteratorCachePolicy(
+            int maxEntries,
+            CachePolicyType policyType,
+            int lruOverflow,
+            java.util.function.BiConsumer<KeyNamespace<K, N>, V> evictionListener) {
+        if (policyType == CachePolicyType.CAFFEINE) {
+            return new CaffeineCachePolicy<>(maxEntries, evictionListener);
+        }
+        return new LruCachePolicy<>(maxEntries, lruOverflow, evictionListener);
+    }
+
+    private void onIteratorCacheEviction(KeyNamespace<K, N> key, Map<UK, UV> value) {
+        // No L2 for iterator cache currently
+    }
+
+    private void updateIteratorCache(K currentKey, UK userKey, UV userValue) {
+        setIteratorLookupKey(currentKey, currentNamespace);
+        Map<UK, UV> cachedMap = l1IteratorCache.get(iteratorLookupKey);
+        if (cachedMap != null) {
+            if (userValue == null) {
+                cachedMap.remove(userKey);
+            } else {
+                cachedMap.put(userKey, userValue);
+            }
+        }
+    }
+
+    private static final class KeyNamespace<K, N> {
+        private K key;
+        private N namespace;
+
+        private KeyNamespace(K key, N namespace) {
+            this.key = key;
+            this.namespace = namespace;
+        }
+
+        private KeyNamespace(K key, N namespace, TypeSerializer<K> keySerializer,
+                TypeSerializer<N> namespaceSerializer) {
+            this.key = keySerializer != null ? keySerializer.copy(key) : key;
+            this.namespace = namespaceSerializer != null ? namespaceSerializer.copy(namespace) : namespace;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o)
+                return true;
+            if (o == null || getClass() != o.getClass())
+                return false;
+            KeyNamespace<?, ?> that = (KeyNamespace<?, ?>) o;
+            return Objects.equals(key, that.key) && Objects.equals(namespace, that.namespace);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(key, namespace);
+        }
+    }
+
+    private final class CachePopulatingEntryIterator implements Iterator<Map.Entry<UK, UV>> {
+        private final Iterator<Map.Entry<UK, UV>> delegateIterator;
+        private final K key;
+        private final N namespace;
+        private final Map<UK, UV> collectedMap;
+        private boolean sizeExceeded;
+
+        private CachePopulatingEntryIterator(Iterator<Map.Entry<UK, UV>> delegateIterator, K key, N namespace) {
+            this.delegateIterator = delegateIterator;
+            this.key = key;
+            this.namespace = namespace;
+            this.collectedMap = new java.util.HashMap<>();
+            this.sizeExceeded = false;
+        }
+
+        @Override
+        public boolean hasNext() {
+            if (delegateIterator.hasNext()) {
+                return true;
+            } else {
+                // End of iteration. If size within limits, cache the map.
+                if (!sizeExceeded) {
+                    KeyNamespace<K, N> storageKey = new KeyNamespace<>(key, namespace, keySerializer,
+                            namespaceSerializer);
+                    l1IteratorCache.put(storageKey, collectedMap);
+                }
+                return false;
+            }
+        }
+
+        @Override
+        public Map.Entry<UK, UV> next() {
+            Map.Entry<UK, UV> entry = delegateIterator.next();
+            if (!sizeExceeded) {
+                collectedMap.put(entry.getKey(), entry.getValue());
+                if (collectedMap.size() > iteratorCacheMaxMapSize) {
+                    sizeExceeded = true;
+                    collectedMap.clear(); // Free memory
+                }
+            }
+            if (iterationCacheFillEnabled) {
+                cacheEntry(entry); // Also fill L1 entry cache if enabled
+            }
+            return entry;
+        }
+    }
+
     private static final class KeyNamespaceUserKey<K, N, UK> {
+
         private K key;
         private N namespace;
         private UK userKey;
