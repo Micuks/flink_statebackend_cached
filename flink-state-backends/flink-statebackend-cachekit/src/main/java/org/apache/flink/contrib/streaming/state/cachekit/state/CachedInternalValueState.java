@@ -35,6 +35,7 @@ import javax.annotation.Nonnull;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -376,6 +377,21 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             int keyGroupPrefixBytes = backend.getKeyGroupPrefixBytes();
             int numberOfKeyGroups = backend.getNumberOfKeyGroups();
             
+            // Use reflection to access protected/non-public fields and methods
+            Field dbField = RocksDBKeyedStateBackend.class.getDeclaredField("db");
+            dbField.setAccessible(true);
+            org.rocksdb.RocksDB db = (org.rocksdb.RocksDB) dbField.get(backend);
+            
+            java.lang.reflect.Method getWriteBatchSizeMethod = RocksDBKeyedStateBackend.class.getDeclaredMethod("getWriteBatchSize");
+            getWriteBatchSizeMethod.setAccessible(true);
+            long writeBatchSize = (Long) getWriteBatchSizeMethod.invoke(backend);
+            
+            // Get value serializer from AbstractRocksDBState
+            Field valueSerializerField = AbstractRocksDBState.class.getDeclaredField("valueSerializer");
+            valueSerializerField.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            TypeSerializer<V> rocksDBValueSerializer = (TypeSerializer<V>) valueSerializerField.get(rocksDBState);
+            
             // Create a new key builder and data output serializer for batch operations
             // (to avoid state conflicts with concurrent operations)
             SerializedCompositeKeyBuilder<K> keyBuilder = new SerializedCompositeKeyBuilder<>(
@@ -384,7 +400,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
             // Use batch write
             try (RocksDBWriteBatchWrapper writeBatchWrapper =
-                    new RocksDBWriteBatchWrapper(backend.db, writeOptions, backend.getWriteBatchSize())) {
+                    new RocksDBWriteBatchWrapper(db, writeOptions, writeBatchSize)) {
                 
                 for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : dirtyEntries) {
                     KeyNamespaceKey<K, N> keyNamespaceKey = entry.getKey();
@@ -406,7 +422,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     } else {
                         // Serialize value
                         dataOutputView.clear();
-                        valueSerializer.serialize(val.value, dataOutputView);
+                        rocksDBValueSerializer.serialize(val.value, dataOutputView);
                         byte[] valueBytes = dataOutputView.getCopyOfBuffer();
                         writeBatchWrapper.put(columnFamily, compositeKey, valueBytes);
                     }
