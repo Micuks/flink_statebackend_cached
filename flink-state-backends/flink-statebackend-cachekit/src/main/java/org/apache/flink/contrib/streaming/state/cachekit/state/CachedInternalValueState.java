@@ -15,16 +15,28 @@
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.contrib.streaming.state.AbstractRocksDBState;
+import org.apache.flink.contrib.streaming.state.RocksDBKeyedStateBackend;
+import org.apache.flink.contrib.streaming.state.RocksDBWriteBatchWrapper;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.LruCachePolicy;
+import org.apache.flink.core.memory.DataOutputSerializer;
+import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
+import org.apache.flink.runtime.state.SerializedCompositeKeyBuilder;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
+
+import org.rocksdb.ColumnFamilyHandle;
+import org.rocksdb.RocksDBException;
 
 import javax.annotation.Nonnull;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -294,23 +306,118 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     public void flush() {
         // Flush L1 dirty entries to L2 (which writes through)
-        java.util.List<java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>>> dirtyEntries = new java.util.ArrayList<>();
+        List<java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>>> dirtyEntries = new ArrayList<>();
         for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : l1Cache.entries()) {
             if (entry.getValue().dirty) {
                 dirtyEntries.add(entry);
             }
         }
-        for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : dirtyEntries) {
-            CachedValue<V> val = entry.getValue();
-            if (val.dirty) {
-                // Push to L2 (Write-Through)
-                // We simulate eviction to L2
-                l2Cache.put(entry.getKey(), CachedValue.of(val.value, false)); // L2 holds clean
-                flushEntryToDelegate(entry.getKey(), val); // Write-through to delegate
+        
+        if (dirtyEntries.isEmpty()) {
+            return;
+        }
 
-                // Mark L1 clean
-                l1Cache.put(entry.getKey(), CachedValue.of(val.value, false));
+        // Try to use batch write if delegate is RocksDB implementation
+        if (tryFlushBatch(dirtyEntries)) {
+            // Batch flush succeeded, update cache states
+            for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : dirtyEntries) {
+                CachedValue<V> val = entry.getValue();
+                if (val.dirty) {
+                    // Push to L2 (Write-Through)
+                    l2Cache.put(entry.getKey(), CachedValue.of(val.value, false)); // L2 holds clean
+                    // Mark L1 clean
+                    l1Cache.put(entry.getKey(), CachedValue.of(val.value, false));
+                }
             }
+        } else {
+            // Fallback to individual flush
+            for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : dirtyEntries) {
+                CachedValue<V> val = entry.getValue();
+                if (val.dirty) {
+                    // Push to L2 (Write-Through)
+                    // We simulate eviction to L2
+                    l2Cache.put(entry.getKey(), CachedValue.of(val.value, false)); // L2 holds clean
+                    flushEntryToDelegate(entry.getKey(), val); // Write-through to delegate
+
+                    // Mark L1 clean
+                    l1Cache.put(entry.getKey(), CachedValue.of(val.value, false));
+                }
+            }
+        }
+    }
+
+    /**
+     * Attempts to flush entries using RocksDB batch write for better performance.
+     * Returns true if batch write was used, false otherwise (fallback to individual writes).
+     */
+    private boolean tryFlushBatch(List<java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>>> dirtyEntries) {
+        // Check if delegate is RocksDB implementation
+        // 相信清柳delegate一定配的是rocksDB，先不检查了
+        // if (!(delegate instanceof AbstractRocksDBState)) {
+        //     return false;
+        // }
+
+        try {
+            AbstractRocksDBState<K, N, V> rocksDBState = (AbstractRocksDBState<K, N, V>) delegate;
+            
+            // Use reflection to access protected fields
+            Field backendField = AbstractRocksDBState.class.getDeclaredField("backend");
+            backendField.setAccessible(true);
+            RocksDBKeyedStateBackend<K> backend = (RocksDBKeyedStateBackend<K>) backendField.get(rocksDBState);
+
+            Field columnFamilyField = AbstractRocksDBState.class.getDeclaredField("columnFamily");
+            columnFamilyField.setAccessible(true);
+            ColumnFamilyHandle columnFamily = (ColumnFamilyHandle) columnFamilyField.get(rocksDBState);
+
+            Field writeOptionsField = AbstractRocksDBState.class.getDeclaredField("writeOptions");
+            writeOptionsField.setAccessible(true);
+            org.rocksdb.WriteOptions writeOptions = (org.rocksdb.WriteOptions) writeOptionsField.get(rocksDBState);
+
+            int keyGroupPrefixBytes = backend.getKeyGroupPrefixBytes();
+            int numberOfKeyGroups = backend.getNumberOfKeyGroups();
+            
+            // Create a new key builder and data output serializer for batch operations
+            // (to avoid state conflicts with concurrent operations)
+            SerializedCompositeKeyBuilder<K> keyBuilder = new SerializedCompositeKeyBuilder<>(
+                    keySerializer, keyGroupPrefixBytes, 32);
+            DataOutputSerializer dataOutputView = new DataOutputSerializer(128);
+
+            // Use batch write
+            try (RocksDBWriteBatchWrapper writeBatchWrapper =
+                    new RocksDBWriteBatchWrapper(backend.db, writeOptions, backend.getWriteBatchSize())) {
+                
+                for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : dirtyEntries) {
+                    KeyNamespaceKey<K, N> keyNamespaceKey = entry.getKey();
+                    CachedValue<V> val = entry.getValue();
+
+                    // Calculate key group
+                    int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(
+                            keyNamespaceKey.key, numberOfKeyGroups);
+
+                    // Serialize composite key (key group + key + namespace)
+                    keyBuilder.setKeyAndKeyGroup(keyNamespaceKey.key, keyGroup);
+                    byte[] compositeKey = keyBuilder.buildCompositeKeyNamespace(
+                            keyNamespaceKey.namespace, namespaceSerializer);
+
+                    // Serialize value
+                    if (val.isNull) {
+                        // For null values, we need to delete the key
+                        writeBatchWrapper.remove(columnFamily, compositeKey);
+                    } else {
+                        // Serialize value
+                        dataOutputView.clear();
+                        valueSerializer.serialize(val.value, dataOutputView);
+                        byte[] valueBytes = dataOutputView.getCopyOfBuffer();
+                        writeBatchWrapper.put(columnFamily, compositeKey, valueBytes);
+                    }
+                }
+            } // Auto-close will flush the batch
+
+            return true;
+        } catch (Exception e) {
+            // If batch write fails for any reason, fallback to individual writes
+            // Log the exception but don't throw - we'll fallback gracefully
+            return false;
         }
     }
 
