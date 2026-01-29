@@ -58,6 +58,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final boolean mapCacheEnabled;
     private final CachePolicyType mapCachePolicyType;
     private final int mapCacheLruOverflow;
+    private final java.util.function.Consumer<K> keyContextSetter;
     private final boolean bypassEnabled;
     private final double hitRateThreshold;
     private final int hitRateWindow;
@@ -66,6 +67,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
     private final TypeSerializer<UK> userKeySerializer;
+    private final TypeSerializer<UV> userValueSerializer;
     private final ThreadLocal<DataOutputSerializer> serializerView;
 
     private N currentNamespace;
@@ -79,6 +81,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     public CachedInternalMapState(
             InternalMapState<K, N, UK, UV> delegate,
             CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
             int maxEntries,
             CachePolicyType cachePolicyType,
             int lruOverflow,
@@ -92,6 +95,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             boolean iterationCacheFillEnabled) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
+        this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
         this.presenceCachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
         this.presenceCacheLruOverflow = Math.max(0, lruOverflow);
         this.presenceCacheEnabled = maxEntries > 0;
@@ -107,11 +111,14 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
         TypeSerializer<UK> resolvedUserKeySerializer = null;
+        TypeSerializer<UV> resolvedUserValueSerializer = null;
         TypeSerializer<Map<UK, UV>> valueSerializer = delegate.getValueSerializer();
         if (valueSerializer instanceof MapSerializer) {
             resolvedUserKeySerializer = ((MapSerializer<UK, UV>) valueSerializer).getKeySerializer();
+            resolvedUserValueSerializer = ((MapSerializer<UK, UV>) valueSerializer).getValueSerializer();
         }
         this.userKeySerializer = resolvedUserKeySerializer;
+        this.userValueSerializer = resolvedUserValueSerializer;
         this.usePrimitivePresenceCache = presenceCacheImplementation == PresenceCacheImplementation.PRIMITIVE
                 && keySerializer != null
                 && namespaceSerializer != null
@@ -178,7 +185,14 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         setLookupKey(currentKey, currentNamespace, userKey);
 
         if (bypassEnabled && isBypassing && shouldBypassRead()) {
-            return delegate.get(userKey);
+            UV value = delegate.get(userKey);
+            if (mapCacheEnabled) {
+                updateValueCache(currentKey, userKey, value, false);
+            }
+            if (presenceCacheEnabled) {
+                updatePresence(currentKey, userKey, value != null);
+            }
+            return value;
         }
 
         if (mapCacheEnabled) {
@@ -198,7 +212,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         UV value = delegate.get(userKey);
         recordAccess(false);
         if (mapCacheEnabled) {
-            updateValueCache(currentKey, userKey, value);
+            updateValueCache(currentKey, userKey, value, false);
         }
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, value != null);
@@ -218,11 +232,13 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             remove(userKey);
             return;
         }
-        delegate.put(userKey, userValue);
+        boolean writeThrough = !mapCacheEnabled || (bypassEnabled && isBypassing);
+        if (writeThrough) {
+            delegate.put(userKey, userValue);
+        }
 
-        // Cache Update need deep copy for storage
         if (mapCacheEnabled) {
-            updateValueCache(currentKey, userKey, userValue);
+            updateValueCache(currentKey, userKey, userValue, !writeThrough);
         }
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, true);
@@ -237,14 +253,17 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
 
-        delegate.putAll(map);
+        boolean writeThrough = !mapCacheEnabled || (bypassEnabled && isBypassing);
+        if (writeThrough) {
+            delegate.putAll(map);
+        }
         for (Map.Entry<UK, UV> entry : map.entrySet()) {
             UK uKey = entry.getKey();
             if (uKey == null) {
                 continue;
             }
             if (mapCacheEnabled) {
-                updateValueCache(currentKey, uKey, entry.getValue());
+                updateValueCache(currentKey, uKey, entry.getValue(), !writeThrough);
             }
             if (presenceCacheEnabled) {
                 updatePresence(currentKey, uKey, entry.getValue() != null);
@@ -260,9 +279,12 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
 
-        delegate.remove(userKey);
+        boolean writeThrough = !mapCacheEnabled || (bypassEnabled && isBypassing);
+        if (writeThrough) {
+            delegate.remove(userKey);
+        }
         if (mapCacheEnabled) {
-            updateValueCache(currentKey, userKey, null);
+            updateValueCache(currentKey, userKey, null, !writeThrough);
         }
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, false);
@@ -281,7 +303,14 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         setLookupKey(currentKey, currentNamespace, userKey);
 
         if (bypassEnabled && isBypassing && shouldBypassRead()) {
-            return delegate.contains(userKey);
+            boolean exists = delegate.contains(userKey);
+            if (mapCacheEnabled && !exists) {
+                updateValueCache(currentKey, userKey, null, false);
+            }
+            if (presenceCacheEnabled) {
+                updatePresence(currentKey, userKey, exists);
+            }
+            return exists;
         }
 
         if (mapCacheEnabled) {
@@ -301,7 +330,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         boolean exists = delegate.contains(userKey);
         recordAccess(false);
         if (mapCacheEnabled && !exists) {
-            updateValueCache(currentKey, userKey, null);
+            updateValueCache(currentKey, userKey, null, false);
         }
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, exists);
@@ -373,6 +402,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         delegate.clear();
         clearPresenceCaches();
         clearValueCaches();
+        resetBypassState();
     }
 
     @Override
@@ -406,6 +436,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             TypeSerializer<Map<UK, UV>> safeValueSerializer)
             throws Exception {
         ensureDelegateNamespace(null);
+        flush();
         return delegate.getSerializedValue(
                 serializedKeyAndNamespace, safeKeySerializer, safeNamespaceSerializer, safeValueSerializer);
     }
@@ -414,6 +445,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     public StateIncrementalVisitor<K, N, Map<UK, UV>> getStateIncrementalVisitor(
             int recommendedMaxNumberOfReturnedRecords) {
         ensureDelegateNamespace(null);
+        flush();
         return delegate.getStateIncrementalVisitor(recommendedMaxNumberOfReturnedRecords);
     }
 
@@ -506,8 +538,32 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (!mapCacheEnabled) {
             return;
         }
-        l1ValueCache.clear();
-        l2ValueCache.clear();
+        K currentKey = currentKeyProvider.getCurrentKey();
+        if (currentKey == null || currentNamespace == null) {
+            l1ValueCache.clear();
+            l2ValueCache.clear();
+            return;
+        }
+        removeValueEntriesForNamespace(l1ValueCache, currentKey, currentNamespace);
+        removeValueEntriesForNamespace(l2ValueCache, currentKey, currentNamespace);
+    }
+
+    private void removeValueEntriesForNamespace(
+            CachePolicy<KeyNamespaceUserKey<K, N, UK>, CachedMapValue<UV>> cache,
+            K currentKey,
+            N namespace) {
+        java.util.List<KeyNamespaceUserKey<K, N, UK>> toRemove = new java.util.ArrayList<>();
+        for (Map.Entry<KeyNamespaceUserKey<K, N, UK>, CachedMapValue<UV>> entry : cache.entries()) {
+            KeyNamespaceUserKey<K, N, UK> key = entry.getKey();
+            if (key != null
+                    && Objects.equals(currentKey, key.key)
+                    && Objects.equals(namespace, key.namespace)) {
+                toRemove.add(key);
+            }
+        }
+        for (KeyNamespaceUserKey<K, N, UK> key : toRemove) {
+            cache.remove(key);
+        }
     }
 
     private CachedMapValue<UV> getCachedValue(K currentKey) {
@@ -530,17 +586,25 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         return cached;
     }
 
-    private void updateValueCache(K currentKey, UK userKey, UV userValue) {
+    private void updateValueCache(K currentKey, UK userKey, UV userValue, boolean dirty) {
         if (currentKey == null || currentNamespace == null) {
             return;
         }
+        UV cachedValue = copyUserValue(userValue);
         KeyNamespaceUserKey<K, N, UK> storage = new KeyNamespaceUserKey<>(currentKey, currentNamespace, userKey,
                 keySerializer, namespaceSerializer, userKeySerializer);
-        CachedMapValue<UV> cached = CachedMapValue.of(userValue);
+        CachedMapValue<UV> cached = CachedMapValue.of(cachedValue, dirty);
         l1ValueCache.put(storage, cached);
         // remove allows probe key
         setLookupKey(currentKey, currentNamespace, userKey);
         l2ValueCache.remove(lookupKey);
+    }
+
+    private UV copyUserValue(UV value) {
+        if (value == null || userValueSerializer == null) {
+            return value;
+        }
+        return userValueSerializer.copy(value);
     }
 
     private Iterable<Map.Entry<UK, UV>> cacheEntries(Iterable<Map.Entry<UK, UV>> entries) {
@@ -593,7 +657,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         K currentKey = currentKeyProvider.getCurrentKey();
         if (mapCacheEnabled) {
-            updateValueCache(currentKey, userKey, entry.getValue());
+            updateValueCache(currentKey, userKey, entry.getValue(), false);
         }
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, entry.getValue() != null);
@@ -654,11 +718,19 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (key == null || value == null) {
             return;
         }
+        if (value.dirty) {
+            flushEntryToDelegate(key, value);
+            l2ValueCache.put(key, CachedMapValue.of(value.valueOrNull(), false));
+            return;
+        }
         l2ValueCache.put(key, value);
     }
 
     private void onValueL2Eviction(KeyNamespaceUserKey<K, N, UK> key, CachedMapValue<UV> value) {
-        // MapState cache doesn't need flush on L2 eviction.
+        if (key == null || value == null || !value.dirty) {
+            return;
+        }
+        flushEntryToDelegate(key, value);
     }
 
     private boolean shouldBypassRead() {
@@ -688,12 +760,67 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                     opsSinceLastSample = 0;
                 }
             } else if (shouldBypass) {
+                flush();
                 isBypassing = true;
                 opsSinceLastSample = 0;
             }
 
             currentWindowAccesses = 0;
             currentWindowHits = 0;
+        }
+    }
+
+    private void resetBypassState() {
+        isBypassing = false;
+        currentWindowAccesses = 0;
+        currentWindowHits = 0;
+        opsSinceLastSample = 0;
+    }
+
+    public void flush() {
+        if (!mapCacheEnabled) {
+            return;
+        }
+        java.util.List<Map.Entry<KeyNamespaceUserKey<K, N, UK>, CachedMapValue<UV>>> dirtyEntries =
+                new java.util.ArrayList<>();
+        for (Map.Entry<KeyNamespaceUserKey<K, N, UK>, CachedMapValue<UV>> entry : l1ValueCache.entries()) {
+            CachedMapValue<UV> value = entry.getValue();
+            if (value != null && value.dirty) {
+                dirtyEntries.add(entry);
+            }
+        }
+        for (Map.Entry<KeyNamespaceUserKey<K, N, UK>, CachedMapValue<UV>> entry : dirtyEntries) {
+            CachedMapValue<UV> value = entry.getValue();
+            if (value != null && value.dirty) {
+                flushEntryToDelegate(entry.getKey(), value);
+                CachedMapValue<UV> clean = CachedMapValue.of(value.valueOrNull(), false);
+                l2ValueCache.put(entry.getKey(), clean);
+                l1ValueCache.put(entry.getKey(), clean);
+            }
+        }
+    }
+
+    private void flushEntryToDelegate(KeyNamespaceUserKey<K, N, UK> key, CachedMapValue<UV> value) {
+        if (key == null || value == null) {
+            return;
+        }
+        K previousKey = currentKeyProvider.getCurrentKey();
+        N previousNamespace = currentNamespace;
+        keyContextSetter.accept(key.key);
+        delegate.setCurrentNamespace(key.namespace);
+        try {
+            if (value.isNull) {
+                delegate.remove(key.userKey);
+            } else {
+                delegate.put(key.userKey, value.value);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to flush MapState entry to delegate", e);
+        } finally {
+            keyContextSetter.accept(previousKey);
+            if (previousNamespace != null) {
+                delegate.setCurrentNamespace(previousNamespace);
+            }
         }
     }
 
@@ -793,14 +920,16 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private static final class CachedMapValue<V> {
         private final V value;
         private final boolean isNull;
+        private final boolean dirty;
 
-        private CachedMapValue(V value, boolean isNull) {
+        private CachedMapValue(V value, boolean isNull, boolean dirty) {
             this.value = value;
             this.isNull = isNull;
+            this.dirty = dirty;
         }
 
-        static <V> CachedMapValue<V> of(V value) {
-            return new CachedMapValue<>(value, value == null);
+        static <V> CachedMapValue<V> of(V value, boolean dirty) {
+            return new CachedMapValue<>(value, value == null, dirty);
         }
 
         V valueOrNull() {

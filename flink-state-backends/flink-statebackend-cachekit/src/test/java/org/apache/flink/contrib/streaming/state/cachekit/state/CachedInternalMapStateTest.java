@@ -45,6 +45,7 @@ class CachedInternalMapStateTest {
         CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
                 delegate,
                 currentKey::get,
+                currentKey::set,
                 100,
                 CachePolicyType.LRU,
                 0,
@@ -72,6 +73,7 @@ class CachedInternalMapStateTest {
         CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
                 delegate,
                 currentKey::get,
+                currentKey::set,
                 100,
                 CachePolicyType.LRU,
                 0,
@@ -104,6 +106,7 @@ class CachedInternalMapStateTest {
         CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
                 delegate,
                 currentKey::get,
+                currentKey::set,
                 100,
                 CachePolicyType.LRU,
                 0,
@@ -133,6 +136,7 @@ class CachedInternalMapStateTest {
         CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
                 delegate,
                 currentKey::get,
+                currentKey::set,
                 0,
                 CachePolicyType.LRU,
                 0,
@@ -177,6 +181,7 @@ class CachedInternalMapStateTest {
         CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
                 delegate,
                 currentKey::get,
+                currentKey::set,
                 100,
                 CachePolicyType.LRU,
                 0,
@@ -196,5 +201,34 @@ class CachedInternalMapStateTest {
 
         state.contains("uk1");
         verify(delegate, times(1)).contains("uk1");
+    }
+
+    @Test
+    void testFlushWritesBackDirtyEntries() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
+                delegate,
+                currentKey::get,
+                currentKey::set,
+                0,
+                CachePolicyType.LRU,
+                0,
+                PresenceCacheImplementation.PRIMITIVE,
+                100,
+                CachePolicyType.LRU,
+                0,
+                false,
+                0.0,
+                1,
+                true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        state.put("uk1", 42);
+        verify(delegate, times(0)).put(any(), any());
+
+        state.flush();
+        verify(delegate, times(1)).put("uk1", 42);
     }
 }

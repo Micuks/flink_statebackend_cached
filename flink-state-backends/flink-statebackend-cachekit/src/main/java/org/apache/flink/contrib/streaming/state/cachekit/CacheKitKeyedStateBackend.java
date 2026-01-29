@@ -192,6 +192,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             CachedInternalMapState<K, N, Object, Object> wrapped = new CachedInternalMapState<>(
                     delegateMap,
                     this::getCurrentKey,
+                    this::setCurrentKey,
                     mapPresenceCacheMaxEntries,
                     mapPresenceCachePolicy,
                     mapPresenceCacheLruOverflow,
@@ -274,6 +275,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             CachedInternalMapState<K, N, Object, Object> wrapped = new CachedInternalMapState<>(
                     delegateMap,
                     this::getCurrentKey,
+                    this::setCurrentKey,
                     mapPresenceCacheMaxEntries,
                     mapPresenceCachePolicy,
                     mapPresenceCacheLruOverflow,
@@ -326,6 +328,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         for (Object wrapper : wrappersByDelegateIdentity.values()) {
             if (wrapper instanceof CachedInternalValueState) {
                 ((CachedInternalValueState<?, ?, ?>) wrapper).flush();
+            } else if (wrapper instanceof CachedInternalMapState) {
+                ((CachedInternalMapState<?, ?, ?, ?>) wrapper).flush();
             }
         }
         return delegate.snapshot(checkpointId, timestamp, streamFactory, checkpointOptions);
