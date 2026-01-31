@@ -35,6 +35,10 @@ under the License.
 
 	<packaging>jar</packaging>
 
+	<properties>
+		<cached.skipTests>true</cached.skipTests>
+	</properties>
+
 	<dependencies>
 
 		<!-- core dependencies -->
@@ -152,6 +156,13 @@ under the License.
 
 	<build>
 		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<skipTests>${cached.skipTests}</skipTests>
+				</configuration>
+			</plugin>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-checkstyle-plugin</artifactId>

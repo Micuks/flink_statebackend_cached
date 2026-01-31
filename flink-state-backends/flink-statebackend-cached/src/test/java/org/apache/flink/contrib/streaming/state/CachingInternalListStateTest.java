@@ -187,14 +187,27 @@ class CachingInternalListStateTest {
                 l2CacheSize,
                 maxActiveNamespaces,
                 10, // maxCacheMemoryMb
-                currentCachePolicyType, // Use the current policy type
+                currentCachePolicyType, // value policy
+                currentCachePolicyType, // map policy
+                currentCachePolicyType, // list policy
+                currentCachePolicyType, // aggregating policy
                 (int) mapL1KeyPresenceCacheSize, // Added
                 (int) mapL2KeyPresenceCacheSize,  // Added
                 mapCacheHitRateThreshold, // Added
                 mapCacheHitRateWindowSize, // Added
                 mapCacheMinAccessesForBypassCheck, // Added
                 mapKeyPresenceCacheEnabled, // Added
-                mapBypassEnabled // Added
+                mapBypassEnabled, // Added
+                CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+                false,
+                null,
+                new org.apache.flink.configuration.Configuration(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
         );
         cachingKeyedStateBackend.setCurrentKey(testKey);
 
@@ -878,5 +891,4 @@ class CachingInternalListStateTest {
                 cachingListState.getValueSerializer());
     }
 }
-
 

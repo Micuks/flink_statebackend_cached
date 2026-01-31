@@ -35,6 +35,50 @@ under the License.
 
 	<packaging>jar</packaging>
 
+	<profiles>
+		<profile>
+			<id>changelog-tests-jdk9plus</id>
+			<activation>
+				<jdk>[9,)</jdk>
+			</activation>
+			<properties>
+				<changelog.module.opens>
+					--add-opens java.base/java.lang=ALL-UNNAMED
+					--add-opens java.base/java.lang.reflect=ALL-UNNAMED
+					--add-opens java.base/java.lang.invoke=ALL-UNNAMED
+					--add-opens java.base/java.io=ALL-UNNAMED
+					--add-opens java.base/java.util=ALL-UNNAMED
+					--add-opens java.base/java.net=ALL-UNNAMED
+					--add-opens java.base/java.nio=ALL-UNNAMED
+					--add-opens java.base/java.util.concurrent=ALL-UNNAMED
+					--add-opens java.base/sun.nio.ch=ALL-UNNAMED
+				</changelog.module.opens>
+			</properties>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-surefire-plugin</artifactId>
+						<executions>
+							<execution>
+								<id>default-test</id>
+								<configuration>
+									<argLine>-XX:+UseG1GC -Xms256m -Xmx768m ${changelog.module.opens}</argLine>
+								</configuration>
+							</execution>
+							<execution>
+								<id>integration-tests</id>
+								<configuration>
+									<argLine>-XX:+UseG1GC -Xms256m -Xmx1536m ${changelog.module.opens}</argLine>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
+
 	<dependencies>
 
 		<dependency>

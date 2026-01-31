@@ -317,7 +317,9 @@ class CachingRocksDBStateBackendComparativeTest
                 mapCacheHitRateWindowSize,
                 mapCacheMinAccessesForBypassCheck,
                 mapKeyPresenceCacheEnabled,
-                mapBypassEnabled);
+                mapBypassEnabled,
+                CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+                false);
     }
 
     @BeforeEach
@@ -365,7 +367,9 @@ class CachingRocksDBStateBackendComparativeTest
             1000L, // mapCacheHitRateWindowSize
             100_000L, // mapCacheMinAccessesForBypassCheck
             true, // mapKeyPresenceCacheEnabled
-            true // mapBypassEnabled
+            true, // mapBypassEnabled
+            CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+            false
         );
 
         this.keyedStateBackend = createKeyedStateBackend(

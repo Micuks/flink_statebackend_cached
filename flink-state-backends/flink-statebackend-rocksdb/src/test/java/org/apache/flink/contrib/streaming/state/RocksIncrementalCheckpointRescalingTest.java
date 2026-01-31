@@ -42,6 +42,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
+import java.io.File;
 import java.util.List;
 
 /** Tests to guard rescaling from checkpoint. */
@@ -419,7 +420,8 @@ public class RocksIncrementalCheckpointRescalingTest extends TestLogger {
     }
 
     private StateBackend getStateBackend() throws Exception {
-        return new RocksDBStateBackend("file://" + rootFolder.newFolder().getAbsolutePath(), true);
+        final File checkpointDir = rootFolder.newFolder();
+        return new RocksDBStateBackend(checkpointDir.toURI().toString(), true);
     }
 
     /** A simple keyed function for tests. */

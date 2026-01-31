@@ -35,6 +35,10 @@ under the License.
 
 	<packaging>jar</packaging>
 
+	<properties>
+		<rocksdb.surefire.tmpArg></rocksdb.surefire.tmpArg>
+	</properties>
+
 	<dependencies>
 
 		<!-- core dependencies -->
@@ -109,5 +113,94 @@ under the License.
 			</plugin>
 		</plugins>
 	</build>
+
+	<profiles>
+		<profile>
+			<id>rocksdb-tests-jdk9plus</id>
+			<activation>
+				<jdk>[9,)</jdk>
+			</activation>
+			<properties>
+				<rocksdb.module.opens>
+					--add-opens java.base/java.lang=ALL-UNNAMED
+					--add-opens java.base/java.lang.reflect=ALL-UNNAMED
+					--add-opens java.base/java.lang.invoke=ALL-UNNAMED
+					--add-opens java.base/java.io=ALL-UNNAMED
+					--add-opens java.base/java.util=ALL-UNNAMED
+					--add-opens java.base/java.net=ALL-UNNAMED
+					--add-opens java.base/java.nio=ALL-UNNAMED
+					--add-opens java.base/java.util.concurrent=ALL-UNNAMED
+					--add-opens java.base/sun.nio.ch=ALL-UNNAMED
+				</rocksdb.module.opens>
+			</properties>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-surefire-plugin</artifactId>
+						<executions>
+							<execution>
+								<id>default-test</id>
+								<configuration>
+									<argLine>-XX:+UseG1GC -Xms256m -Xmx768m ${rocksdb.surefire.tmpArg} ${rocksdb.module.opens}</argLine>
+								</configuration>
+							</execution>
+							<execution>
+								<id>integration-tests</id>
+								<configuration>
+									<argLine>-XX:+UseG1GC -Xms256m -Xmx1536m ${rocksdb.surefire.tmpArg} ${rocksdb.module.opens}</argLine>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+
+		<profile>
+			<id>rocksdb-tests-windows-short-tmp</id>
+			<activation>
+				<os>
+					<family>Windows</family>
+				</os>
+			</activation>
+			<properties>
+				<rocksdb.test.tmpdir>C:\\t</rocksdb.test.tmpdir>
+				<rocksdb.surefire.tmpArg>-Djava.io.tmpdir=${rocksdb.test.tmpdir}</rocksdb.surefire.tmpArg>
+			</properties>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-antrun-plugin</artifactId>
+						<executions>
+							<execution>
+								<id>create-windows-tmpdir</id>
+								<phase>process-test-resources</phase>
+								<goals>
+									<goal>run</goal>
+								</goals>
+								<configuration>
+									<target>
+										<mkdir dir="${rocksdb.test.tmpdir}"/>
+									</target>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-surefire-plugin</artifactId>
+						<configuration>
+							<systemPropertyVariables>
+								<java.io.tmpdir>${rocksdb.test.tmpdir}</java.io.tmpdir>
+							</systemPropertyVariables>
+						</configuration>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
 
 </project>

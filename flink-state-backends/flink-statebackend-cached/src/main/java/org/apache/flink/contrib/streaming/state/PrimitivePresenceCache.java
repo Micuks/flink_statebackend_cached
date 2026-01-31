@@ -86,9 +86,7 @@ public class PrimitivePresenceCache implements CachePolicy<Long, Byte> {
             return null;
         }
         byte removed = delegate.remove(key.longValue());
-        if (removed != -1 && evictionListener != null) {
-            evictionListener.accept(new java.util.AbstractMap.SimpleImmutableEntry<>(key, removed));
-        }
+        // For normal removals (explicit invalidation), do not treat as eviction; caller handles memory.
         return removed == -1 ? null : removed;
     }
 

@@ -113,7 +113,9 @@ class CachingStateBackendTest {
                         mapCacheHitRateWindowSize,
                         mapCacheMinAccessesForBypassCheck,
                         mapKeyPresenceCacheEnabled,
-                        mapBypassEnabled
+                        mapBypassEnabled,
+                        CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+                        false
                         );
     }
 
@@ -164,7 +166,9 @@ class CachingStateBackendTest {
                                         mapCacheHitRateWindowSize,
                                         mapCacheMinAccessesForBypassCheck,
                                         mapKeyPresenceCacheEnabled,
-                                        mapBypassEnabled);
+                                        mapBypassEnabled,
+                                        CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+                                        false);
 
         assertNotNull(cachingBackendWithPlainDelegate.createOperatorStateBackend(mockEnv,
                 "testOperator", Collections.emptyList(), new CloseableRegistry()));
@@ -189,7 +193,9 @@ class CachingStateBackendTest {
                                         mapCacheHitRateWindowSize,
                                         mapCacheMinAccessesForBypassCheck,
                                         mapKeyPresenceCacheEnabled,
-                                        mapBypassEnabled);
+                                        mapBypassEnabled,
+                                        CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+                                        false);
         assertTrue(cachingBackend.useManagedMemory());
         verify(mockDelegate).useManagedMemory();
     }
@@ -220,7 +226,9 @@ class CachingStateBackendTest {
                                         mapCacheHitRateWindowSize,
                                         mapCacheMinAccessesForBypassCheck,
                                         mapKeyPresenceCacheEnabled,
-                                        mapBypassEnabled);
+                                        mapBypassEnabled,
+                                        CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+                                        false);
         CompletedCheckpointStorageLocation resolvedLocation =
                 cachingBackend.resolveCheckpoint(pointer);
 
@@ -254,7 +262,9 @@ class CachingStateBackendTest {
                                         mapCacheHitRateWindowSize,
                                         mapCacheMinAccessesForBypassCheck,
                                         mapKeyPresenceCacheEnabled,
-                                        mapBypassEnabled);
+                                        mapBypassEnabled,
+                                        CachingStateBackendFactory.PresenceCacheImplementation.DEFAULT,
+                                        false);
         CheckpointStorageAccess createdStorageAccess =
                 cachingBackend.createCheckpointStorage(jobID);
 
