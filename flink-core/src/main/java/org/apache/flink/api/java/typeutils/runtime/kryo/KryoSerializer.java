@@ -55,6 +55,7 @@ import java.io.ObjectInputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
@@ -522,6 +523,9 @@ public class KryoSerializer<T> extends TypeSerializer<T> {
 
             // Enable reference tracking.
             kryo.setReferences(true);
+
+            // Use optimized serializer for HashMap to avoid writeClassAndObject overhead
+            kryo.addDefaultSerializer(HashMap.class, new OptimizedHashMapKryoSerializer());
 
             // Throwable and all subclasses should be serialized via java serialization
             // Note: the registered JavaSerializer is Flink's own implementation, and not Kryo's.
