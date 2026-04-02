@@ -1939,6 +1939,22 @@ public class TypeExtractor {
             return AvroUtils.getAvroUtils().createAvroTypeInfo(clazz);
         }
 
+        // check for Map types — route to native MapSerializer instead of Kryo
+        if (Map.class.isAssignableFrom(clazz)) {
+            if (parameterizedType instanceof ParameterizedType) {
+                ParameterizedType paramType = (ParameterizedType) parameterizedType;
+                Type[] typeArgs = paramType.getActualTypeArguments();
+                if (typeArgs.length == 2) {
+                    TypeInformation<?> keyTypeInfo = createTypeInfoWithTypeHierarchy(
+                            typeHierarchy, typeArgs[0], in1Type, in2Type);
+                    TypeInformation<?> valueTypeInfo = createTypeInfoWithTypeHierarchy(
+                            typeHierarchy, typeArgs[1], in1Type, in2Type);
+                    return (TypeInformation<OUT>) new MapTypeInfo<>(keyTypeInfo, valueTypeInfo);
+                }
+            }
+            // Raw Map without type parameters — fall through to GenericTypeInfo
+        }
+
         if (Modifier.isInterface(clazz.getModifiers())) {
             // Interface has no members and is therefore not handled as POJO
             return new GenericTypeInfo<>(clazz);
