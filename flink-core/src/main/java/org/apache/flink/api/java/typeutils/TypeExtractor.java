@@ -1940,7 +1940,9 @@ public class TypeExtractor {
         }
 
         // check for Map types — route to native MapSerializer instead of Kryo
-        if (Map.class.isAssignableFrom(clazz)) {
+        // Only match Map interface and HashMap; TreeMap/LinkedHashMap need their own
+        // serializers to preserve ordering/insertion-order semantics.
+        if (clazz == Map.class || clazz == HashMap.class) {
             if (parameterizedType instanceof ParameterizedType) {
                 ParameterizedType paramType = (ParameterizedType) parameterizedType;
                 Type[] typeArgs = paramType.getActualTypeArguments();
