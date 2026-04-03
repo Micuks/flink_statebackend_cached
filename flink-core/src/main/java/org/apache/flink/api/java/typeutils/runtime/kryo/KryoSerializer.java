@@ -524,9 +524,6 @@ public class KryoSerializer<T> extends TypeSerializer<T> {
             // Enable reference tracking.
             kryo.setReferences(true);
 
-            // Use optimized serializer for HashMap to avoid writeClassAndObject overhead
-            kryo.addDefaultSerializer(HashMap.class, new OptimizedHashMapKryoSerializer());
-
             // Throwable and all subclasses should be serialized via java serialization
             // Note: the registered JavaSerializer is Flink's own implementation, and not Kryo's.
             //       This is due to a know issue with Kryo's JavaSerializer. See FLINK-6025 for
@@ -553,6 +550,10 @@ public class KryoSerializer<T> extends TypeSerializer<T> {
                             : kryo.getNextRegistrationId());
 
             kryo.setRegistrationRequired(false);
+
+            // Register optimized HashMap serializer (must be after applyRegistrations to take priority)
+            kryo.register(HashMap.class, new OptimizedHashMapKryoSerializer());
+
             kryo.setClassLoader(Thread.currentThread().getContextClassLoader());
         }
     }
