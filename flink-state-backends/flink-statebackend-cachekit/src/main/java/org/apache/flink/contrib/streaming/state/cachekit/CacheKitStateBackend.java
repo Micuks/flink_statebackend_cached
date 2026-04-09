@@ -182,7 +182,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapPresenceCacheImplementation,
                 mapCacheMaxEntries,
                 mapCachePolicy,
-                mapCacheLruOverflow);
+                mapCacheLruOverflow,
+                operatorIdentifier);
     }
 
     @Override

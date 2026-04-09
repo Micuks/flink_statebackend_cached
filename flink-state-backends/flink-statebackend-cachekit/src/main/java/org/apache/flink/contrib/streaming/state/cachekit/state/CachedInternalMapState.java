@@ -29,6 +29,12 @@ import org.apache.flink.runtime.state.internal.InternalMapState;
 
 import javax.annotation.Nonnull;
 
+import java.io.BufferedWriter;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.Map;
@@ -42,6 +48,26 @@ import java.util.Objects;
  * Keying: (currentKey, namespace, userKey).
  */
 public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapState<K, N, UK, UV> {
+
+    /** Access event type enumeration. */
+    public enum AccessEventType {
+        MAP_GET,
+        MAP_PUT,
+        MAP_PUT_ALL,
+        MAP_REMOVE,
+        MAP_CONTAINS,
+        MAP_ENTRIES,
+        MAP_KEYS,
+        MAP_VALUES,
+        MAP_ITERATOR,
+        MAP_CLEAR,
+        MAP_GET_VALUE_CACHE_HIT,
+        MAP_GET_PRESENCE_CACHE_HIT,
+        MAP_GET_DELEGATE_LOAD,
+        MAP_CONTAINS_VALUE_CACHE_HIT,
+        MAP_CONTAINS_PRESENCE_CACHE_HIT,
+        MAP_CONTAINS_DELEGATE_LOAD
+    }
 
     private final InternalMapState<K, N, UK, UV> delegate;
     private final CurrentKeyProvider<K> currentKeyProvider;
@@ -67,6 +93,12 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private N currentNamespace;
     private final KeyNamespaceUserKey<K, N, UK> lookupKey = new KeyNamespaceUserKey<>(null, null, null);
 
+    // Access logging
+    private final String logFilePath;
+    private final BufferedWriter logWriter;
+    private final Object logLock = new Object();
+    private final String operatorIdentifier;
+
     public CachedInternalMapState(
             InternalMapState<K, N, UK, UV> delegate,
             CurrentKeyProvider<K> currentKeyProvider,
@@ -76,7 +108,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             PresenceCacheImplementation presenceCacheImplementation,
             int mapCacheMaxEntries,
             CachePolicyType mapCachePolicyType,
-            int mapCacheLruOverflow) {
+            int mapCacheLruOverflow,
+            String operatorIdentifier) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.presenceCachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
@@ -87,6 +120,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         this.mapCacheEnabled = mapCacheMaxEntries > 0;
         this.mapCachePolicyType = Objects.requireNonNull(mapCachePolicyType, "mapCachePolicyType");
         this.mapCacheLruOverflow = Math.max(0, mapCacheLruOverflow);
+        this.operatorIdentifier = operatorIdentifier != null ? operatorIdentifier : "map_state";
+        this.logFilePath = "/home/wutb/map_state_access_log.txt";
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
         TypeSerializer<UK> resolvedUserKeySerializer = null;
@@ -139,6 +174,28 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             this.l1ValueCache = new NoOpCachePolicy<>();
             this.l2ValueCache = new NoOpCachePolicy<>();
         }
+
+        // Initialize log writer if log file path is provided
+        if (logFilePath != null && !logFilePath.isEmpty()) {
+            try {
+                Path path = Paths.get(logFilePath);
+                // Create parent directories if they don't exist
+                if (path.getParent() != null) {
+                    Files.createDirectories(path.getParent());
+                }
+                this.logWriter = new BufferedWriter(new FileWriter(logFilePath, true));
+                // Write header
+                synchronized (logLock) {
+                    logWriter.write("# timestamp\tkey\tnamespace\tuserKey\tevent_type\tcache_level\toperator");
+                    logWriter.newLine();
+                    logWriter.flush();
+                }
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to initialize log file: " + logFilePath, e);
+            }
+        } else {
+            this.logWriter = null;
+        }
     }
 
     // Helper to update lookup key safely without allocation
@@ -163,15 +220,18 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (mapCacheEnabled) {
             CachedMapValue<UV> cached = getCachedValue(currentKey); // Optimize getCachedValue to use lookupKey
             if (cached != null) {
+                recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_GET_VALUE_CACHE_HIT, "VALUE_CACHE");
                 return cached.valueOrNull();
             }
         }
         if (presenceCacheEnabled) {
             Boolean present = getPresence(currentKey, userKey); // Optimize getPresence
             if (present != null && !present) {
+                recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_GET_PRESENCE_CACHE_HIT, "PRESENCE_CACHE");
                 return null;
             }
         }
+        recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_GET_DELEGATE_LOAD, "DELEGATE");
         UV value = delegate.get(userKey);
         if (mapCacheEnabled) {
             updateValueCache(currentKey, userKey, value);
@@ -194,6 +254,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             remove(userKey);
             return;
         }
+        recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_PUT, "L1");
         delegate.put(userKey, userValue);
 
         // Cache Update need deep copy for storage
@@ -213,6 +274,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
 
+        recordAccess(currentKey, currentNamespace, null, AccessEventType.MAP_PUT_ALL, "L1");
         delegate.putAll(map);
         for (Map.Entry<UK, UV> entry : map.entrySet()) {
             UK uKey = entry.getKey();
@@ -236,6 +298,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
 
+        recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_REMOVE, "L1");
         delegate.remove(userKey);
         if (mapCacheEnabled) {
             updateValueCache(currentKey, userKey, null);
@@ -259,15 +322,18 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (mapCacheEnabled) {
             CachedMapValue<UV> cached = getCachedValue(currentKey);
             if (cached != null) {
+                recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_CONTAINS_VALUE_CACHE_HIT, "VALUE_CACHE");
                 return !cached.isNull();
             }
         }
         if (presenceCacheEnabled) {
             Boolean present = getPresence(currentKey, userKey);
             if (present != null) {
+                recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_CONTAINS_PRESENCE_CACHE_HIT, "PRESENCE_CACHE");
                 return present;
             }
         }
+        recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_CONTAINS_DELEGATE_LOAD, "DELEGATE");
         boolean exists = delegate.contains(userKey);
         if (mapCacheEnabled && !exists) {
             updateValueCache(currentKey, userKey, null);
@@ -281,6 +347,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     @Override
     public Iterable<Map.Entry<UK, UV>> entries() throws Exception {
         ensureDelegateNamespace(null); // Key not needed for this check
+        K currentKey = currentKeyProvider.getCurrentKey();
+        recordAccess(currentKey, currentNamespace, null, AccessEventType.MAP_ENTRIES, "DELEGATE");
         Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
         if (!mapCacheEnabled && !presenceCacheEnabled) {
             return entries;
@@ -291,6 +359,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     @Override
     public Iterable<UK> keys() throws Exception {
         ensureDelegateNamespace(null);
+        K currentKey = currentKeyProvider.getCurrentKey();
+        recordAccess(currentKey, currentNamespace, null, AccessEventType.MAP_KEYS, "DELEGATE");
         if (!mapCacheEnabled && !presenceCacheEnabled) {
             return delegate.keys();
         }
@@ -301,6 +371,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     @Override
     public Iterable<UV> values() throws Exception {
         ensureDelegateNamespace(null);
+        K currentKey = currentKeyProvider.getCurrentKey();
+        recordAccess(currentKey, currentNamespace, null, AccessEventType.MAP_VALUES, "DELEGATE");
         if (!mapCacheEnabled && !presenceCacheEnabled) {
             return delegate.values();
         }
@@ -311,6 +383,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     @Override
     public Iterator<Map.Entry<UK, UV>> iterator() throws Exception {
         ensureDelegateNamespace(null);
+        K currentKey = currentKeyProvider.getCurrentKey();
+        recordAccess(currentKey, currentNamespace, null, AccessEventType.MAP_ITERATOR, "DELEGATE");
         Iterator<Map.Entry<UK, UV>> iterator = delegate.iterator();
         if (!mapCacheEnabled && !presenceCacheEnabled) {
             return iterator;
@@ -327,6 +401,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     @Override
     public void clear() {
         ensureDelegateNamespace(null);
+        K currentKey = currentKeyProvider.getCurrentKey();
+        recordAccess(currentKey, currentNamespace, null, AccessEventType.MAP_CLEAR, "L1");
         delegate.clear();
         clearPresenceCaches();
         clearValueCaches();
@@ -372,6 +448,54 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             int recommendedMaxNumberOfReturnedRecords) {
         ensureDelegateNamespace(null);
         return delegate.getStateIncrementalVisitor(recommendedMaxNumberOfReturnedRecords);
+    }
+
+    /**
+     * Records an access event for the given key, namespace, and userKey.
+     *
+     * @param key the key being accessed
+     * @param namespace the namespace being accessed
+     * @param userKey the userKey being accessed
+     * @param eventType the type of access event
+     * @param cacheLevel the cache level where the access occurred
+     */
+    private void recordAccess(K key, N namespace, UK userKey, AccessEventType eventType, String cacheLevel) {
+        if (logWriter == null) {
+            return;
+        }
+
+        long timestamp = System.nanoTime();
+        String keyStr = key != null ? key.toString() : "null";
+        String namespaceStr = namespace != null ? namespace.toString() : "null";
+        String userKeyStr = userKey != null ? userKey.toString() : "null";
+
+        synchronized (logLock) {
+            try {
+                logWriter.write(String.format("%d\t%s\t%s\t%s\t%s\t%s\t%s%n",
+                        timestamp, keyStr, namespaceStr, userKeyStr, eventType, cacheLevel, operatorIdentifier));
+                logWriter.flush();
+            } catch (IOException e) {
+                // Log error but don't throw to avoid breaking cache operations
+                System.err.println("Failed to write to access log file: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Closes the log file writer if it was opened.
+     * Should be called when the state is no longer needed to ensure all data is flushed.
+     */
+    public void close() {
+        if (logWriter != null) {
+            synchronized (logLock) {
+                try {
+                    logWriter.flush();
+                    logWriter.close();
+                } catch (IOException e) {
+                    System.err.println("Failed to close access log file: " + e.getMessage());
+                }
+            }
+        }
     }
 
     private void ensureDelegateNamespace(K currentKey) {

@@ -79,6 +79,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int mapCacheMaxEntries;
     private final CachePolicyType mapCachePolicy;
     private final int mapCacheLruOverflow;
+    private final String operatorIdentifier;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -101,7 +102,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             PresenceCacheImplementation mapPresenceCacheImplementation,
             int mapCacheMaxEntries,
             CachePolicyType mapCachePolicy,
-            int mapCacheLruOverflow) {
+            int mapCacheLruOverflow,
+            String operatorIdentifier) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -127,6 +129,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapCacheMaxEntries = mapCacheMaxEntries;
         this.mapCachePolicy = mapCachePolicy;
         this.mapCacheLruOverflow = mapCacheLruOverflow;
+        this.operatorIdentifier = operatorIdentifier;
     }
 
     @Override
@@ -186,7 +189,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapPresenceCacheImplementation,
                     mapCacheMaxEntries,
                     mapCachePolicy,
-                    mapCacheLruOverflow);
+                    mapCacheLruOverflow,
+                    operatorIdentifier);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -264,7 +268,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapPresenceCacheImplementation,
                     mapCacheMaxEntries,
                     mapCachePolicy,
-                    mapCacheLruOverflow);
+                    mapCacheLruOverflow,
+                    operatorIdentifier);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }

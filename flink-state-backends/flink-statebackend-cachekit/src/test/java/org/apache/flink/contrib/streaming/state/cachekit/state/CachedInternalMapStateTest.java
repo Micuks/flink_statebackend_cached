@@ -50,7 +50,8 @@ class CachedInternalMapStateTest {
                 PresenceCacheImplementation.PRIMITIVE,
                 0,
                 CachePolicyType.LRU,
-                0);
+                0,
+                "test_operator");
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         assertFalse(state.contains("uk1"));
@@ -73,7 +74,8 @@ class CachedInternalMapStateTest {
                 PresenceCacheImplementation.PRIMITIVE,
                 0,
                 CachePolicyType.LRU,
-                0);
+                0,
+                "test_operator");
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.put("uk1", 1);
@@ -101,7 +103,8 @@ class CachedInternalMapStateTest {
                 PresenceCacheImplementation.PRIMITIVE,
                 0,
                 CachePolicyType.LRU,
-                0);
+                0,
+                "test_operator");
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         assertFalse(state.contains("uk1"));
