@@ -23,6 +23,7 @@ import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMap
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalValueState;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
+import org.apache.flink.contrib.streaming.state.cachekit.window.WindowLifecycleTracker;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.SavepointResources;
@@ -83,6 +84,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final double mapHitRateThreshold;
     private final int mapHitRateWindow;
     private final boolean mapIterationCacheFillEnabled;
+    private final boolean windowAwareEvictionEnabled;
+    private final WindowLifecycleTracker windowTracker;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -109,7 +112,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean mapBypassEnabled,
             double mapHitRateThreshold,
             int mapHitRateWindow,
-            boolean mapIterationCacheFillEnabled) {
+            boolean mapIterationCacheFillEnabled,
+            boolean windowAwareEvictionEnabled) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -139,6 +143,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapHitRateThreshold = mapHitRateThreshold;
         this.mapHitRateWindow = mapHitRateWindow;
         this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
+        this.windowAwareEvictionEnabled = windowAwareEvictionEnabled;
+        this.windowTracker = windowAwareEvictionEnabled ? new WindowLifecycleTracker() : null;
     }
 
     @Override
@@ -176,7 +182,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueCacheLruOverflow,
                     valueBypassEnabled,
                     valueHitRateThreshold,
-                    valueHitRateWindow);
+                    valueHitRateWindow,
+                    windowTracker);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }

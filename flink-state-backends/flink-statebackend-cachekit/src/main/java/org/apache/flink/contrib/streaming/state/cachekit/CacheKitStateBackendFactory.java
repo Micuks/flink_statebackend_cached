@@ -144,6 +144,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         .defaultValue(true)
                         .withDescription("Enable cache backfill during MapState iteration.");
 
+        public static final ConfigOption<Boolean> WINDOW_AWARE_EVICTION_ENABLED = ConfigOptions
+                        .key("state.backend.cachekit.window.aware-eviction.enabled")
+                        .booleanType()
+                        .defaultValue(false)
+                        .withDescription(
+                                        "Enable window-lifecycle-aware eviction. When enabled, cache eviction "
+                                                        + "prioritizes keeping data for windows about to trigger and "
+                                                        + "evicts data for windows farthest from triggering.");
+
         public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
                         .stringType()
                         .noDefaultValue()
@@ -171,6 +180,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final double mapHitRateThreshold = config.get(MAP_HIT_RATE_THRESHOLD);
                 final int mapHitRateWindow = config.get(MAP_HIT_RATE_WINDOW);
                 final boolean mapIterationCacheFillEnabled = config.get(MAP_ITERATION_CACHE_FILL_ENABLED);
+                final boolean windowAwareEvictionEnabled = config.get(WINDOW_AWARE_EVICTION_ENABLED);
                 final String delegateClass = config.get(DELEGATE_BACKEND);
 
                 System.out.printf(
@@ -230,7 +240,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 mapBypassEnabled,
                                 mapHitRateThreshold,
                                 mapHitRateWindow,
-                                mapIterationCacheFillEnabled);
+                                mapIterationCacheFillEnabled,
+                                windowAwareEvictionEnabled);
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

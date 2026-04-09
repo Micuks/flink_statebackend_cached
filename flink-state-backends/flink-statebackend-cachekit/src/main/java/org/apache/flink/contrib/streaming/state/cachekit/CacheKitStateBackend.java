@@ -82,6 +82,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final double mapHitRateThreshold;
     private final int mapHitRateWindow;
     private final boolean mapIterationCacheFillEnabled;
+    private final boolean windowAwareEvictionEnabled;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -101,7 +102,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
             boolean mapBypassEnabled,
             double mapHitRateThreshold,
             int mapHitRateWindow,
-            boolean mapIterationCacheFillEnabled) {
+            boolean mapIterationCacheFillEnabled,
+            boolean windowAwareEvictionEnabled) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -120,6 +122,35 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.mapHitRateThreshold = mapHitRateThreshold;
         this.mapHitRateWindow = mapHitRateWindow;
         this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
+        this.windowAwareEvictionEnabled = windowAwareEvictionEnabled;
+    }
+
+    /** Backwards-compatible constructor without windowAwareEvictionEnabled. */
+    public CacheKitStateBackend(
+            StateBackend delegateBackend,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled) {
+        this(delegateBackend, valueCacheMaxEntries, valueCachePolicy, valueCacheLruOverflow,
+                valueBypassEnabled, valueHitRateThreshold, valueHitRateWindow,
+                mapPresenceCacheMaxEntries, mapPresenceCachePolicy, mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation, mapCacheMaxEntries, mapCachePolicy,
+                mapCacheLruOverflow, mapBypassEnabled, mapHitRateThreshold, mapHitRateWindow,
+                mapIterationCacheFillEnabled, false);
     }
 
     @Override
@@ -198,7 +229,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapBypassEnabled,
                 mapHitRateThreshold,
                 mapHitRateWindow,
-                mapIterationCacheFillEnabled);
+                mapIterationCacheFillEnabled,
+                windowAwareEvictionEnabled);
     }
 
     @Override

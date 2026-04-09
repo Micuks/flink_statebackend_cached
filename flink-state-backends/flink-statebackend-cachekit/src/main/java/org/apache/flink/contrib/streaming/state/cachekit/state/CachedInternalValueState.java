@@ -19,10 +19,13 @@ import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.LruCachePolicy;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.WindowAwareLruCachePolicy;
+import org.apache.flink.contrib.streaming.state.cachekit.window.WindowLifecycleTracker;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -49,6 +52,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
 
+    @Nullable
+    private final WindowLifecycleTracker windowTracker;
+
     private N currentNamespace;
 
     // Sticky Cache (L1)
@@ -66,6 +72,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private long currentWindowHits = 0;
     private int opsSinceLastSample = 0;
 
+    /** Constructor with window lifecycle tracker for window-aware eviction. */
     public CachedInternalValueState(
             InternalValueState<K, N, V> delegate,
             CurrentKeyProvider<K> currentKeyProvider,
@@ -75,7 +82,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             int lruOverflow,
             boolean bypassEnabled,
             double hitRateThreshold,
-            int hitRateWindow) {
+            int hitRateWindow,
+            @Nullable WindowLifecycleTracker windowTracker) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -84,6 +92,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.bypassEnabled = bypassEnabled;
         this.hitRateThreshold = hitRateThreshold;
         this.hitRateWindow = hitRateWindow;
+        this.windowTracker = windowTracker;
 
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
@@ -94,6 +103,21 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         // L2 Cache: Remaining size (or full maxEntries)
         this.l2Cache = createCachePolicy(maxEntries, this::onL2Eviction);
+    }
+
+    /** Backwards-compatible constructor without window tracker. */
+    public CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow) {
+        this(delegate, currentKeyProvider, keyContextSetter, maxEntries, cachePolicyType,
+                lruOverflow, bypassEnabled, hitRateThreshold, hitRateWindow, null);
     }
 
     private void setLookupKey(K key, N namespace) {
@@ -269,6 +293,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     public void setCurrentNamespace(@Nonnull N namespace) {
         this.currentNamespace = namespace;
         delegate.setCurrentNamespace(namespace);
+
+        // Window lifecycle tracking injection
+        if (windowTracker != null) {
+            K currentKey = currentKeyProvider.getCurrentKey();
+            windowTracker.onWindowAccess(currentKey, namespace);
+        }
     }
 
     @Override
@@ -336,6 +366,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.function.BiConsumer<KeyNamespaceKey<K, N>, CachedValue<V>> evictionListener) {
         if (cachePolicyType == CachePolicyType.CAFFEINE) {
             return new CaffeineCachePolicy<>(maxEntries, evictionListener);
+        }
+        if (windowTracker != null) {
+            // Window-aware eviction: use ETT-based priority instead of pure LRU
+            return new WindowAwareLruCachePolicy<>(
+                    maxEntries,
+                    lruOverflow,
+                    evictionListener,
+                    key -> windowTracker.getEvictionPriority(key.namespace));
         }
         return new LruCachePolicy<>(maxEntries, lruOverflow, evictionListener);
     }
