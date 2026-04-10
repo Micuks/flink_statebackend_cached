@@ -66,7 +66,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         MAP_GET_DELEGATE_LOAD,
         MAP_CONTAINS_VALUE_CACHE_HIT,
         MAP_CONTAINS_PRESENCE_CACHE_HIT,
-        MAP_CONTAINS_DELEGATE_LOAD
+        MAP_CONTAINS_DELEGATE_LOAD,
+        MAP_ITERATE_COMPLETE
     }
 
     private final InternalMapState<K, N, UK, UV> delegate;
@@ -98,6 +99,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final BufferedWriter logWriter;
     private final Object logLock = new Object();
     private final String operatorIdentifier;
+    private final String stateName;
 
     public CachedInternalMapState(
             InternalMapState<K, N, UK, UV> delegate,
@@ -109,7 +111,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             int mapCacheMaxEntries,
             CachePolicyType mapCachePolicyType,
             int mapCacheLruOverflow,
-            String operatorIdentifier) {
+            String operatorIdentifier,
+            String stateName) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.presenceCachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
@@ -121,7 +124,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         this.mapCachePolicyType = Objects.requireNonNull(mapCachePolicyType, "mapCachePolicyType");
         this.mapCacheLruOverflow = Math.max(0, mapCacheLruOverflow);
         this.operatorIdentifier = operatorIdentifier != null ? operatorIdentifier : "map_state";
-        this.logFilePath = "/home/wutb/map_state_access_log.txt";
+        this.stateName = stateName != null ? stateName : "unknown";
+        this.logFilePath = "/home/wutb/wutb/map_state_access_log.txt";
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
         TypeSerializer<UK> resolvedUserKeySerializer = null;
@@ -186,7 +190,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 this.logWriter = new BufferedWriter(new FileWriter(logFilePath, true));
                 // Write header
                 synchronized (logLock) {
-                    logWriter.write("# timestamp\tkey\tnamespace\tuserKey\tevent_type\tcache_level\toperator");
+                    logWriter.write("# timestamp\tkey\tnamespace\tuserKey\tevent_type\tcache_level\toperator\tstate_name");
                     logWriter.newLine();
                     logWriter.flush();
                 }
@@ -220,14 +224,16 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (mapCacheEnabled) {
             CachedMapValue<UV> cached = getCachedValue(currentKey); // Optimize getCachedValue to use lookupKey
             if (cached != null) {
-                recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_GET_VALUE_CACHE_HIT, "VALUE_CACHE");
+                recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_GET_VALUE_CACHE_HIT,
+                        "VALUE_CACHE");
                 return cached.valueOrNull();
             }
         }
         if (presenceCacheEnabled) {
             Boolean present = getPresence(currentKey, userKey); // Optimize getPresence
             if (present != null && !present) {
-                recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_GET_PRESENCE_CACHE_HIT, "PRESENCE_CACHE");
+                recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_GET_PRESENCE_CACHE_HIT,
+                        "PRESENCE_CACHE");
                 return null;
             }
         }
@@ -322,14 +328,16 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (mapCacheEnabled) {
             CachedMapValue<UV> cached = getCachedValue(currentKey);
             if (cached != null) {
-                recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_CONTAINS_VALUE_CACHE_HIT, "VALUE_CACHE");
+                recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_CONTAINS_VALUE_CACHE_HIT,
+                        "VALUE_CACHE");
                 return !cached.isNull();
             }
         }
         if (presenceCacheEnabled) {
             Boolean present = getPresence(currentKey, userKey);
             if (present != null) {
-                recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_CONTAINS_PRESENCE_CACHE_HIT, "PRESENCE_CACHE");
+                recordAccess(currentKey, currentNamespace, userKey, AccessEventType.MAP_CONTAINS_PRESENCE_CACHE_HIT,
+                        "PRESENCE_CACHE");
                 return present;
             }
         }
@@ -453,10 +461,10 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     /**
      * Records an access event for the given key, namespace, and userKey.
      *
-     * @param key the key being accessed
-     * @param namespace the namespace being accessed
-     * @param userKey the userKey being accessed
-     * @param eventType the type of access event
+     * @param key        the key being accessed
+     * @param namespace  the namespace being accessed
+     * @param userKey    the userKey being accessed
+     * @param eventType  the type of access event
      * @param cacheLevel the cache level where the access occurred
      */
     private void recordAccess(K key, N namespace, UK userKey, AccessEventType eventType, String cacheLevel) {
@@ -471,8 +479,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
         synchronized (logLock) {
             try {
-                logWriter.write(String.format("%d\t%s\t%s\t%s\t%s\t%s\t%s%n",
-                        timestamp, keyStr, namespaceStr, userKeyStr, eventType, cacheLevel, operatorIdentifier));
+                logWriter.write(String.format("%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s%n",
+                        timestamp, keyStr, namespaceStr, userKeyStr, eventType, cacheLevel, operatorIdentifier, stateName));
                 logWriter.flush();
             } catch (IOException e) {
                 // Log error but don't throw to avoid breaking cache operations
@@ -483,7 +491,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
     /**
      * Closes the log file writer if it was opened.
-     * Should be called when the state is no longer needed to ensure all data is flushed.
+     * Should be called when the state is no longer needed to ensure all data is
+     * flushed.
      */
     public void close() {
         if (logWriter != null) {
@@ -829,6 +838,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
     private final class CachingEntryIterator implements Iterator<Map.Entry<UK, UV>> {
         private final Iterator<Map.Entry<UK, UV>> delegateIterator;
+        private int iteratedCount = 0;
+        private boolean logged = false;
 
         private CachingEntryIterator(Iterator<Map.Entry<UK, UV>> delegateIterator) {
             this.delegateIterator = delegateIterator;
@@ -836,12 +847,20 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
         @Override
         public boolean hasNext() {
-            return delegateIterator.hasNext();
+            boolean has = delegateIterator.hasNext();
+            if (!has && !logged) {
+                logged = true;
+                K currentKey = currentKeyProvider.getCurrentKey();
+                recordAccess(currentKey, currentNamespace, null,
+                        AccessEventType.MAP_ITERATE_COMPLETE, String.valueOf(iteratedCount));
+            }
+            return has;
         }
 
         @Override
         public Map.Entry<UK, UV> next() {
             Map.Entry<UK, UV> entry = delegateIterator.next();
+            iteratedCount++;
             cacheEntry(entry);
             return entry;
         }

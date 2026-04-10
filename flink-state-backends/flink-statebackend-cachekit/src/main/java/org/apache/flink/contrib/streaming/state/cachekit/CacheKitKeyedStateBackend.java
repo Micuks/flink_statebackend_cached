@@ -190,7 +190,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapCacheMaxEntries,
                     mapCachePolicy,
                     mapCacheLruOverflow,
-                    operatorIdentifier);
+                    operatorIdentifier,
+                    stateDescriptor.getName());
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -269,7 +270,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapCacheMaxEntries,
                     mapCachePolicy,
                     mapCacheLruOverflow,
-                    operatorIdentifier);
+                    operatorIdentifier,
+                    stateDesc.getName());
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
