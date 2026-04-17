@@ -862,6 +862,36 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             Map.Entry<UK, UV> entry = delegateIterator.next();
             iteratedCount++;
             cacheEntry(entry);
+            
+            // [MEASURE] Track serialized size of UK and UV to guide single-entry cache sizing
+            // Sample ~0.01% (every 10000th row) to reduce log volume for large datasets (50M+)
+            if (iteratedCount % 10000 == 1) {
+                try {
+                    int ukSize = -1;
+                    int uvSize = -1;
+                    DataOutputSerializer dos = new DataOutputSerializer(128);
+                    
+                    if (userKeySerializer != null && entry.getKey() != null) {
+                        userKeySerializer.serialize(entry.getKey(), dos);
+                        ukSize = dos.length();
+                        dos.clear();
+                    }
+                    
+                    if (delegate.getValueSerializer() instanceof MapSerializer && entry.getValue() != null) {
+                        TypeSerializer<UV> uvSer = ((MapSerializer<UK, UV>) delegate.getValueSerializer()).getValueSerializer();
+                        uvSer.serialize(entry.getValue(), dos);
+                        uvSize = dos.length();
+                    }
+                    
+                    K currentKey = currentKeyProvider.getCurrentKey();
+                    recordAccess(currentKey, currentNamespace, entry.getKey(), 
+                        AccessEventType.MAP_ITERATOR, 
+                        String.format("MEASURE_SIZE_UK:%d_UV:%d", ukSize, uvSize));
+                } catch (Exception e) {
+                    // ignore serialization failure for measuring
+                }
+            }
+            
             return entry;
         }
     }
