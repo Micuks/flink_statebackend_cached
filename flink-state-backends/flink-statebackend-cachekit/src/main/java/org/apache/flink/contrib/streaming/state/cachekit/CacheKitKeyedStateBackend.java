@@ -83,6 +83,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final double mapHitRateThreshold;
     private final int mapHitRateWindow;
     private final boolean mapIterationCacheFillEnabled;
+    private final int mapSnapshotCacheMaxEntries;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -109,7 +110,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean mapBypassEnabled,
             double mapHitRateThreshold,
             int mapHitRateWindow,
-            boolean mapIterationCacheFillEnabled) {
+            boolean mapIterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -139,6 +141,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapHitRateThreshold = mapHitRateThreshold;
         this.mapHitRateWindow = mapHitRateWindow;
         this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
+        this.mapSnapshotCacheMaxEntries = mapSnapshotCacheMaxEntries;
     }
 
     @Override
@@ -183,7 +186,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         if (stateDescriptor.getType() == StateDescriptor.Type.MAP
                 && internal instanceof InternalMapState
-                && (mapPresenceCacheMaxEntries > 0 || mapCacheMaxEntries > 0)) {
+                && (mapPresenceCacheMaxEntries > 0 || mapCacheMaxEntries > 0 || mapSnapshotCacheMaxEntries > 0)) {
             Object existing = wrappersByDelegateIdentity.get(internal);
             if (existing != null) {
                 return (S) existing;
@@ -203,7 +206,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapBypassEnabled,
                     mapHitRateThreshold,
                     mapHitRateWindow,
-                    mapIterationCacheFillEnabled);
+                    mapIterationCacheFillEnabled,
+                    mapSnapshotCacheMaxEntries);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -266,7 +270,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         if (stateDesc.getType() == StateDescriptor.Type.MAP
                 && internal instanceof InternalMapState
-                && (mapPresenceCacheMaxEntries > 0 || mapCacheMaxEntries > 0)) {
+                && (mapPresenceCacheMaxEntries > 0 || mapCacheMaxEntries > 0 || mapSnapshotCacheMaxEntries > 0)) {
             Object existing = wrappersByDelegateIdentity.get(internal);
             if (existing != null) {
                 return (IS) existing;
@@ -286,7 +290,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapBypassEnabled,
                     mapHitRateThreshold,
                     mapHitRateWindow,
-                    mapIterationCacheFillEnabled);
+                    mapIterationCacheFillEnabled,
+                    mapSnapshotCacheMaxEntries);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
