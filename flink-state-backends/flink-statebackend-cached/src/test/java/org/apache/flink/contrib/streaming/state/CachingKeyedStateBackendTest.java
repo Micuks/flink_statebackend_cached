@@ -258,6 +258,8 @@ class CachingKeyedStateBackendTest {
             0,
             0,
             0,
+            0,
+            0,
             0
         );
     }
@@ -628,6 +630,8 @@ class CachingKeyedStateBackendTest {
             0,
             0,
             0,
+            0,
+            0,
             0
         );
 
@@ -686,6 +690,8 @@ class CachingKeyedStateBackendTest {
                 0,
                 0,
                 0,
+                0,
+                0,
                 0);
 
         ValueStateDescriptor<String> lruDesc = new ValueStateDescriptor<>("lruValue", String.class);
@@ -722,6 +728,8 @@ class CachingKeyedStateBackendTest {
                 false,
                 null,
                 new org.apache.flink.configuration.Configuration(),
+                0,
+                0,
                 0,
                 0,
                 0,

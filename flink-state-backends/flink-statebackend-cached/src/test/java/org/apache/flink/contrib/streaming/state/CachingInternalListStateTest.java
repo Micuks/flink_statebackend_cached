@@ -207,6 +207,8 @@ class CachingInternalListStateTest {
                 0,
                 0,
                 0,
+                0,
+                0,
                 0
         );
         cachingKeyedStateBackend.setCurrentKey(testKey);

@@ -24,6 +24,8 @@ package org.apache.flink.contrib.streaming.state;
  * @param <V> The type of the cached value.
  */
 public class CacheEntry<V> {
+    static final long AVG_COLLECTION_ELEMENT_SIZE = 16L;
+
     private V value;
     private boolean dirty;
     private transient long estimatedSizeBytes;

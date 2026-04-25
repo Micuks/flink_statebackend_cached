@@ -74,6 +74,24 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                     .noDefaultValue()
                     .withDescription("Override for maximum active namespaces for ListState caches.");
 
+    public static final ConfigOption<Integer> LIST_MAX_ELEMENTS_PER_ENTRY_CONFIG =
+            ConfigOptions.key("state.backend.cached.list.max.elements.per.entry")
+                    .intType()
+                    .defaultValue(0)
+                    .withDescription(
+                            "Maximum number of elements per entry in ListState cache. "
+                                    + "When greater than 0, lists exceeding this size are truncated (oldest elements removed). "
+                                    + "A value of 0 means unlimited (default).");
+
+    public static final ConfigOption<Integer> LIST_INCREMENTAL_FLUSH_THRESHOLD_CONFIG =
+            ConfigOptions.key("state.backend.cached.list.incremental.flush.threshold")
+                    .intType()
+                    .defaultValue(0)
+                    .withDescription(
+                            "Trigger incremental flush to RocksDB when a key's dirty buffer reaches this size. "
+                                    + "A value of 0 disables incremental flush (flush only on checkpoint/eviction). "
+                                    + "This leverages RocksDB merge semantics for O(append) writes.");
+
     public static final ConfigOption<Long> AGGREGATING_MAX_ACTIVE_NAMESPACES_CONFIG =
             ConfigOptions.key("state.backend.cached.aggregating.max.active.namespaces")
                     .longType()

@@ -151,6 +151,8 @@ class CachingInternalValueStateTest {
                         0,
                         0,
                         0,
+                        0,
+                        0,
                         0
                         );
         cachingKeyedStateBackend.setCurrentKey(testKey);

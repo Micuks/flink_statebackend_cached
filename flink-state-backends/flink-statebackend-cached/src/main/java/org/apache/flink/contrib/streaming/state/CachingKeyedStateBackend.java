@@ -133,6 +133,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int valueMaxActiveNamespaces;
     private final int mapMaxActiveNamespaces;
     private final int listMaxActiveNamespaces;
+    private final int listMaxElementsPerEntry;
+    private final int listIncrementalFlushThreshold;
     private final int aggregatingMaxActiveNamespaces;
     private final long l2TimeBucketSizeMillis;
     private final boolean perKeyMetricsEnabled;
@@ -187,7 +189,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             org.apache.flink.configuration.Configuration taskConfiguration,
             int mapSpecificL1EntryCacheSize, int mapSpecificL2EntryCacheSize,
             int valueMaxActiveNamespaces, int mapMaxActiveNamespaces,
-            int listMaxActiveNamespaces, int aggregatingMaxActiveNamespaces) {
+            int listMaxActiveNamespaces, int aggregatingMaxActiveNamespaces,
+            int listMaxElementsPerEntry, int listIncrementalFlushThreshold) {
 
         super(
                 kvStateRegistry,
@@ -232,6 +235,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.valueMaxActiveNamespaces = (valueMaxActiveNamespaces > 0) ? valueMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
         this.mapMaxActiveNamespaces = (mapMaxActiveNamespaces > 0) ? mapMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
         this.listMaxActiveNamespaces = (listMaxActiveNamespaces > 0) ? listMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
+        this.listMaxElementsPerEntry = listMaxElementsPerEntry;
+        this.listIncrementalFlushThreshold = listIncrementalFlushThreshold;
         this.aggregatingMaxActiveNamespaces = (aggregatingMaxActiveNamespaces > 0) ? aggregatingMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
 
         // Initialize global L2 entry limit from configuration
@@ -370,7 +375,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             org.apache.flink.configuration.Configuration taskConfiguration,
             int mapSpecificL1EntryCacheSize, int mapSpecificL2EntryCacheSize,
             int valueMaxActiveNamespaces, int mapMaxActiveNamespaces,
-            int listMaxActiveNamespaces, int aggregatingMaxActiveNamespaces
+            int listMaxActiveNamespaces, int aggregatingMaxActiveNamespaces,
+            int listMaxElementsPerEntry, int listIncrementalFlushThreshold
     ) {
         // Call super constructor first, using direct parameters where available
         super(
@@ -418,6 +424,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.valueMaxActiveNamespaces = (valueMaxActiveNamespaces > 0) ? valueMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
         this.mapMaxActiveNamespaces = (mapMaxActiveNamespaces > 0) ? mapMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
         this.listMaxActiveNamespaces = (listMaxActiveNamespaces > 0) ? listMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
+        this.listMaxElementsPerEntry = listMaxElementsPerEntry;
+        this.listIncrementalFlushThreshold = listIncrementalFlushThreshold;
         this.aggregatingMaxActiveNamespaces = (aggregatingMaxActiveNamespaces > 0) ? aggregatingMaxActiveNamespaces : maxActiveNamespaceOrPerKeyCacheContainers;
 
         long cfgBucket2 = 0L;
@@ -708,7 +716,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             InternalListState<K, N, V_SD> actualDelegateListState = (InternalListState<K, N, V_SD>) actualStateRaw;
             cachingStateToRegister = new CachingInternalListState<>(
                     actualDelegateListState, this, l1EntryCacheSize, l2EntryCacheSize,
-                    this.listMaxActiveNamespaces, this.listCachePolicyType); // Max memory mb was missing here for list
+                    this.listMaxActiveNamespaces, this.listCachePolicyType, this.listMaxElementsPerEntry,
+                    this.listIncrementalFlushThreshold);
         } else if (stateDescriptor.getType() == StateDescriptor.Type.AGGREGATING && actualStateRaw instanceof InternalAggregatingState) {
             InternalAggregatingState actualDelegateAggState = (InternalAggregatingState) actualStateRaw;
             AggregatingStateDescriptor aggStateDesc = (AggregatingStateDescriptor) stateDescriptor;
@@ -916,7 +925,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         l1EntryCacheSize,
                         l2EntryCacheSize,
                         this.listMaxActiveNamespaces,
-                        this.listCachePolicyType);
+                        this.listCachePolicyType, this.listMaxElementsPerEntry,
+                        this.listIncrementalFlushThreshold);
                 listWrapper.setCurrentNamespace(namespace);
                 cachingStateToRegister = listWrapper;
                 break;
@@ -1143,7 +1153,8 @@ public class CachingKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         l1EntryCacheSize,
                         l2EntryCacheSize,
                         this.listMaxActiveNamespaces,
-                        this.listCachePolicyType);
+                        this.listCachePolicyType, this.listMaxElementsPerEntry,
+                        this.listIncrementalFlushThreshold);
                 break;
             }
             case AGGREGATING: {

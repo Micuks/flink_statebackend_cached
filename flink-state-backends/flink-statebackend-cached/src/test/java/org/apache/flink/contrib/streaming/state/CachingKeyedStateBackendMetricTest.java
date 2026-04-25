@@ -109,6 +109,8 @@ class CachingKeyedStateBackendMetricTest {
                 0,
                 0,
                 0,
+                0,
+                0,
                 0
                 );
         cachingBackend.setCurrentKey("testKey");
