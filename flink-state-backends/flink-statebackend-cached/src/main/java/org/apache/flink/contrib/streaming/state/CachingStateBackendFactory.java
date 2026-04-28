@@ -92,6 +92,16 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                                     + "A value of 0 disables incremental flush (flush only on checkpoint/eviction). "
                                     + "This leverages RocksDB merge semantics for O(append) writes.");
 
+    public static final ConfigOption<Boolean> LIST_CACHE_ENABLED_CONFIG =
+            ConfigOptions.key("state.backend.cached.list.cache.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "Enable caching for ListState. When false, ListState operations (add/get) "
+                                    + "are passed directly to the underlying RocksDB backend without caching. "
+                                    + "Disabling can improve performance for append-heavy workloads where the "
+                                    + "current caching strategy causes slowdowns.");
+
     public static final ConfigOption<Long> AGGREGATING_MAX_ACTIVE_NAMESPACES_CONFIG =
             ConfigOptions.key("state.backend.cached.aggregating.max.active.namespaces")
                     .longType()

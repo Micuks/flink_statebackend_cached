@@ -24,7 +24,6 @@ package org.apache.flink.contrib.streaming.state;
  * @param <V> The type of the cached value.
  */
 public class CacheEntry<V> {
-    static final long AVG_COLLECTION_ELEMENT_SIZE = 16L;
 
     private V value;
     private boolean dirty;
@@ -67,10 +66,21 @@ public class CacheEntry<V> {
 }
 
 class ValueSizeUtils {
-    private static final long OBJECT_SHELL_SIZE = 16;
-    private static final long STRING_CHAR_SIZE = 2;
-    private static final long AVG_COLLECTION_ELEMENT_SIZE = 16;
-    private static final long MAP_ENTRY_OVERHEAD = 32;
+    // JVM object shell (compressed oops, 64-bit JVM)
+    private static final long OBJECT_SHELL_SIZE = 12L;
+    // Reference pointer size (compressed oops)
+    private static final long REFERENCE_SIZE = 4L;
+    // Array header size (includes length field)
+    private static final long ARRAY_HEADER_SIZE = 16L;
+    // HashMap: 16-byte table array header + 4 bytes per bucket entry (key+val refs)
+    private static final long HASHMAP_BUCKET_REF_SIZE = 8L;
+    // HashMap entry (RocksDB StateMap-like): key ref + value ref + hashcode int + next ref
+    private static final long HASHMAP_ENTRY_SIZE = 32L;
+    // String: object header + int hash32 + int coder + reference to char[]
+    private static final long STRING_HEADER_SIZE = 40L;
+    // char[] array header + 2 bytes per char
+    private static final long CHAR_ARRAY_HEADER = 16L;
+    private static final long CHAR_SIZE = 2L;
 
     @SuppressWarnings("rawtypes")
     public static long estimate(Object o) {
@@ -78,7 +88,12 @@ class ValueSizeUtils {
             return 0;
         }
         if (o instanceof String) {
-            return ((String) o).length() * STRING_CHAR_SIZE + OBJECT_SHELL_SIZE;
+            String s = (String) o;
+            int len = s.length();
+            return STRING_HEADER_SIZE
+                    + CHAR_ARRAY_HEADER
+                    + (long) len * CHAR_SIZE
+                    + REFERENCE_SIZE; // char[] reference inside String
         }
         if (o instanceof Integer) {
             return OBJECT_SHELL_SIZE + 4;
@@ -101,17 +116,34 @@ class ValueSizeUtils {
         if (o instanceof Character) {
             return OBJECT_SHELL_SIZE + 2;
         }
+        if (o instanceof Boolean) {
+            return OBJECT_SHELL_SIZE + 1;
+        }
         if (o instanceof java.util.List) {
-            return ((java.util.List) o).size() * AVG_COLLECTION_ELEMENT_SIZE + OBJECT_SHELL_SIZE;
+            java.util.List<?> list = (java.util.List<?>) o;
+            int size = list.size();
+            long elemRefsSize = (long) size * REFERENCE_SIZE;
+            return ARRAY_HEADER_SIZE + elemRefsSize;
         }
         if (o instanceof java.util.Map) {
-            long size = OBJECT_SHELL_SIZE;
-            size += ((java.util.Map) o).size() * (AVG_COLLECTION_ELEMENT_SIZE + AVG_COLLECTION_ELEMENT_SIZE + MAP_ENTRY_OVERHEAD);
-            return size;
+            java.util.Map<?, ?> map = (java.util.Map<?, ?>) o;
+            int size = map.size();
+            if (size == 0) {
+                return OBJECT_SHELL_SIZE + REFERENCE_SIZE; // empty HashMap shell + table ref
+            }
+            // HashMap internal: shell(12) + table ref(4) + size int(4) + modCount int(4) + threshold int(4) + loadFactor float(4) = 32
+            long mapShell = 32L;
+            // Bucket array: first array header(16) + capacity * bucket-ref-size(8)
+            int capacity = Integer.highestOneBit((int) Math.ceil(size / 0.75));
+            if (capacity < 16) {
+                capacity = 16;
+            }
+            long bucketArraySize = ARRAY_HEADER_SIZE + (long) capacity * HASHMAP_BUCKET_REF_SIZE;
+            // Entry nodes: key-ref(4) + value-ref(4) + hash(4) + next-ref(4) + overhead(~16) = 32 each
+            long entriesSize = (long) size * HASHMAP_ENTRY_SIZE;
+            return mapShell + bucketArraySize + entriesSize;
         }
-        if (o instanceof Boolean) {
-            return 4; // Approximate size for a Boolean object
-        }
-        return AVG_COLLECTION_ELEMENT_SIZE + OBJECT_SHELL_SIZE;
+        // Fallback for unknown objects: shell + small reference
+        return OBJECT_SHELL_SIZE + REFERENCE_SIZE;
     }
 }

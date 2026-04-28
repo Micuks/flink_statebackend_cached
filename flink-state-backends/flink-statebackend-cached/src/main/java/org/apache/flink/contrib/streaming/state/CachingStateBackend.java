@@ -68,6 +68,7 @@ public class CachingStateBackend extends AbstractStateBackend
     private final CachingStateBackendFactory.CachePolicyType listCachePolicyType;
     private final int listMaxElementsPerEntry;
     private final int listIncrementalFlushThreshold;
+    private final boolean listCacheEnabled;
     private final CachingStateBackendFactory.CachePolicyType aggregatingCachePolicyType;
     private final long mapL1KeyPresenceCacheSize;
     private final long mapL2KeyPresenceCacheSize;
@@ -111,6 +112,7 @@ public class CachingStateBackend extends AbstractStateBackend
         this.listCachePolicyType = cachePolicyType;
         this.listMaxElementsPerEntry = 0;
         this.listIncrementalFlushThreshold = 0;
+        this.listCacheEnabled = true;
         this.aggregatingCachePolicyType = cachePolicyType;
         this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
         this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
@@ -218,6 +220,17 @@ public class CachingStateBackend extends AbstractStateBackend
         this.listMaxElementsPerEntry = (int) tmpListMaxElements;
         this.listIncrementalFlushThreshold = (int) tmpListIncrementalThreshold;
 
+        // Read ListState cache enabled flag
+        boolean tmpListCacheEnabled = true;
+        if (config instanceof Configuration) {
+            Configuration conf = (Configuration) config;
+            if (conf.contains(CachingStateBackendFactory.LIST_CACHE_ENABLED_CONFIG)) {
+                tmpListCacheEnabled = conf.getBoolean(
+                        CachingStateBackendFactory.LIST_CACHE_ENABLED_CONFIG, true);
+            }
+        }
+        this.listCacheEnabled = tmpListCacheEnabled;
+
         // Resolve per-state max active namespaces with fallback to the global value
         long tmpValueMaxNs = this.maxActiveNamespaces;
         long tmpMapMaxNs = this.maxActiveNamespaces;
@@ -283,6 +296,7 @@ public class CachingStateBackend extends AbstractStateBackend
         cfg.set(CachingStateBackendFactory.LIST_CACHE_POLICY_CONFIG, this.listCachePolicyType);
         cfg.set(CachingStateBackendFactory.LIST_MAX_ELEMENTS_PER_ENTRY_CONFIG, this.listMaxElementsPerEntry);
         cfg.set(CachingStateBackendFactory.LIST_INCREMENTAL_FLUSH_THRESHOLD_CONFIG, this.listIncrementalFlushThreshold);
+        cfg.set(CachingStateBackendFactory.LIST_CACHE_ENABLED_CONFIG, this.listCacheEnabled);
         cfg.set(CachingStateBackendFactory.AGGREGATING_CACHE_POLICY_CONFIG, this.aggregatingCachePolicyType);
         // Package-level logging controls
         try {
@@ -375,7 +389,8 @@ public class CachingStateBackend extends AbstractStateBackend
                 (int) this.listMaxActiveNamespaces,
                 (int) this.aggregatingMaxActiveNamespaces,
                 this.listMaxElementsPerEntry,
-                this.listIncrementalFlushThreshold);
+                this.listIncrementalFlushThreshold,
+                this.listCacheEnabled);
     }
 
     @Override
@@ -448,6 +463,7 @@ public class CachingStateBackend extends AbstractStateBackend
     public CachingStateBackendFactory.CachePolicyType getListCachePolicyType() { return listCachePolicyType; }
     public int getListMaxElementsPerEntry() { return listMaxElementsPerEntry; }
     public int getListIncrementalFlushThreshold() { return listIncrementalFlushThreshold; }
+    public boolean isListCacheEnabled() { return listCacheEnabled; }
     public CachingStateBackendFactory.CachePolicyType getAggregatingCachePolicyType() { return aggregatingCachePolicyType; }
 
     public long getMapL1KeyPresenceCacheSize() {

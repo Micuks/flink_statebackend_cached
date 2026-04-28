@@ -45,13 +45,17 @@ public class DirtyBufferEntry<V_ELE> {
     /** True if dirtyBuffer is non-empty. */
     private boolean dirty;
 
+    /** True if this entry was created by a full list replace (update()) operation, not an append (add/addAll). */
+    private boolean updated;
+
     /** Estimated heap size in bytes. */
     private transient long estimatedSizeBytes;
 
-    public DirtyBufferEntry(List<V_ELE> flushedList, List<V_ELE> dirtyBuffer, boolean dirty) {
+    public DirtyBufferEntry(List<V_ELE> flushedList, List<V_ELE> dirtyBuffer, boolean dirty, boolean updated) {
         this.flushedList = flushedList;
         this.dirtyBuffer = dirtyBuffer != null ? dirtyBuffer : new ArrayList<>();
         this.dirty = dirty;
+        this.updated = updated;
         this.estimatedSizeBytes = estimateSize();
     }
 
@@ -65,6 +69,14 @@ public class DirtyBufferEntry<V_ELE> {
 
     public boolean isDirty() {
         return dirty;
+    }
+
+    /**
+     * Returns true if this entry was created by a full list replace (update()) operation.
+     * In this case, flushedList contains the new complete state and dirtyBuffer is empty.
+     */
+    public boolean isUpdated() {
+        return updated;
     }
 
     public long getEstimatedSizeBytes() {
@@ -108,6 +120,7 @@ public class DirtyBufferEntry<V_ELE> {
      */
     public void markFlushed() {
         this.dirty = false;
+        this.updated = false;
         estimatedSizeBytes = estimateSize();
     }
 
@@ -118,6 +131,7 @@ public class DirtyBufferEntry<V_ELE> {
         this.flushedList = null;
         this.dirtyBuffer = new ArrayList<>();
         this.dirty = false;
+        this.updated = false;
         estimatedSizeBytes = estimateSize();
     }
 
@@ -158,6 +172,20 @@ public class DirtyBufferEntry<V_ELE> {
         }
         dirtyBuffer.clear();
         dirty = false;
+        estimatedSizeBytes = estimateSize();
+    }
+
+    /**
+     * Resets the entry to a clean state with a new flushed list, clearing the dirty buffer.
+     * Used after flushToUnderlyingState() has written the data to RocksDB.
+     *
+     * @param flushedList the fully flushed list (may be null to represent empty/cleared state)
+     */
+    public void resetToFlushed(List<V_ELE> flushedList) {
+        this.flushedList = flushedList;
+        this.dirtyBuffer.clear();
+        this.dirty = false;
+        this.updated = false;
         estimatedSizeBytes = estimateSize();
     }
 
@@ -211,18 +239,14 @@ public class DirtyBufferEntry<V_ELE> {
     private long estimateSize() {
         long size = 0;
         if (flushedList != null) {
-            size += CacheEntry.AVG_COLLECTION_ELEMENT_SIZE;
             for (V_ELE ele : flushedList) {
-                size += CacheEntry.AVG_COLLECTION_ELEMENT_SIZE;
                 if (ele != null) {
                     size += ValueSizeUtils.estimate(ele);
                 }
             }
         }
-        size += CacheEntry.AVG_COLLECTION_ELEMENT_SIZE;
         if (dirtyBuffer != null) {
             for (V_ELE ele : dirtyBuffer) {
-                size += CacheEntry.AVG_COLLECTION_ELEMENT_SIZE;
                 if (ele != null) {
                     size += ValueSizeUtils.estimate(ele);
                 }
@@ -233,6 +257,6 @@ public class DirtyBufferEntry<V_ELE> {
 
     /** Creates an empty entry (no flushed data, empty dirty buffer, not dirty). */
     public static <V_ELE> DirtyBufferEntry<V_ELE> empty() {
-        return new DirtyBufferEntry<>(null, new ArrayList<>(), false);
+        return new DirtyBufferEntry<>(null, new ArrayList<>(), false, false);
     }
 }
