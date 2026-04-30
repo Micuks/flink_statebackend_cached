@@ -23,6 +23,7 @@ import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePoli
 import org.apache.flink.contrib.streaming.state.cachekit.cache.LruCachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PrimitivePresenceCache;
+import org.apache.flink.contrib.streaming.state.cachekit.metrics.SnapshotCacheMetrics;
 import org.apache.flink.contrib.streaming.state.cachekit.util.MurmurHash3;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.runtime.state.internal.InternalMapState;
@@ -78,6 +79,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final boolean mapSnapshotCacheEnabled;
     /** Reusable probe key for snapshot cache lookups (avoids allocation per lookup). */
     private final KeyNamespace<K, N> snapshotProbe = new KeyNamespace<>(null, null);
+    /** Per-state metrics counters for snapshot cache (null if metrics disabled). */
+    private final SnapshotCacheMetrics.StateMetrics snapshotMetrics;
 
     private N currentNamespace;
     private final KeyNamespaceUserKey<K, N, UK> lookupKey = new KeyNamespaceUserKey<>(null, null, null);
@@ -102,7 +105,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             double hitRateThreshold,
             int hitRateWindow,
             boolean iterationCacheFillEnabled,
-            int mapSnapshotCacheMaxEntries) {
+            int mapSnapshotCacheMaxEntries,
+            String stateName) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -178,8 +182,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         this.mapSnapshotCacheEnabled = mapSnapshotCacheMaxEntries > 0;
         if (mapSnapshotCacheEnabled) {
             this.mapSnapshotCache = new LruCachePolicy<>(mapSnapshotCacheMaxEntries, 64, null);
+            this.snapshotMetrics = SnapshotCacheMetrics.forState(
+                    stateName != null ? stateName : "unknown");
         } else {
             this.mapSnapshotCache = new NoOpCachePolicy<>();
+            this.snapshotMetrics = null;
         }
     }
 
@@ -366,6 +373,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         
         // --- MapSnapshot short-circuit ---
         if (mapSnapshotCacheEnabled) {
+            snapshotMetrics.entriesTotal.increment();
             Iterable<Map.Entry<UK, UV>> shortCircuit = trySnapshotShortCircuit(currentKey);
             if (shortCircuit != null) {
                 return shortCircuit;
@@ -390,6 +398,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         ensureDelegateNamespace(currentKey);
         
         if (mapSnapshotCacheEnabled) {
+            snapshotMetrics.entriesTotal.increment();
             Iterable<Map.Entry<UK, UV>> shortCircuit = trySnapshotShortCircuit(currentKey);
             if (shortCircuit != null) {
                 List<UK> keyList = new ArrayList<>();
@@ -416,6 +425,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         ensureDelegateNamespace(currentKey);
 
         if (mapSnapshotCacheEnabled) {
+            snapshotMetrics.entriesTotal.increment();
             Iterable<Map.Entry<UK, UV>> shortCircuit = trySnapshotShortCircuit(currentKey);
             if (shortCircuit != null) {
                 List<UV> valList = new ArrayList<>();
@@ -442,6 +452,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         ensureDelegateNamespace(currentKey);
 
         if (mapSnapshotCacheEnabled) {
+            snapshotMetrics.entriesTotal.increment();
             Iterable<Map.Entry<UK, UV>> shortCircuit = trySnapshotShortCircuit(currentKey);
             if (shortCircuit != null) {
                 return shortCircuit.iterator();
@@ -494,6 +505,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             if (currentKey != null && currentNamespace != null) {
                 KeyNamespace<K, N> stored = newStoredKeyNamespace(currentKey, currentNamespace);
                 mapSnapshotCache.put(stored, MapSnapshot.empty());
+                snapshotMetrics.fillEmpty.increment();
             }
         }
     }
@@ -1046,20 +1058,25 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         snapshotProbe.namespace = currentNamespace;
         MapSnapshot<UK> snapshot = mapSnapshotCache.get(snapshotProbe);
         if (snapshot == null) {
-            return null; // UNKNOWN → fallthrough to delegate
+            // UNKNOWN → cache miss, fallthrough to delegate
+            snapshotMetrics.miss.increment();
+            return null;
         }
         if (snapshot.isEmpty()) {
             // EMPTY → return empty list, zero JNI
+            snapshotMetrics.hitEmpty.increment();
             return Collections.emptyList();
         }
         // SINGLE → downgrade to point-get via this.get(cachedUK)
         UV value = this.get(snapshot.cachedUserKey);
         if (value != null) {
+            snapshotMetrics.hitSingle.increment();
             return Collections.singletonList(
                     new AbstractMap.SimpleImmutableEntry<>(snapshot.cachedUserKey, value));
         }
         // Stale cache: get() returned null → invalidate and fallthrough
         mapSnapshotCache.remove(snapshotProbe);
+        snapshotMetrics.fallback.increment();
         return null;
     }
 
@@ -1069,7 +1086,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         snapshotProbe.key = currentKey;
         snapshotProbe.namespace = currentNamespace;
-        mapSnapshotCache.remove(snapshotProbe);
+        if (mapSnapshotCache.remove(snapshotProbe) != null) {
+            snapshotMetrics.invalidate.increment();
+        }
     }
 
     private Iterable<Map.Entry<UK, UV>> wrapWithSnapshotAwareIterator(
@@ -1176,6 +1195,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             KeyNamespace<K, N> stored = newStoredKeyNamespace(currentKey, currentNamespace);
             if (iteratedCount == 0) {
                 mapSnapshotCache.put(stored, MapSnapshot.empty());
+                if (snapshotMetrics != null) {
+                    snapshotMetrics.fillEmpty.increment();
+                }
             } else if (iteratedCount == 1 && firstUserKey != null) {
                 // Deep copy
                 UK copiedUK = firstUserKey;
@@ -1185,6 +1207,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                     copiedUK = userKeySerializer.copy(firstUserKey);
                 }
                 mapSnapshotCache.put(stored, new MapSnapshot<>(copiedUK));
+                if (snapshotMetrics != null) {
+                    snapshotMetrics.fillSingle.increment();
+                }
             } else {
                 mapSnapshotCache.remove(stored);
             }

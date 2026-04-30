@@ -20,6 +20,7 @@ import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
+import org.apache.flink.contrib.streaming.state.cachekit.metrics.SnapshotCacheMetrics;
 import org.apache.flink.contrib.streaming.state.RocksDBStateBackendFactory;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.StateBackendFactory;
@@ -153,6 +154,31 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         + "Caches (Key, Namespace) -> {EMPTY | SINGLE(UserKey)} to short-circuit "
                                                         + "entries()/iterator() calls. Set 0 to disable.");
 
+        public static final ConfigOption<String> METRICS_OUTPUT_DIR = ConfigOptions
+                        .key("state.backend.cachekit.metrics.output-dir")
+                        .stringType()
+                        .noDefaultValue()
+                        .withDescription(
+                                        "Directory for snapshot cache metrics CSV files. "
+                                                        + "If unset, no CSV output is produced. "
+                                                        + "Metrics are always printed to stdout on JVM shutdown.");
+
+        public static final ConfigOption<Integer> METRICS_DUMP_INTERVAL_SEC = ConfigOptions
+                        .key("state.backend.cachekit.metrics.dump-interval-sec")
+                        .intType()
+                        .defaultValue(60)
+                        .withDescription(
+                                        "Interval in seconds between periodic CSV dumps. "
+                                                        + "Set 0 to disable periodic dumps (only dump on shutdown).");
+
+        public static final ConfigOption<Boolean> METRICS_INCREMENTAL = ConfigOptions
+                        .key("state.backend.cachekit.metrics.incremental")
+                        .booleanType()
+                        .defaultValue(false)
+                        .withDescription(
+                                        "If true, counters are reset after each periodic dump (incremental mode). "
+                                                        + "If false, counters are cumulative.");
+
         public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
                         .stringType()
                         .noDefaultValue()
@@ -181,7 +207,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final int mapHitRateWindow = config.get(MAP_HIT_RATE_WINDOW);
                 final boolean mapIterationCacheFillEnabled = config.get(MAP_ITERATION_CACHE_FILL_ENABLED);
                 final int mapSnapshotMaxEntries = Math.max(0, config.get(MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
+                final String metricsOutputDir = config.get(METRICS_OUTPUT_DIR);
+                final int metricsDumpIntervalSec = Math.max(0, config.get(METRICS_DUMP_INTERVAL_SEC));
+                final boolean metricsIncremental = config.get(METRICS_INCREMENTAL);
                 final String delegateClass = config.get(DELEGATE_BACKEND);
+
+                // Initialize metrics collection if snapshot cache is enabled
+                if (mapSnapshotMaxEntries > 0) {
+                        SnapshotCacheMetrics.init(metricsOutputDir, metricsDumpIntervalSec, metricsIncremental);
+                }
 
                 System.out.printf(
                                 "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, delegate=%s%n",
