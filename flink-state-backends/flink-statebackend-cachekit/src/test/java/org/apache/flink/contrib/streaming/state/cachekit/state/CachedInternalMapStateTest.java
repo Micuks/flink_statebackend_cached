@@ -57,7 +57,8 @@ class CachedInternalMapStateTest {
                 0.0,
                 1,
                 true,
-                0);
+                0,
+                "test");
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         assertFalse(state.contains("uk1"));
@@ -86,7 +87,8 @@ class CachedInternalMapStateTest {
                 0.0,
                 1,
                 true,
-                0);
+                0,
+                "test");
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.put("uk1", 1);
@@ -120,7 +122,8 @@ class CachedInternalMapStateTest {
                 0.0,
                 1,
                 true,
-                0);
+                0,
+                "test");
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         assertFalse(state.contains("uk1"));
@@ -151,7 +154,8 @@ class CachedInternalMapStateTest {
                 0.5,
                 1,
                 true,
-                0);
+                0,
+                "test");
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.get("u1");
@@ -197,7 +201,8 @@ class CachedInternalMapStateTest {
                 0.0,
                 1,
                 false,
-                0);
+                0,
+                "test");
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         for (Map.Entry<String, Integer> ignored : state.entries()) {
@@ -228,7 +233,8 @@ class CachedInternalMapStateTest {
                 0.0,
                 1,
                 true,
-                0);
+                0,
+                "test");
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.put("uk1", 42);
