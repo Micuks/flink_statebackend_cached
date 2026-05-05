@@ -120,10 +120,8 @@ class ValueSizeUtils {
             return OBJECT_SHELL_SIZE + 1;
         }
         if (o instanceof java.util.List) {
-            java.util.List<?> list = (java.util.List<?>) o;
-            int size = list.size();
-            long elemRefsSize = (long) size * REFERENCE_SIZE;
-            return ARRAY_HEADER_SIZE + elemRefsSize;
+            // Use the specialized ListStateSizeEstimator for accurate List size estimation
+            return ListStateSizeEstimator.estimateListSize((java.util.List<?>) o);
         }
         if (o instanceof java.util.Map) {
             java.util.Map<?, ?> map = (java.util.Map<?, ?>) o;

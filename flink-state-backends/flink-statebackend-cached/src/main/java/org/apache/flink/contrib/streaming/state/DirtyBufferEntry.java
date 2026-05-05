@@ -190,6 +190,25 @@ public class DirtyBufferEntry<V_ELE> {
     }
 
     /**
+     * Compacts the entry by releasing the flushedList reference when it's safe to do so.
+     * After this operation, only the dirtyBuffer remains in memory.
+     * The flushedList data is assumed to be safely persisted in RocksDB.
+     *
+     * <p>Call this method after incremental flush when the flushedList has been
+     * successfully written to RocksDB and we want to reduce memory usage.
+     *
+     * <p>Note: After calling this method, getMergedList() will return only the dirtyBuffer
+     * contents until new data is added and merged.
+     */
+    public void compact() {
+        if (dirtyBuffer != null && !dirtyBuffer.isEmpty() && !dirty) {
+            // flushedList has been flushed to RocksDB, release it to save memory
+            flushedList = null;
+            estimatedSizeBytes = estimateSize();
+        }
+    }
+
+    /**
      * Truncates both flushedList and dirtyBuffer to at most maxElements, keeping the newest elements.
      *
      * @param maxElements maximum allowed elements (must be &gt; 0)
@@ -237,22 +256,17 @@ public class DirtyBufferEntry<V_ELE> {
     }
 
     private long estimateSize() {
-        long size = 0;
-        if (flushedList != null) {
-            for (V_ELE ele : flushedList) {
-                if (ele != null) {
-                    size += ValueSizeUtils.estimate(ele);
-                }
-            }
-        }
-        if (dirtyBuffer != null) {
-            for (V_ELE ele : dirtyBuffer) {
-                if (ele != null) {
-                    size += ValueSizeUtils.estimate(ele);
-                }
-            }
-        }
-        return Math.max(size, 0);
+        // Use the specialized ListStateSizeEstimator for accurate size estimation
+        long flushedSize = flushedList != null ?
+                ListStateSizeEstimator.estimateListSize(flushedList) : 0;
+        long dirtySize = dirtyBuffer != null ?
+                ListStateSizeEstimator.estimateListSize(dirtyBuffer) : 0;
+
+        // Add DirtyBufferEntry object overhead:
+        // object header(12) + flushedList ref(4) + dirtyBuffer ref(4) + dirty(1) + updated(1) + padding(2) + estimatedSizeBytes(8)
+        long objectOverhead = 32L;
+
+        return flushedSize + dirtySize + objectOverhead;
     }
 
     /** Creates an empty entry (no flushed data, empty dirty buffer, not dirty). */

@@ -102,6 +102,44 @@ public class CachingStateBackendFactory implements StateBackendFactory<CachingSt
                                     + "Disabling can improve performance for append-heavy workloads where the "
                                     + "current caching strategy causes slowdowns.");
 
+    // ListState dedicated cache configuration (independent from L1/L2 used by ValueState/MapState)
+    public static final ConfigOption<Long> LIST_DEDICATED_CACHE_MEMORY_MB_CONFIG =
+            ConfigOptions.key("state.backend.cached.list.dedicated.cache.memory.mb")
+                    .longType()
+                    .defaultValue(256L)
+                    .withDescription(
+                            "Maximum memory in MB for ListState dedicated cache. "
+                                    + "This cache is independent from the L1/L2 caches used by ValueState and MapState. "
+                                    + "Default is 256MB. A larger cache can improve performance for ListState workloads "
+                                    + "with many keys (e.g., 370,000 keys).");
+
+    public static final ConfigOption<Integer> LIST_DEDICATED_CACHE_MAX_ENTRIES_CONFIG =
+            ConfigOptions.key("state.backend.cached.list.dedicated.cache.max.entries")
+                    .intType()
+                    .defaultValue(50000)
+                    .withDescription(
+                            "Maximum number of entries in ListState dedicated cache. "
+                                    + "When this limit is reached, LRU eviction occurs. "
+                                    + "Default is 50,000 entries.");
+
+    public static final ConfigOption<Long> LIST_DEDICATED_CACHE_ENTRY_EXPIRATION_MILLIS_CONFIG =
+            ConfigOptions.key("state.backend.cached.list.dedicated.cache.entry.expiration.ms")
+                    .longType()
+                    .defaultValue(0L)
+                    .withDescription(
+                            "Entry expiration time in milliseconds for ListState dedicated cache. "
+                                    + "Entries not accessed within this time are evicted. "
+                                    + "A value of 0 means no expiration (default).");
+
+    public static final ConfigOption<Boolean> LIST_DEDICATED_CACHE_ENABLED_CONFIG =
+            ConfigOptions.key("state.backend.cached.list.dedicated.cache.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "Enable the dedicated ListState cache (large-capacity LRU). "
+                                    + "When false, falls back to the original L1/L2 cache architecture. "
+                                    + "Default is true.");
+
     public static final ConfigOption<Long> AGGREGATING_MAX_ACTIVE_NAMESPACES_CONFIG =
             ConfigOptions.key("state.backend.cached.aggregating.max.active.namespaces")
                     .longType()

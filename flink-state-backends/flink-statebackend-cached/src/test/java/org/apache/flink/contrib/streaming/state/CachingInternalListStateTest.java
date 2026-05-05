@@ -210,7 +210,12 @@ class CachingInternalListStateTest {
                 0, // aggregatingMaxActiveNamespaces
                 0, // listMaxElementsPerEntry
                 0, // listIncrementalFlushThreshold
-                true  // listCacheEnabled
+                true,  // listCacheEnabled
+                // ListState dedicated cache parameters
+                true,   // listDedicatedCacheEnabled
+                256L,   // listDedicatedCacheMemoryMb
+                50000,  // listDedicatedCacheMaxEntries
+                0L      // listDedicatedCacheEntryExpirationMillis
         );
         cachingKeyedStateBackend.setCurrentKey(testKey);
 

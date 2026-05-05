@@ -69,6 +69,11 @@ public class CachingStateBackend extends AbstractStateBackend
     private final int listMaxElementsPerEntry;
     private final int listIncrementalFlushThreshold;
     private final boolean listCacheEnabled;
+    // ListState dedicated cache configuration
+    private final boolean listDedicatedCacheEnabled;
+    private final long listDedicatedCacheMemoryMb;
+    private final int listDedicatedCacheMaxEntries;
+    private final long listDedicatedCacheEntryExpirationMillis;
     private final CachingStateBackendFactory.CachePolicyType aggregatingCachePolicyType;
     private final long mapL1KeyPresenceCacheSize;
     private final long mapL2KeyPresenceCacheSize;
@@ -113,6 +118,11 @@ public class CachingStateBackend extends AbstractStateBackend
         this.listMaxElementsPerEntry = 0;
         this.listIncrementalFlushThreshold = 0;
         this.listCacheEnabled = true;
+        // ListState dedicated cache defaults to enabled with 256MB / 50K entries
+        this.listDedicatedCacheEnabled = true;
+        this.listDedicatedCacheMemoryMb = 256;
+        this.listDedicatedCacheMaxEntries = 50000;
+        this.listDedicatedCacheEntryExpirationMillis = 0;
         this.aggregatingCachePolicyType = cachePolicyType;
         this.mapL1KeyPresenceCacheSize = mapL1KeyPresenceCacheSize;
         this.mapL2KeyPresenceCacheSize = mapL2KeyPresenceCacheSize;
@@ -146,6 +156,11 @@ public class CachingStateBackend extends AbstractStateBackend
         cfg.set(CachingStateBackendFactory.VALUE_CACHE_HIT_RATE_WINDOW_SIZE_CONFIG, 1000L);
         cfg.set(CachingStateBackendFactory.VALUE_CACHE_MIN_ACCESSES_FOR_BYPASS_CHECK_CONFIG, 100L);
         cfg.set(CachingStateBackendFactory.WRITE_BEHIND_ENABLED_CONFIG, false);
+        // ListState dedicated cache configuration defaults
+        cfg.set(CachingStateBackendFactory.LIST_DEDICATED_CACHE_ENABLED_CONFIG, true);
+        cfg.set(CachingStateBackendFactory.LIST_DEDICATED_CACHE_MEMORY_MB_CONFIG, 256L);
+        cfg.set(CachingStateBackendFactory.LIST_DEDICATED_CACHE_MAX_ENTRIES_CONFIG, 50000);
+        cfg.set(CachingStateBackendFactory.LIST_DEDICATED_CACHE_ENTRY_EXPIRATION_MILLIS_CONFIG, 0L);
         this.taskConfiguration = cfg;
 
         if (!(delegateBackend instanceof AbstractStateBackend)) {
@@ -230,6 +245,36 @@ public class CachingStateBackend extends AbstractStateBackend
             }
         }
         this.listCacheEnabled = tmpListCacheEnabled;
+
+        // Read ListState dedicated cache configuration
+        boolean tmpListDedicatedEnabled = true;
+        long tmpListDedicatedMemoryMb = 256;
+        int tmpListDedicatedMaxEntries = 50000;
+        long tmpListDedicatedExpiration = 0;
+        if (config instanceof Configuration) {
+            Configuration conf = (Configuration) config;
+            if (conf.contains(CachingStateBackendFactory.LIST_DEDICATED_CACHE_ENABLED_CONFIG)) {
+                tmpListDedicatedEnabled = conf.getBoolean(CachingStateBackendFactory.LIST_DEDICATED_CACHE_ENABLED_CONFIG);
+            }
+            if (conf.contains(CachingStateBackendFactory.LIST_DEDICATED_CACHE_MEMORY_MB_CONFIG)) {
+                tmpListDedicatedMemoryMb = conf.getLong(CachingStateBackendFactory.LIST_DEDICATED_CACHE_MEMORY_MB_CONFIG);
+            }
+            if (conf.contains(CachingStateBackendFactory.LIST_DEDICATED_CACHE_MAX_ENTRIES_CONFIG)) {
+                tmpListDedicatedMaxEntries = conf.getInteger(CachingStateBackendFactory.LIST_DEDICATED_CACHE_MAX_ENTRIES_CONFIG.key(), 50000);
+            }
+            if (conf.contains(CachingStateBackendFactory.LIST_DEDICATED_CACHE_ENTRY_EXPIRATION_MILLIS_CONFIG)) {
+                tmpListDedicatedExpiration = conf.getLong(CachingStateBackendFactory.LIST_DEDICATED_CACHE_ENTRY_EXPIRATION_MILLIS_CONFIG);
+            }
+        } else {
+            try { tmpListDedicatedEnabled = config.get(CachingStateBackendFactory.LIST_DEDICATED_CACHE_ENABLED_CONFIG); } catch (Throwable ignore) {}
+            try { tmpListDedicatedMemoryMb = config.get(CachingStateBackendFactory.LIST_DEDICATED_CACHE_MEMORY_MB_CONFIG); } catch (Throwable ignore) {}
+            try { tmpListDedicatedMaxEntries = config.get(CachingStateBackendFactory.LIST_DEDICATED_CACHE_MAX_ENTRIES_CONFIG); } catch (Throwable ignore) {}
+            try { tmpListDedicatedExpiration = config.get(CachingStateBackendFactory.LIST_DEDICATED_CACHE_ENTRY_EXPIRATION_MILLIS_CONFIG); } catch (Throwable ignore) {}
+        }
+        this.listDedicatedCacheEnabled = tmpListDedicatedEnabled;
+        this.listDedicatedCacheMemoryMb = tmpListDedicatedMemoryMb;
+        this.listDedicatedCacheMaxEntries = tmpListDedicatedMaxEntries;
+        this.listDedicatedCacheEntryExpirationMillis = tmpListDedicatedExpiration;
 
         // Resolve per-state max active namespaces with fallback to the global value
         long tmpValueMaxNs = this.maxActiveNamespaces;
@@ -390,7 +435,12 @@ public class CachingStateBackend extends AbstractStateBackend
                 (int) this.aggregatingMaxActiveNamespaces,
                 this.listMaxElementsPerEntry,
                 this.listIncrementalFlushThreshold,
-                this.listCacheEnabled);
+                this.listCacheEnabled,
+                // ListState dedicated cache configuration
+                this.listDedicatedCacheEnabled,
+                this.listDedicatedCacheMemoryMb,
+                this.listDedicatedCacheMaxEntries,
+                this.listDedicatedCacheEntryExpirationMillis);
     }
 
     @Override
@@ -464,6 +514,10 @@ public class CachingStateBackend extends AbstractStateBackend
     public int getListMaxElementsPerEntry() { return listMaxElementsPerEntry; }
     public int getListIncrementalFlushThreshold() { return listIncrementalFlushThreshold; }
     public boolean isListCacheEnabled() { return listCacheEnabled; }
+    public boolean isListDedicatedCacheEnabled() { return listDedicatedCacheEnabled; }
+    public long getListDedicatedCacheMemoryMb() { return listDedicatedCacheMemoryMb; }
+    public int getListDedicatedCacheMaxEntries() { return listDedicatedCacheMaxEntries; }
+    public long getListDedicatedCacheEntryExpirationMillis() { return listDedicatedCacheEntryExpirationMillis; }
     public CachingStateBackendFactory.CachePolicyType getAggregatingCachePolicyType() { return aggregatingCachePolicyType; }
 
     public long getMapL1KeyPresenceCacheSize() {

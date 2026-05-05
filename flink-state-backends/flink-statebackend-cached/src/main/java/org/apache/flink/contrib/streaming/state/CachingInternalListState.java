@@ -82,6 +82,16 @@ public class CachingInternalListState<K, N, V_ELE>
     private final int incrementalFlushThreshold;
     private final boolean cachingEnabled;
 
+    // ListState dedicated cache (alternative to L1/L2 for better scalability)
+    private final boolean listDedicatedCacheEnabled;
+    private final ListStateCacheManager<K, N, V_ELE> listDedicatedCache;
+
+    /**
+     * Tracks (key, namespace) pairs that have been explicitly cleared.
+     * This is used to optimize add() after clear() by skipping unnecessary RocksDB reads.
+     */
+    private final CachedListStateSnapshot<K, N> clearedKeysSnapshot;
+
     public CachingInternalListState(
             InternalListState<K, N, V_ELE> delegateState,
             CachingKeyedStateBackend<K> backend,
@@ -91,7 +101,12 @@ public class CachingInternalListState<K, N, V_ELE>
             CachingStateBackendFactory.CachePolicyType cachePolicyType,
             int maxElementsPerEntry,
             int incrementalFlushThreshold,
-            boolean cachingEnabled) {
+            boolean cachingEnabled,
+            // ListState dedicated cache parameters
+            boolean listDedicatedCacheEnabled,
+            long listDedicatedCacheMemoryMb,
+            int listDedicatedCacheMaxEntries,
+            long listDedicatedCacheEntryExpirationMillis) {
         this.delegateState = delegateState;
         this.backend = backend;
         this.l1CacheSizePerNamespace = l1CacheSize;
@@ -101,6 +116,22 @@ public class CachingInternalListState<K, N, V_ELE>
         this.maxElementsPerEntry = maxElementsPerEntry;
         this.incrementalFlushThreshold = incrementalFlushThreshold;
         this.cachingEnabled = cachingEnabled;
+        this.listDedicatedCacheEnabled = listDedicatedCacheEnabled;
+        this.clearedKeysSnapshot = new CachedListStateSnapshot<>();
+
+        // Initialize ListState dedicated cache if enabled
+        if (listDedicatedCacheEnabled && listDedicatedCacheMemoryMb > 0) {
+            this.listDedicatedCache = new ListStateCacheManager<>(
+                    listDedicatedCacheMemoryMb,
+                    listDedicatedCacheMaxEntries,
+                    listDedicatedCacheEntryExpirationMillis,
+                    true, // cacheEnabled
+                    delegateState,
+                    backend
+            );
+        } else {
+            this.listDedicatedCache = null;
+        }
 
         if (!cachingEnabled) {
             // When caching is disabled, use no-op cache policies that immediately evict entries.
@@ -347,12 +378,112 @@ public class CachingInternalListState<K, N, V_ELE>
         }
     }
 
+    // --- Dedicated cache access methods (for large-scale ListState workloads) ---
+
+    /**
+     * Gets the list value from the dedicated cache.
+     * This method is used when listDedicatedCacheEnabled is true.
+     */
+    private Iterable<V_ELE> getFromDedicatedCache(K key, N namespace) throws Exception {
+        ListStateCacheEntry<V_ELE> entry = listDedicatedCache.getOrCreate(key, namespace);
+        List<V_ELE> merged = entry.getMergedList();
+        return merged != null ? new LazyCopyList<>(merged) : null;
+    }
+
+    /**
+     * Adds an element using the dedicated cache.
+     * This method is used when listDedicatedCacheEnabled is true.
+     */
+    private void addToDedicatedCache(K key, N namespace, V_ELE value) throws Exception {
+        ListStateCacheEntry<V_ELE> entry = listDedicatedCache.getOrCreate(key, namespace);
+        entry.add(value);
+
+        // Trigger incremental flush if threshold is reached
+        if (incrementalFlushThreshold > 0 && entry.getDirtyBuffer().size() >= incrementalFlushThreshold) {
+            flushDedicatedCacheEntry(key, namespace, entry);
+        }
+    }
+
+    /**
+     * Adds multiple elements using the dedicated cache.
+     * This method is used when listDedicatedCacheEnabled is true.
+     */
+    private void addAllToDedicatedCache(K key, N namespace, List<V_ELE> values) throws Exception {
+        if (values == null || values.isEmpty()) {
+            return;
+        }
+        ListStateCacheEntry<V_ELE> entry = listDedicatedCache.getOrCreate(key, namespace);
+        entry.addAll(values);
+
+        if (incrementalFlushThreshold > 0 && entry.getDirtyBuffer().size() >= incrementalFlushThreshold) {
+            flushDedicatedCacheEntry(key, namespace, entry);
+        }
+    }
+
+    /**
+     * Flushes a single entry in the dedicated cache to RocksDB.
+     */
+    private void flushDedicatedCacheEntry(K key, N namespace, ListStateCacheEntry<V_ELE> entry) throws Exception {
+        if (entry == null || !entry.isDirty()) {
+            return;
+        }
+
+        K origKey = backend.getCurrentKey();
+        try {
+            backend.setCurrentKey(key);
+
+            if (entry.isUpdated()) {
+                List<V_ELE> merged = entry.getMergedList();
+                if (merged != null && !merged.isEmpty()) {
+                    delegateState.update(merged);
+                } else {
+                    delegateState.clear();
+                }
+            } else {
+                List<V_ELE> dirtyBuffer = entry.getDirtyBuffer();
+                if (dirtyBuffer != null && !dirtyBuffer.isEmpty()) {
+                    delegateState.addAll(dirtyBuffer);
+                }
+            }
+
+            entry.markFlushed();
+        } finally {
+            backend.setCurrentKey(origKey);
+        }
+    }
+
+    /**
+     * Updates the list using the dedicated cache.
+     * This method is used when listDedicatedCacheEnabled is true.
+     */
+    private void updateInDedicatedCache(K key, N namespace, List<V_ELE> values) throws Exception {
+        ListStateCacheEntry<V_ELE> entry = listDedicatedCache.getOrCreate(key, namespace);
+        if (values == null || values.isEmpty()) {
+            entry.clear();
+        } else {
+            entry.markUpdated(values);
+        }
+    }
+
+    /**
+     * Clears the list using the dedicated cache.
+     * This method is used when listDedicatedCacheEnabled is true.
+     */
+    private void clearInDedicatedCache(K key, N namespace) {
+        listDedicatedCache.remove(key, namespace);
+    }
+
     // --- Public API: get() ---
 
     @Override
     public Iterable<V_ELE> get() throws Exception {
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
+
+        // Use dedicated cache if enabled (provides better scalability for many keys)
+        if (listDedicatedCacheEnabled && listDedicatedCache != null) {
+            return getFromDedicatedCache(currentKey, currentNamespace);
+        }
 
         NamespaceCachePair pair = getNamespaceCaches(currentNamespace);
         if (pair == null) {
@@ -375,9 +506,10 @@ public class CachingInternalListState<K, N, V_ELE>
         DirtyBufferEntry<V_ELE> entry = l1Cache != null ? l1Cache.get(currentKey) : null;
 
         if (entry != null) {
-            // Return a defensive copy so callers cannot mutate internal cache state.
+            // Return a LazyCopyList to avoid defensive copy overhead on every get() call.
+            // The copy is only created if the caller modifies the list or needs a mutable copy.
             List<V_ELE> merged = entry.getMergedList();
-            return merged != null ? new ArrayList<>(merged) : null;
+            return merged != null ? new LazyCopyList<>(merged) : null;
         }
 
         // L1 miss -> try L2
@@ -396,8 +528,8 @@ public class CachingInternalListState<K, N, V_ELE>
                 backend.reportCacheMemoryReleased(old.getEstimatedSizeBytes());
             }
             backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
-            // Return a defensive copy of the promoted value.
-            return new ArrayList<>(l2Value);
+            // Return a LazyCopyList to avoid defensive copy overhead.
+            return new LazyCopyList<>(l2Value);
         }
 
         // L1 & L2 miss: fetch from RocksDB
@@ -425,8 +557,8 @@ public class CachingInternalListState<K, N, V_ELE>
             backend.reportCacheMemoryReleased(old.getEstimatedSizeBytes());
         }
         backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
-        // Return a defensive copy so callers cannot mutate the cached entry.
-        return new ArrayList<>(listFromDelegate);
+        // Return a LazyCopyList to avoid defensive copy overhead.
+        return new LazyCopyList<>(listFromDelegate);
     }
 
     // --- Public API: add() ---
@@ -439,6 +571,16 @@ public class CachingInternalListState<K, N, V_ELE>
 
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
+
+        // Use dedicated cache if enabled (provides better scalability for many keys)
+        if (listDedicatedCacheEnabled && listDedicatedCache != null) {
+            // Check if this key was just cleared - optimization to skip unnecessary RocksDB read
+            if (clearedKeysSnapshot.isCleared(currentKey, currentNamespace)) {
+                clearedKeysSnapshot.unmarkCleared(currentKey, currentNamespace);
+            }
+            addToDedicatedCache(currentKey, currentNamespace, value);
+            return;
+        }
 
         NamespaceCachePair pair = getNamespaceCaches(currentNamespace);
         if (pair == null) {
@@ -455,6 +597,11 @@ public class CachingInternalListState<K, N, V_ELE>
 
         DirtyBufferEntry<V_ELE> entry = l1Cache.get(currentKey);
         if (entry == null) {
+            // Check if this key was just cleared - optimization to skip unnecessary RocksDB read
+            if (clearedKeysSnapshot.isCleared(currentKey, currentNamespace)) {
+                clearedKeysSnapshot.unmarkCleared(currentKey, currentNamespace);
+                // Key was just cleared, skip L2/RocksDB read and directly add to dirty buffer.
+            }
             entry = DirtyBufferEntry.empty();
             DirtyBufferEntry<V_ELE> old = l1Cache.put(currentKey, entry);
             if (old != null) {
@@ -498,6 +645,16 @@ public class CachingInternalListState<K, N, V_ELE>
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
+        // Use dedicated cache if enabled (provides better scalability for many keys)
+        if (listDedicatedCacheEnabled && listDedicatedCache != null) {
+            // Check if this key was just cleared - optimization to skip unnecessary RocksDB read
+            if (clearedKeysSnapshot.isCleared(currentKey, currentNamespace)) {
+                clearedKeysSnapshot.unmarkCleared(currentKey, currentNamespace);
+            }
+            addAllToDedicatedCache(currentKey, currentNamespace, values);
+            return;
+        }
+
         NamespaceCachePair pair = getNamespaceCaches(currentNamespace);
         if (pair == null) {
             // Caching disabled: delegate directly.
@@ -513,6 +670,10 @@ public class CachingInternalListState<K, N, V_ELE>
 
         DirtyBufferEntry<V_ELE> entry = l1Cache.get(currentKey);
         if (entry == null) {
+            // Check if this key was just cleared - optimization to skip unnecessary RocksDB read
+            if (clearedKeysSnapshot.isCleared(currentKey, currentNamespace)) {
+                clearedKeysSnapshot.unmarkCleared(currentKey, currentNamespace);
+            }
             entry = DirtyBufferEntry.empty();
             DirtyBufferEntry<V_ELE> old = l1Cache.put(currentKey, entry);
             if (old != null) {
@@ -549,6 +710,13 @@ public class CachingInternalListState<K, N, V_ELE>
     public void update(List<V_ELE> values) throws Exception {
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
+
+        // Use dedicated cache if enabled (provides better scalability for many keys)
+        if (listDedicatedCacheEnabled && listDedicatedCache != null) {
+            updateInDedicatedCache(currentKey, currentNamespace, values);
+            return;
+        }
+
         NamespaceCachePair pair = getNamespaceCaches(currentNamespace);
 
         if (pair == null) {
@@ -596,6 +764,14 @@ public class CachingInternalListState<K, N, V_ELE>
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
+        // Use dedicated cache if enabled (provides better scalability for many keys)
+        if (listDedicatedCacheEnabled && listDedicatedCache != null) {
+            clearInDedicatedCache(currentKey, currentNamespace);
+            delegateState.clear();
+            clearedKeysSnapshot.markCleared(currentKey, currentNamespace);
+            return;
+        }
+
         NamespaceCachePair pair = getNamespaceCaches(currentNamespace);
         if (pair != null) {
             @SuppressWarnings("unchecked")
@@ -614,6 +790,10 @@ public class CachingInternalListState<K, N, V_ELE>
         }
 
         delegateState.clear();
+
+        // Mark this (key, namespace) as cleared to optimize subsequent add() calls.
+        // This allows add() to skip the unnecessary RocksDB read after clear().
+        clearedKeysSnapshot.markCleared(currentKey, currentNamespace);
     }
 
     // --- Public API: flushToUnderlyingState() ---
@@ -622,6 +802,12 @@ public class CachingInternalListState<K, N, V_ELE>
     public void flushToUnderlyingState() throws IOException {
         K originalFlushKey = backend.getCurrentKey();
         N originalFlushNamespace = this.currentNamespace;
+
+        // Flush dedicated cache first if enabled
+        if (listDedicatedCacheEnabled && listDedicatedCache != null) {
+            listDedicatedCache.flushAll();
+        }
+
         try {
             for (Map.Entry<N, CachePolicy<K, DirtyBufferEntry<V_ELE>>> nsEntry : namespaceCachesL1.entrySet()) {
                 N namespace = nsEntry.getKey();
@@ -730,6 +916,13 @@ public class CachingInternalListState<K, N, V_ELE>
         K currentKey = backend.getCurrentKey();
         N currentNamespace = getCurrentNamespace();
 
+        // Use dedicated cache if enabled (provides better scalability for many keys)
+        if (listDedicatedCacheEnabled && listDedicatedCache != null) {
+            ListStateCacheEntry<V_ELE> entry = listDedicatedCache.getOrCreate(currentKey, currentNamespace);
+            List<V_ELE> merged = entry.getMergedList();
+            return merged;
+        }
+
         NamespaceCachePair pair = getNamespaceCaches(currentNamespace);
         if (pair == null) {
             // Caching disabled: delegate directly.
@@ -743,9 +936,10 @@ public class CachingInternalListState<K, N, V_ELE>
         DirtyBufferEntry<V_ELE> entry = l1Cache != null ? l1Cache.get(currentKey) : null;
 
         if (entry != null) {
-            // Return a defensive copy so callers cannot mutate internal cache state.
+            // Return a LazyCopyList to avoid defensive copy overhead on every get() call.
+            // The copy is only created if the caller modifies the list or needs a mutable copy.
             List<V_ELE> merged = entry.getMergedList();
-            return merged != null ? new ArrayList<>(merged) : null;
+            return merged != null ? new LazyCopyList<>(merged) : null;
         }
 
         CacheEntry<List<V_ELE>> l2Entry = l2Cache != null ? l2Cache.get(currentKey) : null;
@@ -763,7 +957,8 @@ public class CachingInternalListState<K, N, V_ELE>
                 backend.reportCacheMemoryReleased(old.getEstimatedSizeBytes());
             }
             backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
-            return new ArrayList<>(l2Value);
+            // Return a LazyCopyList to avoid defensive copy overhead.
+            return new LazyCopyList<>(l2Value);
         }
 
         List<V_ELE> listFromDelegate = delegateState.getInternal();
@@ -775,7 +970,8 @@ public class CachingInternalListState<K, N, V_ELE>
                 backend.reportCacheMemoryReleased(old.getEstimatedSizeBytes());
             }
             backend.reportCacheMemoryAdded(newEntry.getEstimatedSizeBytes());
-            return new ArrayList<>(listFromDelegate);
+            // Return a LazyCopyList to avoid defensive copy overhead.
+            return new LazyCopyList<>(listFromDelegate);
         }
         return listFromDelegate;
     }
