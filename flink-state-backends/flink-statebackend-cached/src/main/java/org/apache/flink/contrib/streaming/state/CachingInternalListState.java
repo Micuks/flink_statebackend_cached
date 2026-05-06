@@ -27,6 +27,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * An {@link InternalListState} that uses an L1/L2 cache with write-behind + incremental flush for its list values.
@@ -81,6 +82,9 @@ public class CachingInternalListState<K, N, V_ELE>
     private final int maxElementsPerEntry;
     private final int incrementalFlushThreshold;
     private final boolean cachingEnabled;
+
+    // Debug counter: logs config once every 10,000 add() calls
+    private static final AtomicLong addCounter = new AtomicLong(0);
 
     public CachingInternalListState(
             InternalListState<K, N, V_ELE> delegateState,
@@ -287,22 +291,43 @@ public class CachingInternalListState<K, N, V_ELE>
         }
 
         if (entry.isUpdated()) {
-            // Full-replace entry: flushedList contains the new complete state, dirtyBuffer is empty.
-            // Write the new list directly via update() (or clear() if null/empty).
-            List<V_ELE> newList = entry.getMergedList();
-            if (newList != null && !newList.isEmpty()) {
-                delegateState.update(newList);
+            // Full-replace entry: flushedList contains the new complete state, dirtyBuffer is empty
+            // (but may have been appended to via add() after the update()).
+            // Write the merged list via update() (or clear() if null/empty).
+            List<V_ELE> merged = entry.getMergedList();
+            if (merged != null && !merged.isEmpty()) {
+                delegateState.update(merged);
             } else {
                 delegateState.clear();
             }
-            // Reset the entry: flushedList holds the new state, dirtyBuffer stays empty, isUpdated=false.
-            entry.resetToFlushed(newList);
+            // Apply truncation to the merged state.
+            if (maxElementsPerEntry > 0) {
+                entry.truncateToMaxSize(maxElementsPerEntry);
+            }
+            // Reset entry to clean state.
+            List<V_ELE> finalList = entry.getMergedList();
+            entry.resetToFlushed(finalList);
+            // Update L2 with the fully-flushed snapshot (including truncation).
+            if (finalList != null && !finalList.isEmpty()) {
+                CacheEntry<List<V_ELE>> l2Entry = CacheEntry.clean(finalList);
+                CacheEntry<List<V_ELE>> old = l2Cache.put(key, l2Entry);
+                if (old != null) {
+                    backend.reportCacheMemoryReleased(old.getEstimatedSizeBytes());
+                }
+                backend.reportCacheMemoryAdded(l2Entry.getEstimatedSizeBytes());
+            } else {
+                l2Cache.remove(key);
+            }
         } else {
             // Append entry: dirtyBuffer has new elements. Use addAll (RocksDB merge semantics).
             if (!entry.getDirtyBuffer().isEmpty()) {
                 delegateState.addAll(entry.getDirtyBuffer());
             }
             entry.mergeDirtyIntoFlushed();
+            // Apply truncation before updating L2.
+            if (maxElementsPerEntry > 0) {
+                entry.truncateToMaxSize(maxElementsPerEntry);
+            }
             List<V_ELE> fullyFlushed = entry.getMergedList();
             CacheEntry<List<V_ELE>> l2Entry = CacheEntry.clean(fullyFlushed);
             CacheEntry<List<V_ELE>> old = l2Cache.put(key, l2Entry);
@@ -339,6 +364,10 @@ public class CachingInternalListState<K, N, V_ELE>
                     backend.setCurrentKey(key);
                     setCurrentNamespace(namespace);
                     incrementalFlushToDelegate(key, namespace, entry, perNsL2Cache);
+                }
+                // Remove empty entries from L1 to release memory.
+                if (entry.getMergedList() == null) {
+                    perNsL1Cache.remove(key);
                 }
             }
         } finally {
@@ -433,6 +462,14 @@ public class CachingInternalListState<K, N, V_ELE>
 
     @Override
     public void add(V_ELE value) throws Exception {
+        // Debug log: print config once every 10,000 add() calls
+        long count = addCounter.incrementAndGet();
+        if (count % 10000 == 0) {
+            System.out.println("[DEBUG ListState] add() #" + count
+                + ", incrementalFlushThreshold=" + incrementalFlushThreshold
+                + ", cachingEnabled=" + cachingEnabled
+                + ", maxElementsPerEntry=" + maxElementsPerEntry);
+        }
         if (value == null) {
             return;
         }
@@ -656,49 +693,11 @@ public class CachingInternalListState<K, N, V_ELE>
                             continue;
                         }
 
-                        // Step 1: If there is unflushed dirty data, write it to RocksDB via addAll.
-                        // This uses RocksDB merge semantics for O(append) writes.
-                        // If the dirty buffer was already flushed via incremental flush, this is a no-op.
-                        if (!entry.getDirtyBuffer().isEmpty()) {
-                            delegateState.addAll(entry.getDirtyBuffer());
-                        }
-
-                        // Step 2: Merge dirty into flushed, then apply truncation.
-                        // After merge, flushedList contains all data up to the last flush.
-                        // Then truncate to maxElementsPerEntry (keeps newest entries).
-                        // We must update RocksDB with the truncated state to keep RocksDB in sync,
-                        // because earlier entries may have been truncated from the in-memory flushedList
-                        // but are still present in RocksDB from before.
-                        entry.mergeDirtyIntoFlushed();
-                        if (maxElementsPerEntry > 0) {
-                            entry.truncateToMaxSize(maxElementsPerEntry);
-                        }
-
-                        // Step 3: Write the fully flushed and truncated state back to RocksDB.
-                        // This corrects any entries that were truncated out of the in-memory flushedList
-                        // but still exist in RocksDB. Only write if there is data; otherwise clear.
-                        List<V_ELE> finalList = entry.getMergedList();
-                        if (finalList != null && !finalList.isEmpty()) {
-                            delegateState.update(finalList);
-                        } else {
-                            delegateState.clear();
-                        }
-
-                        // Step 4: Update L2 with the fully flushed snapshot.
-                        List<V_ELE> fullyFlushed = entry.getMergedList();
-                        if (fullyFlushed != null && !fullyFlushed.isEmpty()) {
-                            CacheEntry<List<V_ELE>> l2Entry = CacheEntry.clean(fullyFlushed);
-                            CacheEntry<List<V_ELE>> oldL2 = l2Cache.put(key, l2Entry);
-                            if (oldL2 != null) {
-                                backend.reportCacheMemoryReleased(oldL2.getEstimatedSizeBytes());
-                            }
-                            backend.reportCacheMemoryAdded(l2Entry.getEstimatedSizeBytes());
-                        } else {
-                            l2Cache.remove(key);
-                        }
-
-                        // Step 5: Mark entry as fully clean.
-                        entry.markFlushed();
+                        // Flush this entry using the same logic as incrementalFlushToDelegate.
+                        // This avoids the double-write bug where addAll() was followed by update().
+                        // - isUpdated=true: use update() for full replacement
+                        // - isUpdated=false: use addAll() for incremental append (merge semantics)
+                        incrementalFlushToDelegate(key, namespace, entry, l2Cache);
 
                         // Step 6: Remove empty entries from L1 to release memory.
                         if (entry.getMergedList() == null) {
