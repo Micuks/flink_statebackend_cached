@@ -190,7 +190,13 @@ public class CacheKitStateBackend extends AbstractStateBackend
 
         // Initialize metrics on the TaskManager JVM (not the client)
         if (mapSnapshotCacheMaxEntries > 0) {
-            SnapshotCacheMetrics.init(metricsOutputDir, metricsDumpIntervalSec, metricsIncremental);
+            // Prefer pipeline.name (set by Nexmark / SQL client); fall back to short JobID
+            String jobName = env.getJobConfiguration().getString("pipeline.name", null);
+            if (jobName == null || jobName.isBlank()) {
+                jobName = jobID.toString().substring(0, 8);
+            }
+            SnapshotCacheMetrics.init(metricsOutputDir, metricsDumpIntervalSec,
+                    metricsIncremental, jobName);
         }
 
         return new CacheKitKeyedStateBackend<>(

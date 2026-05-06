@@ -157,38 +157,56 @@ public final class SnapshotCacheMetrics {
     /**
      * Initialize periodic CSV dumping.
      *
-     * @param outputDir   directory for CSV files; null to disable file output.
-     * @param intervalSec interval in seconds between dumps; 0 to disable periodic dumps.
-     * @param incremental if true, counters are reset after each dump (incremental mode);
-     *                    if false, counters are cumulative.
+     * @param outputDir       directory for CSV files; null to disable file output.
+     * @param intervalSec     interval in seconds between dumps; 0 to disable periodic dumps.
+     * @param incremental     if true, counters are reset after each dump (incremental mode);
+     *                        if false, counters are cumulative.
+     * @param jobIdentifier   a human-readable identifier for the current job (e.g. job name or
+     *                        short JobID). Used in the CSV filename to separate different queries.
      */
-    public static void init(String outputDir, int intervalSec, boolean incremental) {
+    public static void init(String outputDir, int intervalSec, boolean incremental,
+                            String jobIdentifier) {
         synchronized (INIT_LOCK) {
-            if (scheduler != null) {
-                return; // already initialized
-            }
             incrementalMode = incremental;
+
+            // --- Per-job: switch CSV file if job changed ---
             if (outputDir != null && !outputDir.isBlank()) {
                 File dir = new File(outputDir);
                 if (!dir.exists()) {
                     dir.mkdirs();
                 }
-                String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
-                csvFilePath = new File(dir, "snapshot_cache_metrics_" + timestamp + ".csv").getAbsolutePath();
-                // Write CSV header
-                try (PrintWriter pw = new PrintWriter(new BufferedWriter(new FileWriter(csvFilePath, false)))) {
-                    pw.println("timestamp,state_name,hit_empty,hit_single,miss,fallback,"
-                            + "fill_empty,fill_single,invalidate,entries_total,"
-                            + "hit_rate,fallback_rate,snapshot_cache_size");
-                } catch (IOException e) {
-                    System.err.println("[SnapshotCacheMetrics] Failed to create CSV file: " + e.getMessage());
-                    csvFilePath = null;
+                String safeName = (jobIdentifier != null ? jobIdentifier : "unknown")
+                        .replaceAll("[^a-zA-Z0-9_\\-]", "_");
+                File csvFile = new File(dir, "snapshot_cache_metrics_" + safeName + ".csv");
+                String newPath = csvFile.getAbsolutePath();
+
+                // If switching to a new job file, dump remaining data from previous job first
+                if (csvFilePath != null && !csvFilePath.equals(newPath)) {
+                    dumpAll();
+                    // Reset all counters for the new job
+                    for (StateMetrics m : REGISTRY.values()) {
+                        m.reset();
+                    }
                 }
-                System.out.printf("[SnapshotCacheMetrics] CSV output: %s, interval=%ds, incremental=%s%n",
-                        csvFilePath, intervalSec, incremental);
+
+                csvFilePath = newPath;
+                // Write CSV header only if file is new
+                if (!csvFile.exists() || csvFile.length() == 0) {
+                    try (PrintWriter pw = new PrintWriter(new BufferedWriter(new FileWriter(csvFilePath, false)))) {
+                        pw.println("timestamp,state_name,hit_empty,hit_single,miss,fallback,"
+                                + "fill_empty,fill_single,invalidate,entries_total,"
+                                + "hit_rate,fallback_rate,snapshot_cache_size");
+                    } catch (IOException e) {
+                        System.err.println("[SnapshotCacheMetrics] Failed to create CSV file: " + e.getMessage());
+                        csvFilePath = null;
+                    }
+                }
+                System.out.printf("[SnapshotCacheMetrics] CSV output: %s (job=%s), interval=%ds, incremental=%s%n",
+                        csvFilePath, jobIdentifier, intervalSec, incremental);
             }
 
-            if (intervalSec > 0) {
+            // --- Per-JVM: scheduler + shutdown hook only once ---
+            if (scheduler == null && intervalSec > 0) {
                 scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
                     Thread t = new Thread(r, "snapshot-cache-metrics-dumper");
                     t.setDaemon(true);
@@ -197,13 +215,13 @@ public final class SnapshotCacheMetrics {
                 scheduledTask = scheduler.scheduleAtFixedRate(
                         SnapshotCacheMetrics::dumpAll,
                         intervalSec, intervalSec, TimeUnit.SECONDS);
-            }
 
-            // Shutdown hook to dump final metrics
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                dumpAll();
-                printSummary();
-            }, "snapshot-cache-metrics-shutdown"));
+                // Shutdown hook to dump final metrics
+                Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                    dumpAll();
+                    printSummary();
+                }, "snapshot-cache-metrics-shutdown"));
+            }
         }
     }
 
