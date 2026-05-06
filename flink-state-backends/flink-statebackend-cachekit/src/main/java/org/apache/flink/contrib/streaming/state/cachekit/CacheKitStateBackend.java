@@ -39,6 +39,7 @@ import org.apache.flink.runtime.state.delegate.DelegatingStateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
+import org.apache.flink.contrib.streaming.state.cachekit.metrics.SnapshotCacheMetrics;
 
 import javax.annotation.Nonnull;
 
@@ -83,6 +84,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final int mapHitRateWindow;
     private final boolean mapIterationCacheFillEnabled;
     private final int mapSnapshotCacheMaxEntries;
+    // --- Metrics config (carried through serialization to TM) ---
+    private final String metricsOutputDir;
+    private final int metricsDumpIntervalSec;
+    private final boolean metricsIncremental;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -103,7 +108,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
             double mapHitRateThreshold,
             int mapHitRateWindow,
             boolean mapIterationCacheFillEnabled,
-            int mapSnapshotCacheMaxEntries) {
+            int mapSnapshotCacheMaxEntries,
+            String metricsOutputDir,
+            int metricsDumpIntervalSec,
+            boolean metricsIncremental) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -123,6 +131,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.mapHitRateWindow = mapHitRateWindow;
         this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
         this.mapSnapshotCacheMaxEntries = mapSnapshotCacheMaxEntries;
+        this.metricsOutputDir = metricsOutputDir;
+        this.metricsDumpIntervalSec = metricsDumpIntervalSec;
+        this.metricsIncremental = metricsIncremental;
     }
 
     @Override
@@ -176,6 +187,11 @@ public class CacheKitStateBackend extends AbstractStateBackend
 
         ExecutionConfig executionConfig = env.getExecutionConfig();
         ClassLoader userCodeClassLoader = env.getUserCodeClassLoader().asClassLoader();
+
+        // Initialize metrics on the TaskManager JVM (not the client)
+        if (mapSnapshotCacheMaxEntries > 0) {
+            SnapshotCacheMetrics.init(metricsOutputDir, metricsDumpIntervalSec, metricsIncremental);
+        }
 
         return new CacheKitKeyedStateBackend<>(
                 delegated,
@@ -273,6 +289,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 config.get(CacheKitStateBackendFactory.MAP_ITERATION_CACHE_FILL_ENABLED);
         final int mapSnapshotMaxEntries =
                 Math.max(0, config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
+        final String cfgMetricsOutputDir = config.get(CacheKitStateBackendFactory.METRICS_OUTPUT_DIR);
+        final int cfgMetricsDumpIntervalSec =
+                Math.max(0, config.get(CacheKitStateBackendFactory.METRICS_DUMP_INTERVAL_SEC));
+        final boolean cfgMetricsIncremental = config.get(CacheKitStateBackendFactory.METRICS_INCREMENTAL);
 
         return new CacheKitStateBackend(
                 configuredDelegate,
@@ -293,6 +313,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapHitRateThreshold,
                 mapHitRateWindow,
                 mapIterationCacheFillEnabled,
-                mapSnapshotMaxEntries);
+                mapSnapshotMaxEntries,
+                cfgMetricsOutputDir,
+                cfgMetricsDumpIntervalSec,
+                cfgMetricsIncremental);
     }
 }

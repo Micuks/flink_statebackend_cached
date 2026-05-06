@@ -212,11 +212,6 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final boolean metricsIncremental = config.get(METRICS_INCREMENTAL);
                 final String delegateClass = config.get(DELEGATE_BACKEND);
 
-                // Initialize metrics collection if snapshot cache is enabled
-                if (mapSnapshotMaxEntries > 0) {
-                        SnapshotCacheMetrics.init(metricsOutputDir, metricsDumpIntervalSec, metricsIncremental);
-                }
-
                 System.out.printf(
                                 "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, delegate=%s%n",
                                 maxEntries,
@@ -276,7 +271,10 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 mapHitRateThreshold,
                                 mapHitRateWindow,
                                 mapIterationCacheFillEnabled,
-                                mapSnapshotMaxEntries);
+                                mapSnapshotMaxEntries,
+                                metricsOutputDir,
+                                metricsDumpIntervalSec,
+                                metricsIncremental);
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {
