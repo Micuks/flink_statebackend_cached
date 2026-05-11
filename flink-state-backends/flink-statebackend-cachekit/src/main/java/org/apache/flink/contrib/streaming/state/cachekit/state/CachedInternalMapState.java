@@ -268,7 +268,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, true);
         }
-        invalidateSnapshot(currentKey);
+        updateSnapshotOnPut(currentKey, userKey);
     }
 
     @Override
@@ -316,7 +316,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, false);
         }
-        invalidateSnapshot(currentKey);
+        updateSnapshotOnRemove(currentKey, userKey);
     }
 
     @Override
@@ -1089,6 +1089,75 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (mapSnapshotCache.remove(snapshotProbe) != null) {
             snapshotMetrics.invalidate.increment();
         }
+    }
+
+    /**
+     * Smart cache update after put(uk, uv).
+     * EMPTY + put → SINGLE(uk), SINGLE(same) + put → SINGLE(same),
+     * SINGLE(different) + put → invalidate.
+     */
+    private void updateSnapshotOnPut(K currentKey, UK userKey) {
+        if (!mapSnapshotCacheEnabled || currentKey == null || currentNamespace == null) {
+            return;
+        }
+        snapshotProbe.key = currentKey;
+        snapshotProbe.namespace = currentNamespace;
+        MapSnapshot<UK> snapshot = mapSnapshotCache.get(snapshotProbe);
+        if (snapshot == null) {
+            return; // UNKNOWN: not in cache, nothing to do
+        }
+
+        if (snapshot.isEmpty()) {
+            // EMPTY → SINGLE: 0 + 1 = 1
+            KeyNamespace<K, N> stored = newStoredKeyNamespace(currentKey, currentNamespace);
+            UK copiedUK = copyUserKey(userKey);
+            mapSnapshotCache.put(stored, new MapSnapshot<>(copiedUK));
+            snapshotMetrics.fillSingle.increment();
+        } else if (Objects.equals(userKey, snapshot.cachedUserKey)) {
+            // SINGLE(same key) → still SINGLE, value changed but key unchanged
+        } else {
+            // SINGLE(different key) → now 2 entries → invalidate
+            mapSnapshotCache.remove(snapshotProbe);
+            snapshotMetrics.invalidate.increment();
+        }
+    }
+
+    /**
+     * Smart cache update after remove(uk).
+     * EMPTY + remove → EMPTY, SINGLE(same) + remove → EMPTY,
+     * SINGLE(different) + remove → SINGLE (no-op).
+     */
+    private void updateSnapshotOnRemove(K currentKey, UK userKey) {
+        if (!mapSnapshotCacheEnabled || currentKey == null || currentNamespace == null) {
+            return;
+        }
+        snapshotProbe.key = currentKey;
+        snapshotProbe.namespace = currentNamespace;
+        MapSnapshot<UK> snapshot = mapSnapshotCache.get(snapshotProbe);
+        if (snapshot == null) {
+            return; // UNKNOWN: not in cache, nothing to do
+        }
+
+        if (snapshot.isEmpty()) {
+            // EMPTY + remove = still EMPTY, no-op
+        } else if (Objects.equals(userKey, snapshot.cachedUserKey)) {
+            // SINGLE(same key) → EMPTY: the only entry was removed
+            KeyNamespace<K, N> stored = newStoredKeyNamespace(currentKey, currentNamespace);
+            mapSnapshotCache.put(stored, MapSnapshot.empty());
+            snapshotMetrics.fillEmpty.increment();
+        } else {
+            // SINGLE(different key) → still SINGLE: removed non-existent key
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private UK copyUserKey(UK userKey) {
+        if (userKey instanceof org.apache.flink.table.data.binary.BinaryRowData) {
+            return (UK) ((org.apache.flink.table.data.binary.BinaryRowData) userKey).copy();
+        } else if (userKeySerializer != null) {
+            return userKeySerializer.copy(userKey);
+        }
+        return userKey;
     }
 
     private Iterable<Map.Entry<UK, UV>> wrapWithSnapshotAwareIterator(
