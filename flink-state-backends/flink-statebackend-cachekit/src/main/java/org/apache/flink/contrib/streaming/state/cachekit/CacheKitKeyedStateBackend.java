@@ -23,6 +23,7 @@ import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMap
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalValueState;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
+import org.apache.flink.contrib.streaming.state.cachekit.metrics.SnapshotCacheMetrics;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.SavepointResources;
@@ -313,14 +314,28 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @Override
     public void dispose() {
+        flushAllSnapshotMetrics();
         wrappersByDelegateIdentity.clear();
         delegate.dispose();
     }
 
     @Override
     public void close() throws IOException {
+        flushAllSnapshotMetrics();
         wrappersByDelegateIdentity.clear();
         delegate.close();
+    }
+
+    private void flushAllSnapshotMetrics() {
+        for (Object wrapper : wrappersByDelegateIdentity.values()) {
+            if (wrapper instanceof CachedInternalMapState) {
+                SnapshotCacheMetrics metrics =
+                        ((CachedInternalMapState<?, ?, ?, ?>) wrapper).getSnapshotCacheMetrics();
+                if (metrics != null) {
+                    metrics.flushToFile();
+                }
+            }
+        }
     }
 
     @Override

@@ -23,6 +23,7 @@ import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePoli
 import org.apache.flink.contrib.streaming.state.cachekit.cache.LruCachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PrimitivePresenceCache;
+import org.apache.flink.contrib.streaming.state.cachekit.metrics.SnapshotCacheMetrics;
 import org.apache.flink.contrib.streaming.state.cachekit.util.MurmurHash3;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.runtime.state.internal.InternalMapState;
@@ -78,6 +79,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final boolean mapSnapshotCacheEnabled;
     /** Reusable probe key for snapshot cache lookups (avoids allocation per lookup). */
     private final KeyNamespace<K, N> snapshotProbe = new KeyNamespace<>(null, null);
+    private final SnapshotCacheMetrics snapshotCacheMetrics;
 
     private N currentNamespace;
     private final KeyNamespaceUserKey<K, N, UK> lookupKey = new KeyNamespaceUserKey<>(null, null, null);
@@ -103,6 +105,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             int hitRateWindow,
             boolean iterationCacheFillEnabled,
             int mapSnapshotCacheMaxEntries) {
+        this.snapshotCacheMetrics = new SnapshotCacheMetrics(
+                "MapState-" + System.identityHashCode(delegate));
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -363,6 +367,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     public Iterable<Map.Entry<UK, UV>> entries() throws Exception {
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
+        snapshotCacheMetrics.recordEntriesCall();
         
         // --- MapSnapshot short-circuit ---
         if (mapSnapshotCacheEnabled) {
@@ -372,6 +377,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             }
         }
 
+        snapshotCacheMetrics.recordSnapshotMiss();
         Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
         if (!mapCacheEnabled && !presenceCacheEnabled && !mapSnapshotCacheEnabled) {
             return entries;
@@ -388,6 +394,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     public Iterable<UK> keys() throws Exception {
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
+        snapshotCacheMetrics.recordEntriesCall();
         
         if (mapSnapshotCacheEnabled) {
             Iterable<Map.Entry<UK, UV>> shortCircuit = trySnapshotShortCircuit(currentKey);
@@ -414,6 +421,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     public Iterable<UV> values() throws Exception {
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
+        snapshotCacheMetrics.recordEntriesCall();
 
         if (mapSnapshotCacheEnabled) {
             Iterable<Map.Entry<UK, UV>> shortCircuit = trySnapshotShortCircuit(currentKey);
@@ -440,6 +448,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     public Iterator<Map.Entry<UK, UV>> iterator() throws Exception {
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
+        snapshotCacheMetrics.recordEntriesCall();
 
         if (mapSnapshotCacheEnabled) {
             Iterable<Map.Entry<UK, UV>> shortCircuit = trySnapshotShortCircuit(currentKey);
@@ -1050,11 +1059,13 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         if (snapshot.isEmpty()) {
             // EMPTY → return empty list, zero JNI
+            snapshotCacheMetrics.recordSnapshotHitEmpty();
             return Collections.emptyList();
         }
         // SINGLE → downgrade to point-get via this.get(cachedUK)
         UV value = this.get(snapshot.cachedUserKey);
         if (value != null) {
+            snapshotCacheMetrics.recordSnapshotHitSingle();
             return Collections.singletonList(
                     new AbstractMap.SimpleImmutableEntry<>(snapshot.cachedUserKey, value));
         }
@@ -1069,6 +1080,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         snapshotProbe.key = currentKey;
         snapshotProbe.namespace = currentNamespace;
+        if (mapSnapshotCache.get(snapshotProbe) != null) {
+            snapshotCacheMetrics.recordSnapshotInvalidated();
+        }
         mapSnapshotCache.remove(snapshotProbe);
     }
 
@@ -1176,6 +1190,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             KeyNamespace<K, N> stored = newStoredKeyNamespace(currentKey, currentNamespace);
             if (iteratedCount == 0) {
                 mapSnapshotCache.put(stored, MapSnapshot.empty());
+                snapshotCacheMetrics.recordBackfillEmpty();
             } else if (iteratedCount == 1 && firstUserKey != null) {
                 // Deep copy
                 UK copiedUK = firstUserKey;
@@ -1185,9 +1200,16 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                     copiedUK = userKeySerializer.copy(firstUserKey);
                 }
                 mapSnapshotCache.put(stored, new MapSnapshot<>(copiedUK));
+                snapshotCacheMetrics.recordBackfillSingle();
             } else {
                 mapSnapshotCache.remove(stored);
+                snapshotCacheMetrics.recordBackfillMulti();
             }
         }
+    }
+
+    /** Expose metrics for flushing from the backend on close/dispose. */
+    public SnapshotCacheMetrics getSnapshotCacheMetrics() {
+        return snapshotCacheMetrics;
     }
 }
