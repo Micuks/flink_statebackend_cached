@@ -42,7 +42,8 @@ import java.util.concurrent.atomic.LongAdder;
  *
  * <p>CSV columns:
  * {@code timestamp, state_name, hit_empty, hit_single, miss, fallback,
- *        fill_empty, fill_single, invalidate, entries_total, snapshot_cache_size}
+ *        fill_empty, fill_single, invalidate, entries_total,
+ *        hit_rate, fallback_rate}
  */
 public final class SnapshotCacheMetrics {
 
@@ -195,7 +196,7 @@ public final class SnapshotCacheMetrics {
                     try (PrintWriter pw = new PrintWriter(new BufferedWriter(new FileWriter(csvFilePath, false)))) {
                         pw.println("timestamp,state_name,hit_empty,hit_single,miss,fallback,"
                                 + "fill_empty,fill_single,invalidate,entries_total,"
-                                + "hit_rate,fallback_rate,snapshot_cache_size");
+                                + "hit_rate,fallback_rate");
                     } catch (IOException e) {
                         System.err.println("[SnapshotCacheMetrics] Failed to create CSV file: " + e.getMessage());
                         csvFilePath = null;
@@ -238,11 +239,10 @@ public final class SnapshotCacheMetrics {
             try (PrintWriter pw = new PrintWriter(new BufferedWriter(new FileWriter(csvFilePath, true)))) {
                 for (StateMetrics m : REGISTRY.values()) {
                     long[] s = m.snapshot();
-                    pw.printf("%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%d%n",
+                    pw.printf("%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%.6f,%.6f%n",
                             ts, m.stateName,
                             s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
-                            m.hitRate(), m.fallbackRate(),
-                            0 // snapshot_cache_size placeholder; can be enriched later
+                            m.hitRate(), m.fallbackRate()
                     );
                 }
             } catch (IOException e) {
