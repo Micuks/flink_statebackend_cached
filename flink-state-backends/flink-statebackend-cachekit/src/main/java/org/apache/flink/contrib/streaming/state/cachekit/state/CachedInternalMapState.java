@@ -87,6 +87,16 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private long currentWindowHits = 0;
     private int opsSinceLastSample = 0;
 
+    // --- Snapshot Bypass state (per-instance, independent of value/presence bypass) ---
+    private final boolean snapshotBypassEnabled;
+    private final double snapshotHitRateThreshold;
+    private final int snapshotHitRateWindow;
+    private volatile boolean snapshotBypassing = false;
+    private long snapshotWindowAccesses = 0;
+    private long snapshotWindowHits = 0;
+    private int snapshotOpsSinceLastProbe = 0;
+    private static final int SNAPSHOT_PROBE_INTERVAL = 100;
+
     public CachedInternalMapState(
             InternalMapState<K, N, UK, UV> delegate,
             CurrentKeyProvider<K> currentKeyProvider,
@@ -102,7 +112,10 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             double hitRateThreshold,
             int hitRateWindow,
             boolean iterationCacheFillEnabled,
-            int mapSnapshotCacheMaxEntries) {
+            int mapSnapshotCacheMaxEntries,
+            boolean snapshotBypassEnabled,
+            double snapshotHitRateThreshold,
+            int snapshotHitRateWindow) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -181,6 +194,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         } else {
             this.mapSnapshotCache = new NoOpCachePolicy<>();
         }
+
+        // Snapshot bypass: only meaningful if snapshot cache itself is enabled
+        this.snapshotBypassEnabled = snapshotBypassEnabled && mapSnapshotCacheEnabled;
+        this.snapshotHitRateThreshold = snapshotHitRateThreshold;
+        this.snapshotHitRateWindow = Math.max(100, snapshotHitRateWindow);
     }
 
     // Helper to update lookup key safely without allocation
@@ -463,7 +481,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
 
-        if (mapSnapshotCacheEnabled) {
+        if (mapSnapshotCacheEnabled && !snapshotBypassing) {
             if (currentKey != null && currentNamespace != null) {
                 snapshotProbe.key = currentKey;
                 snapshotProbe.namespace = currentNamespace;
@@ -490,7 +508,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         clearValueCaches();
         resetBypassState();
 
-        if (mapSnapshotCacheEnabled) {
+        if (mapSnapshotCacheEnabled && !snapshotBypassing) {
             if (currentKey != null && currentNamespace != null) {
                 KeyNamespace<K, N> stored = newStoredKeyNamespace(currentKey, currentNamespace);
                 mapSnapshotCache.put(stored, MapSnapshot.empty());
@@ -868,6 +886,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         currentWindowAccesses = 0;
         currentWindowHits = 0;
         opsSinceLastSample = 0;
+        // Reset Snapshot Bypass state
+        snapshotBypassing = false;
+        snapshotWindowAccesses = 0;
+        snapshotWindowHits = 0;
+        snapshotOpsSinceLastProbe = 0;
     }
 
     public void flush() {
@@ -1042,12 +1065,29 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (currentKey == null || currentNamespace == null) {
             return null;
         }
+
+        // --- Snapshot Bypass check ---
+        if (snapshotBypassing) {
+            // During bypass: periodically probe to detect hit rate recovery
+            snapshotOpsSinceLastProbe++;
+            if (snapshotOpsSinceLastProbe < SNAPSHOT_PROBE_INTERVAL) {
+                return null;  // Skip snapshot cache lookup entirely
+            }
+            snapshotOpsSinceLastProbe = 0;
+            // Fall through to sample this one access
+        }
+
         snapshotProbe.key = currentKey;
         snapshotProbe.namespace = currentNamespace;
         MapSnapshot<UK> snapshot = mapSnapshotCache.get(snapshotProbe);
         if (snapshot == null) {
+            recordSnapshotAccess(false);  // Miss
             return null; // UNKNOWN → fallthrough to delegate
         }
+
+        // Hit
+        recordSnapshotAccess(true);
+
         if (snapshot.isEmpty()) {
             // EMPTY → return empty list, zero JNI
             return Collections.emptyList();
@@ -1064,7 +1104,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private void invalidateSnapshot(K currentKey) {
-        if (!mapSnapshotCacheEnabled || currentKey == null || currentNamespace == null) {
+        if (!mapSnapshotCacheEnabled || snapshotBypassing || currentKey == null || currentNamespace == null) {
             return;
         }
         snapshotProbe.key = currentKey;
@@ -1170,6 +1210,10 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
 
         private void backfillSnapshotCache() {
+            // Skip backfill during snapshot bypass to avoid wasting CPU
+            if (snapshotBypassing) {
+                return;
+            }
             if (currentKey == null || currentNamespace == null) {
                 return;
             }
@@ -1188,6 +1232,49 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             } else {
                 mapSnapshotCache.remove(stored);
             }
+        }
+    }
+
+    // ====================================================================
+    // Snapshot Bypass: adaptive hit-rate based bypass for snapshot cache
+    // ====================================================================
+
+    /**
+     * Records a snapshot cache access (hit or miss) and evaluates whether to
+     * enable/disable the snapshot bypass based on a sliding window hit rate.
+     *
+     * <p>This method mirrors the existing {@link #recordAccess(boolean)} pattern
+     * used for value/presence cache bypass, but operates independently on the
+     * snapshot cache.
+     */
+    private void recordSnapshotAccess(boolean isHit) {
+        if (!snapshotBypassEnabled) {
+            return;
+        }
+        snapshotWindowAccesses++;
+        if (isHit) {
+            snapshotWindowHits++;
+        }
+        if (snapshotWindowAccesses >= snapshotHitRateWindow) {
+            double hitRate = (double) snapshotWindowHits / snapshotWindowAccesses;
+            boolean shouldBypass = hitRate < snapshotHitRateThreshold;
+
+            if (snapshotBypassing) {
+                if (!shouldBypass) {
+                    // Hit rate recovered → re-enable snapshot cache
+                    snapshotBypassing = false;
+                    snapshotOpsSinceLastProbe = 0;
+                }
+            } else if (shouldBypass) {
+                // Hit rate too low → enter bypass, release memory
+                snapshotBypassing = true;
+                mapSnapshotCache.clear();
+                snapshotOpsSinceLastProbe = 0;
+            }
+
+            // Reset window
+            snapshotWindowAccesses = 0;
+            snapshotWindowHits = 0;
         }
     }
 }

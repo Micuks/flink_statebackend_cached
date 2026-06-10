@@ -84,6 +84,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int mapHitRateWindow;
     private final boolean mapIterationCacheFillEnabled;
     private final int mapSnapshotCacheMaxEntries;
+    private final boolean mapSnapshotBypassEnabled;
+    private final double mapSnapshotHitRateThreshold;
+    private final int mapSnapshotHitRateWindow;
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -111,7 +114,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             double mapHitRateThreshold,
             int mapHitRateWindow,
             boolean mapIterationCacheFillEnabled,
-            int mapSnapshotCacheMaxEntries) {
+            int mapSnapshotCacheMaxEntries,
+            boolean mapSnapshotBypassEnabled,
+            double mapSnapshotHitRateThreshold,
+            int mapSnapshotHitRateWindow) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -142,6 +148,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapHitRateWindow = mapHitRateWindow;
         this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
         this.mapSnapshotCacheMaxEntries = mapSnapshotCacheMaxEntries;
+        this.mapSnapshotBypassEnabled = mapSnapshotBypassEnabled;
+        this.mapSnapshotHitRateThreshold = mapSnapshotHitRateThreshold;
+        this.mapSnapshotHitRateWindow = mapSnapshotHitRateWindow;
     }
 
     @Override
@@ -207,7 +216,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapHitRateThreshold,
                     mapHitRateWindow,
                     mapIterationCacheFillEnabled,
-                    mapSnapshotCacheMaxEntries);
+                    mapSnapshotCacheMaxEntries,
+                    mapSnapshotBypassEnabled,
+                    mapSnapshotHitRateThreshold,
+                    mapSnapshotHitRateWindow);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -291,7 +303,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapHitRateThreshold,
                     mapHitRateWindow,
                     mapIterationCacheFillEnabled,
-                    mapSnapshotCacheMaxEntries);
+                    mapSnapshotCacheMaxEntries,
+                    mapSnapshotBypassEnabled,
+                    mapSnapshotHitRateThreshold,
+                    mapSnapshotHitRateWindow);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }

@@ -83,6 +83,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final int mapHitRateWindow;
     private final boolean mapIterationCacheFillEnabled;
     private final int mapSnapshotCacheMaxEntries;
+    private final boolean mapSnapshotBypassEnabled;
+    private final double mapSnapshotHitRateThreshold;
+    private final int mapSnapshotHitRateWindow;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -103,7 +106,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
             double mapHitRateThreshold,
             int mapHitRateWindow,
             boolean mapIterationCacheFillEnabled,
-            int mapSnapshotCacheMaxEntries) {
+            int mapSnapshotCacheMaxEntries,
+            boolean mapSnapshotBypassEnabled,
+            double mapSnapshotHitRateThreshold,
+            int mapSnapshotHitRateWindow) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -123,6 +129,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.mapHitRateWindow = mapHitRateWindow;
         this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
         this.mapSnapshotCacheMaxEntries = mapSnapshotCacheMaxEntries;
+        this.mapSnapshotBypassEnabled = mapSnapshotBypassEnabled;
+        this.mapSnapshotHitRateThreshold = mapSnapshotHitRateThreshold;
+        this.mapSnapshotHitRateWindow = mapSnapshotHitRateWindow;
     }
 
     @Override
@@ -202,7 +211,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapHitRateThreshold,
                 mapHitRateWindow,
                 mapIterationCacheFillEnabled,
-                mapSnapshotCacheMaxEntries);
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotBypassEnabled,
+                mapSnapshotHitRateThreshold,
+                mapSnapshotHitRateWindow);
     }
 
     @Override
@@ -273,6 +285,12 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 config.get(CacheKitStateBackendFactory.MAP_ITERATION_CACHE_FILL_ENABLED);
         final int mapSnapshotMaxEntries =
                 Math.max(0, config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
+        final boolean mapSnapshotBypass =
+                config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_BYPASS_ENABLED);
+        final double mapSnapshotHitThreshold =
+                config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_HIT_RATE_THRESHOLD);
+        final int mapSnapshotHitWindow =
+                config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_HIT_RATE_WINDOW);
 
         return new CacheKitStateBackend(
                 configuredDelegate,
@@ -293,6 +311,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapHitRateThreshold,
                 mapHitRateWindow,
                 mapIterationCacheFillEnabled,
-                mapSnapshotMaxEntries);
+                mapSnapshotMaxEntries,
+                mapSnapshotBypass,
+                mapSnapshotHitThreshold,
+                mapSnapshotHitWindow);
     }
 }

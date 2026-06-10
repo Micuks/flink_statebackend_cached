@@ -153,6 +153,31 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         + "Caches (Key, Namespace) -> {EMPTY | SINGLE(UserKey)} to short-circuit "
                                                         + "entries()/iterator() calls. Set 0 to disable.");
 
+        public static final ConfigOption<Boolean> MAP_SNAPSHOT_BYPASS_ENABLED = ConfigOptions
+                        .key("state.backend.cachekit.map.snapshot.bypass.enabled")
+                        .booleanType()
+                        .defaultValue(true)
+                        .withDescription(
+                                        "Enable adaptive bypass for MapState snapshot cache. "
+                                                        + "When enabled, instances with low snapshot hit rates will automatically "
+                                                        + "disable their snapshot cache to save memory and CPU.");
+
+        public static final ConfigOption<Double> MAP_SNAPSHOT_HIT_RATE_THRESHOLD = ConfigOptions
+                        .key("state.backend.cachekit.map.snapshot.hit-rate.threshold")
+                        .doubleType()
+                        .defaultValue(0.01)
+                        .withDescription(
+                                        "Snapshot cache hit rate threshold (0.0 to 1.0) below which the "
+                                                        + "snapshot cache is bypassed for this instance. Default 0.01 (1%).");
+
+        public static final ConfigOption<Integer> MAP_SNAPSHOT_HIT_RATE_WINDOW = ConfigOptions
+                        .key("state.backend.cachekit.map.snapshot.hit-rate.window")
+                        .intType()
+                        .defaultValue(1000)
+                        .withDescription(
+                                        "Number of snapshot accesses over which to calculate the hit rate "
+                                                        + "for adaptive snapshot bypass.");
+
         public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
                         .stringType()
                         .noDefaultValue()
@@ -181,10 +206,13 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final int mapHitRateWindow = config.get(MAP_HIT_RATE_WINDOW);
                 final boolean mapIterationCacheFillEnabled = config.get(MAP_ITERATION_CACHE_FILL_ENABLED);
                 final int mapSnapshotMaxEntries = Math.max(0, config.get(MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
+                final boolean mapSnapshotBypassEnabled = config.get(MAP_SNAPSHOT_BYPASS_ENABLED);
+                final double mapSnapshotHitRateThreshold = config.get(MAP_SNAPSHOT_HIT_RATE_THRESHOLD);
+                final int mapSnapshotHitRateWindow = config.get(MAP_SNAPSHOT_HIT_RATE_WINDOW);
                 final String delegateClass = config.get(DELEGATE_BACKEND);
 
                 System.out.printf(
-                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, delegate=%s%n",
+                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, mapSnapshotBypass=%s, mapSnapshotHitThreshold=%.2f, mapSnapshotHitWindow=%d, delegate=%s%n",
                                 maxEntries,
                                 policyType,
                                 lruOverflow,
@@ -203,6 +231,9 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 mapHitRateWindow,
                                 mapIterationCacheFillEnabled,
                                 mapSnapshotMaxEntries,
+                                mapSnapshotBypassEnabled,
+                                mapSnapshotHitRateThreshold,
+                                mapSnapshotHitRateWindow,
                                 delegateClass);
 
                 StateBackend delegate;
@@ -242,7 +273,10 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 mapHitRateThreshold,
                                 mapHitRateWindow,
                                 mapIterationCacheFillEnabled,
-                                mapSnapshotMaxEntries);
+                                mapSnapshotMaxEntries,
+                                mapSnapshotBypassEnabled,
+                                mapSnapshotHitRateThreshold,
+                                mapSnapshotHitRateWindow);
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {
