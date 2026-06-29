@@ -791,7 +791,13 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
             OutputTag<IN> outputTag) {
 
         WatermarkGaugeExposingOutput<StreamRecord<IN>> currentOperatorOutput;
-        if (containingTask.getExecutionConfig().isObjectReuseEnabled()) {
+        // Safe(O) per-edge gating: skip the per-record copy only when object-reuse is enabled AND
+        // the consuming operator is provably non-retaining/non-mutating of its input. Unknown
+        // operators fail closed to a copying edge, so Z_safe stays observationally equal to the
+        // copying baseline while preserving zero-copy on provably-safe edges. (No-op unless
+        // -Dflink.safeChain.enabled=true, in which case behavior is stock Flink.)
+        if (containingTask.getExecutionConfig().isObjectReuseEnabled()
+                && SafeChainClassifier.isNonCopySafe(operator)) {
             currentOperatorOutput = new ChainingOutput<>(operator, outputTag);
         } else {
             TypeSerializer<IN> inSerializer =
