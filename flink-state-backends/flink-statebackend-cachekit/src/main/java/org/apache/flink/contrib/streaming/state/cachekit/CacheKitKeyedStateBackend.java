@@ -313,14 +313,49 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @Override
     public void dispose() {
-        wrappersByDelegateIdentity.clear();
-        delegate.dispose();
+        try {
+            flushWrappers();
+        } catch (Exception ignored) {
+            // Dispose must still release delegate resources.
+        } finally {
+            wrappersByDelegateIdentity.clear();
+            delegate.dispose();
+        }
+    }
+
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    public void prefetch(Collection<? extends K> keys) {
+        if (keys == null || keys.isEmpty() || wrappersByDelegateIdentity.isEmpty()) {
+            return;
+        }
+        K previousKey = getCurrentKey();
+        try {
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                if (wrapper instanceof CachedInternalValueState) {
+                    ((CachedInternalValueState) wrapper).prefetch(keys);
+                } else if (wrapper instanceof CachedInternalMapState) {
+                    ((CachedInternalMapState) wrapper).prefetchSnapshots(keys);
+                }
+            }
+        } catch (Throwable ignored) {
+            // Best-effort cache warmup. Authoritative state access remains unchanged.
+        } finally {
+            setCurrentKey(previousKey);
+        }
     }
 
     @Override
     public void close() throws IOException {
-        wrappersByDelegateIdentity.clear();
-        delegate.close();
+        try {
+            flushWrappers();
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Failed to flush CacheKit state wrappers before close.", e);
+        } finally {
+            wrappersByDelegateIdentity.clear();
+            delegate.close();
+        }
     }
 
     @Override
@@ -330,6 +365,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             @Nonnull CheckpointStreamFactory streamFactory,
             @Nonnull CheckpointOptions checkpointOptions)
             throws Exception {
+        flushWrappers();
+        return delegate.snapshot(checkpointId, timestamp, streamFactory, checkpointOptions);
+    }
+
+    private void flushWrappers() throws Exception {
         for (Object wrapper : wrappersByDelegateIdentity.values()) {
             if (wrapper instanceof CachedInternalValueState) {
                 ((CachedInternalValueState<?, ?, ?>) wrapper).flush();
@@ -337,7 +377,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 ((CachedInternalMapState<?, ?, ?, ?>) wrapper).flush();
             }
         }
-        return delegate.snapshot(checkpointId, timestamp, streamFactory, checkpointOptions);
     }
 
     @Override

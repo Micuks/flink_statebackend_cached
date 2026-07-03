@@ -33,6 +33,7 @@ import org.apache.flink.streaming.api.operators.sort.SortingDataInput;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.io.PushingAsyncDataInput.DataOutput;
 import org.apache.flink.streaming.runtime.io.StreamOneInputProcessor;
+import org.apache.flink.streaming.runtime.io.StreamRecordBatchOutput;
 import org.apache.flink.streaming.runtime.io.StreamTaskInput;
 import org.apache.flink.streaming.runtime.io.StreamTaskNetworkInput;
 import org.apache.flink.streaming.runtime.io.StreamTaskNetworkInputFactory;
@@ -100,6 +101,7 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
             CheckpointedInputGate inputGate = createCheckpointedInputGate();
             Counter numRecordsIn = setupNumRecordsInCounter(mainOperator);
             DataOutput<IN> output = createDataOutput(numRecordsIn);
+            output = maybeWrapWithBatchOutput(output, numRecordsIn);
             StreamTaskInput<IN> input = createTaskInput(inputGate);
 
             StreamConfig.InputConfig[] inputConfigs =
@@ -183,6 +185,113 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                 operatorChain.getFinishedOnRestoreInputOrDefault(mainOperator),
                 inputWatermarkGauge,
                 numRecordsIn);
+    }
+
+    private DataOutput<IN> maybeWrapWithBatchOutput(DataOutput<IN> output, Counter numRecordsIn) {
+        try {
+            org.apache.flink.configuration.Configuration cfg =
+                    getEnvironment().getTaskManagerInfo().getConfiguration();
+
+            boolean bpPrefetchEnabled =
+                    cfg.getBoolean(
+                            org.apache.flink.configuration.ConfigOptions.key(
+                                            "state.backend.cachekit.bp-prefetch.enabled")
+                                    .booleanType()
+                                    .defaultValue(false));
+            if (bpPrefetchEnabled) {
+                int distance =
+                        cfg.getInteger(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.distance")
+                                        .intType()
+                                        .defaultValue(64));
+                distance = Math.max(1, Math.min(4096, distance));
+                boolean backpressureGated =
+                        cfg.getBoolean(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.backpressure-gated")
+                                        .booleanType()
+                                        .defaultValue(true));
+                boolean bpPrefetchKeySort =
+                        cfg.getBoolean(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.commutative-key-sort")
+                                        .booleanType()
+                                        .defaultValue(false));
+                @SuppressWarnings("unchecked")
+                Input<IN> headInput = (Input<IN>) mainOperator;
+                java.util.function.BooleanSupplier bp =
+                        () -> recordWriter != null && !recordWriter.isAvailable();
+                return new StreamRecordBatchOutput<>(
+                        output,
+                        headInput,
+                        true,
+                        bpPrefetchKeySort,
+                        distance,
+                        0L,
+                        numRecordsIn,
+                        true,
+                        bp,
+                        backpressureGated);
+            }
+
+            boolean enabled =
+                    cfg.getBoolean(
+                            org.apache.flink.configuration.ConfigOptions.key(
+                                            "state.backend.cachekit.mailbox-batch.enabled")
+                                    .booleanType()
+                                    .defaultValue(false));
+            if (!enabled) {
+                return output;
+            }
+            int batchSize =
+                    cfg.getInteger(
+                            org.apache.flink.configuration.ConfigOptions.key(
+                                            "state.backend.cachekit.mailbox-batch.size")
+                                    .intType()
+                                    .defaultValue(64));
+            batchSize = Math.max(1, Math.min(4096, batchSize));
+            long timeoutUs =
+                    cfg.getLong(
+                            org.apache.flink.configuration.ConfigOptions.key(
+                                            "state.backend.cachekit.mailbox-batch.timeout-us")
+                                    .longType()
+                                    .defaultValue(100L));
+            long timeoutNanos = timeoutUs > 0 ? timeoutUs * 1_000L : 0L;
+            boolean commutativeKeySort =
+                    cfg.getBoolean(
+                            org.apache.flink.configuration.ConfigOptions.key(
+                                            "state.backend.cachekit.mailbox-batch.commutative-key-sort")
+                                    .booleanType()
+                                    .defaultValue(true));
+            double cardinalityThreshold =
+                    cfg.getDouble(
+                            org.apache.flink.configuration.ConfigOptions.key(
+                                            "state.backend.cachekit.mailbox-batch.sort-cardinality-probe-threshold")
+                                    .doubleType()
+                                    .defaultValue(0.75));
+            int probeSize =
+                    cfg.getInteger(
+                            org.apache.flink.configuration.ConfigOptions.key(
+                                            "state.backend.cachekit.mailbox-batch.sort-cardinality-probe-size")
+                                    .intType()
+                                    .defaultValue(8));
+            BatchedKeyedOperatorAdapter.setCardinalityThreshold(cardinalityThreshold);
+            BatchedKeyedOperatorAdapter.setProbeSize(probeSize);
+
+            @SuppressWarnings("unchecked")
+            Input<IN> headInput = (Input<IN>) mainOperator;
+            return new StreamRecordBatchOutput<>(
+                    output,
+                    headInput,
+                    true,
+                    commutativeKeySort,
+                    batchSize,
+                    timeoutNanos,
+                    numRecordsIn);
+        } catch (Throwable t) {
+            return output;
+        }
     }
 
     private StreamTaskInput<IN> createTaskInput(CheckpointedInputGate inputGate) {
