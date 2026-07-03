@@ -20,6 +20,7 @@ package org.apache.flink.streaming.runtime.io;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.runtime.checkpoint.CheckpointException;
+import org.apache.flink.runtime.checkpoint.CheckpointFailureReason;
 import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter;
 import org.apache.flink.streaming.api.operators.BoundedMultiInput;
 import org.apache.flink.streaming.runtime.io.PushingAsyncDataInput.DataOutput;
@@ -65,6 +66,7 @@ public final class StreamOneInputProcessor<IN> implements StreamInputProcessor {
         DataInputStatus status = input.emitNext(output);
 
         if (status == DataInputStatus.END_OF_DATA) {
+            flushBatchOutput();
             endOfInputAware.endInput(input.getInputIndex() + 1);
             output = new FinishedDataOutput<>();
         } else if (status == DataInputStatus.END_OF_RECOVERY) {
@@ -80,11 +82,28 @@ public final class StreamOneInputProcessor<IN> implements StreamInputProcessor {
     @Override
     public CompletableFuture<Void> prepareSnapshot(
             ChannelStateWriter channelStateWriter, long checkpointId) throws CheckpointException {
+        try {
+            flushBatchOutput();
+        } catch (Exception e) {
+            throw new CheckpointException(CheckpointFailureReason.CHECKPOINT_DECLINED, e);
+        }
         return input.prepareSnapshot(channelStateWriter, checkpointId);
     }
 
     @Override
     public void close() throws IOException {
-        input.close();
+        try {
+            flushBatchOutput();
+        } catch (Exception e) {
+            throw new IOException("Failed to flush batched output before closing input processor.", e);
+        } finally {
+            input.close();
+        }
+    }
+
+    private void flushBatchOutput() throws Exception {
+        if (output instanceof BatchOutput) {
+            ((BatchOutput<?>) output).flushBatch();
+        }
     }
 }

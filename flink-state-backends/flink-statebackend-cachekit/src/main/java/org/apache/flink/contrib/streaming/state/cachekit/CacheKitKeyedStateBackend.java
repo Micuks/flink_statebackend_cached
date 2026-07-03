@@ -498,27 +498,56 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
     }
 
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    public void prefetch(Collection<? extends K> keys) {
+        if (keys == null || keys.isEmpty() || wrappersByDelegateIdentity.isEmpty()) {
+            return;
+        }
+        K previousKey = getCurrentKey();
+        try {
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                if (wrapper instanceof CachedInternalValueState) {
+                    ((CachedInternalValueState) wrapper).prefetch(keys);
+                } else if (wrapper instanceof CachedInternalMapState) {
+                    ((CachedInternalMapState) wrapper).prefetchSnapshots(keys);
+                }
+            }
+        } catch (Throwable ignored) {
+            // Best-effort cache warmup. Authoritative state access remains unchanged.
+        } finally {
+            setCurrentKey(previousKey);
+        }
+    }
+
     @Override
     public void close() throws IOException {
-        for (Object wrapper : wrappersByDelegateIdentity.values()) {
-            try {
-                if (wrapper instanceof CachedInternalListState) {
-                    ((CachedInternalListState<?, ?, ?>) wrapper).close();
-                } else if (wrapper instanceof CachedInternalPriorityQueueSet) {
-                    ((CachedInternalPriorityQueueSet<?>) wrapper).close();
+        try {
+            flushWrappers();
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Failed to flush CacheKit state wrappers before close.", e);
+        } finally {
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                try {
+                    if (wrapper instanceof CachedInternalListState) {
+                        ((CachedInternalListState<?, ?, ?>) wrapper).close();
+                    } else if (wrapper instanceof CachedInternalPriorityQueueSet) {
+                        ((CachedInternalPriorityQueueSet<?>) wrapper).close();
+                    }
+                } catch (Exception ignored) {
+                    // log and continue
                 }
-            } catch (Exception ignored) {
-                // log and continue
             }
+            wrappersByDelegateIdentity.clear();
+            if (listStateFlushExecutor != null) {
+                listStateFlushExecutor.shutdownNow();
+            }
+            if (pqFlushExecutor != null) {
+                pqFlushExecutor.shutdownNow();
+            }
+            delegate.close();
         }
-        wrappersByDelegateIdentity.clear();
-        if (listStateFlushExecutor != null) {
-            listStateFlushExecutor.shutdownNow();
-        }
-        if (pqFlushExecutor != null) {
-            pqFlushExecutor.shutdownNow();
-        }
-        delegate.close();
     }
 
     @Override
@@ -528,6 +557,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             @Nonnull CheckpointStreamFactory streamFactory,
             @Nonnull CheckpointOptions checkpointOptions)
             throws Exception {
+        flushWrappers();
+        return delegate.snapshot(checkpointId, timestamp, streamFactory, checkpointOptions);
+    }
+
+    private void flushWrappers() throws Exception {
         List<Exception> flushErrors = new ArrayList<>();
         for (Object wrapper : wrappersByDelegateIdentity.values()) {
             try {
@@ -553,7 +587,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             throw new FlinkRuntimeException(
                     "Failed to flush one or more cached states before snapshot", first);
         }
-        return delegate.snapshot(checkpointId, timestamp, streamFactory, checkpointOptions);
     }
 
     @Override

@@ -363,6 +363,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     public Iterable<Map.Entry<UK, UV>> entries() throws Exception {
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
+        flush();
         
         // --- MapSnapshot short-circuit ---
         if (mapSnapshotCacheEnabled) {
@@ -388,6 +389,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     public Iterable<UK> keys() throws Exception {
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
+        flush();
         
         if (mapSnapshotCacheEnabled) {
             Iterable<Map.Entry<UK, UV>> shortCircuit = trySnapshotShortCircuit(currentKey);
@@ -414,6 +416,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     public Iterable<UV> values() throws Exception {
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
+        flush();
 
         if (mapSnapshotCacheEnabled) {
             Iterable<Map.Entry<UK, UV>> shortCircuit = trySnapshotShortCircuit(currentKey);
@@ -440,6 +443,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     public Iterator<Map.Entry<UK, UV>> iterator() throws Exception {
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
+        flush();
 
         if (mapSnapshotCacheEnabled) {
             Iterable<Map.Entry<UK, UV>> shortCircuit = trySnapshotShortCircuit(currentKey);
@@ -462,6 +466,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     public boolean isEmpty() throws Exception {
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
+        flush();
 
         if (mapSnapshotCacheEnabled) {
             if (currentKey != null && currentNamespace != null) {
@@ -889,6 +894,62 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 CachedMapValue<UV> clean = CachedMapValue.of(value.valueOrNull(), false);
                 l2ValueCache.put(entry.getKey(), clean);
                 l1ValueCache.put(entry.getKey(), clean);
+            }
+        }
+    }
+
+    public void prefetchSnapshots(Iterable<? extends K> keys) {
+        if (!mapSnapshotCacheEnabled || keys == null || currentNamespace == null) {
+            return;
+        }
+        K previousKey = currentKeyProvider.getCurrentKey();
+        N previousNamespace = currentNamespace;
+        try {
+            flush();
+            for (K key : keys) {
+                if (key == null) {
+                    continue;
+                }
+                snapshotProbe.key = key;
+                snapshotProbe.namespace = currentNamespace;
+                if (mapSnapshotCache.get(snapshotProbe) != null) {
+                    continue;
+                }
+
+                keyContextSetter.accept(key);
+                delegate.setCurrentNamespace(currentNamespace);
+                Iterator<Map.Entry<UK, UV>> iterator = delegate.entries().iterator();
+                if (!iterator.hasNext()) {
+                    mapSnapshotCache.put(newStoredKeyNamespace(key, currentNamespace), MapSnapshot.empty());
+                    continue;
+                }
+
+                Map.Entry<UK, UV> first = iterator.next();
+                if (first == null || first.getKey() == null || iterator.hasNext()) {
+                    mapSnapshotCache.remove(newStoredKeyNamespace(key, currentNamespace));
+                    continue;
+                }
+
+                UK copiedUK = first.getKey();
+                if (copiedUK instanceof org.apache.flink.table.data.binary.BinaryRowData) {
+                    copiedUK = (UK) ((org.apache.flink.table.data.binary.BinaryRowData) copiedUK).copy();
+                } else if (userKeySerializer != null) {
+                    copiedUK = userKeySerializer.copy(copiedUK);
+                }
+                mapSnapshotCache.put(newStoredKeyNamespace(key, currentNamespace), new MapSnapshot<>(copiedUK));
+                if (mapCacheEnabled) {
+                    updateValueCache(key, first.getKey(), first.getValue(), false);
+                }
+                if (presenceCacheEnabled) {
+                    updatePresence(key, first.getKey(), first.getValue() != null);
+                }
+            }
+        } catch (Throwable ignored) {
+            // Best-effort cache warmup. Authoritative reads still go through entries().
+        } finally {
+            keyContextSetter.accept(previousKey);
+            if (previousNamespace != null) {
+                delegate.setCurrentNamespace(previousNamespace);
             }
         }
     }

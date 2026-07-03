@@ -346,6 +346,34 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
     }
 
+    public void prefetch(Iterable<? extends K> keys) {
+        if (keys == null || currentNamespace == null) {
+            return;
+        }
+        K previousKey = currentKeyProvider.getCurrentKey();
+        try {
+            for (K key : keys) {
+                if (key == null || findCachedValueFor(key, currentNamespace) != null) {
+                    continue;
+                }
+                keyContextSetter.accept(key);
+                delegate.setCurrentNamespace(currentNamespace);
+                V loaded = delegate.value();
+                KeyNamespaceKey<K, N> storageKey =
+                        new KeyNamespaceKey<>(
+                                key, currentNamespace, keySerializer, namespaceSerializer);
+                l1Cache.put(storageKey, CachedValue.of(loaded, false));
+            }
+        } catch (Throwable ignored) {
+            // Best-effort cache warmup. Authoritative reads still go through value().
+        } finally {
+            keyContextSetter.accept(previousKey);
+            if (currentNamespace != null) {
+                delegate.setCurrentNamespace(currentNamespace);
+            }
+        }
+    }
+
     private void updateSticky(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
         lastAccessKey = key;
         lastAccessValue = value;
@@ -355,7 +383,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
             return lastAccessValue;
         }
-        setLookupKey(currentKey, currentNamespace);
+        return findCachedValueFor(currentKey, currentNamespace);
+    }
+
+    private CachedValue<V> findCachedValueFor(K key, N namespace) {
+        setLookupKey(key, namespace);
         CachedValue<V> l1Value = l1Cache.get(lookupKey);
         if (l1Value != null) {
             return l1Value;

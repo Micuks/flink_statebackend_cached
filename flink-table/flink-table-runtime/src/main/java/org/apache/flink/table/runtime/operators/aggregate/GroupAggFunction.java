@@ -23,6 +23,7 @@ import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+import org.apache.flink.streaming.api.operators.BatchableKeyedFunction;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.utils.JoinedRowData;
 import org.apache.flink.table.runtime.dataview.PerKeyStateDataViewStore;
@@ -35,12 +36,16 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.types.RowKind;
 import org.apache.flink.util.Collector;
 
+import java.util.Iterator;
+import java.util.List;
+
 import static org.apache.flink.table.data.util.RowDataUtil.isAccumulateMsg;
 import static org.apache.flink.table.data.util.RowDataUtil.isRetractMsg;
 import static org.apache.flink.table.runtime.util.StateConfigUtil.createTtlConfig;
 
 /** Aggregate Function used for the groupby (without window) aggregate. */
-public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, RowData> {
+public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, RowData>
+        implements BatchableKeyedFunction<RowData, RowData> {
 
     private static final long serialVersionUID = -4767158666069797704L;
 
@@ -204,6 +209,70 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
             // and clear all state
             accState.clear();
             // cleanup dataview under current key
+            function.cleanup();
+        }
+    }
+
+    @Override
+    public void processBatchForKey(
+            Object currentKey, List<RowData> inputRows, Collector<RowData> out) throws Exception {
+        if (inputRows == null || inputRows.isEmpty()) {
+            return;
+        }
+        final RowData key = (RowData) currentKey;
+        boolean firstRow = false;
+
+        RowData accumulators = accState.value();
+        if (accumulators == null) {
+            Iterator<RowData> inputIter = inputRows.iterator();
+            while (inputIter.hasNext()) {
+                RowData current = inputIter.next();
+                if (isRetractMsg(current)) {
+                    inputIter.remove();
+                } else {
+                    break;
+                }
+            }
+            if (inputRows.isEmpty()) {
+                return;
+            }
+            accumulators = function.createAccumulators();
+            firstRow = true;
+        }
+
+        function.setAccumulators(accumulators);
+        RowData prevAggValue = function.getValue();
+        for (RowData input : inputRows) {
+            if (isAccumulateMsg(input)) {
+                function.accumulate(input);
+            } else {
+                function.retract(input);
+            }
+        }
+        RowData newAggValue = function.getValue();
+        accumulators = function.getAccumulators();
+
+        if (!recordCounter.recordCountIsZero(accumulators)) {
+            accState.update(accumulators);
+            if (!firstRow) {
+                if (stateRetentionTime <= 0 && equaliser.equals(prevAggValue, newAggValue)) {
+                    return;
+                }
+                if (generateUpdateBefore) {
+                    resultRow.replace(key, prevAggValue).setRowKind(RowKind.UPDATE_BEFORE);
+                    out.collect(resultRow);
+                }
+                resultRow.replace(key, newAggValue).setRowKind(RowKind.UPDATE_AFTER);
+            } else {
+                resultRow.replace(key, newAggValue).setRowKind(RowKind.INSERT);
+            }
+            out.collect(resultRow);
+        } else {
+            if (!firstRow) {
+                resultRow.replace(key, prevAggValue).setRowKind(RowKind.DELETE);
+                out.collect(resultRow);
+            }
+            accState.clear();
             function.cleanup();
         }
     }
