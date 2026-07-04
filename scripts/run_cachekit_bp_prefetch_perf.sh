@@ -25,6 +25,7 @@ EXPECTED_TMS=${EXPECTED_TMS:-2}
 OUT=${OUT:-$BENCH_ROOT/results-cachekit-bp-prefetch/$(date +%Y%m%d_%H%M%S)}
 SKIP_DOCKER_BUILD=${SKIP_DOCKER_BUILD:-1}
 FLINK_IMAGE=${FLINK_IMAGE:-flink-cluster-jobmanager:latest}
+SIDE_INPUT_DIR=${SIDE_INPUT_DIR:-$BENCH_ROOT/nexmark-side-input}
 
 EVENTS_LIST=${EVENTS_LIST:-50000000,100000000}
 QUERIES=${QUERIES:-q3,q4,q5,q7,q8,q9,q11,q12,q13,q15,q16,q17,q18,q19,q20}
@@ -92,6 +93,14 @@ prepare_compose() {
     if [ "$SKIP_DOCKER_BUILD" != "1" ]; then
         return
     fi
+    case ",$QUERIES," in
+        *,q13,*)
+            if [ ! -f "$SIDE_INPUT_DIR/side_input.txt" ]; then
+                log "ERROR: q13 requires side input file: $SIDE_INPUT_DIR/side_input.txt"
+                exit 1
+            fi
+            ;;
+    esac
     COMPOSE="$OUT/docker-compose-cachekit-bp-runtime.yml"
     cat > "$COMPOSE" <<CFG
 services:
@@ -109,6 +118,7 @@ services:
       - $BENCH_ROOT/nexmark_bench/profiles/flink-conf-cached.yaml:/opt/flink/conf/flink-conf-cached.yaml:ro
       - $BENCH_ROOT/nexmark_bench/deploy/workers:/opt/flink/conf/workers:ro
       - flink-logs:/opt/flink/log
+      - $SIDE_INPUT_DIR:/opt/flink/data:ro
       - $BENCH_ROOT/nexmark-flink:/opt/nexmark
       - $BENCH_ROOT/lib/flink-dist-1.16.3.jar:/opt/flink/lib/flink-dist-1.16.3.jar:ro
       - $BENCH_ROOT/lib/flink-table-runtime-1.16.3.jar:/opt/flink/lib/flink-table-runtime-1.16.3.jar:ro
@@ -128,6 +138,7 @@ services:
       - $BENCH_ROOT/nexmark_bench/profiles/flink-conf-cached.yaml:/opt/flink/conf/flink-conf-cached.yaml:ro
       - $BENCH_ROOT/nexmark_bench/deploy/workers:/opt/flink/conf/workers:ro
       - flink-logs:/opt/flink/log
+      - $SIDE_INPUT_DIR:/opt/flink/data:ro
       - $BENCH_ROOT/nexmark-flink:/opt/nexmark
       - $BENCH_ROOT/lib/flink-dist-1.16.3.jar:/opt/flink/lib/flink-dist-1.16.3.jar:ro
       - $BENCH_ROOT/lib/flink-table-runtime-1.16.3.jar:/opt/flink/lib/flink-table-runtime-1.16.3.jar:ro
@@ -147,6 +158,7 @@ services:
       - $BENCH_ROOT/nexmark_bench/profiles/flink-conf-cached.yaml:/opt/flink/conf/flink-conf-cached.yaml:ro
       - $BENCH_ROOT/nexmark_bench/deploy/workers:/opt/flink/conf/workers:ro
       - flink-logs:/opt/flink/log
+      - $SIDE_INPUT_DIR:/opt/flink/data:ro
       - $BENCH_ROOT/nexmark-flink:/opt/nexmark
       - $BENCH_ROOT/lib/flink-dist-1.16.3.jar:/opt/flink/lib/flink-dist-1.16.3.jar:ro
       - $BENCH_ROOT/lib/flink-table-runtime-1.16.3.jar:/opt/flink/lib/flink-table-runtime-1.16.3.jar:ro
