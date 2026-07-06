@@ -65,11 +65,11 @@ taskmanager.numberOfTaskSlots: 2
 execution.checkpointing.checkpoints-after-tasks-finish.enabled: true
 
 # CacheKit bp-prefetch candidate.
-state.backend.cachekit.bp-prefetch.enabled: true
+state.backend.cachekit.bp-prefetch.enabled: ${ON_BP_PREFETCH:-true}
 state.backend.cachekit.bp-prefetch.distance: $ON_DISTANCE
 state.backend.cachekit.bp-prefetch.backpressure-gated: $ON_BACKPRESSURE_GATED
 state.backend.cachekit.bp-prefetch.commutative-key-sort: $ON_KEY_SORT
-state.backend.cachekit.mailbox-batch.enabled: true
+state.backend.cachekit.mailbox-batch.enabled: ${ON_MAILBOX:-true}
 state.backend.cachekit.mailbox-batch.size: $MAILBOX_BATCH_SIZE
 state.backend.cachekit.mailbox-batch.timeout-us: $MAILBOX_TIMEOUT_US
 state.backend.cachekit.mailbox-batch.commutative-key-sort: $ON_KEY_SORT
