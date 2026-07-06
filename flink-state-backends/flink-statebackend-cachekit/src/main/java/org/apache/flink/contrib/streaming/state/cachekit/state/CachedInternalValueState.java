@@ -60,6 +60,46 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private final java.util.function.Consumer<K> keyContextSetter;
 
+    // ---- Backpressure-driven async prefetch (off-mailbox worker -> staging -> L1) ----
+
+    /** Cap on staged entries; the worker clears the whole map beyond this (all droppable). */
+    private static final int ASYNC_STAGING_MAX_ENTRIES = loadStagingMaxEntries();
+
+    /**
+     * Values fetched by the shared prefetch worker, waiting to be promoted into L1 by the mailbox
+     * thread. Worker only puts; mailbox only removes/promotes. A staged entry may only be promoted
+     * while {@code writeGen} still equals the generation captured at submission — any write or
+     * dirty flush on this state in between makes the RocksDB read potentially stale.
+     */
+    private final java.util.concurrent.ConcurrentHashMap<KeyNamespaceKey<K, N>, StagedValue<V>>
+            staging = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Write generation: bumped on every {@link #update}, {@link #clear} and dirty flush-through.
+     * Single writer (mailbox thread); the prefetch worker only reads it to abort stale batches.
+     */
+    private volatile long writeGen;
+
+    // Worker-thread-confined duplicated serializers (single shared worker thread => no races).
+    private TypeSerializer<K> workerKeySerializer;
+    private TypeSerializer<N> workerNamespaceSerializer;
+    private TypeSerializer<V> workerValueSerializer;
+
+    private static int loadStagingMaxEntries() {
+        try {
+            return Math.max(
+                    128,
+                    org.apache.flink.configuration.GlobalConfiguration.loadConfiguration()
+                            .get(
+                                    org.apache.flink.configuration.ConfigOptions.key(
+                                                    "state.backend.cachekit.bp-prefetch.staging.max-entries")
+                                            .intType()
+                                            .defaultValue(8192)));
+        } catch (Throwable t) {
+            return 8192;
+        }
+    }
+
     // Bypass State
     private volatile boolean isBypassing = false;
     private long currentWindowAccesses = 0;
@@ -158,6 +198,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return l2Cached.valueOrNull();
         }
 
+        // 4b. Check async-prefetch staging. Sound only when no write/dirty-flush happened on
+        // this state since the fetch was submitted (writeGen match); otherwise fall through to
+        // the authoritative delegate read.
+        if (!staging.isEmpty()) {
+            StagedValue<V> staged = staging.remove(lookupKey);
+            if (staged != null && staged.gen == writeGen) {
+                KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace,
+                        keySerializer, namespaceSerializer);
+                CachedValue<V> newValue = CachedValue.of(staged.value, false);
+                l1Cache.put(storageKey, newValue);
+                updateSticky(storageKey, newValue);
+                recordAccess(true); // Hit
+                return newValue.valueOrNull();
+            }
+        }
+
         // 5. Miss -> Load from Delegate
         V loaded = delegate.value();
         recordAccess(false); // Miss
@@ -181,12 +237,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         K currentKey = currentKeyProvider.getCurrentKey();
 
+        // Note on staging soundness: a plain write-back update lands dirty in L1, and the
+        // staging promote path is only reachable after an L1+L2 miss — the dirty entry shields
+        // the stale staged value until eviction, and eviction flush-through bumps writeGen.
+        // Only writes that reach the delegate (bypass mode, flush) need to bump writeGen here.
+
         // Optimistic Sticky Update (Check L0 first)
         // If current key matches sticky key, we can update in place without new
         // allocation
         if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
             CachedValue<V> newValue;
             if (bypassEnabled && isBypassing) {
+                writeGen++; // direct delegate write: staged RocksDB reads may now be stale
                 delegate.update(value);
                 newValue = CachedValue.of(value, false); // Clean because written to delegate
             } else {
@@ -200,6 +262,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         if (bypassEnabled && isBypassing) {
             // Write-Through (Bypass Mode)
+            writeGen++; // direct delegate write: staged RocksDB reads may now be stale
             delegate.update(value);
 
             // Update L1 as Clean so subsequent reads (if sampled or re-enabled) find it.
@@ -237,6 +300,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         CachedValue<V> newValue;
 
         if (bypassEnabled && isBypassing) {
+            writeGen++; // direct delegate write: staged RocksDB reads may now be stale
             delegate.clear();
             newValue = CachedValue.of(null, false);
         } else if (existing != null && existing.isNull && !existing.dirty) {
@@ -311,6 +375,95 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 // Mark L1 clean
                 l1Cache.put(entry.getKey(), CachedValue.of(val.value, false));
             }
+        }
+    }
+
+    /**
+     * Mailbox-side half of the async prefetch: serialize (key, namespace) for every key that is
+     * not already cached or staged, then hand the byte[] batch to the shared worker thread. The
+     * only work on the mailbox thread is key serialization; the RocksDB reads and value
+     * deserialization happen off-thread and overlap with record dispatch / backpressure waits.
+     *
+     * @return a worker task to run via PrefetchExecutor, or null if there is nothing to fetch.
+     */
+    public Runnable buildAsyncPrefetchTask(Iterable<? extends K> keys) {
+        if (keys == null || currentNamespace == null) {
+            return null;
+        }
+        java.util.ArrayList<byte[]> serialized = new java.util.ArrayList<>();
+        try {
+            org.apache.flink.core.memory.DataOutputSerializer out =
+                    new org.apache.flink.core.memory.DataOutputSerializer(64);
+            for (K key : keys) {
+                if (key == null || findCachedValueFor(key, currentNamespace) != null) {
+                    continue;
+                }
+                setLookupKey(key, currentNamespace);
+                if (staging.containsKey(lookupKey)) {
+                    continue;
+                }
+                out.clear();
+                keySerializer.serialize(key, out);
+                out.writeByte(42); // KvStateSerializer.MAGIC_NUMBER wire format
+                namespaceSerializer.serialize(currentNamespace, out);
+                serialized.add(out.getCopyOfBuffer());
+            }
+        } catch (Throwable t) {
+            return null; // Best-effort: an unserializable key aborts this batch only.
+        }
+        if (serialized.isEmpty()) {
+            return null;
+        }
+        final long gen = writeGen;
+        return () -> fetchIntoStaging(serialized, gen);
+    }
+
+    /**
+     * Worker-side half: runs on the single shared prefetch thread. Reads RocksDB through the
+     * delegate's {@code getSerializedValue} — the same thread-safe path Flink's queryable state
+     * uses concurrently with the task thread — and parks deserialized values in {@link #staging}.
+     */
+    private void fetchIntoStaging(java.util.List<byte[]> serializedKeyAndNamespaces, long gen) {
+        try {
+            if (workerValueSerializer == null) {
+                workerKeySerializer = keySerializer.duplicate();
+                workerNamespaceSerializer = namespaceSerializer.duplicate();
+                workerValueSerializer = delegate.getValueSerializer().duplicate();
+            }
+            if (staging.size() > ASYNC_STAGING_MAX_ENTRIES) {
+                staging.clear(); // all entries are droppable cache; also purges stale generations
+            }
+            for (byte[] skn : serializedKeyAndNamespaces) {
+                if (gen != writeGen) {
+                    return; // a write already invalidated this batch; stop wasting reads
+                }
+                byte[] valueBytes =
+                        ((InternalKvState<K, N, V>) delegate)
+                                .getSerializedValue(
+                                        skn,
+                                        workerKeySerializer,
+                                        workerNamespaceSerializer,
+                                        workerValueSerializer);
+                if (valueBytes == null) {
+                    // Absent key: let the authoritative read apply default-value semantics.
+                    continue;
+                }
+                org.apache.flink.core.memory.DataInputDeserializer in =
+                        new org.apache.flink.core.memory.DataInputDeserializer(
+                                skn, 0, skn.length);
+                K key = workerKeySerializer.deserialize(in);
+                in.readByte(); // magic number
+                N namespace = workerNamespaceSerializer.deserialize(in);
+                org.apache.flink.core.memory.DataInputDeserializer valueIn =
+                        new org.apache.flink.core.memory.DataInputDeserializer(
+                                valueBytes, 0, valueBytes.length);
+                V value = workerValueSerializer.deserialize(valueIn);
+                staging.put(
+                        new KeyNamespaceKey<>(key, namespace),
+                        new StagedValue<>(value, gen));
+            }
+        } catch (Throwable ignored) {
+            // Best-effort cache warmup; the authoritative read path is untouched.
         }
     }
 
@@ -435,6 +588,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     private void flushEntryToDelegate(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
+        // A dirty flush changes RocksDB content: a concurrent prefetch read may now be stale.
+        writeGen++;
         // Save current context
         K previousKey = currentKeyProvider.getCurrentKey();
         // We rely on 'currentNamespace' field in this class but it might have changed.
@@ -511,6 +666,17 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         @Override
         public int hashCode() {
             return Objects.hash(key, namespace);
+        }
+    }
+
+    /** A value fetched by the prefetch worker, tagged with the write generation at submission. */
+    private static final class StagedValue<V> {
+        private final V value;
+        private final long gen;
+
+        private StagedValue(V value, long gen) {
+            this.value = value;
+            this.gen = gen;
         }
     }
 

@@ -28,15 +28,17 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 /**
- * Backpressure-driven state prefetch (MVP, synchronous form B).
+ * Backpressure-driven state prefetch (key extraction + submission side).
  *
  * <p>Given a lookahead buffer of upcoming {@link StreamRecord}s — accumulated by {@link
  * org.apache.flink.streaming.runtime.io.StreamRecordBatchOutput} in prefetch mode — this helper
  * extracts each record's keyed-state key (via the head operator's {@code stateKeySelector1}, reused
- * from the {@link BatchedKeyedOperatorAdapter} reflection pattern) and asks the keyed-state backend
- * to warm its cache for the whole batch through an optional {@code prefetch(Collection)} method.
- * The batch is then dispatched <em>in arrival order</em> (no reorder) by the caller, so every
- * {@code value()} can hit cache when the backend supports prefetch.
+ * from the {@link BatchedKeyedOperatorAdapter} reflection pattern), dedups it, and hands the key
+ * set to the keyed-state backend through an optional {@code prefetch(Collection)} method. Whether
+ * the backend fetches synchronously or on a dedicated worker thread is the backend's choice; the
+ * CacheKit backend enqueues the reads to a shared off-mailbox worker so they overlap with record
+ * dispatch and backpressure waits. The batch is then dispatched <em>in arrival order</em> (no
+ * reorder) by the caller.
  *
  * <p>Correctness gates (all enforced):
  *
@@ -120,7 +122,9 @@ public final class StatePrefetcher {
                 return;
             }
 
-            java.util.List keys = new java.util.ArrayList(n);
+            // LinkedHashSet: dedup same-key records (arrival order preserved) so the backend
+            // never pays a lookup twice for one lookahead window.
+            java.util.Collection keys = new java.util.LinkedHashSet(n);
             for (int i = 0; i < n; i++) {
                 StreamRecord<?> rec = buf[i];
                 if (rec == null) {

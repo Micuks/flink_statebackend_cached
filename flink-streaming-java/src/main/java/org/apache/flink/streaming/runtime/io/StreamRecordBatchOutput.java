@@ -252,8 +252,10 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         CollapseProbe.observe(headOperator, buf, n);
         try {
             if (prefetchMode && BP_PREFETCH_ASYNC_CHUNKS) {
+                // Fire-and-forget: the backend-side prefetch is asynchronous (shared worker
+                // thread + staging cache), so there is nothing to join — blocking the mailbox
+                // here would defeat the purpose of prefetching.
                 scheduleAsyncPrefetchChunks(true);
-                awaitAsyncPrefetch();
             }
             if (LocalPreagg.dispatch(headOperator, buf, n, numRecordsIn)) {
                 // Runtime local pre-aggregation handled the whole batch (key-grouped fold with
@@ -340,14 +342,6 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                                     org.apache.flink.streaming.runtime.tasks.StatePrefetcher
                                             .prefetchAsync(headOperator, slice, slice.length));
             asyncPrefetchScheduledUntil = end;
-        }
-    }
-
-    private void awaitAsyncPrefetch() {
-        try {
-            asyncPrefetchTail.join();
-        } catch (Throwable ignored) {
-            // Best-effort: the authoritative in-order emit path still runs.
         }
     }
 
