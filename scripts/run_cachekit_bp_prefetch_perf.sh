@@ -58,6 +58,22 @@ fi
 ON_KEY_SORT=${ON_KEY_SORT:-false}
 MAILBOX_BATCH_SIZE=${MAILBOX_BATCH_SIZE:-4096}
 MAILBOX_TIMEOUT_US=${MAILBOX_TIMEOUT_US:-0}
+# NO_MAP_CACHE=1 disables ALL CacheKit MapState caching on every cachekit leg.
+# Attribution (2026-07-06) proved the MapState wrapper causes the q4/q9/q13/q20
+# regressions; ValueState cache + bp-prefetch stack stay enabled.
+NO_MAP_CACHE=${NO_MAP_CACHE:-0}
+
+append_no_map() {
+    if [ "$NO_MAP_CACHE" = "1" ]; then
+        cat >> "$1" <<CFG
+
+# MapState caching fully disabled (regression root cause on join-heavy queries).
+state.backend.cachekit.map.cache.max-entries: 0
+state.backend.cachekit.map.snapshot.cache.max-entries: 0
+state.backend.cachekit.map.presence.cache.max-entries: 0
+CFG
+    fi
+}
 
 mkdir -p "$OUT/work"
 exec > >(tee -a "$OUT/run.log") 2>&1
@@ -115,6 +131,8 @@ state.backend.cachekit.mailbox-batch.timeout-us: $MAILBOX_TIMEOUT_US
 state.backend.cachekit.mailbox-batch.commutative-key-sort: $ON_KEY_SORT
 state.backend.cachekit.local-preagg.enabled: $ON_LOCAL_PREAGG
 CFG
+        append_no_map "$OUT/flink-conf-cachekit-cache-only.yaml"
+        append_no_map "$OUT/flink-conf-cachekit-bp.yaml"
     elif [ "$EXPERIMENT" = "prefetch-only" ]; then
         cp "$BENCH_ROOT/nexmark_bench/profiles/flink-conf-cached.yaml" "$OUT/flink-conf-cachekit-cache-only.yaml"
         cat >> "$OUT/flink-conf-cachekit-cache-only.yaml" <<CFG
@@ -144,6 +162,8 @@ state.backend.cachekit.mailbox-batch.timeout-us: $MAILBOX_TIMEOUT_US
 state.backend.cachekit.mailbox-batch.commutative-key-sort: false
 state.backend.cachekit.local-preagg.enabled: false
 CFG
+        append_no_map "$OUT/flink-conf-cachekit-cache-only.yaml"
+        append_no_map "$OUT/flink-conf-cachekit-prefetch-only.yaml"
     else
         cp "$BENCH_ROOT/nexmark_bench/profiles/flink-conf-cached.yaml" "$OUT/flink-conf-cachekit-bp.yaml"
         cat >> "$OUT/flink-conf-cachekit-bp.yaml" <<CFG
@@ -159,6 +179,7 @@ state.backend.cachekit.mailbox-batch.timeout-us: $MAILBOX_TIMEOUT_US
 state.backend.cachekit.mailbox-batch.commutative-key-sort: $ON_KEY_SORT
 state.backend.cachekit.local-preagg.enabled: $ON_LOCAL_PREAGG
 CFG
+        append_no_map "$OUT/flink-conf-cachekit-bp.yaml"
     fi
 
     grep -q 'state.backend: rocksdb' "$OUT/flink-conf-rocksdb-baseline.yaml"
