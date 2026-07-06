@@ -18,6 +18,7 @@ EXPECTED_TMS=${EXPECTED_TMS:-2}
 OUT=${OUT:-$BENCH_ROOT/results-cachekit-bp-prefetch-cdc/$(date +%Y%m%d_%H%M%S)}
 SKIP_DOCKER_BUILD=${SKIP_DOCKER_BUILD:-1}
 FLINK_IMAGE=${FLINK_IMAGE:-flink-cluster-jobmanager:latest}
+SIDE_INPUT_DIR=${SIDE_INPUT_DIR:-$BENCH_ROOT/nexmark-side-input}
 
 QUERY=${QUERY:-q3}
 NUM_EVENTS=${NUM_EVENTS:-1000000}
@@ -108,6 +109,7 @@ services:
       - $BENCH_ROOT/nexmark_bench/deploy/workers:/opt/flink/conf/workers:ro
       - flink-logs:/opt/flink/log
       - $BENCH_ROOT/nexmark-flink:/opt/nexmark
+      - $SIDE_INPUT_DIR:/opt/flink/data:ro
       - $BENCH_ROOT/lib/flink-dist-1.16.3.jar:/opt/flink/lib/flink-dist-1.16.3.jar:ro
       - $BENCH_ROOT/lib/flink-table-runtime-1.16.3.jar:/opt/flink/lib/flink-table-runtime-1.16.3.jar:ro
       - $BENCH_ROOT/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:/opt/flink/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:ro
@@ -127,6 +129,7 @@ services:
       - $BENCH_ROOT/nexmark_bench/deploy/workers:/opt/flink/conf/workers:ro
       - flink-logs:/opt/flink/log
       - $BENCH_ROOT/nexmark-flink:/opt/nexmark
+      - $SIDE_INPUT_DIR:/opt/flink/data:ro
       - $BENCH_ROOT/lib/flink-dist-1.16.3.jar:/opt/flink/lib/flink-dist-1.16.3.jar:ro
       - $BENCH_ROOT/lib/flink-table-runtime-1.16.3.jar:/opt/flink/lib/flink-table-runtime-1.16.3.jar:ro
       - $BENCH_ROOT/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:/opt/flink/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:ro
@@ -146,6 +149,7 @@ services:
       - $BENCH_ROOT/nexmark_bench/deploy/workers:/opt/flink/conf/workers:ro
       - flink-logs:/opt/flink/log
       - $BENCH_ROOT/nexmark-flink:/opt/nexmark
+      - $SIDE_INPUT_DIR:/opt/flink/data:ro
       - $BENCH_ROOT/lib/flink-dist-1.16.3.jar:/opt/flink/lib/flink-dist-1.16.3.jar:ro
       - $BENCH_ROOT/lib/flink-table-runtime-1.16.3.jar:/opt/flink/lib/flink-table-runtime-1.16.3.jar:ro
       - $BENCH_ROOT/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:/opt/flink/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:ro
