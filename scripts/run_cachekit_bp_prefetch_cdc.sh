@@ -291,9 +291,17 @@ run_leg() {
         docker restart "$tm" >/dev/null
     done
     wait_tms
+    local source_args=()
+    if [ -n "${SOURCE_PATH:-}" ]; then
+        # Deterministic filesystem source: both legs replay identical input, so
+        # window boundaries match too (wall-clock datagen makes q7/q8/q11 window
+        # outputs run-to-run incomparable otherwise).
+        source_args=(--source-path "$SOURCE_PATH")
+    fi
     docker exec -w /opt/nexmark "$CONTAINER" \
         python3 /opt/nexmark/run_nexmark_with_savepoint.py \
-            --backend "$backend_tag" --query "$QUERY" --num-events "$NUM_EVENTS" --tps "$TPS"
+            --backend "$backend_tag" --query "$QUERY" --num-events "$NUM_EVENTS" --tps "$TPS" \
+            "${source_args[@]}"
     local src="$BENCH_ROOT/nexmark-flink/results/${QUERY}_${backend_tag}_results_p1"
     local dst="$OUT/results/$leg"
     rm -rf "$dst"
