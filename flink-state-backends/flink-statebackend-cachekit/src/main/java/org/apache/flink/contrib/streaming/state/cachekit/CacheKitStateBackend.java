@@ -83,6 +83,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final int mapHitRateWindow;
     private final boolean mapIterationCacheFillEnabled;
     private final int mapSnapshotCacheMaxEntries;
+    private final boolean listStateCowEnabled;
+    private final boolean listStateRywEnabled;
+    private final int listStateClearedKeysCapacity;
+    private final boolean priorityQueueOptEnabled;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -103,7 +107,11 @@ public class CacheKitStateBackend extends AbstractStateBackend
             double mapHitRateThreshold,
             int mapHitRateWindow,
             boolean mapIterationCacheFillEnabled,
-            int mapSnapshotCacheMaxEntries) {
+            int mapSnapshotCacheMaxEntries,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -123,6 +131,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.mapHitRateWindow = mapHitRateWindow;
         this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
         this.mapSnapshotCacheMaxEntries = mapSnapshotCacheMaxEntries;
+        this.listStateCowEnabled = listStateCowEnabled;
+        this.listStateRywEnabled = listStateRywEnabled;
+        this.listStateClearedKeysCapacity = listStateClearedKeysCapacity;
+        this.priorityQueueOptEnabled = priorityQueueOptEnabled;
     }
 
     @Override
@@ -202,7 +214,11 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapHitRateThreshold,
                 mapHitRateWindow,
                 mapIterationCacheFillEnabled,
-                mapSnapshotCacheMaxEntries);
+                mapSnapshotCacheMaxEntries,
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled);
     }
 
     @Override
@@ -273,6 +289,14 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 config.get(CacheKitStateBackendFactory.MAP_ITERATION_CACHE_FILL_ENABLED);
         final int mapSnapshotMaxEntries =
                 Math.max(0, config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
+        final boolean listStateCowEnabled =
+                config.get(CacheKitStateBackendFactory.LIST_STATE_COW_ENABLED);
+        final boolean listStateRywEnabled =
+                config.get(CacheKitStateBackendFactory.LIST_STATE_RYW_ENABLED);
+        final int clearedKeysCapacity =
+                Math.max(1, config.get(CacheKitStateBackendFactory.LIST_STATE_CLEARED_KEYS_CAPACITY));
+        final boolean priorityQueueOptEnabled =
+                config.get(CacheKitStateBackendFactory.PRIORITY_QUEUE_OPT_ENABLED);
 
         return new CacheKitStateBackend(
                 configuredDelegate,
@@ -293,6 +317,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapHitRateThreshold,
                 mapHitRateWindow,
                 mapIterationCacheFillEnabled,
-                mapSnapshotMaxEntries);
+                mapSnapshotMaxEntries,
+                listStateCowEnabled,
+                listStateRywEnabled,
+                clearedKeysCapacity,
+                priorityQueueOptEnabled);
     }
 }

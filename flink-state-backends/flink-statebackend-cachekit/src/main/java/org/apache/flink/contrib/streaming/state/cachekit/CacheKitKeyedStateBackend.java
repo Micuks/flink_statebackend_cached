@@ -16,10 +16,13 @@
 package org.apache.flink.contrib.streaming.state.cachekit;
 
 import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalListState;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMapState;
+import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalPriorityQueueSet;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalValueState;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
@@ -34,17 +37,26 @@ import org.apache.flink.runtime.state.SnapshotResult;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.state.StateSnapshotTransformer;
 import org.apache.flink.runtime.state.internal.InternalKvState;
+import org.apache.flink.runtime.state.internal.InternalListState;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.PriorityComparable;
+import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.Preconditions;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nonnull;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.stream.Stream;
 import java.util.Collection;
 import java.util.IdentityHashMap;
@@ -64,6 +76,7 @@ import org.apache.flink.api.java.tuple.Tuple2;
 public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     private static final long serialVersionUID = 1L;
+    private static final Logger LOG = LoggerFactory.getLogger(CacheKitKeyedStateBackend.class);
 
     private final AbstractKeyedStateBackend<K> delegate;
     private final int valueCacheMaxEntries;
@@ -84,6 +97,15 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int mapHitRateWindow;
     private final boolean mapIterationCacheFillEnabled;
     private final int mapSnapshotCacheMaxEntries;
+    private final boolean listStateCowEnabled;
+    private final boolean listStateRywEnabled;
+    private final int listStateClearedKeysCapacity;
+    private final boolean priorityQueueOptEnabled;
+
+    // --- fullOpt: shared flush executors (N wrappers share one thread each) ---
+    private final ExecutorService listStateFlushExecutor;
+    private final ExecutorService pqFlushExecutor;
+
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
     public CacheKitKeyedStateBackend(
@@ -111,7 +133,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             double mapHitRateThreshold,
             int mapHitRateWindow,
             boolean mapIterationCacheFillEnabled,
-            int mapSnapshotCacheMaxEntries) {
+            int mapSnapshotCacheMaxEntries,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -142,6 +168,34 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapHitRateWindow = mapHitRateWindow;
         this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
         this.mapSnapshotCacheMaxEntries = mapSnapshotCacheMaxEntries;
+        this.listStateCowEnabled = listStateCowEnabled;
+        this.listStateRywEnabled = listStateRywEnabled;
+        this.listStateClearedKeysCapacity = listStateClearedKeysCapacity;
+        this.priorityQueueOptEnabled = priorityQueueOptEnabled;
+
+        // fullOpt: initialize shared flush executors (daemon threads)
+        this.listStateFlushExecutor = listStateCowEnabled
+                ? Executors.newSingleThreadExecutor(r -> {
+                        Thread t = new Thread(r, "cachekit-list-state-flush");
+                        t.setDaemon(true);
+                        return t;
+                  })
+                : null;
+        this.pqFlushExecutor = priorityQueueOptEnabled
+                ? Executors.newSingleThreadExecutor(r -> {
+                        Thread t = new Thread(r, "cachekit-pq-flush");
+                        t.setDaemon(true);
+                        return t;
+                  })
+                : null;
+
+        LOG.info(
+                "[CACHEKIT fullOpt] Backend created: listStateCow={}, listStateRyw={}, "
+                        + "clearedKeysCap={}, priorityQueueOpt={}",
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled);
     }
 
     @Override
@@ -208,6 +262,39 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapHitRateWindow,
                     mapIterationCacheFillEnabled,
                     mapSnapshotCacheMaxEntries);
+            wrappersByDelegateIdentity.put(internal, wrapped);
+            return (S) wrapped;
+        }
+
+        // fullOpt: ListState COW + RYW wrapper
+        if (stateDescriptor.getType() == StateDescriptor.Type.LIST
+                && internal instanceof InternalListState
+                && (listStateCowEnabled || listStateRywEnabled)) {
+            Object existing = wrappersByDelegateIdentity.get(internal);
+            if (existing != null) {
+                return (S) existing;
+            }
+            @SuppressWarnings("unchecked")
+            InternalListState<K, N, Object> delegateList =
+                    (InternalListState<K, N, Object>) internal;
+            // Element serializer from ListStateDescriptor (not from delegate API)
+            @SuppressWarnings("unchecked")
+            TypeSerializer<Object> elementSerializer =
+                    (TypeSerializer<Object>)
+                            ((ListStateDescriptor<?>) stateDescriptor).getElementSerializer();
+            Preconditions.checkNotNull(
+                    elementSerializer,
+                    "ListState must have an element serializer configured");
+            CachedInternalListState<K, N, Object> wrapped =
+                    new CachedInternalListState<>(
+                            delegateList,
+                            this::getCurrentKey,
+                            this::setCurrentKey,
+                            listStateCowEnabled,
+                            listStateRywEnabled,
+                            elementSerializer,
+                            listStateFlushExecutor,
+                            listStateClearedKeysCapacity);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -296,30 +383,126 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             return (IS) wrapped;
         }
 
+        // fullOpt: ListState COW + RYW wrapper
+        if (stateDesc.getType() == StateDescriptor.Type.LIST
+                && internal instanceof InternalListState
+                && (listStateCowEnabled || listStateRywEnabled)) {
+            Object existing = wrappersByDelegateIdentity.get(internal);
+            if (existing != null) {
+                return (IS) existing;
+            }
+            @SuppressWarnings("unchecked")
+            InternalListState<K, N, Object> delegateList =
+                    (InternalListState<K, N, Object>) internal;
+            @SuppressWarnings("unchecked")
+            TypeSerializer<Object> elementSerializer =
+                    (TypeSerializer<Object>)
+                            ((ListStateDescriptor<?>) stateDesc).getElementSerializer();
+            Preconditions.checkNotNull(
+                    elementSerializer,
+                    "ListState must have an element serializer configured");
+            CachedInternalListState<K, N, Object> wrapped =
+                    new CachedInternalListState<>(
+                            delegateList,
+                            this::getCurrentKey,
+                            this::setCurrentKey,
+                            listStateCowEnabled,
+                            listStateRywEnabled,
+                            elementSerializer,
+                            listStateFlushExecutor,
+                            listStateClearedKeysCapacity);
+            wrappersByDelegateIdentity.put(internal, wrapped);
+            return (IS) wrapped;
+        }
+
         return state;
     }
 
     @Override
     public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>> KeyGroupedInternalPriorityQueue<T> create(
             String stateName, TypeSerializer<T> byteOrderedElementSerializer) {
-        return delegate.create(stateName, byteOrderedElementSerializer);
+        KeyGroupedInternalPriorityQueue<T> delegateQueue =
+                delegate.create(stateName, byteOrderedElementSerializer);
+        return wrapPriorityQueue(delegateQueue);
     }
 
     @Override
     public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>> KeyGroupedInternalPriorityQueue<T> create(
             String stateName, TypeSerializer<T> byteOrderedElementSerializer, boolean allowFutureMetadataUpdates) {
-        return delegate.create(stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
+        KeyGroupedInternalPriorityQueue<T> delegateQueue =
+                delegate.create(stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
+        return wrapPriorityQueue(delegateQueue);
+    }
+
+    /**
+     * fullOpt: wrap PriorityQueue with async buffer if enabled and delegate is not RocksDB-backed.
+     * RocksDB-backed PQ already has its own async buffer; wrapping would cause double-buffering.
+     */
+    private <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
+            KeyGroupedInternalPriorityQueue<T> wrapPriorityQueue(
+                    KeyGroupedInternalPriorityQueue<T> delegateQueue) {
+        if (!priorityQueueOptEnabled) {
+            return delegateQueue;
+        }
+        String className = delegateQueue.getClass().getName();
+        if (className.contains("RocksDB") || className.contains("rocksdb")) {
+            LOG.info(
+                    "[CACHEKIT PQ] RocksDB-backed PriorityQueue ({}) detected; "
+                            + "skipping wrapper to avoid double-buffering.",
+                    className);
+            return delegateQueue;
+        }
+        return new CachedInternalPriorityQueueSet<>(
+                delegateQueue, pqFlushExecutor, priorityQueueOptEnabled);
     }
 
     @Override
     public void dispose() {
-        wrappersByDelegateIdentity.clear();
-        delegate.dispose();
+        try {
+            super.dispose();
+        } finally {
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                try {
+                    if (wrapper instanceof CachedInternalListState) {
+                        ((CachedInternalListState<?, ?, ?>) wrapper).close();
+                    } else if (wrapper instanceof CachedInternalPriorityQueueSet) {
+                        ((CachedInternalPriorityQueueSet<?>) wrapper).close();
+                    }
+                } catch (Exception ignored) {
+                    // log and continue
+                }
+            }
+            wrappersByDelegateIdentity.clear();
+            if (listStateFlushExecutor != null) {
+                listStateFlushExecutor.shutdownNow();
+            }
+            if (pqFlushExecutor != null) {
+                pqFlushExecutor.shutdownNow();
+            }
+            delegate.dispose();
+        }
     }
 
     @Override
     public void close() throws IOException {
+        for (Object wrapper : wrappersByDelegateIdentity.values()) {
+            try {
+                if (wrapper instanceof CachedInternalListState) {
+                    ((CachedInternalListState<?, ?, ?>) wrapper).close();
+                } else if (wrapper instanceof CachedInternalPriorityQueueSet) {
+                    ((CachedInternalPriorityQueueSet<?>) wrapper).close();
+                }
+            } catch (Exception ignored) {
+                // log and continue
+            }
+        }
         wrappersByDelegateIdentity.clear();
+        if (listStateFlushExecutor != null) {
+            listStateFlushExecutor.shutdownNow();
+        }
+        if (pqFlushExecutor != null) {
+            pqFlushExecutor.shutdownNow();
+        }
         delegate.close();
     }
 
@@ -330,12 +513,27 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             @Nonnull CheckpointStreamFactory streamFactory,
             @Nonnull CheckpointOptions checkpointOptions)
             throws Exception {
+        List<Exception> flushErrors = new ArrayList<>();
         for (Object wrapper : wrappersByDelegateIdentity.values()) {
-            if (wrapper instanceof CachedInternalValueState) {
-                ((CachedInternalValueState<?, ?, ?>) wrapper).flush();
-            } else if (wrapper instanceof CachedInternalMapState) {
-                ((CachedInternalMapState<?, ?, ?, ?>) wrapper).flush();
+            try {
+                if (wrapper instanceof CachedInternalValueState) {
+                    ((CachedInternalValueState<?, ?, ?>) wrapper).flush();
+                } else if (wrapper instanceof CachedInternalMapState) {
+                    ((CachedInternalMapState<?, ?, ?, ?>) wrapper).flush();
+                } else if (wrapper instanceof CachedInternalListState) {
+                    ((CachedInternalListState<?, ?, ?>) wrapper).flushToUnderlyingState();
+                }
+            } catch (Exception e) {
+                flushErrors.add(e);
             }
+        }
+        if (!flushErrors.isEmpty()) {
+            Exception first = flushErrors.get(0);
+            for (int i = 1; i < flushErrors.size(); i++) {
+                first.addSuppressed(flushErrors.get(i));
+            }
+            throw new FlinkRuntimeException(
+                    "Failed to flush one or more cached states before snapshot", first);
         }
         return delegate.snapshot(checkpointId, timestamp, streamFactory, checkpointOptions);
     }

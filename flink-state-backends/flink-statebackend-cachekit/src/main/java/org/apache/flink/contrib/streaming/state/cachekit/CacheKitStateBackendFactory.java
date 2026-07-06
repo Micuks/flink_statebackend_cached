@@ -153,16 +153,53 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         + "Caches (Key, Namespace) -> {EMPTY | SINGLE(UserKey)} to short-circuit "
                                                         + "entries()/iterator() calls. Set 0 to disable.");
 
-        public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
-                        .stringType()
-                        .noDefaultValue()
-                        .withDescription(
-                                        "Optional fully-qualified StateBackend class name used as delegate. "
-                                                        + "If absent, EmbeddedRocksDBStateBackend is used.");
+	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
+			.stringType()
+			.noDefaultValue()
+			.withDescription(
+					"Optional fully-qualified StateBackend class name used as delegate. "
+									+ "If absent, EmbeddedRocksDBStateBackend is used.");
 
-        @Override
-        public CacheKitStateBackend createFromConfig(ReadableConfig config, ClassLoader classLoader)
-                        throws IOException {
+	// ===== ListState COW + RYW 配置 (fullOpt) =====
+	public static final ConfigOption<Boolean> LIST_STATE_COW_ENABLED =
+			ConfigOptions.key("state.backend.cachekit.list-state.cow")
+					.booleanType()
+					.defaultValue(false)
+					.withDescription(
+							"Enable Async COW (Copy-On-Write) Flush for ListState. "
+									+ "add() operations are buffered in memory and flushed asynchronously "
+									+ "when threshold (4096 keys or 500 elements per list) is reached.");
+
+	public static final ConfigOption<Boolean> LIST_STATE_RYW_ENABLED =
+			ConfigOptions.key("state.backend.cachekit.list-state.ryw")
+					.booleanType()
+					.defaultValue(false)
+					.withDescription(
+							"Enable Read-Your-Writes for ListState. Tracks cleared keys and returns "
+									+ "in-memory data directly without backend I/O. Can be used independently of COW.");
+
+	public static final ConfigOption<Integer> LIST_STATE_CLEARED_KEYS_CAPACITY =
+			ConfigOptions.key("state.backend.cachekit.list-state.cleared-keys.capacity")
+					.intType()
+					.defaultValue(200_000)
+					.withDescription(
+							"Max entries in the cleared-keys LRU cache for ListState RYW. "
+									+ "Used to bound memory when many keys are cleared.");
+
+	// ===== PriorityQueue 配置 (fullOpt) =====
+	public static final ConfigOption<Boolean> PRIORITY_QUEUE_OPT_ENABLED =
+			ConfigOptions.key("state.backend.cachekit.priority-queue.opt")
+					.booleanType()
+					.defaultValue(false)
+					.withDescription(
+							"Enable async pending buffer optimization for PriorityQueue (timers). "
+									+ "ONLY effective when the delegate backend is Heap-based. "
+									+ "For RocksDB delegate, this is automatically skipped "
+									+ "to avoid double-buffering with the delegate's own async buffer.");
+
+	@Override
+	public CacheKitStateBackend createFromConfig(ReadableConfig config, ClassLoader classLoader)
+					throws IOException {
                 final int maxEntries = Math.max(0, config.get(VALUE_CACHE_MAX_ENTRIES));
                 final CachePolicyType policyType = config.get(VALUE_CACHE_POLICY);
                 final int lruOverflow = Math.max(0, config.get(VALUE_CACHE_LRU_OVERFLOW));
@@ -181,10 +218,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final int mapHitRateWindow = config.get(MAP_HIT_RATE_WINDOW);
                 final boolean mapIterationCacheFillEnabled = config.get(MAP_ITERATION_CACHE_FILL_ENABLED);
                 final int mapSnapshotMaxEntries = Math.max(0, config.get(MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
-                final String delegateClass = config.get(DELEGATE_BACKEND);
+		final String delegateClass = config.get(DELEGATE_BACKEND);
 
-                System.out.printf(
-                                "CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, delegate=%s%n",
+			final boolean listStateCowEnabled = config.get(LIST_STATE_COW_ENABLED);
+			final boolean listStateRywEnabled = config.get(LIST_STATE_RYW_ENABLED);
+			final int clearedKeysCapacity = Math.max(1, config.get(LIST_STATE_CLEARED_KEYS_CAPACITY));
+			final boolean priorityQueueOptEnabled = config.get(PRIORITY_QUEUE_OPT_ENABLED);
+
+			System.out.printf(
+							"CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, delegate=%s, listStateCow=%s, listStateRyw=%s, clearedKeysCap=%d, priorityQueueOpt=%s%n",
                                 maxEntries,
                                 policyType,
                                 lruOverflow,
@@ -202,8 +244,12 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 mapHitRateThreshold,
                                 mapHitRateWindow,
                                 mapIterationCacheFillEnabled,
-                                mapSnapshotMaxEntries,
-                                delegateClass);
+								mapSnapshotMaxEntries,
+								delegateClass,
+								listStateCowEnabled,
+								listStateRywEnabled,
+								clearedKeysCapacity,
+								priorityQueueOptEnabled);
 
                 StateBackend delegate;
                 if (delegateClass == null || delegateClass.isBlank()) {
@@ -223,27 +269,31 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         delegate = instantiateBackend(delegateClass, classLoader);
                 }
 
-                return new CacheKitStateBackend(
-                                delegate,
-                                maxEntries,
-                                policyType,
-                                lruOverflow,
-                                bypassEnabled,
-                                hitRateThreshold,
-                                hitRateWindow,
-                                mapPresenceMaxEntries,
-                                mapPresencePolicy,
-                                mapPresenceLruOverflow,
-                                mapPresenceImpl,
-                                mapCacheMaxEntries,
-                                mapCachePolicy,
-                                mapCacheLruOverflow,
-                                mapBypassEnabled,
-                                mapHitRateThreshold,
-                                mapHitRateWindow,
-                                mapIterationCacheFillEnabled,
-                                mapSnapshotMaxEntries);
-        }
+				return new CacheKitStateBackend(
+								delegate,
+								maxEntries,
+								policyType,
+								lruOverflow,
+								bypassEnabled,
+								hitRateThreshold,
+								hitRateWindow,
+								mapPresenceMaxEntries,
+								mapPresencePolicy,
+								mapPresenceLruOverflow,
+								mapPresenceImpl,
+								mapCacheMaxEntries,
+								mapCachePolicy,
+								mapCacheLruOverflow,
+								mapBypassEnabled,
+								mapHitRateThreshold,
+								mapHitRateWindow,
+								mapIterationCacheFillEnabled,
+								mapSnapshotMaxEntries,
+								listStateCowEnabled,
+								listStateRywEnabled,
+								clearedKeysCapacity,
+								priorityQueueOptEnabled);
+	}
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {
                 try {

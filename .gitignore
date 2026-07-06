@@ -66,3 +66,5 @@ tools/japicmp-output
 /docs/.hugo_build.lock
 final_review_gate.py
 /.idea
+/fullOpt.md
+/migration.md
