@@ -498,17 +498,62 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
     }
 
+    /**
+     * When true (default), ValueState prefetch is submitted to the shared off-mailbox worker
+     * thread instead of being executed synchronously in the mailbox critical path.
+     */
+    private static final boolean BP_PREFETCH_ASYNC =
+            loadBooleanFlag("state.backend.cachekit.bp-prefetch.async.enabled", true);
+
+    /**
+     * MapState snapshot prefetch is disabled by default: it flushes dirty entries and pays a full
+     * RocksDB prefix-iterator per key on the mailbox thread, while only single-entry maps are ever
+     * cached — a net loss on multi-entry (join) MapState.
+     */
+    private static final boolean BP_PREFETCH_MAP_SNAPSHOTS =
+            loadBooleanFlag("state.backend.cachekit.bp-prefetch.map-snapshots.enabled", false);
+
+    private static boolean loadBooleanFlag(String key, boolean defaultValue) {
+        try {
+            return org.apache.flink.configuration.GlobalConfiguration.loadConfiguration()
+                    .get(
+                            org.apache.flink.configuration.ConfigOptions.key(key)
+                                    .booleanType()
+                                    .defaultValue(defaultValue));
+        } catch (Throwable t) {
+            return defaultValue;
+        }
+    }
+
     @SuppressWarnings({ "unchecked", "rawtypes" })
     public void prefetch(Collection<? extends K> keys) {
         if (keys == null || keys.isEmpty() || wrappersByDelegateIdentity.isEmpty()) {
             return;
         }
+        if (BP_PREFETCH_ASYNC) {
+            // Off-mailbox path: only (key, namespace) serialization happens here; RocksDB reads
+            // and value deserialization run on the shared prefetch worker. No key-context
+            // save/restore needed — submission never touches the backend key context.
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                if (wrapper instanceof CachedInternalValueState) {
+                    Runnable task =
+                            ((CachedInternalValueState) wrapper).buildAsyncPrefetchTask(keys);
+                    if (task != null) {
+                        PrefetchExecutor.trySubmit(task);
+                    }
+                }
+            }
+            if (!BP_PREFETCH_MAP_SNAPSHOTS) {
+                return;
+            }
+        }
         K previousKey = getCurrentKey();
         try {
             for (Object wrapper : wrappersByDelegateIdentity.values()) {
-                if (wrapper instanceof CachedInternalValueState) {
+                if (!BP_PREFETCH_ASYNC && wrapper instanceof CachedInternalValueState) {
                     ((CachedInternalValueState) wrapper).prefetch(keys);
-                } else if (wrapper instanceof CachedInternalMapState) {
+                } else if (BP_PREFETCH_MAP_SNAPSHOTS
+                        && wrapper instanceof CachedInternalMapState) {
                     ((CachedInternalMapState) wrapper).prefetchSnapshots(keys);
                 }
             }
