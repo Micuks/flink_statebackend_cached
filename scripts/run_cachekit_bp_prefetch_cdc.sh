@@ -75,6 +75,15 @@ state.backend.cachekit.mailbox-batch.timeout-us: $MAILBOX_TIMEOUT_US
 state.backend.cachekit.mailbox-batch.commutative-key-sort: $ON_KEY_SORT
 state.backend.cachekit.local-preagg.enabled: $ON_LOCAL_PREAGG
 CFG
+    if [ "${NO_MAP_CACHE:-0}" = "1" ]; then
+        cat >> "$OUT/flink-conf-cachekit-bp.yaml" <<CFG
+
+# MapState caching fully disabled (matches the final perf configuration).
+state.backend.cachekit.map.cache.max-entries: 0
+state.backend.cachekit.map.snapshot.cache.max-entries: 0
+state.backend.cachekit.map.presence.cache.max-entries: 0
+CFG
+    fi
 }
 
 prepare_compose() {
