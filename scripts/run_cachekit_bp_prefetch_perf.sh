@@ -26,15 +26,17 @@ CONTAINER=${CONTAINER:-${COMPOSE_PROJECT_NAME}-jobmanager-1}
 EXPECTED_TMS=${EXPECTED_TMS:-2}
 EXPERIMENT=${EXPERIMENT:-bp-prefetch}
 case "$EXPERIMENT" in
-    bp-prefetch|prefetch-only) ;;
+    bp-prefetch|prefetch-only|attribution) ;;
     *)
-        echo "Unsupported EXPERIMENT=$EXPERIMENT; expected bp-prefetch or prefetch-only" >&2
+        echo "Unsupported EXPERIMENT=$EXPERIMENT; expected bp-prefetch, prefetch-only or attribution" >&2
         exit 2
         ;;
 esac
 DEFAULT_OUT_ROOT="$BENCH_ROOT/results-cachekit-bp-prefetch"
 if [ "$EXPERIMENT" = "prefetch-only" ]; then
     DEFAULT_OUT_ROOT="$BENCH_ROOT/results-cachekit-prefetch-only"
+elif [ "$EXPERIMENT" = "attribution" ]; then
+    DEFAULT_OUT_ROOT="$BENCH_ROOT/results-cachekit-attribution"
 fi
 OUT=${OUT:-$DEFAULT_OUT_ROOT/$(date +%Y%m%d_%H%M%S)}
 SKIP_DOCKER_BUILD=${SKIP_DOCKER_BUILD:-1}
@@ -87,7 +89,33 @@ state.backend.cachekit.mailbox-batch.enabled: false
 state.backend.cachekit.local-preagg.enabled: false
 CFG
 
-    if [ "$EXPERIMENT" = "prefetch-only" ]; then
+    if [ "$EXPERIMENT" = "attribution" ]; then
+        # Three-leg regression attribution: rocksdb / cache-only / all-on.
+        cp "$BENCH_ROOT/nexmark_bench/profiles/flink-conf-cached.yaml" "$OUT/flink-conf-cachekit-cache-only.yaml"
+        cat >> "$OUT/flink-conf-cachekit-cache-only.yaml" <<CFG
+
+# CacheKit cache-only leg for regression attribution.
+state.backend.cachekit.bp-prefetch.enabled: false
+state.backend.cachekit.bp-prefetch.async-chunks.enabled: false
+state.backend.cachekit.mailbox-batch.enabled: false
+state.backend.cachekit.local-preagg.enabled: false
+CFG
+
+        cp "$BENCH_ROOT/nexmark_bench/profiles/flink-conf-cached.yaml" "$OUT/flink-conf-cachekit-bp.yaml"
+        cat >> "$OUT/flink-conf-cachekit-bp.yaml" <<CFG
+
+# CacheKit all-on leg for regression attribution.
+state.backend.cachekit.bp-prefetch.enabled: true
+state.backend.cachekit.bp-prefetch.distance: $ON_DISTANCE
+state.backend.cachekit.bp-prefetch.backpressure-gated: $ON_BACKPRESSURE_GATED
+state.backend.cachekit.bp-prefetch.commutative-key-sort: $ON_KEY_SORT
+state.backend.cachekit.mailbox-batch.enabled: true
+state.backend.cachekit.mailbox-batch.size: $MAILBOX_BATCH_SIZE
+state.backend.cachekit.mailbox-batch.timeout-us: $MAILBOX_TIMEOUT_US
+state.backend.cachekit.mailbox-batch.commutative-key-sort: $ON_KEY_SORT
+state.backend.cachekit.local-preagg.enabled: $ON_LOCAL_PREAGG
+CFG
+    elif [ "$EXPERIMENT" = "prefetch-only" ]; then
         cp "$BENCH_ROOT/nexmark_bench/profiles/flink-conf-cached.yaml" "$OUT/flink-conf-cachekit-cache-only.yaml"
         cat >> "$OUT/flink-conf-cachekit-cache-only.yaml" <<CFG
 
@@ -134,7 +162,12 @@ CFG
     fi
 
     grep -q 'state.backend: rocksdb' "$OUT/flink-conf-rocksdb-baseline.yaml"
-    if [ "$EXPERIMENT" = "prefetch-only" ]; then
+    if [ "$EXPERIMENT" = "attribution" ]; then
+        grep -q 'state.backend: org.apache.flink.contrib.streaming.state.cachekit.CacheKitStateBackendFactory' \
+            "$OUT/flink-conf-cachekit-cache-only.yaml"
+        grep -q 'state.backend: org.apache.flink.contrib.streaming.state.cachekit.CacheKitStateBackendFactory' \
+            "$OUT/flink-conf-cachekit-bp.yaml"
+    elif [ "$EXPERIMENT" = "prefetch-only" ]; then
         grep -q 'state.backend: org.apache.flink.contrib.streaming.state.cachekit.CacheKitStateBackendFactory' \
             "$OUT/flink-conf-cachekit-cache-only.yaml"
         grep -q 'state.backend: org.apache.flink.contrib.streaming.state.cachekit.CacheKitStateBackendFactory' \
@@ -321,7 +354,59 @@ def join_walls(meta):
 lines = []
 payload = {"metric": "throughput_per_core_kps", "experiment": experiment, "events": {}}
 
-if experiment == "prefetch-only":
+if experiment == "attribution":
+    payload["baseline"] = "rocksdb"
+    for events in events_list:
+        lines.append(f"## events={events}\n")
+        lines.append("| query | rocksdb k/s/core | cache-only k/s/core | all-on k/s/core | cache-only vs rocksdb | all-on vs rocksdb | all-on vs cache-only | cores r/c/a | wall r/c/a |\n")
+        lines.append("|---|---:|---:|---:|---:|---:|---:|---|---|\n")
+        cache_abs_list = []
+        allon_abs_list = []
+        allon_vs_cache_list = []
+        payload["events"][events] = {}
+        for q in queries:
+            rocks_vals, rocks_meta = collect(events, "rocksdb", q)
+            cache_vals, cache_meta = collect(events, "cache-only", q)
+            allon_vals, allon_meta = collect(events, "all-on", q)
+            rocks = mean(rocks_vals)
+            cache = mean(cache_vals)
+            allon = mean(allon_vals)
+            cache_abs = speedup(cache, rocks)
+            allon_abs = speedup(allon, rocks)
+            allon_vs_cache = speedup(allon, cache)
+            if cache_abs is not None:
+                cache_abs_list.append(cache_abs)
+            if allon_abs is not None:
+                allon_abs_list.append(allon_abs)
+            if allon_vs_cache is not None:
+                allon_vs_cache_list.append(allon_vs_cache)
+            payload["events"][events][q] = {
+                "rocksdb_throughput_per_core_kps": rocks,
+                "cache_only_throughput_per_core_kps": cache,
+                "all_on_throughput_per_core_kps": allon,
+                "cache_only_vs_rocksdb_speedup_pct": cache_abs,
+                "all_on_vs_rocksdb_speedup_pct": allon_abs,
+                "all_on_vs_cache_only_speedup_pct": allon_vs_cache,
+                "rocksdb_rounds": rocks_meta,
+                "cache_only_rounds": cache_meta,
+                "all_on_rounds": allon_meta,
+            }
+            cores = f"{join_cores(rocks_meta)}/{join_cores(cache_meta)}/{join_cores(allon_meta)}"
+            walls = f"{join_walls(rocks_meta)}/{join_walls(cache_meta)}/{join_walls(allon_meta)}"
+            lines.append(
+                f"| {q} | {f(rocks)} | {f(cache)} | {f(allon)} | {f(cache_abs)}% | "
+                f"{f(allon_abs)}% | {f(allon_vs_cache)}% | {cores} | {walls} |\n"
+            )
+        payload["events"][events]["_mean_cache_only_vs_rocksdb_speedup_pct"] = mean(cache_abs_list)
+        payload["events"][events]["_mean_all_on_vs_rocksdb_speedup_pct"] = mean(allon_abs_list)
+        payload["events"][events]["_mean_all_on_vs_cache_only_speedup_pct"] = mean(allon_vs_cache_list)
+        lines.append(f"\nmean cache-only vs rocksdb: {f(mean(cache_abs_list))}%\n")
+        lines.append(f"mean all-on vs rocksdb: {f(mean(allon_abs_list))}%\n")
+        lines.append(f"mean all-on vs cache-only: {f(mean(allon_vs_cache_list))}%\n\n")
+
+    (out / "COMPARE-cachekit-attribution.md").write_text("".join(lines))
+    (out / "COMPARE-cachekit-attribution.json").write_text(json.dumps(payload, indent=2))
+elif experiment == "prefetch-only":
     payload["isolated_baseline"] = "cache-only"
     payload["reference_baseline"] = "rocksdb"
     for events in events_list:
@@ -449,7 +534,11 @@ for events in "${events_array[@]}"; do
         for query in "${query_array[@]}"; do
             query=$(echo "$query" | xargs)
             [ -n "$query" ] || continue
-            if [ "$EXPERIMENT" = "prefetch-only" ]; then
+            if [ "$EXPERIMENT" = "attribution" ]; then
+                run_one "$events" rocksdb rocksdb "$OUT/flink-conf-rocksdb-baseline.yaml" "$query" "$round"
+                run_one "$events" cache-only cached "$OUT/flink-conf-cachekit-cache-only.yaml" "$query" "$round"
+                run_one "$events" all-on cached "$OUT/flink-conf-cachekit-bp.yaml" "$query" "$round"
+            elif [ "$EXPERIMENT" = "prefetch-only" ]; then
                 run_one "$events" rocksdb rocksdb "$OUT/flink-conf-rocksdb-baseline.yaml" "$query" "$round"
                 run_one "$events" cache-only cached "$OUT/flink-conf-cachekit-cache-only.yaml" "$query" "$round"
                 run_one "$events" prefetch-only cached "$OUT/flink-conf-cachekit-prefetch-only.yaml" "$query" "$round"
