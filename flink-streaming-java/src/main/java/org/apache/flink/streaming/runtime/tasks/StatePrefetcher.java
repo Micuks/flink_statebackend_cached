@@ -64,6 +64,10 @@ public final class StatePrefetcher {
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Cache of optional {@code hasPrefetchableState()} {@link Method} per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            HAS_PREFETCHABLE_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
     /** Sentinel field used to mark "no stateKeySelector1 available" in the field cache. */
     private static final Field NO_FIELD;
 
@@ -117,6 +121,13 @@ public final class StatePrefetcher {
                 return;
             }
 
+            // Skip the whole per-batch key extraction when the backend has nothing to warm
+            // (e.g. window operators whose namespaced states are never wrapped). Wrappers
+            // register lazily, so this is re-checked on every batch, not cached.
+            if (!hasPrefetchableState(ksb)) {
+                return;
+            }
+
             KeySelector selector = extractStateKeySelector1(op);
             if (selector == null) {
                 return;
@@ -155,6 +166,36 @@ public final class StatePrefetcher {
         }
         prefetch(headOperator, buf, n);
         return java.util.concurrent.CompletableFuture.completedFuture(null);
+    }
+
+    /** Best-effort {@code hasPrefetchableState()} probe; defaults to true when absent. */
+    private static boolean hasPrefetchableState(KeyedStateBackend<?> backend) {
+        try {
+            Method method =
+                    HAS_PREFETCHABLE_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(), StatePrefetcher::lookupHasPrefetchableMethod);
+            if (method == NO_METHOD) {
+                return true; // backend without the probe: keep the old behavior
+            }
+            Object result = method.invoke(backend);
+            return !(result instanceof Boolean) || (Boolean) result;
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    private static Method lookupHasPrefetchableMethod(Class<?> backendClass) {
+        Class<?> c = backendClass;
+        while (c != null && c != Object.class) {
+            try {
+                Method method = c.getDeclaredMethod("hasPrefetchableState");
+                method.setAccessible(true);
+                return method;
+            } catch (NoSuchMethodException ignored) {
+                c = c.getSuperclass();
+            }
+        }
+        return NO_METHOD;
     }
 
     private static Method findPrefetchMethod(KeyedStateBackend<?> backend) {
