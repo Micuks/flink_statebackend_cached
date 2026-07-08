@@ -19,6 +19,7 @@ import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.LruCachePolicy;
+import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 
@@ -101,8 +102,29 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         lookupKey.namespace = namespace;
     }
 
+    /**
+     * D1 correctness gate (migrated from the OmniStateStore object-resident ValueState).
+     *
+     * <p>The object-resident value cache holds live, deserialized accumulators by reference and
+     * writes them back lazily. This is sound and beneficial ONLY for plain (non-windowed) keyed
+     * ValueState — unbounded group aggregation / dedup — whose namespace is {@link VoidNamespace}.
+     * Windowed ValueState (namespace = a window) has purge / merge semantics this cache does not
+     * model: caching it lets stale per-window accumulators survive a window purge and corrupts the
+     * emitted result (empirically, nexmark q5 / q7 diverge). Such accesses take the delegate path
+     * directly, which is byte-for-byte identical to plain RocksDB. The gate is per-access on the
+     * current namespace, so a query that mixes windowed and VoidNamespace value state still caches
+     * the VoidNamespace portion and bypasses only the windowed one.
+     */
+    private boolean namespaceCacheable() {
+        return currentNamespace == VoidNamespace.INSTANCE;
+    }
+
     @Override
     public V value() throws IOException {
+        // [D1] windowed ValueState bypasses the object cache — delegate path == plain RocksDB.
+        if (!namespaceCacheable()) {
+            return delegate.value();
+        }
         K currentKey = currentKeyProvider.getCurrentKey();
 
         // 1. Check Sticky Cache (Always Check L0 - Fast Path)
@@ -179,6 +201,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             clear();
             return;
         }
+        // [D1] windowed ValueState bypasses the object cache — delegate path == plain RocksDB.
+        if (!namespaceCacheable()) {
+            delegate.update(value);
+            return;
+        }
         K currentKey = currentKeyProvider.getCurrentKey();
 
         // Optimistic Sticky Update (Check L0 first)
@@ -224,6 +251,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     @Override
     public void clear() {
+        // [D1] windowed ValueState bypasses the object cache — delegate path == plain RocksDB.
+        if (!namespaceCacheable()) {
+            delegate.clear();
+            return;
+        }
         K currentKey = currentKeyProvider.getCurrentKey();
         KeyNamespaceKey<K, N> cacheKey;
         // Reuse sticky key if possible

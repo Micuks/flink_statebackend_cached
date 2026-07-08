@@ -1169,6 +1169,18 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             return entry;
         }
 
+        @Override
+        public void remove() {
+            // Delegate the actual removal to the underlying iterator (e.g. RocksDBMapIterator)
+            delegateIterator.remove();
+            // After a mutation the cached snapshot is potentially stale; invalidate it.
+            if (mapSnapshotCacheEnabled) {
+                invalidateSnapshot(currentKey);
+            }
+            // Don't backfill after a mutation — the tracked count/firstUserKey are stale.
+            backfilled = true;
+        }
+
         private void backfillSnapshotCache() {
             if (currentKey == null || currentNamespace == null) {
                 return;
