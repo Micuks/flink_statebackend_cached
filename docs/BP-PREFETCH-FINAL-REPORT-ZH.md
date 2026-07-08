@@ -59,11 +59,10 @@
 ## 五、已知限制与后续方向
 
 1. **q5 -8.4%**:滑动窗口 query 的遗留真回退(深夜 3 轮定论)。已排除:mailbox-batch、窗口 state 缓存、预取 key 提取空转(短路后仍在)。剩余嫌疑:prefetchMode 下 StreamRecordBatchOutput 的 lookahead 缓冲/逐条 replay 路径对该算子形态的固有开销;可尝试对无可折叠、无可预取的算子完全绕过 batch 包装。
-2. **q3 -7.3%**:三套数据在 ±10% 内摆动、wall 恒定,cores 采样噪声带,可用更多轮次收敛。
-3. **q11/窗口缓存**:门控放弃了窗口 state 缓存的 +13%;若要拿回需修 write-back wrapper 对 namespaced state 的语义(费力,优先级低)。
-4. **q12**:需要移植 falcon 侧 guard-gap first-window proctime oracle 才能闭环 CDC。
-5. **100M 档**:本轮仅 50M×3;100M 套件约 10-12h 机时,可按需补。
-6. 预取的进一步空间:submitPrefetch 目前按提交时刻单一 namespace 序列化,已由 VoidNamespace 门控自然约束;若扩展到 MapState 需先解决其缓存正确性。
+2. **q11/窗口缓存**:门控放弃了窗口 state 缓存的 +13%;若要拿回需修 write-back wrapper 对 namespaced state 的语义(费力,优先级低)。
+3. **q12**:需要移植 falcon 侧 guard-gap first-window proctime oracle 才能闭环 CDC。
+4. **100M 档**:本轮仅 50M×3;100M 套件约 10-12h 机时,可按需补。
+5. 预取的进一步空间:submitPrefetch 目前按提交时刻单一 namespace 序列化,已由 VoidNamespace 门控自然约束;若扩展到 MapState 需先解决其缓存正确性。
 
 ## 六、复现索引
 
