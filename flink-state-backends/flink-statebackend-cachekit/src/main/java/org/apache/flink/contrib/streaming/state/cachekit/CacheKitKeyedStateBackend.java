@@ -424,7 +424,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             String stateName, TypeSerializer<T> byteOrderedElementSerializer) {
         KeyGroupedInternalPriorityQueue<T> delegateQueue =
                 delegate.create(stateName, byteOrderedElementSerializer);
-        return wrapPriorityQueue(delegateQueue);
+        return wrapPriorityQueue(delegateQueue, byteOrderedElementSerializer);
     }
 
     @Override
@@ -432,7 +432,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             String stateName, TypeSerializer<T> byteOrderedElementSerializer, boolean allowFutureMetadataUpdates) {
         KeyGroupedInternalPriorityQueue<T> delegateQueue =
                 delegate.create(stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
-        return wrapPriorityQueue(delegateQueue);
+        return wrapPriorityQueue(delegateQueue, byteOrderedElementSerializer);
     }
 
     /**
@@ -450,7 +450,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
      */
     private <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
             KeyGroupedInternalPriorityQueue<T> wrapPriorityQueue(
-                    KeyGroupedInternalPriorityQueue<T> delegateQueue) {
+                    KeyGroupedInternalPriorityQueue<T> delegateQueue,
+                    TypeSerializer<T> elementSerializer) {
         if (!priorityQueueOptEnabled) {
             return delegateQueue;
         }
@@ -462,8 +463,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     delegateQueue.getClass().getName());
             return delegateQueue;
         }
-        return new CachedInternalPriorityQueueSet<>(
-                delegateQueue, pqFlushExecutor, priorityQueueOptEnabled);
+        // PQ-3.3 fix: register the PQ wrapper so snapshot/close/dispose can flush it
+        CachedInternalPriorityQueueSet<T> pqWrapper =
+                new CachedInternalPriorityQueueSet<>(
+                        delegateQueue, elementSerializer, pqFlushExecutor, priorityQueueOptEnabled);
+        wrappersByDelegateIdentity.put(pqWrapper, pqWrapper);
+        return pqWrapper;
     }
 
     @Override

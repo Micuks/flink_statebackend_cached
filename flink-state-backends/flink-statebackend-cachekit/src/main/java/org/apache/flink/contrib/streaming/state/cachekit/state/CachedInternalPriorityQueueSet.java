@@ -17,7 +17,6 @@ package org.apache.flink.contrib.streaming.state.cachekit.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
-import org.apache.flink.runtime.state.internal.InternalPriorityQueue;
 import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.KeyGroupedInternalPriorityQueue;
 import org.apache.flink.runtime.state.PriorityComparable;
@@ -37,6 +36,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Cachekit wrapper over delegate {@link KeyGroupedInternalPriorityQueue} that implements async pending
@@ -87,6 +87,9 @@ public class CachedInternalPriorityQueueSet<
     /** Whether the optimization is enabled. */
     private final boolean enabled;
 
+    /** Element serializer for checkpoint snapshots. */
+    private final TypeSerializer<T> elementSerializer;
+
     // ---- Single ordered pending buffer (PQ-2.2 fix: merged from two separate buffers) ----
 
     /** Pending mutations: each record is an ADD or REMOVE in insertion order. */
@@ -96,27 +99,40 @@ public class CachedInternalPriorityQueueSet<
     private CompletableFuture<?> tail = CompletableFuture.completedFuture(null);
 
     /** Captured flush exception propagated to the next await (PQ-2.7 fix). */
-    private volatile Throwable flushError;
+    private final AtomicReference<Throwable> flushError = new AtomicReference<>(null);
 
     /** Shared flush executor (injected from CacheKitKeyedStateBackend). */
     private final ExecutorService flushExecutor;
 
     /**
      * Marker type for a pending mutation: either an ADD of an element or a REMOVE of an element.
-     * Using a sealed record keeps the two operation types explicit and easy to pattern-match.
+     * (PQ-3.1 fix: replaced Java 16 record with a plain class for JDK 11 compatibility.)
      */
     private enum MutationType {
         ADD,
         REMOVE
     }
 
-    private record Mutation<T>(MutationType type, T element) {}
+    private static final class Mutation<T> {
+        private final MutationType type;
+        private final T element;
+
+        Mutation(MutationType type, T element) {
+            this.type = type;
+            this.element = element;
+        }
+
+        MutationType type() { return type; }
+        T element() { return element; }
+    }
 
     public CachedInternalPriorityQueueSet(
             KeyGroupedInternalPriorityQueue<T> delegate,
+            TypeSerializer<T> elementSerializer,
             ExecutorService flushExecutor,
             boolean enabled) {
         this.delegate = delegate;
+        this.elementSerializer = elementSerializer;
         this.flushExecutor = flushExecutor;
         this.enabled = enabled;
 
@@ -289,9 +305,9 @@ public class CachedInternalPriorityQueueSet<
                         .whenComplete(
                                 (r, ex) -> {
                                     if (ex != null) {
-                                        // PQ-2.7 fix: capture exception instead of only logging
+                                        // PQ-2.7 / PQ-3.2 fix: capture exception instead of only logging
                                         LOG.error("[CACHEKIT PQ] Async flush failed", ex);
-                                        flushError.compareAndSet(null, ex);
+                                        flushError.set(ex);
                                     }
                                 });
     }
@@ -339,10 +355,9 @@ public class CachedInternalPriorityQueueSet<
             throw new FlinkRuntimeException("Failed to await PQ flush", e);
         }
 
-        // PQ-2.7 fix: propagate async flush error to the caller
-        if (flushError != null) {
-            Throwable ex = flushError;
-            flushError = null;
+        // PQ-2.7 / PQ-3.2 fix: propagate async flush error to the caller
+        Throwable ex = flushError.getAndSet(null);
+        if (ex != null) {
             throw new FlinkRuntimeException("Prior async flush failed", ex);
         }
     }
@@ -372,9 +387,8 @@ public class CachedInternalPriorityQueueSet<
     //  Passthrough to delegate (priority queue metadata)
     // ------------------------------------------------------------------------
 
-    @Override
     public TypeSerializer<T> getElementSerializer() {
-        return delegate.getElementSerializer();
+        return elementSerializer;
     }
 
     @Override

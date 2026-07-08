@@ -263,9 +263,12 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
         // Merge any pending data for this key into delegate before reading
         List<V> pendingForKey = pendingMap.remove(wrapped);
         if (pendingForKey != null && !pendingForKey.isEmpty()) {
-            boolean wasCleared;
-            synchronized (clearedKeys) {
-                wasCleared = clearedKeys.remove(wrapped) != null;
+            // LS-3.1 fix: clearedKeys is only non-null when rywEnabled=true
+            boolean wasCleared = false;
+            if (rywEnabled) {
+                synchronized (clearedKeys) {
+                    wasCleared = clearedKeys.remove(wrapped) != null;
+                }
             }
             // LS-1/LS-4 fix: set keyContext before delegate call
             K originalKey = currentKeyProvider.getCurrentKey();
@@ -341,15 +344,14 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
             // LS-3 fix: synchronous flush before marking cleared
             // This ensures the delegate state is also cleared before checkpoint.
             flushPendingMapSync();
-        }
 
-        // LS-3 fix: mark as cleared AND delete from delegate.
-        // The delete is done immediately (synchronously) so:
-        //   - checkpoint does not contain stale data
-        //   - clearedKeys LRU eviction does not bring back old data
-        //   - RYW-only mode works correctly (clear actually deletes)
-        if (rywEnabled) {
-            clearedKeys.put(wrapped, Boolean.TRUE);
+            // LS-3.2 fix: delegate.clear() must be called whenever COW is enabled,
+            // not just when RYW is enabled. When rywEnabled=true we also track the cleared
+            // key for the RYW fast path.
+            if (rywEnabled) {
+                clearedKeys.put(wrapped, Boolean.TRUE);
+            }
+
             // LS-1/LS-4 fix: set keyContext before delegate.clear()
             K originalKey = currentKeyProvider.getCurrentKey();
             N originalNamespace = currentNamespace;
@@ -450,9 +452,12 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
         List<V> snapshot = pendingMap.remove(wrapped);
         if (snapshot == null || snapshot.isEmpty()) return;
 
-        boolean wasCleared;
-        synchronized (clearedKeys) {
-            wasCleared = clearedKeys.remove(wrapped) != null;
+        // LS-3.1 fix: clearedKeys is only non-null when rywEnabled=true
+        boolean wasCleared = false;
+        if (rywEnabled) {
+            synchronized (clearedKeys) {
+                wasCleared = clearedKeys.remove(wrapped) != null;
+            }
         }
 
         K originalKey = currentKeyProvider.getCurrentKey();
@@ -490,9 +495,12 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
             if (values == null || values.isEmpty()) continue;
 
             NamespaceKeyWrapper k = entry.getKey();
-            boolean wasCleared;
-            synchronized (clearedKeys) {
-                wasCleared = clearedKeys.remove(k) != null;
+            // LS-3.1 fix: clearedKeys is only non-null when rywEnabled=true
+            boolean wasCleared = false;
+            if (rywEnabled) {
+                synchronized (clearedKeys) {
+                    wasCleared = clearedKeys.remove(k) != null;
+                }
             }
 
             try {
@@ -532,9 +540,12 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
             if (values == null || values.isEmpty()) continue;
 
             NamespaceKeyWrapper k = entry.getKey();
-            boolean wasCleared;
-            synchronized (clearedKeys) {
-                wasCleared = clearedKeys.remove(k) != null;
+            // LS-3.1 fix: clearedKeys is only non-null when rywEnabled=true
+            boolean wasCleared = false;
+            if (rywEnabled) {
+                synchronized (clearedKeys) {
+                    wasCleared = clearedKeys.remove(k) != null;
+                }
             }
 
             try {
