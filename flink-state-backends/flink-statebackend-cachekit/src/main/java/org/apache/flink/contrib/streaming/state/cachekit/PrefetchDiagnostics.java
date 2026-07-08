@@ -119,7 +119,6 @@ public final class PrefetchDiagnostics {
     }
 
     private static void dumpLoop() {
-        long lastSubmitted = 0;
         while (true) {
             try {
                 Thread.sleep(10_000L);
@@ -127,10 +126,6 @@ public final class PrefetchDiagnostics {
                 return;
             }
             long sub = SUBMITTED.get();
-            if (sub == lastSubmitted) {
-                continue; // nothing happened this window; stay quiet
-            }
-            lastSubmitted = sub;
             long staged = STAGED.get();
             long promoted = PROMOTED.get();
             long stale = STALE_REJECT.get();

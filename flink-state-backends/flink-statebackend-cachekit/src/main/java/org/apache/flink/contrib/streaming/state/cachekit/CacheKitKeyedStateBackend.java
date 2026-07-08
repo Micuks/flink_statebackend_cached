@@ -142,6 +142,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapHitRateWindow = mapHitRateWindow;
         this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
         this.mapSnapshotCacheMaxEntries = mapSnapshotCacheMaxEntries;
+        // Force PrefetchDiagnostics class load (and its periodic dumper) even for backends that
+        // never wrap a ValueState — so "prefetch surface = 0" queries still report submitted=0.
+        PrefetchDiagnostics.enabled();
     }
 
     @Override
