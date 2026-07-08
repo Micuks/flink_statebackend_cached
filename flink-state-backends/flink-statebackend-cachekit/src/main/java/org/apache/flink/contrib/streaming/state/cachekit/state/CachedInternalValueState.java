@@ -209,8 +209,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 CachedValue<V> newValue = CachedValue.of(staged.value, false);
                 l1Cache.put(storageKey, newValue);
                 updateSticky(storageKey, newValue);
+                org.apache.flink.contrib.streaming.state.cachekit.PrefetchDiagnostics.promoted();
                 recordAccess(true); // Hit
                 return newValue.valueOrNull();
+            } else if (staged != null) {
+                org.apache.flink.contrib.streaming.state.cachekit.PrefetchDiagnostics.staleReject();
             }
         }
 
@@ -414,6 +417,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (serialized.isEmpty()) {
             return null;
         }
+        org.apache.flink.contrib.streaming.state.cachekit.PrefetchDiagnostics.submitted(
+                serialized.size());
         final long gen = writeGen;
         return () -> fetchIntoStaging(serialized, gen);
     }
@@ -431,10 +436,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 workerValueSerializer = delegate.getValueSerializer().duplicate();
             }
             if (staging.size() > ASYNC_STAGING_MAX_ENTRIES) {
+                org.apache.flink.contrib.streaming.state.cachekit.PrefetchDiagnostics
+                        .overflowCleared(staging.size());
                 staging.clear(); // all entries are droppable cache; also purges stale generations
             }
             for (byte[] skn : serializedKeyAndNamespaces) {
                 if (gen != writeGen) {
+                    org.apache.flink.contrib.streaming.state.cachekit.PrefetchDiagnostics
+                            .genAbort();
                     return; // a write already invalidated this batch; stop wasting reads
                 }
                 byte[] valueBytes =
@@ -446,6 +455,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                         workerValueSerializer);
                 if (valueBytes == null) {
                     // Absent key: let the authoritative read apply default-value semantics.
+                    org.apache.flink.contrib.streaming.state.cachekit.PrefetchDiagnostics.absent(1);
                     continue;
                 }
                 org.apache.flink.core.memory.DataInputDeserializer in =
@@ -461,6 +471,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 staging.put(
                         new KeyNamespaceKey<>(key, namespace),
                         new StagedValue<>(value, gen));
+                org.apache.flink.contrib.streaming.state.cachekit.PrefetchDiagnostics.staged(1);
             }
         } catch (Throwable ignored) {
             // Best-effort cache warmup; the authoritative read path is untouched.
