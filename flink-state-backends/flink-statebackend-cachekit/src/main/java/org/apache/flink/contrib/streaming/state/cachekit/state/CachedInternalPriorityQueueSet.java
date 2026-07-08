@@ -17,7 +17,7 @@ package org.apache.flink.contrib.streaming.state.cachekit.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
-import org.apache.flink.runtime.state.InternalPriorityQueue;
+import org.apache.flink.runtime.state.internal.InternalPriorityQueue;
 import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.KeyGroupedInternalPriorityQueue;
 import org.apache.flink.runtime.state.PriorityComparable;
@@ -32,28 +32,41 @@ import javax.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Cachekit wrapper over delegate {@link KeyGroupedInternalPriorityQueue} that implements async pending
  * buffer optimization for PriorityQueue (used for timers).
  *
- * <p><b>Design:</b>
+ * <p><b>Design &amp; Fixes Applied:</b>
  *
  * <ul>
- *   <li>When the optimization is enabled, {@code add()} / {@code remove()} / {@code poll()} do NOT
- *       immediately write to the delegate. Instead, they buffer the operation intent in
- *       pending-adds / pending-removes lists.
- *   <li>When the pending buffer reaches {@code MAX_PENDING_SIZE} (1024), the buffer is
- *       asynchronously flushed to the delegate.
- *   <li>On {@code poll()} / {@code peek()}, we wait for in-flight flushes so the delegate view is
- *       up-to-date.
- *   <li>The wrapper only wraps non-RocksDB delegates (detected by class name check in {@code
- *       CacheKitKeyedStateBackend}). For RocksDB delegates, the wrapper is not created.
+ *   <li><b>Single ordered buffer</b> (PQ-2.2 fix): All add/remove operations are recorded in a
+ *       single {@code List<Mutation<T>>} buffer, preserving insertion order. Flushing executes
+ *       operations in order, preventing a remove-then-add from being reordered as add-then-remove.
+ *   <li><b>Proper Future chaining</b> (PQ-2.1 fix): {@code CompletableFuture.runAsync()} return
+ *       value is chained via a tail-reference, so {@code awaitPendingFlush()} actually waits for
+ *       background flush to complete (instead of the previous bug where it always waited on a
+ *       dummy completed future).
+ *   <li><b>Complete visibility barrier</b> (PQ-2.4 fix): All observable methods ({@code peek()},
+ *       {@code poll()}, {@code isEmpty()}, {@code size()}, {@code iterator()}, {@code
+ *       getSubsetForKeyGroup()}) call {@code flushAndAwait()} before touching the delegate,
+ *       ensuring pending operations are visible.
+ *   <li><b>No double-delete on poll</b> (PQ-2.3 fix): {@code poll()} removes from the delegate
+ *       and returns the result directly; the element is NOT re-added to the pending buffer.
+ *   <li><b>add() always returns true</b> (PQ-2.6 fix): Consistent with the {@code
+ *       PriorityQueue} contract that the element was successfully buffered.
+ *   <li><b>Async exception propagation</b> (PQ-2.7 fix): Flush exceptions are captured in {@code
+ *       flushError} and re-thrown on the next {@code awaitPendingFlush()} call, ensuring the Flink
+ *       Task fails rather than silently losing data.
+ *   <li><b>Only wraps Heap delegates</b>: Detected at construction time via {@code instanceof
+ *       HeapPriorityQueueSet} in {@link
+ *       org.apache.flink.contrib.streaming.state.cachekit.CacheKitKeyedStateBackend
+ *       #wrapPriorityQueue}.
  * </ul>
  *
  * @param <T> The element type, constrained by Flink's timer interfaces.
@@ -65,11 +78,8 @@ public class CachedInternalPriorityQueueSet<
     private static final Logger LOG =
             LoggerFactory.getLogger(CachedInternalPriorityQueueSet.class);
 
-    /** Threshold for triggering async flush of the add buffer. */
-    private static final int MAX_PENDING_ADD_SIZE = 1024;
-
-    /** Threshold for triggering async flush of the remove buffer. */
-    private static final int MAX_PENDING_REMOVE_SIZE = 1024;
+    /** Threshold for triggering async flush. */
+    private static final int MAX_PENDING_SIZE = 1024;
 
     /** The underlying delegate priority queue. */
     private final KeyGroupedInternalPriorityQueue<T> delegate;
@@ -77,20 +87,30 @@ public class CachedInternalPriorityQueueSet<
     /** Whether the optimization is enabled. */
     private final boolean enabled;
 
-    // ---- Pending buffers ----
-    /** Buffers pending add intents (elements to be added to delegate). */
-    @Nonnull private final List<T> pendingAdds = new ArrayList<>();
-    private final AtomicInteger pendingAddSize = new AtomicInteger(0);
+    // ---- Single ordered pending buffer (PQ-2.2 fix: merged from two separate buffers) ----
 
-    /** Buffers pending remove intents (elements to be removed from delegate). */
-    @Nonnull private final List<T> pendingRemoves = new ArrayList<>();
-    private final AtomicInteger pendingRemoveSize = new AtomicInteger(0);
+    /** Pending mutations: each record is an ADD or REMOVE in insertion order. */
+    @Nonnull private final List<Mutation<T>> pending = Collections.synchronizedList(new ArrayList<>());
 
-    /** In-flight flush future for sequencing. */
-    private final CompletableFuture<?>[] inFlightFlush = new CompletableFuture<?>[] {null};
+    /** Chain of async flush futures using tail-reference pattern (PQ-2.1 fix). */
+    private CompletableFuture<?> tail = CompletableFuture.completedFuture(null);
+
+    /** Captured flush exception propagated to the next await (PQ-2.7 fix). */
+    private volatile Throwable flushError;
 
     /** Shared flush executor (injected from CacheKitKeyedStateBackend). */
     private final ExecutorService flushExecutor;
+
+    /**
+     * Marker type for a pending mutation: either an ADD of an element or a REMOVE of an element.
+     * Using a sealed record keeps the two operation types explicit and easy to pattern-match.
+     */
+    private enum MutationType {
+        ADD,
+        REMOVE
+    }
+
+    private record Mutation<T>(MutationType type, T element) {}
 
     public CachedInternalPriorityQueueSet(
             KeyGroupedInternalPriorityQueue<T> delegate,
@@ -101,8 +121,9 @@ public class CachedInternalPriorityQueueSet<
         this.enabled = enabled;
 
         LOG.info(
-                "[CACHEKIT PQ] CachedInternalPriorityQueueSet created: enabled={}",
-                enabled);
+                "[CACHEKIT PQ] CachedInternalPriorityQueueSet created: enabled={}, delegate={}",
+                enabled,
+                delegate.getClass().getName());
     }
 
     // ------------------------------------------------------------------------
@@ -115,17 +136,14 @@ public class CachedInternalPriorityQueueSet<
             return delegate.add(toAdd);
         }
 
-        boolean result;
-        synchronized (pendingAdds) {
-            pendingAdds.add(toAdd);
-            pendingAddSize.incrementAndGet();
-            result = pendingAdds.size() < MAX_PENDING_ADD_SIZE;
+        synchronized (pending) {
+            pending.add(new Mutation<>(MutationType.ADD, toAdd));
+            if (pending.size() >= MAX_PENDING_SIZE) {
+                flushAsyncInternal();
+            }
         }
-
-        if (pendingAddSize.get() >= MAX_PENDING_ADD_SIZE) {
-            flushAddsAsync();
-        }
-        return result;
+        // PQ-2.6 fix: always return true, matching PriorityQueue contract
+        return true;
     }
 
     @Override
@@ -134,14 +152,12 @@ public class CachedInternalPriorityQueueSet<
             return delegate.remove(toRemove);
         }
 
-        synchronized (pendingRemoves) {
-            pendingRemoves.add(toRemove);
-            pendingRemoveSize.incrementAndGet();
+        synchronized (pending) {
+            pending.add(new Mutation<>(MutationType.REMOVE, toRemove));
+            if (pending.size() >= MAX_PENDING_SIZE) {
+                flushAsyncInternal();
+            }
         }
-        if (pendingRemoveSize.get() >= MAX_PENDING_REMOVE_SIZE) {
-            flushRemovesAsync();
-        }
-        // Return true: the element is at least in the pending buffer; delegate will confirm on flush.
         return true;
     }
 
@@ -152,20 +168,11 @@ public class CachedInternalPriorityQueueSet<
             return delegate.poll();
         }
 
-        // Ensure any in-flight flush is done so delegate has the latest view
-        awaitPendingFlush();
+        // PQ-2.4 fix: complete visibility barrier — flush all pending first
+        flushAndAwait();
 
-        T result = delegate.poll();
-        if (result != null) {
-            synchronized (pendingRemoves) {
-                pendingRemoves.add(result);
-                pendingRemoveSize.incrementAndGet();
-            }
-            if (pendingRemoveSize.get() >= MAX_PENDING_REMOVE_SIZE) {
-                flushRemovesAsync();
-            }
-        }
-        return result;
+        // PQ-2.3 fix: poll from delegate and return directly; do NOT re-add to pending buffer
+        return delegate.poll();
     }
 
     @Override
@@ -174,7 +181,8 @@ public class CachedInternalPriorityQueueSet<
         if (!enabled) {
             return delegate.peek();
         }
-        awaitPendingFlush();
+        // PQ-2.4 fix: complete visibility barrier
+        flushAndAwait();
         return delegate.peek();
     }
 
@@ -187,8 +195,13 @@ public class CachedInternalPriorityQueueSet<
             delegate.addAll(elements);
             return;
         }
-        for (T element : elements) {
-            add(element);
+        synchronized (pending) {
+            for (T element : elements) {
+                pending.add(new Mutation<>(MutationType.ADD, element));
+            }
+            if (pending.size() >= MAX_PENDING_SIZE) {
+                flushAsyncInternal();
+            }
         }
     }
 
@@ -197,7 +210,8 @@ public class CachedInternalPriorityQueueSet<
         if (!enabled) {
             return delegate.isEmpty();
         }
-        awaitPendingFlush();
+        // PQ-2.4 fix: complete visibility barrier
+        flushAndAwait();
         return delegate.isEmpty();
     }
 
@@ -206,7 +220,8 @@ public class CachedInternalPriorityQueueSet<
         if (!enabled) {
             return delegate.size();
         }
-        awaitPendingFlush();
+        // PQ-2.4 fix: complete visibility barrier
+        flushAndAwait();
         return delegate.size();
     }
 
@@ -216,14 +231,18 @@ public class CachedInternalPriorityQueueSet<
         if (!enabled) {
             return delegate.iterator();
         }
-        awaitPendingFlush();
+        // PQ-2.4 fix: complete visibility barrier
+        flushAndAwait();
         return delegate.iterator();
     }
 
     @Nonnull
     @Override
     public Set<T> getSubsetForKeyGroup(int keyGroupId) {
-        // Delegate handles key-group partitioning
+        // PQ-2.4 fix: also flush before returning subset
+        if (enabled) {
+            flushAndAwait();
+        }
         return delegate.getSubsetForKeyGroup(keyGroupId);
     }
 
@@ -231,111 +250,100 @@ public class CachedInternalPriorityQueueSet<
     //  Internal helpers
     // ------------------------------------------------------------------------
 
-    private void flushAddsAsync() {
-        final List<T> snapshot;
-        synchronized (pendingAdds) {
-            if (pendingAdds.isEmpty()) return;
-            snapshot = new ArrayList<>(pendingAdds);
-            pendingAdds.clear();
-            pendingAddSize.set(0);
+    /**
+     * Submits a new async flush task chained after the current tail future.
+     *
+     * <p>PQ-2.1 fix: uses {@code tail = tail.thenRunAsync(...)} so that subsequent flushes are
+     * serialized in submission order, and {@code awaitPendingFlush()} (via {@code tail.join()})
+     * actually waits for this flush to complete.
+     */
+    private void flushAsyncInternal() {
+        if (pending.isEmpty()) {
+            return;
         }
-
         if (flushExecutor == null) {
-            // Fallback: flush synchronously
-            for (T element : snapshot) {
-                delegate.add(element);
-            }
+            flushSyncInternal();
             return;
         }
 
-        CompletableFuture.runAsync(
-                        () -> {
-                            for (T element : snapshot) {
-                                delegate.add(element);
-                            }
-                        },
-                        flushExecutor)
-                .whenComplete(
-                        (r, ex) -> {
-                            if (ex != null) {
-                                LOG.error("[CACHEKIT PQ] Async add flush failed", ex);
-                            }
-                        });
-        trackInFlight();
+        @SuppressWarnings("unchecked")
+        List<Mutation<T>> snapshot = new ArrayList<>((Collection<Mutation<T>>) pending);
+        pending.clear();
+
+        // PQ-2.1 fix: chain the new future onto the tail
+        tail =
+                tail.thenRunAsync(
+                                () -> {
+                                    for (Mutation<T> m : snapshot) {
+                                        switch (m.type()) {
+                                            case ADD:
+                                                delegate.add(m.element());
+                                                break;
+                                            case REMOVE:
+                                                delegate.remove(m.element());
+                                                break;
+                                        }
+                                    }
+                                },
+                                flushExecutor)
+                        .whenComplete(
+                                (r, ex) -> {
+                                    if (ex != null) {
+                                        // PQ-2.7 fix: capture exception instead of only logging
+                                        LOG.error("[CACHEKIT PQ] Async flush failed", ex);
+                                        flushError.compareAndSet(null, ex);
+                                    }
+                                });
     }
 
-    private void flushRemovesAsync() {
-        final List<T> snapshot;
-        synchronized (pendingRemoves) {
-            if (pendingRemoves.isEmpty()) return;
-            snapshot = new ArrayList<>(pendingRemoves);
-            pendingRemoves.clear();
-            pendingRemoveSize.set(0);
-        }
-
-        if (flushExecutor == null) {
-            // Fallback: flush synchronously
-            for (T element : snapshot) {
-                delegate.remove(element);
-            }
+    /**
+     * Synchronous flush: applies all pending mutations in order directly on the caller thread.
+     */
+    private void flushSyncInternal() {
+        if (pending.isEmpty()) {
             return;
         }
-
-        CompletableFuture.runAsync(
-                        () -> {
-                            for (T element : snapshot) {
-                                delegate.remove(element);
-                            }
-                        },
-                        flushExecutor)
-                .whenComplete(
-                        (r, ex) -> {
-                            if (ex != null) {
-                                LOG.error("[CACHEKIT PQ] Async remove flush failed", ex);
-                            }
-                        });
-        trackInFlight();
-    }
-
-    private void flushAddsSync() {
-        synchronized (pendingAdds) {
-            if (pendingAdds.isEmpty()) return;
-            for (T element : pendingAdds) {
-                delegate.add(element);
-            }
-            pendingAdds.clear();
-            pendingAddSize.set(0);
-        }
-    }
-
-    private void flushRemovesSync() {
-        synchronized (pendingRemoves) {
-            if (pendingRemoves.isEmpty()) return;
-            for (T element : pendingRemoves) {
-                delegate.remove(element);
-            }
-            pendingRemoves.clear();
-            pendingRemoveSize.set(0);
-        }
-    }
-
-    private void awaitPendingFlush() {
-        CompletableFuture<?> f = inFlightFlush[0];
-        if (f != null && !f.isDone()) {
-            try {
-                f.join();
-            } catch (Exception e) {
-                throw new FlinkRuntimeException("Failed to await pending PQ flush", e);
+        @SuppressWarnings("unchecked")
+        List<Mutation<T>> snapshot = new ArrayList<>((Collection<Mutation<T>>) pending);
+        pending.clear();
+        for (Mutation<T> m : snapshot) {
+            switch (m.type()) {
+                case ADD:
+                    delegate.add(m.element());
+                    break;
+                case REMOVE:
+                    delegate.remove(m.element());
+                    break;
             }
         }
     }
 
-    private void trackInFlight() {
-        synchronized (inFlightFlush) {
-            CompletableFuture<?> prev = inFlightFlush[0];
-            if (prev == null || prev.isDone()) {
-                inFlightFlush[0] = CompletableFuture.completedFuture(null);
+    /**
+     * PQ-2.4 fix: complete visibility barrier — submits remaining pending operations asynchronously
+     * and blocks until the current tail future (and all previously submitted flushes) complete.
+     *
+     * <p>PQ-2.7 fix: re-throws any exception captured from a prior async flush.
+     */
+    private void flushAndAwait() {
+        CompletableFuture<?> toAwait;
+        synchronized (pending) {
+            if (!pending.isEmpty()) {
+                flushAsyncInternal();
             }
+            toAwait = tail;
+        }
+
+        try {
+            toAwait.join();
+        } catch (Exception e) {
+            throw new FlinkRuntimeException("Failed to await PQ flush", e);
+        }
+
+        // PQ-2.7 fix: propagate async flush error to the caller
+        if (flushError != null) {
+            Throwable ex = flushError;
+            flushError = null;
+            throw new FlinkRuntimeException("Prior async flush failed", ex);
         }
     }
 
@@ -344,21 +352,19 @@ public class CachedInternalPriorityQueueSet<
     // ------------------------------------------------------------------------
 
     /**
-     * Flushes all pending operations to the delegate synchronously. Called by the keyed state backend
-     * during snapshots.
+     * Flushes all pending operations to the delegate synchronously. Called by the keyed state
+     * backend during snapshots.
      */
     public void flushAllPending() {
-        awaitPendingFlush();
-        flushAddsSync();
-        flushRemovesSync();
+        flushAndAwait();
     }
 
     /**
-     * Closes the wrapper. Called by {@code CacheKitKeyedStateBackend.dispose()}. The executor is shut
-     * down by the backend, not here.
+     * Closes the wrapper. Called by {@code CacheKitKeyedStateBackend.dispose()}. The executor is
+     * shut down by the backend, not here.
      */
     public void close() {
-        flushAllPending();
+        flushAndAwait();
         LOG.info("[CACHEKIT PQ] CachedInternalPriorityQueueSet closed");
     }
 
@@ -367,15 +373,19 @@ public class CachedInternalPriorityQueueSet<
     // ------------------------------------------------------------------------
 
     @Override
+    public TypeSerializer<T> getElementSerializer() {
+        return delegate.getElementSerializer();
+    }
+
+    @Override
     public String toString() {
-        return "CachedInternalPriorityQueueSet{delegate="
+        return "CachedInternalPriorityQueueSet{"
+                + "delegate="
                 + delegate
                 + ", enabled="
                 + enabled
-                + ", pendingAddsSize="
-                + pendingAddSize.get()
-                + ", pendingRemovesSize="
-                + pendingRemoveSize.get()
+                + ", pendingSize="
+                + pending.size()
                 + '}';
     }
 }

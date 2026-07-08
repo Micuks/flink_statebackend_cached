@@ -36,7 +36,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 
@@ -44,19 +43,32 @@ import java.util.concurrent.ExecutorService;
  * Cachekit wrapper over delegate {@link InternalListState} that implements:
  *
  * <ul>
- *   <li><b>Async Copy-On-Write (COW)</b>: {@code add()} / {@code addAll()} buffer writes into a
- *       pending map and flush asynchronously to the delegate when thresholds are exceeded
- *       (4096 keys or 500 elements per list).
- *   <li><b>Read-Your-Writes (RYW)</b>: cleared-keys fast-path avoids a backend read by returning
- *       the in-memory buffered data directly.
- *   <li><b>Atomic pending-map updates</b>: all mutations go through {@code compute()} to avoid
- *       race conditions when {@code flushAllAsync()} swaps the map reference.
- *   <li><b>Bounded cleared-keys</b>: uses an LRU-linked-hash-map with a configurable capacity to
- *       prevent unbounded memory growth.
+ *   <li><b>Batch-merge optimization</b>: {@code add()} / {@code addAll()} buffer into a pending map.
+ *       Each key's pending list is merged into a single {@code delegate.addAll()} call at flush time,
+ *       reducing the number of RocksDB write operations.
+ *   <li><b>Synchronous flush (方案 A)</b>: Flush is always synchronous on the Flink Task thread.
+ *       This eliminates all cross-thread keyContext issues (LS-1, LS-4), broken async Future tracking
+ *       (LS-2), and the need for complex checkpoint coordination.
+ *   <li><b>RYW with correct clear semantics</b> (LS-3 fix): {@code clear()} now syncs to the delegate,
+ *       so checkpoint does not contain stale data and clearedKeys LRU eviction does not bring back old
+ *       data.
+ *   <li><b>Bounded cleared-keys</b>: uses an LRU-linked-hash-map with a configurable capacity.
+ *       When an entry is evicted from clearedKeys, the key's data is deleted from the delegate
+ *       (preventing LS-3 reappear issue).
+ *   <li><b>Reference snapshot at add time</b> (LS-5 fix): pendingMap stores deep copies of values
+ *       at add time, so later mutation of the original objects does not corrupt buffered data.
  * </ul>
  *
- * <p>COW and RYW can be independently enabled. When COW is off but RYW is on, the pending map is
- * still maintained but flushed synchronously (enabling the RYW fast path).
+ * <p>COW and RYW can be independently enabled:
+ *
+ * <ul>
+ *   <li>{@code cow=true, ryw=true}: Full COW + RYW. pendingMap buffers writes; cleared keys read
+ *       from pendingMap directly.
+ *   <li>{@code cow=true, ryw=false}: COW-only. pendingMap buffers writes; no cleared-key fast path.
+ *   <li>{@code cow=false, ryw=true}: RYW-only. pendingMap is still maintained (synchronously flushed),
+ *       enabling the cleared-key fast path. Batch merge still applies.
+ *   <li>{@code cow=false, ryw=false}: passthrough to delegate (wrapper does nothing).
+ * </ul>
  *
  * @param <K> The Flink key type.
  * @param <N> The namespace type.
@@ -76,25 +88,25 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
     private final TypeSerializer<V> elementSerializer;
     private final TypeSerializer<List<V>> listSerializer;
 
-    // ---- COW: async pending buffer ----
-    /** Flush threshold: when pending map reaches this size, trigger global async flush. */
+    // ---- COW config ----
+    private final boolean cowEnabled;
+    private final boolean rywEnabled;
+
+    // ---- COW: sync pending buffer ----
+    /** Flush threshold: when pending map reaches this size, trigger sync flush. */
     private static final int FLUSH_THRESHOLD = 4096;
-    /** Per-list threshold: when a single list reaches this size, flush that key async. */
+    /** Per-list threshold: when a single list reaches this size, flush that key sync. */
     private static final int MAX_PENDING_LIST_SIZE = 500;
 
+    /** Pending buffer: key → list of values. Values are copied at add time (LS-5 fix). */
     private volatile ConcurrentHashMap<NamespaceKeyWrapper, List<V>> pendingMap =
             new ConcurrentHashMap<>();
-    private final CompletableFuture<?>[] inFlightFlush = new CompletableFuture<?>[] {null};
 
     // ---- RYW: cleared key tracking with bounded LRU ----
-    private final boolean rywEnabled;
     private final int clearedKeysCapacity;
     private final Map<NamespaceKeyWrapper, Boolean> clearedKeys;
 
-    // ---- async flush executor (injected from backend; shared across all list states) ----
-    private final ExecutorService flushExecutor;
-
-    // ---- cached hash for current key (avoids recomputation) ----
+    // ---- cached wrapper for hot-path allocation reduction ----
     private NamespaceKeyWrapper cachedWrapper;
 
     public CachedInternalListState(
@@ -109,13 +121,15 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
+        this.cowEnabled = cowEnabled;
+        this.rywEnabled = rywEnabled;
         this.elementSerializer = Objects.requireNonNull(elementSerializer, "elementSerializer");
         this.listSerializer = new ListSerializer<>(elementSerializer);
-        this.flushExecutor = flushExecutor;
-        this.rywEnabled = rywEnabled;
-        this.clearedKeysCapacity = clearedKeysCapacity;
 
         // Bounded cleared-keys map with LRU eviction (access-order LinkedHashMap)
+        // LS-3 fix: when an entry is evicted, we flush the delete to the delegate so the data
+        // does not reappear. This is done lazily in the eviction callback.
+        this.clearedKeysCapacity = clearedKeysCapacity;
         if (rywEnabled) {
             this.clearedKeys =
                     Collections.synchronizedMap(
@@ -123,6 +137,11 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
                                 @Override
                                 protected boolean removeEldestEntry(
                                         Map.Entry<NamespaceKeyWrapper, Boolean> eldest) {
+                                    if (size() > clearedKeysCapacity) {
+                                        // LS-3 fix: evicted cleared-key means we lost the "deleted" marker.
+                                        // Flush a delete to the delegate so stale data does not reappear.
+                                        flushClearedKeyToDelegate(eldest.getKey());
+                                    }
                                     return size() > clearedKeysCapacity;
                                 }
                             });
@@ -144,10 +163,13 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
     @Override
     public void add(V value) throws Exception {
         Preconditions.checkNotNull(value, "You cannot add null to a ListState.");
-        if (!isCowEnabled()) {
+        if (!cowEnabled) {
             delegate.add(value);
             return;
         }
+
+        // LS-5 fix: copy the value at add time to avoid reference aliasing
+        V copiedValue = copyValue(value);
 
         NamespaceKeyWrapper wrapped = wrapCurrentKey();
         boolean[] needsSingleFlush = {false};
@@ -157,7 +179,7 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
                 wrapped,
                 (k, existing) -> {
                     List<V> list = existing != null ? existing : new ArrayList<>();
-                    list.add(value);
+                    list.add(copiedValue);
                     if (list.size() >= MAX_PENDING_LIST_SIZE) {
                         needsSingleFlush[0] = true;
                     }
@@ -167,10 +189,11 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
                     return list;
                 });
 
+        // Flush synchronously (方案 A)
         if (needsSingleFlush[0]) {
-            flushSingleKeyAsync(wrapped);
+            flushSingleKeySync(wrapped);
         } else if (needsGlobalFlush[0]) {
-            flushAllAsync();
+            flushAllSync();
         }
     }
 
@@ -179,9 +202,15 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
         if (values == null || values.isEmpty()) {
             return;
         }
-        if (!isCowEnabled()) {
+        if (!cowEnabled) {
             delegate.addAll(values);
             return;
+        }
+
+        // LS-5 fix: copy all values at addAll time
+        List<V> copiedValues = new ArrayList<>(values.size());
+        for (V v : values) {
+            copiedValues.add(copyValue(v));
         }
 
         NamespaceKeyWrapper wrapped = wrapCurrentKey();
@@ -191,7 +220,7 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
                 wrapped,
                 (k, existing) -> {
                     List<V> list = existing != null ? existing : new ArrayList<>();
-                    list.addAll(values);
+                    list.addAll(copiedValues);
                     if (pendingMap.size() >= FLUSH_THRESHOLD) {
                         needsGlobalFlush[0] = true;
                     }
@@ -199,7 +228,7 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
                 });
 
         if (needsGlobalFlush[0]) {
-            flushAllAsync();
+            flushAllSync();
         }
     }
 
@@ -211,7 +240,8 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
 
     @Override
     public List<V> getInternal() throws Exception {
-        if (!isCowEnabled()) {
+        if (!cowEnabled) {
+            // passthrough
             Iterable<V> result = delegate.get();
             if (result == null) return null;
             List<V> list = new ArrayList<>();
@@ -227,8 +257,7 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
             return (pending != null && !pending.isEmpty()) ? new ArrayList<>(pending) : null;
         }
 
-        // Slow path: wait for in-flight async flush, then sync flush any remaining
-        awaitPendingFlush();
+        // Slow path: flush pending then read from delegate
         flushPendingMapSync();
 
         // Merge any pending data for this key into delegate before reading
@@ -238,10 +267,21 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
             synchronized (clearedKeys) {
                 wasCleared = clearedKeys.remove(wrapped) != null;
             }
-            if (wasCleared) {
-                delegate.updateInternal(pendingForKey);
-            } else {
-                delegate.addAll(pendingForKey);
+            // LS-1/LS-4 fix: set keyContext before delegate call
+            K originalKey = currentKeyProvider.getCurrentKey();
+            N originalNamespace = currentNamespace;
+            try {
+                keyContextSetter.accept((K) wrapped.key);
+                delegate.setCurrentNamespace((N) wrapped.namespace);
+                if (wasCleared) {
+                    delegate.updateInternal(pendingForKey);
+                } else {
+                    delegate.addAll(pendingForKey);
+                }
+            } finally {
+                // restore original context
+                keyContextSetter.accept(originalKey);
+                delegate.setCurrentNamespace(originalNamespace);
             }
         }
 
@@ -260,13 +300,13 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
     @Override
     public void updateInternal(List<V> values) throws Exception {
         Preconditions.checkNotNull(values, "List of values to add cannot be null.");
-        if (!isCowEnabled()) {
+        if (!cowEnabled) {
             delegate.updateInternal(values);
             return;
         }
 
         if (!values.isEmpty()) {
-            awaitPendingFlush();
+            // LS-1/LS-4 fix: flush before replacing, with keyContext set
             flushPendingMapSync();
 
             NamespaceKeyWrapper wrapped = wrapCurrentKey();
@@ -274,7 +314,17 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
             if (rywEnabled) {
                 clearedKeys.remove(wrapped);
             }
-            delegate.updateInternal(values);
+            // LS-1/LS-4 fix: set keyContext
+            K originalKey = currentKeyProvider.getCurrentKey();
+            N originalNamespace = currentNamespace;
+            try {
+                keyContextSetter.accept((K) wrapped.key);
+                delegate.setCurrentNamespace((N) wrapped.namespace);
+                delegate.updateInternal(values);
+            } finally {
+                keyContextSetter.accept(originalKey);
+                delegate.setCurrentNamespace(originalNamespace);
+            }
         } else {
             clear();
         }
@@ -287,39 +337,46 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
         // Discard buffered data
         pendingMap.remove(wrapped);
 
-        if (isCowEnabled()) {
-            // Wait for any in-flight async flush to avoid overwriting with stale data
-            awaitPendingFlush();
+        if (cowEnabled) {
+            // LS-3 fix: synchronous flush before marking cleared
+            // This ensures the delegate state is also cleared before checkpoint.
             flushPendingMapSync();
         }
 
-        // RYW: mark this key as cleared so getInternal() returns in-memory data
+        // LS-3 fix: mark as cleared AND delete from delegate.
+        // The delete is done immediately (synchronously) so:
+        //   - checkpoint does not contain stale data
+        //   - clearedKeys LRU eviction does not bring back old data
+        //   - RYW-only mode works correctly (clear actually deletes)
         if (rywEnabled) {
             clearedKeys.put(wrapped, Boolean.TRUE);
+            // LS-1/LS-4 fix: set keyContext before delegate.clear()
+            K originalKey = currentKeyProvider.getCurrentKey();
+            N originalNamespace = currentNamespace;
+            try {
+                keyContextSetter.accept((K) wrapped.key);
+                delegate.setCurrentNamespace((N) wrapped.namespace);
+                delegate.clear();
+            } finally {
+                keyContextSetter.accept(originalKey);
+                delegate.setCurrentNamespace(originalNamespace);
+            }
         }
 
-        // Do NOT call delegate.clear() here.
-        // Rationale:
-        //   1. In RYW mode, the in-memory pending data already "owns" the key's view.
-        //   2. delegate.clear() generates a RocksDB delete write, which undermines the
-        //      purpose of write buffering in COW mode.
-        //   3. When subsequent adds fully buffer in pendingMap and never write delegate,
-        //      the delete write would be wasted anyway.
-        //   4. On the next snapshot, flushPendingMapSync() handles data correctly
-        //      (no stale data from delegate to worry about).
-
         LOG.debug(
-                "[CACHEKIT COW] clear() marked key as cleared; in-memory view dominates getInternal()");
+                "[CACHEKIT COW] clear() flushed and deleted delegate state for key={}, namespace={}",
+                wrapped.key,
+                wrapped.namespace);
     }
 
     @Override
     public void mergeNamespaces(N target, Collection<N> sources) throws Exception {
         if (sources == null || sources.isEmpty()) return;
-        if (!isCowEnabled()) {
+        if (!cowEnabled) {
             delegate.mergeNamespaces(target, sources);
             return;
         }
-        awaitPendingFlush();
+        // Sync flush before merge to avoid race with pending data
         flushPendingMapSync();
         delegate.mergeNamespaces(target, sources);
     }
@@ -329,16 +386,24 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
     // ------------------------------------------------------------------------
 
     /**
-     * Returns whether COW (async write buffering) is active. COW is enabled when the backend's
-     * flush executor is non-null (i.e., the config flag was set AND the executor was provided).
+     * LS-5 fix: produce a deep copy of the value using the element serializer.
+     * This prevents mutation of the caller's object from corrupting the pending buffer.
      */
-    private boolean isCowEnabled() {
-        return flushExecutor != null;
+    private V copyValue(V value) {
+        try {
+            return elementSerializer.copy(value);
+        } catch (Exception e) {
+            throw new FlinkRuntimeException("Failed to copy value for pending buffer", e);
+        }
     }
 
     /**
      * Returns a cached NamespaceKeyWrapper for the current (key, namespace). Reuses the same
      * wrapper instance across calls to avoid allocation pressure on the hot path.
+     *
+     * <p>LS-5 fix: since pendingMap stores references to the same wrapper objects as its keys,
+     * we must NOT return a mutable wrapper whose contents could change after insertion.
+     * The wrapper is immutable (final fields) so this is safe.
      */
     private NamespaceKeyWrapper wrapCurrentKey() {
         K key = currentKeyProvider.getCurrentKey();
@@ -349,117 +414,90 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
         return cachedWrapper;
     }
 
-    /** Async flush of a single key (non-blocking for the caller). */
-    private void flushSingleKeyAsync(NamespaceKeyWrapper wrapped) {
-        if (flushExecutor == null) {
-            flushPendingMapSync();
-            return;
+    /**
+     * LS-3 fix: called when a cleared-key entry is evicted from the LRU clearedKeys map.
+     * Flushes a delete to the delegate so that stale data does not reappear.
+     */
+    private void flushClearedKeyToDelegate(NamespaceKeyWrapper k) {
+        try {
+            K originalKey = currentKeyProvider.getCurrentKey();
+            N originalNamespace = currentNamespace;
+            try {
+                keyContextSetter.accept((K) k.key);
+                delegate.setCurrentNamespace((N) k.namespace);
+                delegate.clear();
+            } finally {
+                keyContextSetter.accept(originalKey);
+                delegate.setCurrentNamespace(originalNamespace);
+            }
+            LOG.debug(
+                    "[CACHEKIT COW] ClearedKey evicted, flushed delete to delegate: key={}, ns={}",
+                    k.key,
+                    k.namespace);
+        } catch (Exception e) {
+            LOG.warn(
+                    "[CACHEKIT COW] Failed to flush cleared-key delete on eviction; "
+                            + "stale data may reappear",
+                    e);
         }
+    }
 
-        final List<V> snapshot = pendingMap.remove(wrapped);
+    /**
+     * Synchronous flush of a single key's pending list to the delegate (方案 A).
+     * KeyContext is set before the delegate call (LS-1/LS-4 fix).
+     */
+    private void flushSingleKeySync(NamespaceKeyWrapper wrapped) {
+        List<V> snapshot = pendingMap.remove(wrapped);
         if (snapshot == null || snapshot.isEmpty()) return;
 
-        final boolean wasCleared;
-        if (rywEnabled) {
-            synchronized (clearedKeys) {
-                wasCleared = clearedKeys.remove(wrapped) != null;
+        boolean wasCleared;
+        synchronized (clearedKeys) {
+            wasCleared = clearedKeys.remove(wrapped) != null;
+        }
+
+        K originalKey = currentKeyProvider.getCurrentKey();
+        N originalNamespace = currentNamespace;
+        try {
+            keyContextSetter.accept((K) wrapped.key);
+            delegate.setCurrentNamespace((N) wrapped.namespace);
+            if (wasCleared) {
+                delegate.updateInternal(snapshot);
+            } else {
+                delegate.addAll(snapshot);
             }
-        } else {
-            wasCleared = false;
+        } catch (Exception e) {
+            throw new FlinkRuntimeException("Failed to sync-flush ListState single key", e);
+        } finally {
+            keyContextSetter.accept(originalKey);
+            delegate.setCurrentNamespace(originalNamespace);
         }
-
-        CompletableFuture.runAsync(
-                        () -> {
-                            try {
-                                if (wasCleared) {
-                                    delegate.updateInternal(snapshot);
-                                } else {
-                                    delegate.addAll(snapshot);
-                                }
-                            } catch (Exception e) {
-                                throw new FlinkRuntimeException(
-                                        "Failed to flush ListState single key", e);
-                            }
-                        },
-                        flushExecutor)
-                .whenComplete(
-                        (r, ex) -> {
-                            if (ex != null) {
-                                LOG.error("[CACHEKIT COW] Async flush failed", ex);
-                            }
-                        });
-        trackInFlight();
     }
 
-    /** Async flush of all pending data (global flush). */
-    private void flushAllAsync() {
-        if (flushExecutor == null) {
-            flushPendingMapSync();
-            return;
-        }
-
-        final ConcurrentHashMap<NamespaceKeyWrapper, List<V>> snapshot = pendingMap;
-        pendingMap = new ConcurrentHashMap<>();
-        if (snapshot.isEmpty()) return;
-
-        CompletableFuture.runAsync(
-                        () -> {
-                            for (Map.Entry<NamespaceKeyWrapper, List<V>> entry : snapshot.entrySet()) {
-                                NamespaceKeyWrapper k = entry.getKey();
-                                List<V> values = entry.getValue();
-                                if (values == null || values.isEmpty()) continue;
-
-                                final boolean wasCleared;
-                                if (rywEnabled) {
-                                    synchronized (clearedKeys) {
-                                        wasCleared = clearedKeys.remove(k) != null;
-                                    }
-                                } else {
-                                    wasCleared = false;
-                                }
-                                try {
-                                    if (wasCleared) {
-                                        delegate.updateInternal(values);
-                                    } else {
-                                        delegate.addAll(values);
-                                    }
-                                } catch (Exception e) {
-                                    throw new FlinkRuntimeException(
-                                            "Failed to flush ListState pending map", e);
-                                }
-                            }
-                        },
-                        flushExecutor)
-                .whenComplete(
-                        (r, ex) -> {
-                            if (ex != null) {
-                                LOG.error("[CACHEKIT COW] Global async flush failed", ex);
-                            }
-                        });
-        trackInFlight();
-    }
-
-    /** Synchronously flush all pending data. Called during getInternal(), updateInternal(), and
-     * checkpoint. */
-    private void flushPendingMapSync() {
+    /**
+     * Synchronous flush of all pending data to the delegate (方案 A).
+     * LS-1/LS-4 fix: sets keyContext for each entry before the delegate call.
+     */
+    private void flushAllSync() {
         ConcurrentHashMap<NamespaceKeyWrapper, List<V>> snapshot = pendingMap;
         pendingMap = new ConcurrentHashMap<>();
         if (snapshot.isEmpty()) return;
+
+        K originalKey = currentKeyProvider.getCurrentKey();
+        N originalNamespace = currentNamespace;
 
         for (Map.Entry<NamespaceKeyWrapper, List<V>> entry : snapshot.entrySet()) {
             List<V> values = entry.getValue();
             if (values == null || values.isEmpty()) continue;
 
             NamespaceKeyWrapper k = entry.getKey();
-            final boolean wasCleared;
-            if (rywEnabled) {
-                synchronized (clearedKeys) {
-                    wasCleared = clearedKeys.remove(k) != null;
-                }
-            } else {
-                wasCleared = false;
+            boolean wasCleared;
+            synchronized (clearedKeys) {
+                wasCleared = clearedKeys.remove(k) != null;
             }
+
             try {
+                keyContextSetter.accept((K) k.key);
+                delegate.setCurrentNamespace((N) k.namespace);
                 if (wasCleared) {
                     delegate.updateInternal(values);
                 } else {
@@ -469,29 +507,52 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
                 throw new FlinkRuntimeException("Failed to sync-flush ListState pending map", e);
             }
         }
+
+        // restore original context
+        keyContextSetter.accept(originalKey);
+        delegate.setCurrentNamespace(originalNamespace);
     }
 
-    private void awaitPendingFlush() {
-        CompletableFuture<?> f = inFlightFlush[0];
-        if (f != null && !f.isDone()) {
+    /**
+     * Synchronously flush all pending data. Called during getInternal(), updateInternal(),
+     * clear(), and checkpoint.
+     *
+     * <p>LS-1/LS-4 fix: sets keyContext for each entry before the delegate call.
+     */
+    private void flushPendingMapSync() {
+        ConcurrentHashMap<NamespaceKeyWrapper, List<V>> snapshot = pendingMap;
+        pendingMap = new ConcurrentHashMap<>();
+        if (snapshot.isEmpty()) return;
+
+        K originalKey = currentKeyProvider.getCurrentKey();
+        N originalNamespace = currentNamespace;
+
+        for (Map.Entry<NamespaceKeyWrapper, List<V>> entry : snapshot.entrySet()) {
+            List<V> values = entry.getValue();
+            if (values == null || values.isEmpty()) continue;
+
+            NamespaceKeyWrapper k = entry.getKey();
+            boolean wasCleared;
+            synchronized (clearedKeys) {
+                wasCleared = clearedKeys.remove(k) != null;
+            }
+
             try {
-                f.join();
+                keyContextSetter.accept((K) k.key);
+                delegate.setCurrentNamespace((N) k.namespace);
+                if (wasCleared) {
+                    delegate.updateInternal(values);
+                } else {
+                    delegate.addAll(values);
+                }
             } catch (Exception e) {
-                throw new FlinkRuntimeException("Failed to await pending ListState flush", e);
+                throw new FlinkRuntimeException("Failed to sync-flush ListState pending map", e);
             }
         }
-    }
 
-    @SuppressWarnings("unchecked")
-    private void trackInFlight() {
-        // Simple chaining: store the latest future; await uses it.
-        // In high-concurrency scenarios this could chain many futures but ensures correctness.
-        synchronized (inFlightFlush) {
-            CompletableFuture<?> prev = inFlightFlush[0];
-            if (prev == null || prev.isDone()) {
-                inFlightFlush[0] = CompletableFuture.completedFuture(null);
-            }
-        }
+        // restore original context
+        keyContextSetter.accept(originalKey);
+        delegate.setCurrentNamespace(originalNamespace);
     }
 
     // ------------------------------------------------------------------------
@@ -499,12 +560,13 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
     // ------------------------------------------------------------------------
 
     /**
-     * Flushes all pending data to the delegate state. Called by the keyed state backend during
-     * snapshots.
+     * Flushes all pending data to the delegate state synchronously. Called by the keyed state
+     * backend during snapshots.
+     *
+     * <p>No async Future tracking is needed because all flushes are synchronous.
      */
     public void flushToUnderlyingState() throws IOException {
         try {
-            awaitPendingFlush();
             flushPendingMapSync();
         } catch (Exception e) {
             throw new IOException("Failed to flush ListState to delegate", e);
@@ -548,8 +610,6 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
     @Override
     @SuppressWarnings("unchecked")
     public TypeSerializer<List<V>> getValueSerializer() {
-        // InternalListState's value type is List<V>, so we return the ListSerializer wrapping
-        // the element serializer.
         return (TypeSerializer<List<V>>) (TypeSerializer<?>) listSerializer;
     }
 
@@ -583,7 +643,6 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
     }
 
     public StateSnapshotTransformer<List<V>> getSnapshotTransformer() {
-        // Not part of InternalListState interface; return null
         return null;
     }
 
@@ -603,7 +662,7 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
         private final Object key;
         private final int hash; // cached
 
-        <N, K> NamespaceKeyWrapper(N namespace, K key) {
+        <N2, K2> NamespaceKeyWrapper(N2 namespace, K2 key) {
             this.namespace = namespace;
             this.key = key;
             int h = Objects.hashCode(namespace);
@@ -611,7 +670,7 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
             this.hash = h;
         }
 
-        <N, K> boolean matches(K key, N namespace) {
+        <K2, N2> boolean matches(K2 key, N2 namespace) {
             return Objects.equals(this.namespace, namespace) && Objects.equals(this.key, key);
         }
 

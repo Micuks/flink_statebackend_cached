@@ -41,6 +41,7 @@ import org.apache.flink.runtime.state.internal.InternalListState;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
+import org.apache.flink.runtime.state.heap.HeapPriorityQueueSet;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.PriorityComparable;
@@ -435,8 +436,17 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     }
 
     /**
-     * fullOpt: wrap PriorityQueue with async buffer if enabled and delegate is not RocksDB-backed.
+     * fullOpt: wrap PriorityQueue with async buffer if enabled and delegate is Heap-backed.
      * RocksDB-backed PQ already has its own async buffer; wrapping would cause double-buffering.
+     *
+     * <p>We use a Heap whitelist (instanceof HeapPriorityQueueSet) instead of a RocksDB blacklist.
+     * This correctly handles:
+     * <ul>
+     *   <li>RocksDB Timer → KeyGroupPartitionedPriorityQueue (non-Heap) → skipped ✅
+     *   <li>RocksDB configured with Heap Timer → HeapPriorityQueueSet → optimized ✅
+     *   <li>Heap Timer → HeapPriorityQueueSet → optimized ✅
+     *   <li>Unrecognized new implementations → skipped by default ✅
+     * </ul>
      */
     private <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
             KeyGroupedInternalPriorityQueue<T> wrapPriorityQueue(
@@ -444,12 +454,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         if (!priorityQueueOptEnabled) {
             return delegateQueue;
         }
-        String className = delegateQueue.getClass().getName();
-        if (className.contains("RocksDB") || className.contains("rocksdb")) {
+        // PQ-1 fix: use Heap whitelist instead of RocksDB blacklist
+        if (!(delegateQueue instanceof HeapPriorityQueueSet)) {
             LOG.info(
-                    "[CACHEKIT PQ] RocksDB-backed PriorityQueue ({}) detected; "
-                            + "skipping wrapper to avoid double-buffering.",
-                    className);
+                    "[CACHEKIT PQ] Non-Heap PriorityQueue detected ({}); "
+                            + "skipping wrapper to avoid double-buffering or unsupported backend.",
+                    delegateQueue.getClass().getName());
             return delegateQueue;
         }
         return new CachedInternalPriorityQueueSet<>(
@@ -522,6 +532,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     ((CachedInternalMapState<?, ?, ?, ?>) wrapper).flush();
                 } else if (wrapper instanceof CachedInternalListState) {
                     ((CachedInternalListState<?, ?, ?>) wrapper).flushToUnderlyingState();
+                } else if (wrapper instanceof CachedInternalPriorityQueueSet) {
+                    // PQ-2.5 fix: checkpoint must flush all pending PQ operations
+                    ((CachedInternalPriorityQueueSet<?>) wrapper).flushAllPending();
                 }
             } catch (Exception e) {
                 flushErrors.add(e);
