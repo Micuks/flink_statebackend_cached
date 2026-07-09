@@ -128,12 +128,13 @@ class CachedInternalPriorityQueueSetTest {
 
     private CachedInternalPriorityQueueSet<TestElement> createEnabled(
             KeyGroupedInternalPriorityQueue<TestElement> delegate, ExecutorService executor) {
-        return new CachedInternalPriorityQueueSet<>(delegate, executor, true);
+        // elementSerializer is only stored + exposed via getter; unused by these unit tests.
+        return new CachedInternalPriorityQueueSet<>(delegate, null, executor, true);
     }
 
     private CachedInternalPriorityQueueSet<TestElement> createDisabled(
             KeyGroupedInternalPriorityQueue<TestElement> delegate) {
-        return new CachedInternalPriorityQueueSet<>(delegate, null, false);
+        return new CachedInternalPriorityQueueSet<>(delegate, null, null, false);
     }
 
     // ---- Tests: Disabled mode ----
