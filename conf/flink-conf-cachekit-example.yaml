@@ -1,0 +1,103 @@
+################################################################################
+# CacheKit — recommended flink-conf example
+#
+# Final verified stack (Nexmark 15q, 50M × 3 rounds, quiet host):
+#   throughput/core mean +32.43% vs pure RocksDB
+#   CDC 14/14 deterministic queries PASS (q12 is proc-time exception)
+#
+# Stack = VoidNamespace-gated ValueState object cache (D1)
+#       + truly-async backpressure prefetch
+#       + mailbox-batch lookahead
+#       + local pre-aggregation
+#       + MapState caches OFF
+#
+# See docs/BP-PREFETCH-FINAL-REPORT-ZH.md and D1-MIGRATION.md.
+################################################################################
+
+# --- Cluster topology (adjust to your deploy) ---------------------------------
+jobmanager.rpc.address: jobmanager
+jobmanager.bind-host: 0.0.0.0
+jobmanager.rpc.port: 6123
+rest.bind-address: 0.0.0.0
+rest.port: 8081
+taskmanager.bind-host: 0.0.0.0
+taskmanager.numberOfTaskSlots: 2
+parallelism.default: 16
+jobmanager.memory.process.size: 8g
+taskmanager.memory.process.size: 8g
+io.tmp.dirs: /tmp
+
+env.java.opts: -XX:NewRatio=3 -XX:ParallelGCThreads=4
+env.java.opts.jobmanager: -Xlog:gc*:$FLINK_LOG_DIR/jobmanager-gc.log:time -XX:+UseG1GC
+env.java.opts.taskmanager: -Xlog:gc*:$FLINK_LOG_DIR/taskmanager-gc.log:time -XX:+UseG1GC
+
+# --- State backend: CacheKit over RocksDB -------------------------------------
+state.backend: org.apache.flink.contrib.streaming.state.cachekit.CacheKitStateBackendFactory
+# Optional explicit delegate (default = EmbeddedRocksDBStateBackend):
+# state.backend.cachekit.delegate: org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackend
+
+state.checkpoints.dir: file:///tmp/checkpoint
+state.backend.incremental: true
+state.backend.local-recovery: true
+state.backend.rocksdb.memory.managed: true
+state.backend.rocksdb.memory.fixed-per-slot: 1024m
+state.backend.rocksdb.localdir: /tmp
+execution.checkpointing.interval: 180000
+execution.checkpointing.mode: EXACTLY_ONCE
+execution.checkpointing.tolerable-failed-checkpoints: 0
+execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+execution.checkpointing.checkpoints-after-tasks-finish.enabled: false
+
+# --- ValueState object-resident cache (D1 / VoidNamespace-gated) --------------
+# Only VoidNamespace states are wrapped (GroupAgg / dedup / TopN).
+# Windowed (namespaced) ValueState takes the plain RocksDB path.
+state.backend.cachekit.cache.void-namespace-only: true
+state.backend.cachekit.value.cache.max-entries: 8000
+state.backend.cachekit.value.cache.policy: LRU
+state.backend.cachekit.value.cache.lru.overflow: 1024
+state.backend.cachekit.value.bypass.enabled: true
+state.backend.cachekit.value.hit-rate.threshold: 0.03
+state.backend.cachekit.value.hit-rate.window: 5000
+
+# --- MapState caches OFF (final config) ---------------------------------------
+# Attribution showed MapState wrappers caused q4/q9/q13/q20 regressions.
+# Keep all MapState cache layers disabled unless you have a proven win.
+state.backend.cachekit.map.cache.max-entries: 0
+state.backend.cachekit.map.snapshot.cache.max-entries: 0
+state.backend.cachekit.map.presence.cache.max-entries: 0
+state.backend.cachekit.map.iteration.cache-fill.enabled: false
+state.backend.cachekit.map.bypass.enabled: false
+
+# --- Truly-async backpressure prefetch ----------------------------------------
+# Mailbox thread only serializes key+namespace and enqueues; a shared daemon
+# worker (`cachekit-bp-prefetch`) reads RocksDB via getSerializedValue and
+# stages results. Promote into L1 only when writeGen still matches.
+state.backend.cachekit.bp-prefetch.enabled: true
+state.backend.cachekit.bp-prefetch.distance: 64
+state.backend.cachekit.bp-prefetch.backpressure-gated: true
+state.backend.cachekit.bp-prefetch.commutative-key-sort: false
+state.backend.cachekit.bp-prefetch.async.enabled: true
+state.backend.cachekit.bp-prefetch.async-chunks.enabled: false
+state.backend.cachekit.bp-prefetch.map-snapshots.enabled: false
+# state.backend.cachekit.bp-prefetch.staging.max-entries: 8192
+
+# --- Mailbox batch / lookahead buffer -----------------------------------------
+# Required plumbing for prefetch + local-preagg. Size 4096 matched final runs.
+state.backend.cachekit.mailbox-batch.enabled: true
+state.backend.cachekit.mailbox-batch.size: 4096
+state.backend.cachekit.mailbox-batch.timeout-us: 0
+state.backend.cachekit.mailbox-batch.commutative-key-sort: false
+
+# --- Runtime local pre-aggregation --------------------------------------------
+# Fold same-key batches in GroupAgg / RowTimeDeduplicate (work-reduction).
+# This is the main throughput lever alongside the ValueState cache.
+state.backend.cachekit.local-preagg.enabled: true
+
+# --- Table planner (keep planner mini-batch OFF; runtime local-preagg replaces it)
+table.exec.mini-batch.enabled: false
+table.optimizer.distinct-agg.split.enabled: true
+
+# --- Metrics (optional) -------------------------------------------------------
+metrics.reporters: prom
+metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+metrics.reporter.prom.port: 9249
