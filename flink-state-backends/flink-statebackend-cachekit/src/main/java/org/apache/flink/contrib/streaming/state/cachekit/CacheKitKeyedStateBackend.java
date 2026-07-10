@@ -494,7 +494,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         } finally {
             for (Object wrapper : wrappersByDelegateIdentity.values()) {
                 try {
-                    if (wrapper instanceof CachedInternalListState) {
+                    if (wrapper instanceof CachedInternalValueState) {
+                        // Quiesce async bp-prefetch BEFORE delegate.dispose()/close() frees the
+                        // RocksDB db + ColumnFamilyHandles (else a shared-executor prefetch worker
+                        // reads a freed handle and SIGSEGVs in librocksdbjni).
+                        ((CachedInternalValueState<?, ?, ?>) wrapper).close();
+                    } else if (wrapper instanceof CachedInternalListState) {
                         ((CachedInternalListState<?, ?, ?>) wrapper).close();
                     } else if (wrapper instanceof CachedInternalPriorityQueueSet) {
                         ((CachedInternalPriorityQueueSet<?>) wrapper).close();
@@ -603,7 +608,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         } finally {
             for (Object wrapper : wrappersByDelegateIdentity.values()) {
                 try {
-                    if (wrapper instanceof CachedInternalListState) {
+                    if (wrapper instanceof CachedInternalValueState) {
+                        // Quiesce async bp-prefetch BEFORE delegate.dispose()/close() frees the
+                        // RocksDB db + ColumnFamilyHandles (else a shared-executor prefetch worker
+                        // reads a freed handle and SIGSEGVs in librocksdbjni).
+                        ((CachedInternalValueState<?, ?, ?>) wrapper).close();
+                    } else if (wrapper instanceof CachedInternalListState) {
                         ((CachedInternalListState<?, ?, ?>) wrapper).close();
                     } else if (wrapper instanceof CachedInternalPriorityQueueSet) {
                         ((CachedInternalPriorityQueueSet<?>) wrapper).close();

@@ -61,6 +61,20 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private final java.util.function.Consumer<K> keyContextSetter;
 
+    /**
+     * Lifecycle guard for the off-thread async prefetch worker. The worker reads RocksDB through
+     * {@code delegate.getSerializedValue()} on the SHARED, TM-JVM-level {@code PrefetchExecutor} —
+     * whose lifetime is longer than this backend's. Without a guard, a worker still holding a native
+     * ColumnFamilyHandle can race {@code delegate.dispose()} ({@code closeQuietly(db)}) and SIGSEGV
+     * in librocksdbjni (a native crash the worker's {@code catch (Throwable)} cannot catch). The
+     * worker takes the read lock around each delegate read and bails if {@link #closed}; {@link
+     * #close()} sets {@code closed} then takes the write lock as a barrier, guaranteeing no read is
+     * in flight before the backend disposes the RocksDB delegate.
+     */
+    private volatile boolean closed = false;
+    private final java.util.concurrent.locks.ReadWriteLock lifecycleLock =
+            new java.util.concurrent.locks.ReentrantReadWriteLock();
+
     // ---- Backpressure-driven async prefetch (off-mailbox worker -> staging -> L1) ----
 
     /** Cap on staged entries; the worker clears the whole map beyond this (all droppable). */
@@ -418,8 +432,20 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      *
      * @return a worker task to run via PrefetchExecutor, or null if there is nothing to fetch.
      */
+    /**
+     * Quiesce the async prefetch for this state before the backend disposes its RocksDB delegate.
+     * Sets {@link #closed} so no new work touches the delegate, then takes the write lock as a
+     * barrier so any in-flight worker read on the shared PrefetchExecutor has drained. After this
+     * returns it is safe for the backend to call {@code delegate.dispose()} / {@code close()}.
+     */
+    public void close() {
+        closed = true;
+        lifecycleLock.writeLock().lock();
+        lifecycleLock.writeLock().unlock();
+    }
+
     public Runnable buildAsyncPrefetchTask(Iterable<? extends K> keys) {
-        if (keys == null || currentNamespace == null) {
+        if (closed || keys == null || currentNamespace == null) {
             return null;
         }
         java.util.ArrayList<byte[]> serialized = new java.util.ArrayList<>();
@@ -469,13 +495,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 if (gen != writeGen) {
                     return; // a write already invalidated this batch; stop wasting reads
                 }
-                byte[] valueBytes =
-                        ((InternalKvState<K, N, V>) delegate)
-                                .getSerializedValue(
-                                        skn,
-                                        workerKeySerializer,
-                                        workerNamespaceSerializer,
-                                        workerValueSerializer);
+                byte[] valueBytes;
+                lifecycleLock.readLock().lock();
+                try {
+                    if (closed) {
+                        return; // backend is disposing — never touch the delegate's RocksDB handles
+                    }
+                    valueBytes =
+                            ((InternalKvState<K, N, V>) delegate)
+                                    .getSerializedValue(
+                                            skn,
+                                            workerKeySerializer,
+                                            workerNamespaceSerializer,
+                                            workerValueSerializer);
+                } finally {
+                    lifecycleLock.readLock().unlock();
+                }
                 if (valueBytes == null) {
                     // Absent key: let the authoritative read apply default-value semantics.
                     continue;
