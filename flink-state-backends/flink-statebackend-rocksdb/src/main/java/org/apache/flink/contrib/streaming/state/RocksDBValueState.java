@@ -31,6 +31,9 @@ import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.RocksDBException;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 /**
  * {@link ValueState} implementation that stores state in RocksDB.
@@ -40,7 +43,7 @@ import java.io.IOException;
  * @param <V> The type of value that the state state stores.
  */
 class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
-        implements InternalValueState<K, N, V> {
+        implements InternalValueState<K, N, V>, RocksDBBatchValueReader<K, N> {
 
     /**
      * Creates a new {@code RocksDBValueState}.
@@ -90,6 +93,28 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
         } catch (IOException | RocksDBException e) {
             throw new FlinkRuntimeException("Error while retrieving data from RocksDB.", e);
         }
+    }
+
+    @Override
+    public List<byte[]> getSerializedValues(
+            List<byte[]> serializedKeyAndNamespaces,
+            TypeSerializer<K> safeKeySerializer,
+            TypeSerializer<N> safeNamespaceSerializer)
+            throws Exception {
+        if (serializedKeyAndNamespaces.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<byte[]> rocksDBKeys = new ArrayList<>(serializedKeyAndNamespaces.size());
+        for (byte[] serializedKeyAndNamespace : serializedKeyAndNamespaces) {
+            rocksDBKeys.add(
+                    serializeQueryKeyAndNamespace(
+                            serializedKeyAndNamespace,
+                            safeKeySerializer,
+                            safeNamespaceSerializer));
+        }
+        return backend.db.multiGetAsList(
+                Collections.nCopies(rocksDBKeys.size(), columnFamily), rocksDBKeys);
     }
 
     @Override

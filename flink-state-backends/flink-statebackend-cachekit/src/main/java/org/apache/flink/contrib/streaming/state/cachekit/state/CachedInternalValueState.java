@@ -15,6 +15,7 @@
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePolicy;
@@ -45,6 +46,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final boolean bypassEnabled;
     private final double hitRateThreshold;
     private final int hitRateWindow;
+    private final boolean multiGetPrefetchEnabled;
 
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
@@ -131,6 +133,30 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             boolean bypassEnabled,
             double hitRateThreshold,
             int hitRateWindow) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                false);
+    }
+
+    public CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean multiGetPrefetchEnabled) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -139,6 +165,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.bypassEnabled = bypassEnabled;
         this.hitRateThreshold = hitRateThreshold;
         this.hitRateWindow = hitRateWindow;
+        this.multiGetPrefetchEnabled = multiGetPrefetchEnabled;
 
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
@@ -472,6 +499,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (staging.size() > ASYNC_STAGING_MAX_ENTRIES) {
                 staging.clear(); // all entries are droppable cache; also purges stale generations
             }
+            if (multiGetPrefetchEnabled && delegate instanceof RocksDBBatchValueReader<?, ?>) {
+                fetchBatchIntoStaging(serializedKeyAndNamespaces, gen);
+                return;
+            }
             for (byte[] skn : serializedKeyAndNamespaces) {
                 if (gen != writeGen) {
                     return; // a write already invalidated this batch; stop wasting reads
@@ -496,23 +527,57 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     // Absent key: let the authoritative read apply default-value semantics.
                     continue;
                 }
-                org.apache.flink.core.memory.DataInputDeserializer in =
-                        new org.apache.flink.core.memory.DataInputDeserializer(
-                                skn, 0, skn.length);
-                K key = workerKeySerializer.deserialize(in);
-                in.readByte(); // magic number
-                N namespace = workerNamespaceSerializer.deserialize(in);
-                org.apache.flink.core.memory.DataInputDeserializer valueIn =
-                        new org.apache.flink.core.memory.DataInputDeserializer(
-                                valueBytes, 0, valueBytes.length);
-                V value = workerValueSerializer.deserialize(valueIn);
-                staging.put(
-                        new KeyNamespaceKey<>(key, namespace),
-                        new StagedValue<>(value, gen));
+                stageSerializedValue(skn, valueBytes, gen);
             }
         } catch (Throwable ignored) {
             // Best-effort cache warmup; the authoritative read path is untouched.
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void fetchBatchIntoStaging(
+            java.util.List<byte[]> serializedKeyAndNamespaces, long gen) throws Exception {
+        java.util.List<byte[]> valueBytes;
+        lifecycleLock.readLock().lock();
+        try {
+            if (closed || gen != writeGen) {
+                return;
+            }
+            valueBytes =
+                    ((RocksDBBatchValueReader<K, N>) delegate)
+                            .getSerializedValues(
+                                    serializedKeyAndNamespaces,
+                                    workerKeySerializer,
+                                    workerNamespaceSerializer);
+        } finally {
+            lifecycleLock.readLock().unlock();
+        }
+
+        if (gen != writeGen || valueBytes.size() != serializedKeyAndNamespaces.size()) {
+            return;
+        }
+        for (int i = 0; i < valueBytes.size(); i++) {
+            if (gen != writeGen) {
+                return;
+            }
+            byte[] serializedValue = valueBytes.get(i);
+            if (serializedValue != null) {
+                stageSerializedValue(serializedKeyAndNamespaces.get(i), serializedValue, gen);
+            }
+        }
+    }
+
+    private void stageSerializedValue(byte[] skn, byte[] valueBytes, long gen) throws IOException {
+        org.apache.flink.core.memory.DataInputDeserializer in =
+                new org.apache.flink.core.memory.DataInputDeserializer(skn, 0, skn.length);
+        K key = workerKeySerializer.deserialize(in);
+        in.readByte(); // magic number
+        N namespace = workerNamespaceSerializer.deserialize(in);
+        org.apache.flink.core.memory.DataInputDeserializer valueIn =
+                new org.apache.flink.core.memory.DataInputDeserializer(
+                        valueBytes, 0, valueBytes.length);
+        V value = workerValueSerializer.deserialize(valueIn);
+        staging.put(new KeyNamespaceKey<>(key, namespace), new StagedValue<>(value, gen));
     }
 
     public void prefetch(Iterable<? extends K> keys) {

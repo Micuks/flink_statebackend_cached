@@ -12,6 +12,8 @@ cd "$WT"
     -am -Dmaven.test.skip=true -DskipTests -DskipITs -Drat.skip=true -Dcheckstyle.skip=true -Dspotless.check.skip=true package
 ./mvnw -pl flink-table/flink-table-runtime \
     -Dmaven.test.skip=true -DskipTests -DskipITs -Drat.skip=true -Dcheckstyle.skip=true -Dspotless.check.skip=true package
+./mvnw -pl flink-state-backends/flink-statebackend-rocksdb \
+    -Dmaven.test.skip=true -DskipTests -DskipITs -Drat.skip=true -Dcheckstyle.skip=true -Dspotless.check.skip=true install
 ./mvnw -pl flink-state-backends/flink-statebackend-cachekit \
     -Dmaven.test.skip=true -DskipTests -DskipITs -Drat.skip=true -Dcheckstyle.skip=true -Dspotless.check.skip=true package
 
@@ -33,6 +35,11 @@ if [ ! -f "$DIST_BACKUP" ]; then
 fi
 cp "$DIST_BACKUP" "$DIST_JAR"
 jar uf "$DIST_JAR" -C "$WT/flink-streaming-java/target/classes" org/apache/flink/streaming
+ROCKSDB_CLASSES="$WT/flink-state-backends/flink-statebackend-rocksdb/target/classes"
+jar uf "$DIST_JAR" \
+    -C "$ROCKSDB_CLASSES" org/apache/flink/contrib/streaming/state/AbstractRocksDBState.class \
+    -C "$ROCKSDB_CLASSES" org/apache/flink/contrib/streaming/state/RocksDBBatchValueReader.class \
+    -C "$ROCKSDB_CLASSES" org/apache/flink/contrib/streaming/state/RocksDBValueState.class
 
 install -D -m 0644 \
     "$WT/flink-table/flink-table-runtime/target/flink-table-runtime-1.16-SNAPSHOT.jar" \
@@ -40,6 +47,13 @@ install -D -m 0644 \
 install -D -m 0644 \
     "$WT/flink-state-backends/flink-statebackend-cachekit/target/flink-statebackend-cachekit-1.16-SNAPSHOT.jar" \
     "$BENCH_ROOT/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar"
+
+for class in \
+    org/apache/flink/contrib/streaming/state/AbstractRocksDBState.class \
+    org/apache/flink/contrib/streaming/state/RocksDBBatchValueReader.class \
+    org/apache/flink/contrib/streaming/state/RocksDBValueState.class; do
+    jar tf "$DIST_JAR" | grep -Fqx "$class"
+done
 
 echo "Staged benchmark jars:"
 ls -l \
