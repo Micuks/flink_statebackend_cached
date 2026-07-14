@@ -129,6 +129,20 @@ public abstract class AbstractRocksDBState<K, N, V> implements InternalKvState<K
             final TypeSerializer<V> safeValueSerializer)
             throws Exception {
 
+        return backend.db.get(
+                columnFamily,
+                serializeQueryKeyAndNamespace(
+                        serializedKeyAndNamespace,
+                        safeKeySerializer,
+                        safeNamespaceSerializer));
+    }
+
+    protected final byte[] serializeQueryKeyAndNamespace(
+            byte[] serializedKeyAndNamespace,
+            TypeSerializer<K> safeKeySerializer,
+            TypeSerializer<N> safeNamespaceSerializer)
+            throws IOException {
+
         // TODO make KvStateSerializer key-group aware to save this round trip and key-group
         // computation
         Tuple2<K, N> keyAndNamespace =
@@ -143,8 +157,7 @@ public abstract class AbstractRocksDBState<K, N, V> implements InternalKvState<K
                 new SerializedCompositeKeyBuilder<>(
                         safeKeySerializer, backend.getKeyGroupPrefixBytes(), 32);
         keyBuilder.setKeyAndKeyGroup(keyAndNamespace.f0, keyGroup);
-        byte[] key = keyBuilder.buildCompositeKeyNamespace(keyAndNamespace.f1, namespaceSerializer);
-        return backend.db.get(columnFamily, key);
+        return keyBuilder.buildCompositeKeyNamespace(keyAndNamespace.f1, namespaceSerializer);
     }
 
     <UK> byte[] serializeCurrentKeyWithGroupAndNamespacePlusUserKey(
