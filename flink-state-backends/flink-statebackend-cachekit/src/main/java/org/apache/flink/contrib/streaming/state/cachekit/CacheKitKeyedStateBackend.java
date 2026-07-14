@@ -259,7 +259,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueCacheLruOverflow,
                     valueBypassEnabled,
                     valueHitRateThreshold,
-                    valueHitRateWindow);
+                    valueHitRateWindow,
+                    BP_PREFETCH_MULTIGET);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -389,7 +390,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueCacheLruOverflow,
                     valueBypassEnabled,
                     valueHitRateThreshold,
-                    valueHitRateWindow);
+                    valueHitRateWindow,
+                    BP_PREFETCH_MULTIGET);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
@@ -577,6 +579,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
      */
     private static final boolean BP_PREFETCH_ASYNC =
             loadBooleanFlag("state.backend.cachekit.bp-prefetch.async.enabled", true);
+
+    /** Uses one ordered RocksDB MultiGet for each async ValueState prefetch batch. */
+    private static final boolean BP_PREFETCH_MULTIGET =
+            loadBooleanFlag("state.backend.cachekit.bp-prefetch.multiget.enabled", false);
 
     /**
      * MapState snapshot prefetch is disabled by default: it flushes dirty entries and pays a full
