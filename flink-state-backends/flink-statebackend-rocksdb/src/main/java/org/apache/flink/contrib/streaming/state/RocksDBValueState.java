@@ -96,6 +96,42 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
     }
 
     @Override
+    public byte[] serializeBatchKeyAndNamespace(
+            K key,
+            N namespace,
+            TypeSerializer<K> safeKeySerializer,
+            TypeSerializer<N> safeNamespaceSerializer)
+            throws Exception {
+        return serializeKeyAndNamespace(
+                key, namespace, safeKeySerializer, safeNamespaceSerializer);
+    }
+
+    @Override
+    public byte[] getSerializedValueByRocksDBKey(byte[] rocksDBKey) throws Exception {
+        return backend.db.get(columnFamily, rocksDBKey);
+    }
+
+    @Override
+    public List<byte[]> getSerializedValuesByRocksDBKeys(
+            List<byte[]> rocksDBKeys, int fromIndex, int toIndex) throws Exception {
+        if (fromIndex < 0 || toIndex < fromIndex || toIndex > rocksDBKeys.size()) {
+            throw new IndexOutOfBoundsException(
+                    "Invalid RocksDB key range ["
+                            + fromIndex
+                            + ", "
+                            + toIndex
+                            + ") for size "
+                            + rocksDBKeys.size());
+        }
+        if (fromIndex == toIndex) {
+            return Collections.emptyList();
+        }
+        List<byte[]> keyRange = rocksDBKeys.subList(fromIndex, toIndex);
+        return backend.db.multiGetAsList(
+                Collections.nCopies(keyRange.size(), columnFamily), keyRange);
+    }
+
+    @Override
     public List<byte[]> getSerializedValues(
             List<byte[]> serializedKeyAndNamespaces,
             TypeSerializer<K> safeKeySerializer,
@@ -113,8 +149,7 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
                             safeKeySerializer,
                             safeNamespaceSerializer));
         }
-        return backend.db.multiGetAsList(
-                Collections.nCopies(rocksDBKeys.size(), columnFamily), rocksDBKeys);
+        return getSerializedValuesByRocksDBKeys(rocksDBKeys, 0, rocksDBKeys.size());
     }
 
     @Override

@@ -86,6 +86,37 @@ public class RocksDBBatchValueReaderTest {
                                     IntSerializer.INSTANCE,
                                     VoidNamespaceSerializer.INSTANCE)
                             .isEmpty());
+
+            List<byte[]> rocksDBKeys =
+                    Arrays.asList(
+                            reader.serializeBatchKeyAndNamespace(
+                                    99,
+                                    VoidNamespace.INSTANCE,
+                                    IntSerializer.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE),
+                            reader.serializeBatchKeyAndNamespace(
+                                    2,
+                                    VoidNamespace.INSTANCE,
+                                    IntSerializer.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE),
+                            reader.serializeBatchKeyAndNamespace(
+                                    1,
+                                    VoidNamespace.INSTANCE,
+                                    IntSerializer.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE),
+                            reader.serializeBatchKeyAndNamespace(
+                                    99,
+                                    VoidNamespace.INSTANCE,
+                                    IntSerializer.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE));
+            List<byte[]> directValues =
+                    reader.getSerializedValuesByRocksDBKeys(rocksDBKeys, 1, 3);
+            assertEquals(2, directValues.size());
+            assertEquals("two", deserializeValue(directValues.get(0)));
+            assertEquals("one", deserializeValue(directValues.get(1)));
+            assertEquals(
+                    "two",
+                    deserializeValue(reader.getSerializedValueByRocksDBKey(rocksDBKeys.get(1))));
         }
     }
 

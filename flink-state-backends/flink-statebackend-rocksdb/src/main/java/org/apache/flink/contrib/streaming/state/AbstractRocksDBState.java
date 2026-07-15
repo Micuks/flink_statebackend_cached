@@ -149,15 +149,29 @@ public abstract class AbstractRocksDBState<K, N, V> implements InternalKvState<K
                 KvStateSerializer.deserializeKeyAndNamespace(
                         serializedKeyAndNamespace, safeKeySerializer, safeNamespaceSerializer);
 
+        return serializeKeyAndNamespace(
+                keyAndNamespace.f0,
+                keyAndNamespace.f1,
+                safeKeySerializer,
+                safeNamespaceSerializer);
+    }
+
+    protected final byte[] serializeKeyAndNamespace(
+            K key,
+            N namespace,
+            TypeSerializer<K> safeKeySerializer,
+            TypeSerializer<N> safeNamespaceSerializer)
+            throws IOException {
+
         int keyGroup =
                 KeyGroupRangeAssignment.assignToKeyGroup(
-                        keyAndNamespace.f0, backend.getNumberOfKeyGroups());
+                        key, backend.getNumberOfKeyGroups());
 
         SerializedCompositeKeyBuilder<K> keyBuilder =
                 new SerializedCompositeKeyBuilder<>(
                         safeKeySerializer, backend.getKeyGroupPrefixBytes(), 32);
-        keyBuilder.setKeyAndKeyGroup(keyAndNamespace.f0, keyGroup);
-        return keyBuilder.buildCompositeKeyNamespace(keyAndNamespace.f1, namespaceSerializer);
+        keyBuilder.setKeyAndKeyGroup(key, keyGroup);
+        return keyBuilder.buildCompositeKeyNamespace(namespace, safeNamespaceSerializer);
     }
 
     <UK> byte[] serializeCurrentKeyWithGroupAndNamespacePlusUserKey(
