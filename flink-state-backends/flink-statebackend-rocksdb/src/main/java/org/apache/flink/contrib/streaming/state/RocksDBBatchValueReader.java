@@ -33,6 +33,18 @@ import java.util.List;
 @Internal
 public interface RocksDBBatchValueReader<K, N> {
 
+    byte[] serializeBatchKeyAndNamespace(
+            K key,
+            N namespace,
+            TypeSerializer<K> safeKeySerializer,
+            TypeSerializer<N> safeNamespaceSerializer)
+            throws Exception;
+
+    byte[] getSerializedValueByRocksDBKey(byte[] rocksDBKey) throws Exception;
+
+    List<byte[]> getSerializedValuesByRocksDBKeys(
+            List<byte[]> rocksDBKeys, int fromIndex, int toIndex) throws Exception;
+
     List<byte[]> getSerializedValues(
             List<byte[]> serializedKeyAndNamespaces,
             TypeSerializer<K> safeKeySerializer,
