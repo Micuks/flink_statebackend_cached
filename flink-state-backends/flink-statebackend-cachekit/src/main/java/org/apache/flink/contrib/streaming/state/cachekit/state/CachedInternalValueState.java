@@ -502,6 +502,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (closed || keys == null || currentNamespace == null) {
             return null;
         }
+        if (multiGetPrefetchEnabled && delegate instanceof RocksDBBatchValueReader<?, ?>) {
+            return buildPreparedMultiGetTask(keys, currentNamespace);
+        }
         java.util.ArrayList<byte[]> serialized = new java.util.ArrayList<>();
         try {
             org.apache.flink.core.memory.DataOutputSerializer out =
@@ -531,20 +534,55 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     /**
+     * Mailbox-side half of the RocksDB MultiGet path. It prepares the exact composite RocksDB key
+     * once and keeps the corresponding immutable cache key beside it. The worker can therefore
+     * issue each chunk directly, without deserializing query-wire keys and serializing them again
+     * inside RocksDBValueState.
+     */
+    @SuppressWarnings("unchecked")
+    private Runnable buildPreparedMultiGetTask(Iterable<? extends K> keys, N namespace) {
+        java.util.ArrayList<byte[]> rocksDBKeys = new java.util.ArrayList<>();
+        java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys = new java.util.ArrayList<>();
+        RocksDBBatchValueReader<K, N> batchReader =
+                (RocksDBBatchValueReader<K, N>) delegate;
+        try {
+            for (K key : keys) {
+                if (key == null || findCachedValueFor(key, namespace) != null) {
+                    continue;
+                }
+                setLookupKey(key, namespace);
+                if (staging.containsKey(lookupKey)) {
+                    continue;
+                }
+                KeyNamespaceKey<K, N> storageKey =
+                        new KeyNamespaceKey<>(
+                                key, namespace, keySerializer, namespaceSerializer);
+                rocksDBKeys.add(
+                        batchReader.serializeBatchKeyAndNamespace(
+                                storageKey.key,
+                                storageKey.namespace,
+                                keySerializer,
+                                namespaceSerializer));
+                storageKeys.add(storageKey);
+            }
+        } catch (Throwable t) {
+            return null; // Best-effort: an unserializable key aborts this batch only.
+        }
+        if (rocksDBKeys.isEmpty()) {
+            return null;
+        }
+        final long gen = writeGen;
+        return () -> fetchPreparedChunksIntoStaging(rocksDBKeys, storageKeys, gen);
+    }
+
+    /**
      * Worker-side half: runs on the single shared prefetch thread. Reads RocksDB through the
      * delegate's {@code getSerializedValue} — the same thread-safe path Flink's queryable state
      * uses concurrently with the task thread — and parks deserialized values in {@link #staging}.
      */
     private void fetchIntoStaging(java.util.List<byte[]> serializedKeyAndNamespaces, long gen) {
         try {
-            if (workerValueSerializer == null) {
-                workerKeySerializer = keySerializer.duplicate();
-                workerNamespaceSerializer = namespaceSerializer.duplicate();
-                workerValueSerializer = delegate.getValueSerializer().duplicate();
-            }
-            if (staging.size() > ASYNC_STAGING_MAX_ENTRIES) {
-                staging.clear(); // all entries are droppable cache; also purges stale generations
-            }
+            prepareWorkerState();
             if (multiGetPrefetchEnabled && delegate instanceof RocksDBBatchValueReader<?, ?>) {
                 fetchChunksIntoStaging(serializedKeyAndNamespaces, gen);
                 return;
@@ -558,6 +596,88 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         } catch (Throwable ignored) {
             // Best-effort cache warmup; the authoritative read path is untouched.
         }
+    }
+
+    private void prepareWorkerState() {
+        if (workerValueSerializer == null) {
+            workerKeySerializer = keySerializer.duplicate();
+            workerNamespaceSerializer = namespaceSerializer.duplicate();
+            workerValueSerializer = delegate.getValueSerializer().duplicate();
+        }
+        if (staging.size() > ASYNC_STAGING_MAX_ENTRIES) {
+            staging.clear(); // all entries are droppable cache; also purges stale generations
+        }
+    }
+
+    private void fetchPreparedChunksIntoStaging(
+            java.util.List<byte[]> rocksDBKeys,
+            java.util.List<KeyNamespaceKey<K, N>> storageKeys,
+            long gen) {
+        try {
+            prepareWorkerState();
+            for (int start = 0; start < rocksDBKeys.size(); start += multiGetChunkSize) {
+                if (closed || gen != writeGen) {
+                    return;
+                }
+                int end = Math.min(start + multiGetChunkSize, rocksDBKeys.size());
+                fetchPreparedChunkIntoStaging(rocksDBKeys, storageKeys, start, end, gen);
+            }
+        } catch (Throwable ignored) {
+            // Best-effort cache warmup; the authoritative read path is untouched.
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void fetchPreparedChunkIntoStaging(
+            java.util.List<byte[]> rocksDBKeys,
+            java.util.List<KeyNamespaceKey<K, N>> storageKeys,
+            int start,
+            int end,
+            long gen)
+            throws Exception {
+        RocksDBBatchValueReader<K, N> batchReader =
+                (RocksDBBatchValueReader<K, N>) delegate;
+        java.util.List<byte[]> valueBytes;
+        lifecycleLock.readLock().lock();
+        try {
+            if (closed || gen != writeGen) {
+                return;
+            }
+            if (end - start == 1) {
+                valueBytes =
+                        java.util.Collections.singletonList(
+                                batchReader.getSerializedValueByRocksDBKey(
+                                        rocksDBKeys.get(start)));
+            } else {
+                valueBytes =
+                        batchReader.getSerializedValuesByRocksDBKeys(
+                                rocksDBKeys, start, end);
+            }
+        } finally {
+            lifecycleLock.readLock().unlock();
+        }
+
+        if (gen != writeGen || valueBytes.size() != end - start) {
+            return;
+        }
+        for (int i = 0; i < valueBytes.size(); i++) {
+            if (gen != writeGen) {
+                return;
+            }
+            byte[] serializedValue = valueBytes.get(i);
+            if (serializedValue != null) {
+                stagePreparedValue(storageKeys.get(start + i), serializedValue, gen);
+            }
+        }
+    }
+
+    private void stagePreparedValue(
+            KeyNamespaceKey<K, N> storageKey, byte[] valueBytes, long gen) throws IOException {
+        org.apache.flink.core.memory.DataInputDeserializer valueIn =
+                new org.apache.flink.core.memory.DataInputDeserializer(
+                        valueBytes, 0, valueBytes.length);
+        V value = workerValueSerializer.deserialize(valueIn);
+        staging.put(storageKey, new StagedValue<>(value, gen));
     }
 
     @SuppressWarnings("unchecked")
