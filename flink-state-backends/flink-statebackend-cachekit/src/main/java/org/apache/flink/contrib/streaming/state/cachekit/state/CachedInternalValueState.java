@@ -103,6 +103,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private TypeSerializer<K> workerKeySerializer;
     private TypeSerializer<N> workerNamespaceSerializer;
     private TypeSerializer<V> workerValueSerializer;
+    private org.apache.flink.core.memory.DataInputDeserializer workerValueInput;
 
     private static int loadStagingMaxEntries() {
         try {
@@ -603,6 +604,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             workerKeySerializer = keySerializer.duplicate();
             workerNamespaceSerializer = namespaceSerializer.duplicate();
             workerValueSerializer = delegate.getValueSerializer().duplicate();
+            workerValueInput = new org.apache.flink.core.memory.DataInputDeserializer();
         }
         if (staging.size() > ASYNC_STAGING_MAX_ENTRIES) {
             staging.clear(); // all entries are droppable cache; also purges stale generations
@@ -673,10 +675,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private void stagePreparedValue(
             KeyNamespaceKey<K, N> storageKey, byte[] valueBytes, long gen) throws IOException {
-        org.apache.flink.core.memory.DataInputDeserializer valueIn =
-                new org.apache.flink.core.memory.DataInputDeserializer(
-                        valueBytes, 0, valueBytes.length);
-        V value = workerValueSerializer.deserialize(valueIn);
+        workerValueInput.setBuffer(valueBytes, 0, valueBytes.length);
+        V value = workerValueSerializer.deserialize(workerValueInput);
         staging.put(storageKey, new StagedValue<>(value, gen));
     }
 
@@ -757,10 +757,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         K key = workerKeySerializer.deserialize(in);
         in.readByte(); // magic number
         N namespace = workerNamespaceSerializer.deserialize(in);
-        org.apache.flink.core.memory.DataInputDeserializer valueIn =
-                new org.apache.flink.core.memory.DataInputDeserializer(
-                        valueBytes, 0, valueBytes.length);
-        V value = workerValueSerializer.deserialize(valueIn);
+        workerValueInput.setBuffer(valueBytes, 0, valueBytes.length);
+        V value = workerValueSerializer.deserialize(workerValueInput);
         staging.put(new KeyNamespaceKey<>(key, namespace), new StagedValue<>(value, gen));
     }
 
