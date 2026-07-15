@@ -108,6 +108,77 @@ class CachedInternalValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testChunkedMultiGetPublishesCompletedChunkBeforeNextChunkReturns() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        CountDownLatch secondChunkStarted = new CountDownLatch(1);
+        CountDownLatch releaseSecondChunk = new CountDownLatch(1);
+        AtomicInteger calls = new AtomicInteger();
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+
+        RocksDBBatchValueReader<String, VoidNamespace> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace>) delegate;
+        when(batchReader.getSerializedValues(
+                        any(), eq(StringSerializer.INSTANCE), eq(VoidNamespaceSerializer.INSTANCE)))
+                .thenAnswer(
+                        invocation -> {
+                            List<byte[]> keys = invocation.getArgument(0);
+                            assertEquals(2, keys.size());
+                            if (calls.getAndIncrement() == 0) {
+                                return Arrays.asList(
+                                        KvStateSerializer.serializeValue(
+                                                11, IntSerializer.INSTANCE),
+                                        KvStateSerializer.serializeValue(
+                                                22, IntSerializer.INSTANCE));
+                            }
+                            secondChunkStarted.countDown();
+                            assertTrue(releaseSecondChunk.await(5, TimeUnit.SECONDS));
+                            return Arrays.asList(
+                                    KvStateSerializer.serializeValue(33, IntSerializer.INSTANCE),
+                                    KvStateSerializer.serializeValue(44, IntSerializer.INSTANCE));
+                        });
+        when(delegate.value()).thenReturn(99);
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        2);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        Thread prefetchThread =
+                new Thread(
+                        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2", "k3", "k4")),
+                        "test-chunked-prefetch");
+
+        try {
+            prefetchThread.start();
+            assertTrue(secondChunkStarted.await(5, TimeUnit.SECONDS));
+            currentKey.set("k1");
+            assertEquals(11, state.value());
+            verify(delegate, never()).value();
+        } finally {
+            releaseSecondChunk.countDown();
+            prefetchThread.join(5000);
+        }
+        assertFalse(prefetchThread.isAlive());
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testAsyncPrefetchCanDisableMultiGetForControlledComparison() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, VoidNamespace, Integer> delegate =
@@ -165,8 +236,9 @@ class CachedInternalValueStateTest {
                             if (!releaseBatch.await(5, TimeUnit.SECONDS)) {
                                 throw new AssertionError("Timed out waiting to release batch read");
                             }
-                            return Collections.singletonList(
-                                    KvStateSerializer.serializeValue(1, IntSerializer.INSTANCE));
+                            return Arrays.asList(
+                                    KvStateSerializer.serializeValue(1, IntSerializer.INSTANCE),
+                                    KvStateSerializer.serializeValue(2, IntSerializer.INSTANCE));
                         });
 
         CachedInternalValueState<String, VoidNamespace, Integer> state =
@@ -184,7 +256,7 @@ class CachedInternalValueStateTest {
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
         Thread prefetchThread =
                 new Thread(
-                        state.buildAsyncPrefetchTask(Collections.singletonList("k1")),
+                        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")),
                         "test-prefetch");
         Thread closeThread =
                 new Thread(
