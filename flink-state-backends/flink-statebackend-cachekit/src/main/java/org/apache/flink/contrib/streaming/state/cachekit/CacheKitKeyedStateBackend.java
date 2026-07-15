@@ -205,22 +205,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         delegate.setCurrentKey(newKey);
     }
 
-    /**
-     * When true (default), only VoidNamespace states are wrapped with the CacheKit caches.
-     * Namespaced (window/session) states go straight to the delegate: the 2026-07-06 CDC
-     * isolation showed the write-back wrapper corrupts window-aggregation results
-     * (q7/q8/q11 FAIL with the bp-prefetch stack fully off), matching the earlier
-     * Falcon value-L1 lesson where the cache had to be gated to VoidNamespace as well.
-     */
-    private static final boolean VOID_NAMESPACE_ONLY =
-            loadBooleanFlag("state.backend.cachekit.cache.void-namespace-only", true);
-
-    private static boolean isCacheableNamespace(TypeSerializer<?> namespaceSerializer) {
-        return !VOID_NAMESPACE_ONLY
-                || namespaceSerializer
-                        instanceof org.apache.flink.runtime.state.VoidNamespaceSerializer;
-    }
-
     @Nonnull
     @Override
     @SuppressWarnings({ "unchecked", "rawtypes" })
@@ -228,7 +212,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             TypeSerializer<N> namespaceSerializer, StateDescriptor<S, V> stateDescriptor)
             throws Exception {
         S state = delegate.getOrCreateKeyedState(namespaceSerializer, stateDescriptor);
-        if (!(state instanceof InternalKvState) || !isCacheableNamespace(namespaceSerializer)) {
+        if (!(state instanceof InternalKvState)) {
             return state;
         }
 
@@ -345,7 +329,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 namespaceSerializer, stateDesc, stateSnapshotTransformFactory);
 
         // Wrap ValueState with cache layer
-        if (!(state instanceof InternalKvState) || !isCacheableNamespace(namespaceSerializer)) {
+        if (!(state instanceof InternalKvState)) {
             return state;
         }
 
