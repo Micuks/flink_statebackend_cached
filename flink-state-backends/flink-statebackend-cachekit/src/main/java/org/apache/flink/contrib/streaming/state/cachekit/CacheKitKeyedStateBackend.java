@@ -580,7 +580,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private static final boolean BP_PREFETCH_ASYNC =
             loadBooleanFlag("state.backend.cachekit.bp-prefetch.async.enabled", true);
 
-    /** Uses one ordered RocksDB MultiGet for each async ValueState prefetch batch. */
+    /** Uses ordered, incrementally published RocksDB MultiGet chunks for async ValueState reads. */
     private static final boolean BP_PREFETCH_MULTIGET =
             loadBooleanFlag("state.backend.cachekit.bp-prefetch.multiget.enabled", false);
 

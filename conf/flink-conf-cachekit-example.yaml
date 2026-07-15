@@ -69,15 +69,16 @@ state.backend.cachekit.map.iteration.cache-fill.enabled: false
 state.backend.cachekit.map.bypass.enabled: false
 
 # --- Truly-async backpressure prefetch ----------------------------------------
-# Mailbox thread only serializes key+namespace and enqueues; a shared daemon
-# worker (`cachekit-bp-prefetch`) reads RocksDB via getSerializedValue and
-# stages results. Promote into L1 only when writeGen still matches.
+# Mailbox thread prepares key+namespace and enqueues; a shared daemon worker
+# (`cachekit-bp-prefetch`) reads RocksDB and stages results. Promote into L1
+# only when writeGen still matches. MultiGet publishes each completed chunk.
 state.backend.cachekit.bp-prefetch.enabled: true
 state.backend.cachekit.bp-prefetch.distance: 64
 state.backend.cachekit.bp-prefetch.backpressure-gated: true
 state.backend.cachekit.bp-prefetch.commutative-key-sort: false
 state.backend.cachekit.bp-prefetch.async.enabled: true
 state.backend.cachekit.bp-prefetch.multiget.enabled: false
+# state.backend.cachekit.bp-prefetch.multiget.chunk-size: 8
 state.backend.cachekit.bp-prefetch.async-chunks.enabled: false
 state.backend.cachekit.bp-prefetch.map-snapshots.enabled: false
 # state.backend.cachekit.bp-prefetch.staging.max-entries: 8192
