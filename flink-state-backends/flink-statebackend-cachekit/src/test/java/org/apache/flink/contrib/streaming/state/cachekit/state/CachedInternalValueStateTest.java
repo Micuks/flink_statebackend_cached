@@ -14,8 +14,13 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
+import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
+import org.apache.flink.queryablestate.client.state.serialization.KvStateSerializer;
 import org.apache.flink.runtime.state.VoidNamespace;
+import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 
 import org.junit.jupiter.api.Test;
@@ -36,6 +41,56 @@ import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.inOrder;
 
 class CachedInternalValueStateTest {
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testLazyMaterializationDefersValueDeserializationUntilMailboxHit() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        AtomicInteger deserializations = new AtomicInteger();
+        TypeSerializer<Integer> valueSerializer = mock(TypeSerializer.class);
+        when(valueSerializer.duplicate()).thenReturn(valueSerializer);
+        when(valueSerializer.deserialize(any()))
+                .thenAnswer(
+                        invocation -> {
+                            deserializations.incrementAndGet();
+                            return ((org.apache.flink.core.memory.DataInputView)
+                                            invocation.getArgument(0))
+                                    .readInt();
+                        });
+
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(InternalValueState.class);
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(valueSerializer);
+        when(delegate.getSerializedValue(any(), any(), any(), any()))
+                .thenReturn(KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE));
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Runnable task = state.buildAsyncPrefetchTask(java.util.Collections.singletonList("k1"));
+        task.run();
+        assertEquals(0, deserializations.get());
+
+        currentKey.set("k1");
+        assertEquals(11, state.value());
+        assertEquals(1, deserializations.get());
+        assertEquals(11, state.value());
+        assertEquals(1, deserializations.get());
+        verify(delegate, times(0)).value();
+    }
 
     @Test
     void testL1CacheHit() throws IOException {

@@ -234,7 +234,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueCacheLruOverflow,
                     valueBypassEnabled,
                     valueHitRateThreshold,
-                    valueHitRateWindow);
+                    valueHitRateWindow,
+                    BP_PREFETCH_LAZY_MATERIALIZATION);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -351,7 +352,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueCacheLruOverflow,
                     valueBypassEnabled,
                     valueHitRateThreshold,
-                    valueHitRateWindow);
+                    valueHitRateWindow,
+                    BP_PREFETCH_LAZY_MATERIALIZATION);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
@@ -509,6 +511,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
      */
     private static final boolean BP_PREFETCH_ASYNC =
             loadBooleanFlag("state.backend.cachekit.bp-prefetch.async.enabled", true);
+
+    /** Defers prefetched value deserialization until the mailbox actually consumes the value. */
+    private static final boolean BP_PREFETCH_LAZY_MATERIALIZATION =
+            loadBooleanFlag(
+                    "state.backend.cachekit.bp-prefetch.lazy-materialization.enabled", false);
 
     /**
      * MapState snapshot prefetch is disabled by default: it flushes dirty entries and pays a full
