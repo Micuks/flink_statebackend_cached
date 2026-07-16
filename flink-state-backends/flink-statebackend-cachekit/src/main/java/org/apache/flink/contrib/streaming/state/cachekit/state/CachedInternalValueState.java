@@ -45,6 +45,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final boolean bypassEnabled;
     private final double hitRateThreshold;
     private final int hitRateWindow;
+    private final boolean lazyMaterializationEnabled;
 
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
@@ -99,6 +100,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private TypeSerializer<K> workerKeySerializer;
     private TypeSerializer<N> workerNamespaceSerializer;
     private TypeSerializer<V> workerValueSerializer;
+    private org.apache.flink.core.memory.DataInputDeserializer workerValueInput;
+
+    // Mailbox-thread-confined state for materializing a useful staged value on first access.
+    private TypeSerializer<V> mailboxValueSerializer;
+    private org.apache.flink.core.memory.DataInputDeserializer mailboxValueInput;
 
     private static int loadStagingMaxEntries() {
         try {
@@ -131,6 +137,30 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             boolean bypassEnabled,
             double hitRateThreshold,
             int hitRateWindow) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                false);
+    }
+
+    public CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean lazyMaterializationEnabled) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -139,6 +169,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.bypassEnabled = bypassEnabled;
         this.hitRateThreshold = hitRateThreshold;
         this.hitRateWindow = hitRateWindow;
+        this.lazyMaterializationEnabled = lazyMaterializationEnabled;
 
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
@@ -221,7 +252,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (staged != null && staged.gen == writeGen) {
                 KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace,
                         keySerializer, namespaceSerializer);
-                CachedValue<V> newValue = CachedValue.of(staged.value, false);
+                CachedValue<V> newValue = CachedValue.of(materializeStagedValue(staged), false);
                 l1Cache.put(storageKey, newValue);
                 updateSticky(storageKey, newValue);
                 recordAccess(true); // Hit
@@ -468,6 +499,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 workerKeySerializer = keySerializer.duplicate();
                 workerNamespaceSerializer = namespaceSerializer.duplicate();
                 workerValueSerializer = delegate.getValueSerializer().duplicate();
+                workerValueInput = new org.apache.flink.core.memory.DataInputDeserializer();
             }
             if (staging.size() > ASYNC_STAGING_MAX_ENTRIES) {
                 staging.clear(); // all entries are droppable cache; also purges stale generations
@@ -496,23 +528,42 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     // Absent key: let the authoritative read apply default-value semantics.
                     continue;
                 }
-                org.apache.flink.core.memory.DataInputDeserializer in =
-                        new org.apache.flink.core.memory.DataInputDeserializer(
-                                skn, 0, skn.length);
-                K key = workerKeySerializer.deserialize(in);
-                in.readByte(); // magic number
-                N namespace = workerNamespaceSerializer.deserialize(in);
-                org.apache.flink.core.memory.DataInputDeserializer valueIn =
-                        new org.apache.flink.core.memory.DataInputDeserializer(
-                                valueBytes, 0, valueBytes.length);
-                V value = workerValueSerializer.deserialize(valueIn);
-                staging.put(
-                        new KeyNamespaceKey<>(key, namespace),
-                        new StagedValue<>(value, gen));
+                stageSerializedValue(skn, valueBytes, gen);
             }
         } catch (Throwable ignored) {
             // Best-effort cache warmup; the authoritative read path is untouched.
         }
+    }
+
+    private void stageSerializedValue(byte[] skn, byte[] valueBytes, long gen) throws IOException {
+        org.apache.flink.core.memory.DataInputDeserializer in =
+                new org.apache.flink.core.memory.DataInputDeserializer(skn, 0, skn.length);
+        K key = workerKeySerializer.deserialize(in);
+        in.readByte(); // magic number
+        N namespace = workerNamespaceSerializer.deserialize(in);
+        if (lazyMaterializationEnabled) {
+            staging.put(
+                    new KeyNamespaceKey<>(key, namespace),
+                    StagedValue.serialized(valueBytes, gen));
+            return;
+        }
+        workerValueInput.setBuffer(valueBytes, 0, valueBytes.length);
+        V value = workerValueSerializer.deserialize(workerValueInput);
+        staging.put(
+                new KeyNamespaceKey<>(key, namespace),
+                StagedValue.materialized(value, gen));
+    }
+
+    private V materializeStagedValue(StagedValue<V> staged) throws IOException {
+        if (staged.serializedValue == null) {
+            return staged.value;
+        }
+        if (mailboxValueSerializer == null) {
+            mailboxValueSerializer = delegate.getValueSerializer().duplicate();
+            mailboxValueInput = new org.apache.flink.core.memory.DataInputDeserializer();
+        }
+        mailboxValueInput.setBuffer(staged.serializedValue, 0, staged.serializedValue.length);
+        return mailboxValueSerializer.deserialize(mailboxValueInput);
     }
 
     public void prefetch(Iterable<? extends K> keys) {
@@ -729,11 +780,21 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     /** A value fetched by the prefetch worker, tagged with the write generation at submission. */
     private static final class StagedValue<V> {
         private final V value;
+        private final byte[] serializedValue;
         private final long gen;
 
-        private StagedValue(V value, long gen) {
+        private StagedValue(V value, byte[] serializedValue, long gen) {
             this.value = value;
+            this.serializedValue = serializedValue;
             this.gen = gen;
+        }
+
+        private static <V> StagedValue<V> materialized(V value, long gen) {
+            return new StagedValue<>(value, null, gen);
+        }
+
+        private static <V> StagedValue<V> serialized(byte[] value, long gen) {
+            return new StagedValue<>(null, value, gen);
         }
     }
 
