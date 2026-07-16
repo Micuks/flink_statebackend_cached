@@ -46,6 +46,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final double hitRateThreshold;
     private final int hitRateWindow;
     private final boolean lazyMaterializationEnabled;
+    private final boolean spscStagingEnabled;
 
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
@@ -87,7 +88,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      * dirty flush on this state in between makes the RocksDB read potentially stale.
      */
     private final java.util.concurrent.ConcurrentHashMap<KeyNamespaceKey<K, N>, StagedValue<V>>
-            staging = new java.util.concurrent.ConcurrentHashMap<>();
+            concurrentStaging;
+    private final ArmSpscStagingBuffer<StagedEntry<K, N, V>> spscStaging;
+    private final java.util.HashMap<KeyNamespaceKey<K, N>, StagedValue<V>> mailboxStaging;
 
     /**
      * Write generation: bumped on every {@link #update}, {@link #clear} and dirty flush-through.
@@ -160,6 +163,32 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             double hitRateThreshold,
             int hitRateWindow,
             boolean lazyMaterializationEnabled) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                lazyMaterializationEnabled,
+                false);
+    }
+
+    public CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean lazyMaterializationEnabled,
+            boolean spscStagingEnabled) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -169,6 +198,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.hitRateThreshold = hitRateThreshold;
         this.hitRateWindow = hitRateWindow;
         this.lazyMaterializationEnabled = lazyMaterializationEnabled;
+        this.spscStagingEnabled = spscStagingEnabled;
+        this.concurrentStaging =
+                spscStagingEnabled ? null : new java.util.concurrent.ConcurrentHashMap<>();
+        this.spscStaging =
+                spscStagingEnabled
+                        ? new ArmSpscStagingBuffer<>(ASYNC_STAGING_MAX_ENTRIES)
+                        : null;
+        this.mailboxStaging = spscStagingEnabled ? new java.util.HashMap<>() : null;
 
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
@@ -246,17 +283,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // 4b. Check async-prefetch staging. Sound only when no write/dirty-flush happened on
         // this state since the fetch was submitted (writeGen match); otherwise fall through to
         // the authoritative delegate read.
-        if (!staging.isEmpty()) {
-            StagedValue<V> staged = staging.remove(lookupKey);
-            if (staged != null && staged.gen == writeGen) {
-                KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace,
-                        keySerializer, namespaceSerializer);
-                CachedValue<V> newValue = CachedValue.of(materializeStagedValue(staged), false);
-                l1Cache.put(storageKey, newValue);
-                updateSticky(storageKey, newValue);
-                recordAccess(true); // Hit
-                return newValue.valueOrNull();
-            }
+        StagedValue<V> staged = removeStagedValue(lookupKey);
+        if (staged != null && staged.gen == writeGen) {
+            KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace,
+                    keySerializer, namespaceSerializer);
+            CachedValue<V> newValue = CachedValue.of(materializeStagedValue(staged), false);
+            l1Cache.put(storageKey, newValue);
+            updateSticky(storageKey, newValue);
+            recordAccess(true); // Hit
+            return newValue.valueOrNull();
         }
 
         // 5. Miss -> Load from Delegate
@@ -447,6 +482,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (closed || keys == null || currentNamespace == null) {
             return null;
         }
+        drainSpscStaging();
         java.util.ArrayList<byte[]> serialized = new java.util.ArrayList<>();
         try {
             org.apache.flink.core.memory.DataOutputSerializer out =
@@ -456,7 +492,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     continue;
                 }
                 setLookupKey(key, currentNamespace);
-                if (staging.containsKey(lookupKey)) {
+                if (containsStagedValue(lookupKey)) {
                     continue;
                 }
                 out.clear();
@@ -478,7 +514,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     /**
      * Worker-side half: runs on the single shared prefetch thread. Reads RocksDB through the
      * delegate's {@code getSerializedValue} — the same thread-safe path Flink's queryable state
-     * uses concurrently with the task thread — and parks deserialized values in {@link #staging}.
+     * uses concurrently with the task thread — and publishes values to the configured staging
+     * path.
      */
     private void fetchIntoStaging(java.util.List<byte[]> serializedKeyAndNamespaces, long gen) {
         try {
@@ -488,8 +525,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 workerValueSerializer = delegate.getValueSerializer().duplicate();
                 workerValueInput = new org.apache.flink.core.memory.DataInputDeserializer();
             }
-            if (staging.size() > ASYNC_STAGING_MAX_ENTRIES) {
-                staging.clear(); // all entries are droppable cache; also purges stale generations
+            if (!spscStagingEnabled && concurrentStaging.size() > ASYNC_STAGING_MAX_ENTRIES) {
+                // All entries are droppable cache; also purges stale generations.
+                concurrentStaging.clear();
             }
             for (byte[] skn : serializedKeyAndNamespaces) {
                 if (gen != writeGen) {
@@ -529,16 +567,53 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         in.readByte(); // magic number
         N namespace = workerNamespaceSerializer.deserialize(in);
         if (lazyMaterializationEnabled) {
-            staging.put(
+            stageValue(
                     new KeyNamespaceKey<>(key, namespace),
                     StagedValue.serialized(valueBytes, gen));
             return;
         }
         workerValueInput.setBuffer(valueBytes, 0, valueBytes.length);
         V value = workerValueSerializer.deserialize(workerValueInput);
-        staging.put(
+        stageValue(
                 new KeyNamespaceKey<>(key, namespace),
                 StagedValue.materialized(value, gen));
+    }
+
+    private boolean containsStagedValue(KeyNamespaceKey<K, N> key) {
+        return spscStagingEnabled
+                ? mailboxStaging.containsKey(key)
+                : concurrentStaging.containsKey(key);
+    }
+
+    private StagedValue<V> removeStagedValue(KeyNamespaceKey<K, N> key) {
+        if (spscStagingEnabled) {
+            drainSpscStaging();
+            return mailboxStaging.remove(key);
+        }
+        return concurrentStaging.remove(key);
+    }
+
+    private void stageValue(KeyNamespaceKey<K, N> key, StagedValue<V> value) {
+        if (spscStagingEnabled) {
+            // Best-effort cache warmup: a full ring drops the entry and the authoritative read
+            // remains available on the mailbox thread.
+            spscStaging.offer(new StagedEntry<>(key, value));
+        } else {
+            concurrentStaging.put(key, value);
+        }
+    }
+
+    private void drainSpscStaging() {
+        if (!spscStagingEnabled) {
+            return;
+        }
+        StagedEntry<K, N, V> entry;
+        while ((entry = spscStaging.poll()) != null) {
+            if (mailboxStaging.size() >= ASYNC_STAGING_MAX_ENTRIES) {
+                mailboxStaging.clear();
+            }
+            mailboxStaging.put(entry.key, entry.value);
+        }
     }
 
     private V materializeStagedValue(StagedValue<V> staged) throws IOException {
@@ -773,6 +848,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         private static <V> StagedValue<V> serialized(byte[] value, long gen) {
             return new StagedValue<>(null, value, gen);
+        }
+    }
+
+    private static final class StagedEntry<K, N, V> {
+        private final KeyNamespaceKey<K, N> key;
+        private final StagedValue<V> value;
+
+        private StagedEntry(KeyNamespaceKey<K, N> key, StagedValue<V> value) {
+            this.key = key;
+            this.value = value;
         }
     }
 

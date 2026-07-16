@@ -235,7 +235,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueBypassEnabled,
                     valueHitRateThreshold,
                     valueHitRateWindow,
-                    BP_PREFETCH_LAZY_MATERIALIZATION);
+                    BP_PREFETCH_LAZY_MATERIALIZATION,
+                    BP_PREFETCH_SPSC_STAGING);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -353,7 +354,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueBypassEnabled,
                     valueHitRateThreshold,
                     valueHitRateWindow,
-                    BP_PREFETCH_LAZY_MATERIALIZATION);
+                    BP_PREFETCH_LAZY_MATERIALIZATION,
+                    BP_PREFETCH_SPSC_STAGING);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
@@ -516,6 +518,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private static final boolean BP_PREFETCH_LAZY_MATERIALIZATION =
             loadBooleanFlag(
                     "state.backend.cachekit.bp-prefetch.lazy-materialization.enabled", false);
+
+    /** Uses a 128-byte-padded SPSC ring for worker-to-mailbox prefetch hand-off. */
+    private static final boolean BP_PREFETCH_SPSC_STAGING =
+            loadBooleanFlag("state.backend.cachekit.bp-prefetch.spsc-staging.enabled", false);
 
     /**
      * MapState snapshot prefetch is disabled by default: it flushes dirty entries and pays a full
