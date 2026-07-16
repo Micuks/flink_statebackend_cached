@@ -44,6 +44,50 @@ class CachedInternalValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testSpscStagingTransfersPrefetchedValueToMailbox() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(InternalValueState.class);
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.getSerializedValue(any(), any(), any(), any()))
+                .thenReturn(
+                        KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE),
+                        KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE));
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Thread worker =
+                new Thread(
+                        state.buildAsyncPrefetchTask(java.util.Arrays.asList("k1", "k2")),
+                        "spsc-prefetch-worker");
+        worker.start();
+        worker.join(java.util.concurrent.TimeUnit.SECONDS.toMillis(5));
+        assertEquals(false, worker.isAlive());
+
+        currentKey.set("k1");
+        assertEquals(11, state.value());
+        currentKey.set("k2");
+        assertEquals(22, state.value());
+        verify(delegate, times(0)).value();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testLazyMaterializationDefersValueDeserializationUntilMailboxHit() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         AtomicInteger deserializations = new AtomicInteger();

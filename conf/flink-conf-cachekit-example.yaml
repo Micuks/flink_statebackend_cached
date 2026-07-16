@@ -78,6 +78,7 @@ state.backend.cachekit.bp-prefetch.backpressure-gated: true
 state.backend.cachekit.bp-prefetch.commutative-key-sort: false
 state.backend.cachekit.bp-prefetch.async.enabled: true
 state.backend.cachekit.bp-prefetch.lazy-materialization.enabled: false
+state.backend.cachekit.bp-prefetch.spsc-staging.enabled: false
 state.backend.cachekit.bp-prefetch.async-chunks.enabled: false
 state.backend.cachekit.bp-prefetch.map-snapshots.enabled: false
 # state.backend.cachekit.bp-prefetch.staging.max-entries: 8192
