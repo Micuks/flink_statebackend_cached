@@ -113,6 +113,9 @@ class CachedInternalValueStateTest {
         verify(batchReader, never()).getSerializedValues(any(), any(), any());
         verify(delegate, never()).getSerializedValue(any(), any(), any(), any());
         verify(delegate, never()).value();
+        assertEquals(1, state.getPrefetchMultiGetCallsForTesting());
+        assertEquals(1, state.getPrefetchMissingValuesStagedForTesting());
+        assertEquals(3, state.getPrefetchValuesPromotedForTesting());
     }
 
     @Test
@@ -340,6 +343,8 @@ class CachedInternalValueStateTest {
         state.buildAsyncPrefetchTask(Arrays.asList("m1", "m2", "m3", "m4")).run();
         verify(batchReader, times(1))
                 .getSerializedValuesByRocksDBKeys(any(), eq(0), eq(4));
+        assertEquals(3, state.getPrefetchPointGetCallsForTesting());
+        assertEquals(1, state.getPrefetchMultiGetCallsForTesting());
     }
 
     @Test
