@@ -101,7 +101,23 @@ public final class StatePrefetcher {
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
     public static void prefetch(Input<?> headOperator, StreamRecord<?>[] buf, int n) {
-        if (n <= 1 || headOperator == null) {
+        prefetch(headOperator, buf, 0, n);
+    }
+
+    /**
+     * Best-effort prefetch for a live range in the caller-owned record buffer. The call is
+     * synchronous only through key extraction and backend submission; CacheKit performs the actual
+     * RocksDB reads on its worker. Keeping the range avoids allocating a copied record slice for
+     * every early-lookahead chunk.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public static void prefetch(
+            Input<?> headOperator, StreamRecord<?>[] buf, int fromIndex, int toIndex) {
+        if (headOperator == null
+                || buf == null
+                || fromIndex < 0
+                || toIndex > buf.length
+                || toIndex - fromIndex <= 1) {
             return; // single record gains nothing from a batched prefetch
         }
         try {
@@ -135,23 +151,9 @@ public final class StatePrefetcher {
 
             // LinkedHashSet: dedup same-key records (arrival order preserved) so the backend
             // never pays a lookup twice for one lookahead window.
-            java.util.Collection keys = new java.util.LinkedHashSet(n);
-            for (int i = 0; i < n; i++) {
-                StreamRecord<?> rec = buf[i];
-                if (rec == null) {
-                    continue;
-                }
-                Object key;
-                try {
-                    key = selector.getKey(rec.getValue());
-                } catch (Throwable t) {
-                    return; // an unkeyed/odd record: bail, the prefetch is optional
-                }
-                if (key != null) {
-                    keys.add(key);
-                }
-            }
-            if (!keys.isEmpty()) {
+            java.util.Collection keys =
+                    new java.util.LinkedHashSet(Math.max(2, toIndex - fromIndex));
+            if (extractKeys(selector, buf, fromIndex, toIndex, keys) && !keys.isEmpty()) {
                 prefetchMethod.invoke(ksb, keys);
             }
         } catch (Throwable t) {
@@ -159,13 +161,29 @@ public final class StatePrefetcher {
         }
     }
 
-    public static java.util.concurrent.CompletableFuture<Void> prefetchAsync(
-            Input<?> headOperator, StreamRecord<?>[] buf, int n) {
-        if (n <= 1 || headOperator == null) {
-            return java.util.concurrent.CompletableFuture.completedFuture(null);
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    static boolean extractKeys(
+            KeySelector selector,
+            StreamRecord<?>[] buf,
+            int fromIndex,
+            int toIndex,
+            java.util.Collection keys) {
+        for (int i = fromIndex; i < toIndex; i++) {
+            StreamRecord<?> rec = buf[i];
+            if (rec == null) {
+                continue;
+            }
+            Object key;
+            try {
+                key = selector.getKey(rec.getValue());
+            } catch (Throwable t) {
+                return false; // an unkeyed/odd record: bail, the prefetch is optional
+            }
+            if (key != null) {
+                keys.add(key);
+            }
         }
-        prefetch(headOperator, buf, n);
-        return java.util.concurrent.CompletableFuture.completedFuture(null);
+        return true;
     }
 
     /** Best-effort {@code hasPrefetchableState()} probe; defaults to true when absent. */
