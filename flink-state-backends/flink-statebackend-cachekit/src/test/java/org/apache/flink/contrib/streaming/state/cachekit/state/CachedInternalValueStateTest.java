@@ -64,9 +64,10 @@ class CachedInternalValueStateTest {
         when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
         when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
 
-        RocksDBBatchValueReader<String, VoidNamespace> batchReader =
-                (RocksDBBatchValueReader<String, VoidNamespace>) delegate;
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
         stubPreparedKeySerialization(batchReader);
+        when(batchReader.getBatchDefaultValue()).thenReturn(99);
         List<byte[]> batchValues =
                 Arrays.asList(
                         KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE),
@@ -110,7 +111,7 @@ class CachedInternalValueStateTest {
                         eq(VoidNamespaceSerializer.INSTANCE));
         verify(batchReader, never()).getSerializedValues(any(), any(), any());
         verify(delegate, never()).getSerializedValue(any(), any(), any(), any());
-        verify(delegate, times(1)).value();
+        verify(delegate, never()).value();
     }
 
     @Test
@@ -125,8 +126,8 @@ class CachedInternalValueStateTest {
         when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
         when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
 
-        RocksDBBatchValueReader<String, String> batchReader =
-                (RocksDBBatchValueReader<String, String>) delegate;
+        RocksDBBatchValueReader<String, String, Integer> batchReader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
         when(batchReader.serializeBatchKeyAndNamespace(
                         any(), eq("window-7"), any(), any()))
                 .thenAnswer(
@@ -181,8 +182,8 @@ class CachedInternalValueStateTest {
         when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
         when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
 
-        RocksDBBatchValueReader<String, VoidNamespace> batchReader =
-                (RocksDBBatchValueReader<String, VoidNamespace>) delegate;
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
         stubPreparedKeySerialization(batchReader);
         when(batchReader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
                 .thenAnswer(
@@ -250,8 +251,8 @@ class CachedInternalValueStateTest {
         when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
         when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
 
-        RocksDBBatchValueReader<String, VoidNamespace> batchReader =
-                (RocksDBBatchValueReader<String, VoidNamespace>) delegate;
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
         stubPreparedKeySerialization(batchReader);
         when(batchReader.getSerializedValuesByRocksDBKeys(any(), eq(0), eq(2)))
                 .thenReturn(
@@ -321,7 +322,7 @@ class CachedInternalValueStateTest {
         currentKey.set("k1");
         assertEquals(7, state.value());
         verify(delegate, times(1)).getSerializedValue(any(), any(), any(), any());
-        verify((RocksDBBatchValueReader<String, VoidNamespace>) delegate, never())
+        verify((RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate, never())
                 .getSerializedValues(any(), any(), any());
     }
 
@@ -339,8 +340,8 @@ class CachedInternalValueStateTest {
         when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
         when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
         when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
-        RocksDBBatchValueReader<String, VoidNamespace> batchReader =
-                (RocksDBBatchValueReader<String, VoidNamespace>) delegate;
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
         stubPreparedKeySerialization(batchReader);
         when(batchReader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
                 .thenAnswer(
@@ -397,7 +398,7 @@ class CachedInternalValueStateTest {
     }
 
     private static void stubPreparedKeySerialization(
-            RocksDBBatchValueReader<String, VoidNamespace> batchReader) throws Exception {
+            RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader) throws Exception {
         when(batchReader.serializeBatchKeyAndNamespace(
                         any(),
                         eq(VoidNamespace.INSTANCE),

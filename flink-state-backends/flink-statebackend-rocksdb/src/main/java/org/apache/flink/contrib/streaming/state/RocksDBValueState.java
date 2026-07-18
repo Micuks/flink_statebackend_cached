@@ -43,7 +43,7 @@ import java.util.List;
  * @param <V> The type of value that the state state stores.
  */
 class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
-        implements InternalValueState<K, N, V>, RocksDBBatchValueReader<K, N> {
+        implements InternalValueState<K, N, V>, RocksDBBatchValueReader<K, N, V> {
 
     /**
      * Creates a new {@code RocksDBValueState}.
@@ -80,6 +80,11 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
     }
 
     @Override
+    public V getBatchDefaultValue() {
+        return getDefaultValue();
+    }
+
+    @Override
     public V value() {
         try {
             byte[] valueBytes =
@@ -102,8 +107,7 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
             TypeSerializer<K> safeKeySerializer,
             TypeSerializer<N> safeNamespaceSerializer)
             throws Exception {
-        return serializeKeyAndNamespace(
-                key, namespace, safeKeySerializer, safeNamespaceSerializer);
+        return serializeKeyAndNamespace(key, namespace, safeKeySerializer, safeNamespaceSerializer);
     }
 
     @Override
@@ -145,9 +149,7 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
         for (byte[] serializedKeyAndNamespace : serializedKeyAndNamespaces) {
             rocksDBKeys.add(
                     serializeQueryKeyAndNamespace(
-                            serializedKeyAndNamespace,
-                            safeKeySerializer,
-                            safeNamespaceSerializer));
+                            serializedKeyAndNamespace, safeKeySerializer, safeNamespaceSerializer));
         }
         return getSerializedValuesByRocksDBKeys(rocksDBKeys, 0, rocksDBKeys.size());
     }

@@ -55,16 +55,17 @@ public class RocksDBBatchValueReaderTest {
                                     VoidNamespace.INSTANCE,
                                     VoidNamespaceSerializer.INSTANCE,
                                     new ValueStateDescriptor<>(
-                                            "batch-value", StringSerializer.INSTANCE));
+                                            "batch-value", StringSerializer.INSTANCE, "fallback"));
 
             backend.setCurrentKey(1);
             state.update("one");
             backend.setCurrentKey(2);
             state.update("two");
 
-            assertTrue(state instanceof RocksDBBatchValueReader<?, ?>);
-            RocksDBBatchValueReader<Integer, VoidNamespace> reader =
-                    (RocksDBBatchValueReader<Integer, VoidNamespace>) state;
+            assertTrue(state instanceof RocksDBBatchValueReader<?, ?, ?>);
+            RocksDBBatchValueReader<Integer, VoidNamespace, String> reader =
+                    (RocksDBBatchValueReader<Integer, VoidNamespace, String>) state;
+            assertEquals("fallback", reader.getBatchDefaultValue());
             List<byte[]> values =
                     reader.getSerializedValues(
                             Arrays.asList(
@@ -109,8 +110,7 @@ public class RocksDBBatchValueReaderTest {
                                     VoidNamespace.INSTANCE,
                                     IntSerializer.INSTANCE,
                                     VoidNamespaceSerializer.INSTANCE));
-            List<byte[]> directValues =
-                    reader.getSerializedValuesByRocksDBKeys(rocksDBKeys, 1, 3);
+            List<byte[]> directValues = reader.getSerializedValuesByRocksDBKeys(rocksDBKeys, 1, 3);
             assertEquals(2, directValues.size());
             assertEquals("two", deserializeValue(directValues.get(0)));
             assertEquals("one", deserializeValue(directValues.get(1)));

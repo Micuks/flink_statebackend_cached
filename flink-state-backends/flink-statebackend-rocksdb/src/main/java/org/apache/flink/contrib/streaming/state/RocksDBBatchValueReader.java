@@ -27,11 +27,17 @@ import java.util.List;
  * Internal capability exposed by RocksDB {@code ValueState} for ordered batch reads.
  *
  * <p>Each result is the raw serialized value for the key and namespace at the same index. Missing
- * entries are represented by {@code null}. Implementations must preserve input order and list
- * size.
+ * entries are represented by {@code null}. Implementations must preserve input order and list size.
  */
 @Internal
-public interface RocksDBBatchValueReader<K, N> {
+public interface RocksDBBatchValueReader<K, N, V> {
+
+    /**
+     * Returns the state default value. Batch readers use this when RocksDB reports a missing key so
+     * prefetch can cache the same value that {@code ValueState.value()} would return instead of
+     * issuing a second point lookup. Callers must copy a non-null value before publishing it.
+     */
+    V getBatchDefaultValue();
 
     byte[] serializeBatchKeyAndNamespace(
             K key,
