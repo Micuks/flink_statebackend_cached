@@ -606,11 +606,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     /**
      * True when at least one cached ValueState wrapper exists, i.e. a prefetch could land.
-     * Called reflectively by StatePrefetcher BEFORE it pays the per-batch key extraction: window
-     * operators only hold namespaced states (never wrapped under the VoidNamespace gate), so
-     * without this check every lookahead batch would extract and dedup up to `distance` keys for
-     * a prefetch that is guaranteed to be a no-op. Wrappers register lazily on first state
-     * access, so this must be re-evaluated per call, not cached by the caller.
+     * Called reflectively by StatePrefetcher before it pays the per-batch key extraction. Wrappers
+     * register lazily on first state access, so this must be re-evaluated per call, not cached by
+     * the caller.
      */
     public boolean hasPrefetchableState() {
         synchronized (lifecycleLock) {
