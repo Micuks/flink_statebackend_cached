@@ -88,7 +88,8 @@ class CachedInternalValueStateTest {
                         false,
                         0.05,
                         1000,
-                        true);
+                        true,
+                        8);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         Runnable prefetch = state.buildAsyncPrefetchTask(Arrays.asList("k1", "missing", "k2"));
@@ -154,7 +155,8 @@ class CachedInternalValueStateTest {
                         false,
                         0.05,
                         1000,
-                        true);
+                        true,
+                        8);
         state.setCurrentNamespace("window-7");
         state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
 
@@ -292,6 +294,56 @@ class CachedInternalValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testMultiGetUsesPointReadsBelowConfiguredMinimumBatchSize() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
+        stubPreparedKeySerialization(batchReader);
+        when(batchReader.getSerializedValueByRocksDBKey(any()))
+                .thenReturn(KvStateSerializer.serializeValue(7, IntSerializer.INSTANCE));
+        when(batchReader.getSerializedValuesByRocksDBKeys(any(), eq(0), eq(4)))
+                .thenReturn(
+                        Arrays.asList(
+                                KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE),
+                                KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE),
+                                KvStateSerializer.serializeValue(33, IntSerializer.INSTANCE),
+                                KvStateSerializer.serializeValue(44, IntSerializer.INSTANCE)));
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        4);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        state.buildAsyncPrefetchTask(Arrays.asList("p1", "p2", "p3")).run();
+        verify(batchReader, times(3)).getSerializedValueByRocksDBKey(any());
+        verify(batchReader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+
+        state.buildAsyncPrefetchTask(Arrays.asList("m1", "m2", "m3", "m4")).run();
+        verify(batchReader, times(1))
+                .getSerializedValuesByRocksDBKeys(any(), eq(0), eq(4));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testAsyncPrefetchCanDisableMultiGetForControlledComparison() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, VoidNamespace, Integer> delegate =
@@ -366,7 +418,8 @@ class CachedInternalValueStateTest {
                         false,
                         0.05,
                         1000,
-                        true);
+                        true,
+                        8);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
         Thread prefetchThread =
                 new Thread(

@@ -48,6 +48,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final int hitRateWindow;
     private final boolean multiGetPrefetchEnabled;
     private final int multiGetChunkSize;
+    private final int multiGetMinBatchSize;
 
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
@@ -83,6 +84,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     /** Cap on staged entries; the worker clears the whole map beyond this (all droppable). */
     private static final int ASYNC_STAGING_MAX_ENTRIES = loadStagingMaxEntries();
     private static final int MULTIGET_CHUNK_SIZE = loadMultiGetChunkSize();
+    private static final int MULTIGET_MIN_BATCH_SIZE = loadMultiGetMinBatchSize();
 
     /**
      * Values fetched by the shared prefetch worker, waiting to be promoted into L1 by the mailbox
@@ -137,6 +139,23 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
     }
 
+    private static int loadMultiGetMinBatchSize() {
+        try {
+            return Math.max(
+                    2,
+                    Math.min(
+                            MULTIGET_CHUNK_SIZE,
+                            org.apache.flink.configuration.GlobalConfiguration.loadConfiguration()
+                                    .get(
+                                            org.apache.flink.configuration.ConfigOptions.key(
+                                                            "state.backend.cachekit.bp-prefetch.multiget.min-batch-size")
+                                                    .intType()
+                                                    .defaultValue(4))));
+        } catch (Throwable t) {
+            return Math.min(4, MULTIGET_CHUNK_SIZE);
+        }
+    }
+
     // Bypass State
     private volatile boolean isBypassing = false;
     private long currentWindowAccesses = 0;
@@ -188,7 +207,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 hitRateThreshold,
                 hitRateWindow,
                 multiGetPrefetchEnabled,
-                MULTIGET_CHUNK_SIZE);
+                MULTIGET_CHUNK_SIZE,
+                MULTIGET_MIN_BATCH_SIZE);
     }
 
     CachedInternalValueState(
@@ -203,6 +223,34 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             int hitRateWindow,
             boolean multiGetPrefetchEnabled,
             int multiGetChunkSize) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                multiGetPrefetchEnabled,
+                multiGetChunkSize,
+                2);
+    }
+
+    CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean multiGetPrefetchEnabled,
+            int multiGetChunkSize,
+            int multiGetMinBatchSize) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -213,6 +261,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.hitRateWindow = hitRateWindow;
         this.multiGetPrefetchEnabled = multiGetPrefetchEnabled;
         this.multiGetChunkSize = Math.max(2, multiGetChunkSize);
+        this.multiGetMinBatchSize =
+                Math.max(2, Math.min(this.multiGetChunkSize, multiGetMinBatchSize));
 
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
@@ -652,11 +702,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (closed || gen != writeGen) {
                 return;
             }
-            if (end - start == 1) {
-                valueBytes =
-                        java.util.Collections.singletonList(
-                                batchReader.getSerializedValueByRocksDBKey(
-                                        rocksDBKeys.get(start)));
+            if (end - start < multiGetMinBatchSize) {
+                valueBytes = new java.util.ArrayList<>(end - start);
+                for (int i = start; i < end; i++) {
+                    valueBytes.add(
+                            batchReader.getSerializedValueByRocksDBKey(rocksDBKeys.get(i)));
+                }
             } else {
                 valueBytes =
                         batchReader.getSerializedValuesByRocksDBKeys(
@@ -695,9 +746,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 return;
             }
             int end = Math.min(start + multiGetChunkSize, serializedKeyAndNamespaces.size());
-            if (end - start == 1) {
-                fetchSingleIntoStaging(
-                        serializedKeyAndNamespaces.get(start), defaultValue, gen);
+            if (end - start < multiGetMinBatchSize) {
+                for (int i = start; i < end; i++) {
+                    fetchSingleIntoStaging(
+                            serializedKeyAndNamespaces.get(i), defaultValue, gen);
+                }
                 continue;
             }
             fetchChunkIntoStaging(
