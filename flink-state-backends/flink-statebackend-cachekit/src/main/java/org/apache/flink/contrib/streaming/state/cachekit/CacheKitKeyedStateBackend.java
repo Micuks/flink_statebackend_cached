@@ -109,6 +109,21 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
+    /**
+     * Serializes terminal backend operations that Flink may invoke from different task threads.
+     *
+     * <p>During cancellation, {@code StreamTask} can call {@link #close()} while operator teardown
+     * calls {@link #dispose()} concurrently. The latter releases RocksDB column-family handles, so
+     * a wrapper flush must finish before delegate disposal begins.
+     */
+    private final Object lifecycleLock = new Object();
+
+    /** Guarded by {@link #lifecycleLock}. */
+    private boolean closed;
+
+    /** Guarded by {@link #lifecycleLock}. */
+    private boolean disposed;
+
     public CacheKitKeyedStateBackend(
             AbstractKeyedStateBackend<K> delegate,
             TaskKvStateRegistry kvStateRegistry,
@@ -209,6 +224,16 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @Override
     @SuppressWarnings({ "unchecked", "rawtypes" })
     public <N, S extends State, V> S getOrCreateKeyedState(
+            TypeSerializer<N> namespaceSerializer, StateDescriptor<S, V> stateDescriptor)
+            throws Exception {
+        synchronized (lifecycleLock) {
+            ensureOpen();
+            return getOrCreateKeyedStateInternal(namespaceSerializer, stateDescriptor);
+        }
+    }
+
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    private <N, S extends State, V> S getOrCreateKeyedStateInternal(
             TypeSerializer<N> namespaceSerializer, StateDescriptor<S, V> stateDescriptor)
             throws Exception {
         S state = delegate.getOrCreateKeyedState(namespaceSerializer, stateDescriptor);
@@ -325,6 +350,19 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             StateDescriptor<S, SV> stateDesc,
             StateSnapshotTransformer.StateSnapshotTransformFactory<SEV> stateSnapshotTransformFactory)
             throws Exception {
+        synchronized (lifecycleLock) {
+            ensureOpen();
+            return createOrUpdateInternalStateInternal(
+                    namespaceSerializer, stateDesc, stateSnapshotTransformFactory);
+        }
+    }
+
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    private <N, SV, SEV, S extends State, IS extends S> IS createOrUpdateInternalStateInternal(
+            TypeSerializer<N> namespaceSerializer,
+            StateDescriptor<S, SV> stateDesc,
+            StateSnapshotTransformer.StateSnapshotTransformFactory<SEV> stateSnapshotTransformFactory)
+            throws Exception {
         IS state = delegate.createOrUpdateInternalState(
                 namespaceSerializer, stateDesc, stateSnapshotTransformFactory);
 
@@ -422,17 +460,24 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @Override
     public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>> KeyGroupedInternalPriorityQueue<T> create(
             String stateName, TypeSerializer<T> byteOrderedElementSerializer) {
-        KeyGroupedInternalPriorityQueue<T> delegateQueue =
-                delegate.create(stateName, byteOrderedElementSerializer);
-        return wrapPriorityQueue(delegateQueue, byteOrderedElementSerializer);
+        synchronized (lifecycleLock) {
+            ensureOpen();
+            KeyGroupedInternalPriorityQueue<T> delegateQueue =
+                    delegate.create(stateName, byteOrderedElementSerializer);
+            return wrapPriorityQueue(delegateQueue, byteOrderedElementSerializer);
+        }
     }
 
     @Override
     public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>> KeyGroupedInternalPriorityQueue<T> create(
             String stateName, TypeSerializer<T> byteOrderedElementSerializer, boolean allowFutureMetadataUpdates) {
-        KeyGroupedInternalPriorityQueue<T> delegateQueue =
-                delegate.create(stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
-        return wrapPriorityQueue(delegateQueue, byteOrderedElementSerializer);
+        synchronized (lifecycleLock) {
+            ensureOpen();
+            KeyGroupedInternalPriorityQueue<T> delegateQueue =
+                    delegate.create(
+                            stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
+            return wrapPriorityQueue(delegateQueue, byteOrderedElementSerializer);
+        }
     }
 
     /**
@@ -473,33 +518,56 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @Override
     public void dispose() {
-        try {
-            super.dispose();
-        } finally {
-            for (Object wrapper : wrappersByDelegateIdentity.values()) {
-                try {
-                    if (wrapper instanceof CachedInternalValueState) {
-                        // Quiesce async bp-prefetch BEFORE delegate.dispose()/close() frees the
-                        // RocksDB db + ColumnFamilyHandles (else a shared-executor prefetch worker
-                        // reads a freed handle and SIGSEGVs in librocksdbjni).
-                        ((CachedInternalValueState<?, ?, ?>) wrapper).close();
-                    } else if (wrapper instanceof CachedInternalListState) {
-                        ((CachedInternalListState<?, ?, ?>) wrapper).close();
-                    } else if (wrapper instanceof CachedInternalPriorityQueueSet) {
-                        ((CachedInternalPriorityQueueSet<?>) wrapper).close();
-                    }
-                } catch (Exception ignored) {
-                    // log and continue
+        synchronized (lifecycleLock) {
+            if (disposed) {
+                return;
+            }
+            disposed = true;
+            closed = true;
+            try {
+                super.dispose();
+            } finally {
+                closeWrappers();
+                shutdownFlushExecutors();
+                delegate.dispose();
+            }
+        }
+    }
+
+    private void closeWrappers() {
+        for (Object wrapper : wrappersByDelegateIdentity.values()) {
+            try {
+                if (wrapper instanceof CachedInternalValueState) {
+                    // Quiesce async bp-prefetch BEFORE delegate.dispose()/close() frees the
+                    // RocksDB db + ColumnFamilyHandles (else a shared-executor prefetch worker
+                    // reads a freed handle and SIGSEGVs in librocksdbjni).
+                    ((CachedInternalValueState<?, ?, ?>) wrapper).close();
+                } else if (wrapper instanceof CachedInternalMapState) {
+                    ((CachedInternalMapState<?, ?, ?, ?>) wrapper).close();
+                } else if (wrapper instanceof CachedInternalListState) {
+                    ((CachedInternalListState<?, ?, ?>) wrapper).close();
+                } else if (wrapper instanceof CachedInternalPriorityQueueSet) {
+                    ((CachedInternalPriorityQueueSet<?>) wrapper).close();
                 }
+            } catch (Exception ignored) {
+                // log and continue
             }
-            wrappersByDelegateIdentity.clear();
-            if (listStateFlushExecutor != null) {
-                listStateFlushExecutor.shutdownNow();
-            }
-            if (pqFlushExecutor != null) {
-                pqFlushExecutor.shutdownNow();
-            }
-            delegate.dispose();
+        }
+        wrappersByDelegateIdentity.clear();
+    }
+
+    private void shutdownFlushExecutors() {
+        if (listStateFlushExecutor != null) {
+            listStateFlushExecutor.shutdownNow();
+        }
+        if (pqFlushExecutor != null) {
+            pqFlushExecutor.shutdownNow();
+        }
+    }
+
+    private void ensureOpen() {
+        if (closed || disposed) {
+            throw new IllegalStateException("CacheKit keyed state backend is closed.");
         }
     }
 
@@ -539,81 +607,70 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
      * access, so this must be re-evaluated per call, not cached by the caller.
      */
     public boolean hasPrefetchableState() {
-        return !wrappersByDelegateIdentity.isEmpty();
+        synchronized (lifecycleLock) {
+            return !closed && !disposed && !wrappersByDelegateIdentity.isEmpty();
+        }
     }
 
     @SuppressWarnings({ "unchecked", "rawtypes" })
     public void prefetch(Collection<? extends K> keys) {
-        if (keys == null || keys.isEmpty() || wrappersByDelegateIdentity.isEmpty()) {
-            return;
-        }
-        if (BP_PREFETCH_ASYNC) {
-            // Off-mailbox path: only (key, namespace) serialization happens here; RocksDB reads
-            // and value deserialization run on the shared prefetch worker. No key-context
-            // save/restore needed — submission never touches the backend key context.
-            for (Object wrapper : wrappersByDelegateIdentity.values()) {
-                if (wrapper instanceof CachedInternalValueState) {
-                    Runnable task =
-                            ((CachedInternalValueState) wrapper).buildAsyncPrefetchTask(keys);
-                    if (task != null) {
-                        PrefetchExecutor.trySubmit(task);
-                    }
-                }
-            }
-            if (!BP_PREFETCH_MAP_SNAPSHOTS) {
+        synchronized (lifecycleLock) {
+            if (closed || disposed || keys == null || keys.isEmpty() || wrappersByDelegateIdentity.isEmpty()) {
                 return;
             }
-        }
-        K previousKey = getCurrentKey();
-        try {
-            for (Object wrapper : wrappersByDelegateIdentity.values()) {
-                if (!BP_PREFETCH_ASYNC && wrapper instanceof CachedInternalValueState) {
-                    ((CachedInternalValueState) wrapper).prefetch(keys);
-                } else if (BP_PREFETCH_MAP_SNAPSHOTS
-                        && wrapper instanceof CachedInternalMapState) {
-                    ((CachedInternalMapState) wrapper).prefetchSnapshots(keys);
+            if (BP_PREFETCH_ASYNC) {
+                // Off-mailbox path: only (key, namespace) serialization happens here; RocksDB reads
+                // and value deserialization run on the shared prefetch worker. No key-context
+                // save/restore needed — submission never touches the backend key context.
+                for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                    if (wrapper instanceof CachedInternalValueState) {
+                        Runnable task =
+                                ((CachedInternalValueState) wrapper).buildAsyncPrefetchTask(keys);
+                        if (task != null) {
+                            PrefetchExecutor.trySubmit(task);
+                        }
+                    }
+                }
+                if (!BP_PREFETCH_MAP_SNAPSHOTS) {
+                    return;
                 }
             }
-        } catch (Throwable ignored) {
-            // Best-effort cache warmup. Authoritative state access remains unchanged.
-        } finally {
-            setCurrentKey(previousKey);
+            K previousKey = getCurrentKey();
+            try {
+                for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                    if (!BP_PREFETCH_ASYNC && wrapper instanceof CachedInternalValueState) {
+                        ((CachedInternalValueState) wrapper).prefetch(keys);
+                    } else if (BP_PREFETCH_MAP_SNAPSHOTS
+                            && wrapper instanceof CachedInternalMapState) {
+                        ((CachedInternalMapState) wrapper).prefetchSnapshots(keys);
+                    }
+                }
+            } catch (Throwable ignored) {
+                // Best-effort cache warmup. Authoritative state access remains unchanged.
+            } finally {
+                setCurrentKey(previousKey);
+            }
         }
     }
 
     @Override
     public void close() throws IOException {
-        try {
-            flushWrappers();
-        } catch (IOException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new IOException("Failed to flush CacheKit state wrappers before close.", e);
-        } finally {
-            for (Object wrapper : wrappersByDelegateIdentity.values()) {
-                try {
-                    if (wrapper instanceof CachedInternalValueState) {
-                        // Quiesce async bp-prefetch BEFORE delegate.dispose()/close() frees the
-                        // RocksDB db + ColumnFamilyHandles (else a shared-executor prefetch worker
-                        // reads a freed handle and SIGSEGVs in librocksdbjni).
-                        ((CachedInternalValueState<?, ?, ?>) wrapper).close();
-                    } else if (wrapper instanceof CachedInternalListState) {
-                        ((CachedInternalListState<?, ?, ?>) wrapper).close();
-                    } else if (wrapper instanceof CachedInternalPriorityQueueSet) {
-                        ((CachedInternalPriorityQueueSet<?>) wrapper).close();
-                    }
-                } catch (Exception ignored) {
-                    // log and continue
-                }
+        synchronized (lifecycleLock) {
+            if (closed || disposed) {
+                return;
             }
-            wrappersByDelegateIdentity.clear();
-            if (listStateFlushExecutor != null) {
-                listStateFlushExecutor.shutdownNow();
+            closed = true;
+            try {
+                flushWrappers();
+            } catch (IOException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new IOException("Failed to flush CacheKit state wrappers before close.", e);
+            } finally {
+                closeWrappers();
+                shutdownFlushExecutors();
+                delegate.close();
             }
-            if (pqFlushExecutor != null) {
-                pqFlushExecutor.shutdownNow();
-            }
-            delegate.close();
         }
     }
 
@@ -624,8 +681,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             @Nonnull CheckpointStreamFactory streamFactory,
             @Nonnull CheckpointOptions checkpointOptions)
             throws Exception {
-        flushWrappers();
-        return delegate.snapshot(checkpointId, timestamp, streamFactory, checkpointOptions);
+        synchronized (lifecycleLock) {
+            ensureOpen();
+            flushWrappers();
+            return delegate.snapshot(checkpointId, timestamp, streamFactory, checkpointOptions);
+        }
     }
 
     private void flushWrappers() throws Exception {

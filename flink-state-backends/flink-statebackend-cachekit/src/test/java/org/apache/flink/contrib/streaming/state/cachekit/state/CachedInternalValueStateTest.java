@@ -87,6 +87,31 @@ class CachedInternalValueStateTest {
     }
 
     @Test
+    void testFlushDoesNotWriteAfterClose() throws IOException {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalValueState<String, VoidNamespace, Integer> delegate = mock(InternalValueState.class);
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        key -> {},
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        state.update(99);
+
+        state.close();
+        state.flush();
+
+        verify(delegate, times(0)).update(any());
+    }
+
+    @Test
     void testL1EvictionFlushesToDelegateAndMovesToL2() throws IOException {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
         CurrentKeyProvider<String> currentKeyProvider = currentKey::get;

@@ -237,4 +237,35 @@ class CachedInternalMapStateTest {
         state.flush();
         verify(delegate, times(1)).put("uk1", 42);
     }
+
+    @Test
+    void testFlushDoesNotWriteAfterClose() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        true,
+                        0);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        state.put("uk1", 42);
+
+        state.close();
+        state.flush();
+
+        verify(delegate, times(0)).put(any(), any());
+    }
 }

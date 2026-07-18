@@ -87,6 +87,15 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private long currentWindowHits = 0;
     private int opsSinceLastSample = 0;
 
+    /**
+     * Prevents dirty-cache write-back from racing backend teardown. Cache eviction can call
+     * {@link #flushEntryToDelegate(KeyNamespaceUserKey, CachedMapValue)} on the task thread while
+     * {@code CacheKitKeyedStateBackend.dispose()} releases RocksDB column-family handles.
+     */
+    private volatile boolean closed;
+    private final java.util.concurrent.locks.ReadWriteLock lifecycleLock =
+            new java.util.concurrent.locks.ReentrantReadWriteLock();
+
     public CachedInternalMapState(
             InternalMapState<K, N, UK, UV> delegate,
             CurrentKeyProvider<K> currentKeyProvider,
@@ -876,25 +885,32 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     public void flush() {
-        if (!mapCacheEnabled) {
-            return;
-        }
-        java.util.List<Map.Entry<KeyNamespaceUserKey<K, N, UK>, CachedMapValue<UV>>> dirtyEntries =
-                new java.util.ArrayList<>();
-        for (Map.Entry<KeyNamespaceUserKey<K, N, UK>, CachedMapValue<UV>> entry : l1ValueCache.entries()) {
-            CachedMapValue<UV> value = entry.getValue();
-            if (value != null && value.dirty) {
-                dirtyEntries.add(entry);
+        lifecycleLock.readLock().lock();
+        try {
+            if (closed || !mapCacheEnabled) {
+                return;
             }
-        }
-        for (Map.Entry<KeyNamespaceUserKey<K, N, UK>, CachedMapValue<UV>> entry : dirtyEntries) {
-            CachedMapValue<UV> value = entry.getValue();
-            if (value != null && value.dirty) {
-                flushEntryToDelegate(entry.getKey(), value);
-                CachedMapValue<UV> clean = CachedMapValue.of(value.valueOrNull(), false);
-                l2ValueCache.put(entry.getKey(), clean);
-                l1ValueCache.put(entry.getKey(), clean);
+
+            java.util.List<Map.Entry<KeyNamespaceUserKey<K, N, UK>, CachedMapValue<UV>>>
+                    dirtyEntries = new java.util.ArrayList<>();
+            for (Map.Entry<KeyNamespaceUserKey<K, N, UK>, CachedMapValue<UV>> entry :
+                    l1ValueCache.entries()) {
+                CachedMapValue<UV> value = entry.getValue();
+                if (value != null && value.dirty) {
+                    dirtyEntries.add(entry);
+                }
             }
+            for (Map.Entry<KeyNamespaceUserKey<K, N, UK>, CachedMapValue<UV>> entry : dirtyEntries) {
+                CachedMapValue<UV> value = entry.getValue();
+                if (value != null && value.dirty) {
+                    flushEntryToDelegate(entry.getKey(), value);
+                    CachedMapValue<UV> clean = CachedMapValue.of(value.valueOrNull(), false);
+                    l2ValueCache.put(entry.getKey(), clean);
+                    l1ValueCache.put(entry.getKey(), clean);
+                }
+            }
+        } finally {
+            lifecycleLock.readLock().unlock();
         }
     }
 
@@ -955,26 +971,41 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private void flushEntryToDelegate(KeyNamespaceUserKey<K, N, UK> key, CachedMapValue<UV> value) {
-        if (key == null || value == null) {
-            return;
-        }
-        K previousKey = currentKeyProvider.getCurrentKey();
-        N previousNamespace = currentNamespace;
-        keyContextSetter.accept(key.key);
-        delegate.setCurrentNamespace(key.namespace);
+        lifecycleLock.readLock().lock();
         try {
-            if (value.isNull) {
-                delegate.remove(key.userKey);
-            } else {
-                delegate.put(key.userKey, value.value);
+            if (closed || key == null || value == null) {
+                return;
             }
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to flush MapState entry to delegate", e);
+            K previousKey = currentKeyProvider.getCurrentKey();
+            N previousNamespace = currentNamespace;
+            keyContextSetter.accept(key.key);
+            delegate.setCurrentNamespace(key.namespace);
+            try {
+                if (value.isNull) {
+                    delegate.remove(key.userKey);
+                } else {
+                    delegate.put(key.userKey, value.value);
+                }
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to flush MapState entry to delegate", e);
+            } finally {
+                keyContextSetter.accept(previousKey);
+                if (previousNamespace != null) {
+                    delegate.setCurrentNamespace(previousNamespace);
+                }
+            }
         } finally {
-            keyContextSetter.accept(previousKey);
-            if (previousNamespace != null) {
-                delegate.setCurrentNamespace(previousNamespace);
-            }
+            lifecycleLock.readLock().unlock();
+        }
+    }
+
+    /** Quiesces dirty write-back before the backend releases its RocksDB delegate. */
+    public void close() {
+        lifecycleLock.writeLock().lock();
+        try {
+            closed = true;
+        } finally {
+            lifecycleLock.writeLock().unlock();
         }
     }
 

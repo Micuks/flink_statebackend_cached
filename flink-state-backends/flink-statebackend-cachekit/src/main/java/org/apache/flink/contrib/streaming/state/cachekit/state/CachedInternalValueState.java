@@ -61,14 +61,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final java.util.function.Consumer<K> keyContextSetter;
 
     /**
-     * Lifecycle guard for the off-thread async prefetch worker. The worker reads RocksDB through
-     * {@code delegate.getSerializedValue()} on the SHARED, TM-JVM-level {@code PrefetchExecutor} —
-     * whose lifetime is longer than this backend's. Without a guard, a worker still holding a native
-     * ColumnFamilyHandle can race {@code delegate.dispose()} ({@code closeQuietly(db)}) and SIGSEGV
-     * in librocksdbjni (a native crash the worker's {@code catch (Throwable)} cannot catch). The
-     * worker takes the read lock around each delegate read and bails if {@link #closed}; {@link
-     * #close()} sets {@code closed} then takes the write lock as a barrier, guaranteeing no read is
-     * in flight before the backend disposes the RocksDB delegate.
+     * Lifecycle guard for delegate accesses that can overlap backend teardown. The worker reads
+     * RocksDB through {@code delegate.getSerializedValue()} on the SHARED, TM-JVM-level {@code
+     * PrefetchExecutor} — whose lifetime is longer than this backend's. Without a guard, a worker
+     * still holding a native ColumnFamilyHandle can race {@code delegate.dispose()} ({@code
+     * closeQuietly(db)}) and SIGSEGV in librocksdbjni (a native crash the worker's {@code catch
+     * (Throwable)} cannot catch). The worker and dirty-cache flushes take the read lock around each
+     * delegate access and bail if {@link #closed}; {@link #close()} takes the write lock as a
+     * barrier and then marks the wrapper closed, guaranteeing no guarded access is in flight before
+     * the backend disposes the RocksDB delegate.
      */
     private volatile boolean closed = false;
     private final java.util.concurrent.locks.ReadWriteLock lifecycleLock =
@@ -371,24 +372,48 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     public void flush() {
-        // Flush L1 dirty entries to L2 (which writes through)
-        java.util.List<java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>>> dirtyEntries = new java.util.ArrayList<>();
-        for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : l1Cache.entries()) {
-            if (entry.getValue().dirty) {
-                dirtyEntries.add(entry);
+        lifecycleLock.readLock().lock();
+        try {
+            if (closed) {
+                return;
             }
-        }
-        for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : dirtyEntries) {
-            CachedValue<V> val = entry.getValue();
-            if (val.dirty) {
-                // Push to L2 (Write-Through)
-                // We simulate eviction to L2
-                l2Cache.put(entry.getKey(), CachedValue.of(val.value, false)); // L2 holds clean
-                flushEntryToDelegate(entry.getKey(), val); // Write-through to delegate
 
-                // Mark L1 clean
-                l1Cache.put(entry.getKey(), CachedValue.of(val.value, false));
+            // Flush L1 dirty entries to L2 (which writes through)
+            java.util.List<java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>>> dirtyEntries = new java.util.ArrayList<>();
+            for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : l1Cache.entries()) {
+                if (entry.getValue().dirty) {
+                    dirtyEntries.add(entry);
+                }
             }
+            for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : dirtyEntries) {
+                CachedValue<V> val = entry.getValue();
+                if (val.dirty) {
+                    // Push to L2 (Write-Through)
+                    // We simulate eviction to L2
+                    l2Cache.put(entry.getKey(), CachedValue.of(val.value, false)); // L2 holds clean
+                    flushEntryToDelegate(entry.getKey(), val); // Write-through to delegate
+
+                    // Mark L1 clean
+                    l1Cache.put(entry.getKey(), CachedValue.of(val.value, false));
+                }
+            }
+        } finally {
+            lifecycleLock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Quiesce the async prefetch for this state before the backend disposes its RocksDB delegate.
+     * Takes the write lock as a barrier so any in-flight guarded delegate access has drained, then
+     * sets {@link #closed} so new work becomes a no-op. After this returns it is safe for the
+     * backend to call {@code delegate.dispose()} / {@code close()}.
+     */
+    public void close() {
+        lifecycleLock.writeLock().lock();
+        try {
+            closed = true;
+        } finally {
+            lifecycleLock.writeLock().unlock();
         }
     }
 
@@ -400,18 +425,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      *
      * @return a worker task to run via PrefetchExecutor, or null if there is nothing to fetch.
      */
-    /**
-     * Quiesce the async prefetch for this state before the backend disposes its RocksDB delegate.
-     * Sets {@link #closed} so no new work touches the delegate, then takes the write lock as a
-     * barrier so any in-flight worker read on the shared PrefetchExecutor has drained. After this
-     * returns it is safe for the backend to call {@code delegate.dispose()} / {@code close()}.
-     */
-    public void close() {
-        closed = true;
-        lifecycleLock.writeLock().lock();
-        lifecycleLock.writeLock().unlock();
-    }
-
     public Runnable buildAsyncPrefetchTask(Iterable<? extends K> keys) {
         if (closed || keys == null || currentNamespace == null) {
             return null;
@@ -623,45 +636,54 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     private void flushEntryToDelegate(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
-        // A dirty flush changes RocksDB content: a concurrent prefetch read may now be stale.
-        writeGen++;
-        // Save current context
-        K previousKey = currentKeyProvider.getCurrentKey();
-        // We rely on 'currentNamespace' field in this class but it might have changed.
-        // We must use the namespace from the key.
-
-        keyContextSetter.accept(key.key);
-        // delegate.setCurrentNamespace(key.namespace); // delegate namespace must be
-        // set before update
-        // The delegate might look at its own currentNamespace.
-        // However, 'key.namespace' is the correct one for this entry.
-        // We need to ensure we restore the *previous* namespace of the delegate if we
-        // change it.
-        // Actually, we don't have access to delegate's internal 'currentNamespace'
-        // easily to restore it?
-        // But 'setCurrentNamespace' updates 'delegate's currentNamespace.
-        // We can just rely on 'this.currentNamespace' being the "logic" current
-        // namespace,
-        // but 'flushEntryToDelegate' is called for arbitrary keys (eviction).
-        // So we must change it.
-        // And then restore it to 'this.currentNamespace' (which is what the user
-        // expects).
-
-        delegate.setCurrentNamespace(key.namespace);
+        lifecycleLock.readLock().lock();
         try {
-            if (value.isNull) {
-                delegate.clear();
-            } else {
-                delegate.update(value.value);
+            if (closed) {
+                return;
             }
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to flush state to delegate interaction", e);
+
+            // A dirty flush changes RocksDB content: a concurrent prefetch read may now be stale.
+            writeGen++;
+            // Save current context
+            K previousKey = currentKeyProvider.getCurrentKey();
+            // We rely on 'currentNamespace' field in this class but it might have changed.
+            // We must use the namespace from the key.
+
+            keyContextSetter.accept(key.key);
+            // delegate.setCurrentNamespace(key.namespace); // delegate namespace must be
+            // set before update
+            // The delegate might look at its own currentNamespace.
+            // However, 'key.namespace' is the correct one for this entry.
+            // We need to ensure we restore the *previous* namespace of the delegate if we
+            // change it.
+            // Actually, we don't have access to delegate's internal 'currentNamespace'
+            // easily to restore it?
+            // But 'setCurrentNamespace' updates 'delegate's currentNamespace.
+            // We can just rely on 'this.currentNamespace' being the "logic" current
+            // namespace,
+            // but 'flushEntryToDelegate' is called for arbitrary keys (eviction).
+            // So we must change it.
+            // And then restore it to 'this.currentNamespace' (which is what the user
+            // expects).
+
+            delegate.setCurrentNamespace(key.namespace);
+            try {
+                if (value.isNull) {
+                    delegate.clear();
+                } else {
+                    delegate.update(value.value);
+                }
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to flush state to delegate interaction", e);
+            } finally {
+                // Restore context
+                keyContextSetter.accept(previousKey);
+                if (currentNamespace != null) {
+                    delegate.setCurrentNamespace(currentNamespace);
+                }
+            }
         } finally {
-            // Restore context
-            keyContextSetter.accept(previousKey);
-            if (currentNamespace != null) {
-                delegate.setCurrentNamespace(currentNamespace);
-            }
+            lifecycleLock.readLock().unlock();
         }
     }
 
