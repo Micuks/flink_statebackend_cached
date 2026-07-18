@@ -115,6 +115,59 @@ class CachedInternalValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testAsyncMultiGetSupportsNamespacedValueState() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+
+        RocksDBBatchValueReader<String, String> batchReader =
+                (RocksDBBatchValueReader<String, String>) delegate;
+        when(batchReader.serializeBatchKeyAndNamespace(
+                        any(), eq("window-7"), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+        when(batchReader.getSerializedValuesByRocksDBKeys(any(), eq(0), eq(2)))
+                .thenReturn(
+                        Arrays.asList(
+                                KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE),
+                                KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE)));
+
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true);
+        state.setCurrentNamespace("window-7");
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
+
+        currentKey.set("k1");
+        assertEquals(11, state.value());
+        currentKey.set("k2");
+        assertEquals(22, state.value());
+        verify(batchReader, times(1))
+                .getSerializedValuesByRocksDBKeys(any(), eq(0), eq(2));
+        verify(delegate, never()).value();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testChunkedMultiGetPublishesCompletedChunkBeforeNextChunkReturns() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         CountDownLatch secondChunkStarted = new CountDownLatch(1);
