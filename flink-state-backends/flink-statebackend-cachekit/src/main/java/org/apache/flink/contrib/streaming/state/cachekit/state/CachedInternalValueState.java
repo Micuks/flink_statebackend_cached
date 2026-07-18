@@ -503,7 +503,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (closed || keys == null || currentNamespace == null) {
             return null;
         }
-        if (multiGetPrefetchEnabled && delegate instanceof RocksDBBatchValueReader<?, ?>) {
+        if (multiGetPrefetchEnabled && delegate instanceof RocksDBBatchValueReader<?, ?, ?>) {
             return buildPreparedMultiGetTask(keys, currentNamespace);
         }
         java.util.ArrayList<byte[]> serialized = new java.util.ArrayList<>();
@@ -531,7 +531,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return null;
         }
         final long gen = writeGen;
-        return () -> fetchIntoStaging(serialized, gen);
+        final V defaultValue = getBatchDefaultValue();
+        return () -> fetchIntoStaging(serialized, defaultValue, gen);
     }
 
     /**
@@ -544,8 +545,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private Runnable buildPreparedMultiGetTask(Iterable<? extends K> keys, N namespace) {
         java.util.ArrayList<byte[]> rocksDBKeys = new java.util.ArrayList<>();
         java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys = new java.util.ArrayList<>();
-        RocksDBBatchValueReader<K, N> batchReader =
-                (RocksDBBatchValueReader<K, N>) delegate;
+        RocksDBBatchValueReader<K, N, V> batchReader =
+                (RocksDBBatchValueReader<K, N, V>) delegate;
         try {
             for (K key : keys) {
                 if (key == null || findCachedValueFor(key, namespace) != null) {
@@ -573,7 +574,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return null;
         }
         final long gen = writeGen;
-        return () -> fetchPreparedChunksIntoStaging(rocksDBKeys, storageKeys, gen);
+        final V defaultValue = batchReader.getBatchDefaultValue();
+        return () ->
+                fetchPreparedChunksIntoStaging(rocksDBKeys, storageKeys, defaultValue, gen);
     }
 
     /**
@@ -581,18 +584,19 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      * delegate's {@code getSerializedValue} — the same thread-safe path Flink's queryable state
      * uses concurrently with the task thread — and parks deserialized values in {@link #staging}.
      */
-    private void fetchIntoStaging(java.util.List<byte[]> serializedKeyAndNamespaces, long gen) {
+    private void fetchIntoStaging(
+            java.util.List<byte[]> serializedKeyAndNamespaces, V defaultValue, long gen) {
         try {
             prepareWorkerState();
-            if (multiGetPrefetchEnabled && delegate instanceof RocksDBBatchValueReader<?, ?>) {
-                fetchChunksIntoStaging(serializedKeyAndNamespaces, gen);
+            if (multiGetPrefetchEnabled && delegate instanceof RocksDBBatchValueReader<?, ?, ?>) {
+                fetchChunksIntoStaging(serializedKeyAndNamespaces, defaultValue, gen);
                 return;
             }
             for (byte[] skn : serializedKeyAndNamespaces) {
                 if (gen != writeGen) {
                     return; // a write already invalidated this batch; stop wasting reads
                 }
-                fetchSingleIntoStaging(skn, gen);
+                fetchSingleIntoStaging(skn, defaultValue, gen);
             }
         } catch (Throwable ignored) {
             // Best-effort cache warmup; the authoritative read path is untouched.
@@ -614,6 +618,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private void fetchPreparedChunksIntoStaging(
             java.util.List<byte[]> rocksDBKeys,
             java.util.List<KeyNamespaceKey<K, N>> storageKeys,
+            V defaultValue,
             long gen) {
         try {
             prepareWorkerState();
@@ -622,7 +627,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     return;
                 }
                 int end = Math.min(start + multiGetChunkSize, rocksDBKeys.size());
-                fetchPreparedChunkIntoStaging(rocksDBKeys, storageKeys, start, end, gen);
+                fetchPreparedChunkIntoStaging(
+                        rocksDBKeys, storageKeys, start, end, defaultValue, gen);
             }
         } catch (Throwable ignored) {
             // Best-effort cache warmup; the authoritative read path is untouched.
@@ -635,10 +641,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.List<KeyNamespaceKey<K, N>> storageKeys,
             int start,
             int end,
+            V defaultValue,
             long gen)
             throws Exception {
-        RocksDBBatchValueReader<K, N> batchReader =
-                (RocksDBBatchValueReader<K, N>) delegate;
+        RocksDBBatchValueReader<K, N, V> batchReader =
+                (RocksDBBatchValueReader<K, N, V>) delegate;
         java.util.List<byte[]> valueBytes;
         lifecycleLock.readLock().lock();
         try {
@@ -667,38 +674,41 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 return;
             }
             byte[] serializedValue = valueBytes.get(i);
-            if (serializedValue != null) {
-                stagePreparedValue(storageKeys.get(start + i), serializedValue, gen);
-            }
+            stagePreparedValue(
+                    storageKeys.get(start + i), serializedValue, defaultValue, gen);
         }
     }
 
     private void stagePreparedValue(
-            KeyNamespaceKey<K, N> storageKey, byte[] valueBytes, long gen) throws IOException {
-        workerValueInput.setBuffer(valueBytes, 0, valueBytes.length);
-        V value = workerValueSerializer.deserialize(workerValueInput);
+            KeyNamespaceKey<K, N> storageKey, byte[] valueBytes, V defaultValue, long gen)
+            throws IOException {
+        V value = deserializeValueOrCopyDefault(valueBytes, defaultValue);
         staging.put(storageKey, new StagedValue<>(value, gen));
     }
 
     @SuppressWarnings("unchecked")
     private void fetchChunksIntoStaging(
-            java.util.List<byte[]> serializedKeyAndNamespaces, long gen) throws Exception {
+            java.util.List<byte[]> serializedKeyAndNamespaces, V defaultValue, long gen)
+            throws Exception {
         for (int start = 0; start < serializedKeyAndNamespaces.size(); start += multiGetChunkSize) {
             if (closed || gen != writeGen) {
                 return;
             }
             int end = Math.min(start + multiGetChunkSize, serializedKeyAndNamespaces.size());
             if (end - start == 1) {
-                fetchSingleIntoStaging(serializedKeyAndNamespaces.get(start), gen);
+                fetchSingleIntoStaging(
+                        serializedKeyAndNamespaces.get(start), defaultValue, gen);
                 continue;
             }
-            fetchChunkIntoStaging(serializedKeyAndNamespaces.subList(start, end), gen);
+            fetchChunkIntoStaging(
+                    serializedKeyAndNamespaces.subList(start, end), defaultValue, gen);
         }
     }
 
     @SuppressWarnings("unchecked")
     private void fetchChunkIntoStaging(
-            java.util.List<byte[]> serializedKeyAndNamespaces, long gen) throws Exception {
+            java.util.List<byte[]> serializedKeyAndNamespaces, V defaultValue, long gen)
+            throws Exception {
         java.util.List<byte[]> valueBytes;
         lifecycleLock.readLock().lock();
         try {
@@ -706,7 +716,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 return;
             }
             valueBytes =
-                    ((RocksDBBatchValueReader<K, N>) delegate)
+                    ((RocksDBBatchValueReader<K, N, V>) delegate)
                             .getSerializedValues(
                                     serializedKeyAndNamespaces,
                                     workerKeySerializer,
@@ -723,13 +733,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 return;
             }
             byte[] serializedValue = valueBytes.get(i);
-            if (serializedValue != null) {
-                stageSerializedValue(serializedKeyAndNamespaces.get(i), serializedValue, gen);
-            }
+            stageSerializedValue(
+                    serializedKeyAndNamespaces.get(i), serializedValue, defaultValue, gen);
         }
     }
 
-    private void fetchSingleIntoStaging(byte[] skn, long gen) throws Exception {
+    private void fetchSingleIntoStaging(byte[] skn, V defaultValue, long gen) throws Exception {
         byte[] valueBytes;
         lifecycleLock.readLock().lock();
         try {
@@ -746,20 +755,39 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         } finally {
             lifecycleLock.readLock().unlock();
         }
-        if (valueBytes != null && gen == writeGen) {
-            stageSerializedValue(skn, valueBytes, gen);
+        if (valueBytes == null && !(delegate instanceof RocksDBBatchValueReader<?, ?, ?>)) {
+            return;
+        }
+        if (gen == writeGen) {
+            stageSerializedValue(skn, valueBytes, defaultValue, gen);
         }
     }
 
-    private void stageSerializedValue(byte[] skn, byte[] valueBytes, long gen) throws IOException {
+    private void stageSerializedValue(
+            byte[] skn, byte[] valueBytes, V defaultValue, long gen) throws IOException {
         org.apache.flink.core.memory.DataInputDeserializer in =
                 new org.apache.flink.core.memory.DataInputDeserializer(skn, 0, skn.length);
         K key = workerKeySerializer.deserialize(in);
         in.readByte(); // magic number
         N namespace = workerNamespaceSerializer.deserialize(in);
-        workerValueInput.setBuffer(valueBytes, 0, valueBytes.length);
-        V value = workerValueSerializer.deserialize(workerValueInput);
+        V value = deserializeValueOrCopyDefault(valueBytes, defaultValue);
         staging.put(new KeyNamespaceKey<>(key, namespace), new StagedValue<>(value, gen));
+    }
+
+    @SuppressWarnings("unchecked")
+    private V getBatchDefaultValue() {
+        if (delegate instanceof RocksDBBatchValueReader<?, ?, ?>) {
+            return ((RocksDBBatchValueReader<K, N, V>) delegate).getBatchDefaultValue();
+        }
+        return null;
+    }
+
+    private V deserializeValueOrCopyDefault(byte[] valueBytes, V defaultValue) throws IOException {
+        if (valueBytes == null) {
+            return defaultValue == null ? null : workerValueSerializer.copy(defaultValue);
+        }
+        workerValueInput.setBuffer(valueBytes, 0, valueBytes.length);
+        return workerValueSerializer.deserialize(workerValueInput);
     }
 
     public void prefetch(Iterable<? extends K> keys) {
