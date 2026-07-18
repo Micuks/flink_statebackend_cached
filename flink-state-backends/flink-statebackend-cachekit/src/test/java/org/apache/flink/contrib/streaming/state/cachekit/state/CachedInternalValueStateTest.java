@@ -17,6 +17,7 @@ package org.apache.flink.contrib.streaming.state.cachekit.state;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
+import org.apache.flink.contrib.streaming.state.cachekit.PrefetchExecutor;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.queryablestate.client.state.serialization.KvStateSerializer;
 import org.apache.flink.runtime.state.VoidNamespace;
@@ -37,6 +38,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -51,6 +53,90 @@ import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.inOrder;
 
 class CachedInternalValueStateTest {
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testPendingMultiGetKeysAreDeduplicatedAndReleasedWhenDropped() throws Exception {
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
+        stubPreparedKeySerialization(batchReader);
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        () -> "unused",
+                        ignored -> {},
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Runnable first = state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2"));
+        Runnable duplicate = state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2"));
+        assertTrue(first instanceof PrefetchExecutor.DropAwareTask);
+        assertNull(duplicate);
+        assertEquals(2, state.getPrefetchKeysDeduplicatedForTesting());
+
+        ((PrefetchExecutor.DropAwareTask) first).onDrop();
+        Runnable retry = state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2"));
+        assertTrue(retry != null);
+        assertEquals(1, state.getPrefetchTasksDroppedForTesting());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testNewGenerationCanReclaimStalePrefetchReservations() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("activate-bypass");
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(1);
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
+        stubPreparedKeySerialization(batchReader);
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        true,
+                        1.0,
+                        1,
+                        true,
+                        8);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        assertEquals(1, state.value()); // one miss activates write-through bypass
+
+        Runnable stale = state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2"));
+        currentKey.set("writer");
+        state.update(7); // direct delegate write advances writeGen
+        Runnable current = state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2"));
+        assertTrue(current != null);
+
+        ((PrefetchExecutor.DropAwareTask) stale).onDrop();
+        assertNull(state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")));
+        assertEquals(2, state.getPrefetchKeysDeduplicatedForTesting());
+    }
 
     @Test
     @SuppressWarnings("unchecked")

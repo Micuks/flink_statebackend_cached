@@ -16,6 +16,7 @@
 package org.apache.flink.contrib.streaming.state.cachekit;
 
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -29,6 +30,31 @@ import java.util.concurrent.TimeUnit;
  * than a stale one.
  */
 public final class PrefetchExecutor {
+
+    /** A queued prefetch that must release any key reservations if the executor drops it. */
+    public interface DropAwareTask extends Runnable {
+        void onDrop();
+    }
+
+    /**
+     * Keeps the newest lookahead without leaking per-state in-flight reservations. The JDK's
+     * {@link ThreadPoolExecutor.DiscardOldestPolicy} silently forgets the evicted task; CacheKit
+     * needs a callback so a later chunk can prefetch those keys again.
+     */
+    private static final RejectedExecutionHandler DISCARD_OLDEST_WITH_NOTIFICATION =
+            (incoming, executor) -> {
+                if (executor.isShutdown()) {
+                    notifyDropped(incoming);
+                    return;
+                }
+                Runnable dropped = executor.getQueue().poll();
+                notifyDropped(dropped);
+                if (!executor.getQueue().offer(incoming)) {
+                    // Another producer filled the single freed slot first. Dropping the incoming
+                    // lookahead is safe, but its reservations still need releasing.
+                    notifyDropped(incoming);
+                }
+            };
 
     private static final ThreadPoolExecutor EXECUTOR;
 
@@ -45,7 +71,7 @@ public final class PrefetchExecutor {
                             t.setDaemon(true);
                             return t;
                         },
-                        new ThreadPoolExecutor.DiscardOldestPolicy());
+                        DISCARD_OLDEST_WITH_NOTIFICATION);
         EXECUTOR.allowCoreThreadTimeOut(true);
     }
 
@@ -56,7 +82,18 @@ public final class PrefetchExecutor {
         try {
             EXECUTOR.execute(task);
         } catch (Throwable ignored) {
-            // Best-effort: dropping a prefetch is always safe.
+            notifyDropped(task);
+            // Best-effort: dropping a prefetch is always safe once reservations are released.
+        }
+    }
+
+    private static void notifyDropped(Runnable task) {
+        if (task instanceof DropAwareTask) {
+            try {
+                ((DropAwareTask) task).onDrop();
+            } catch (Throwable ignored) {
+                // Diagnostics and reservation cleanup must never reach the mailbox thread.
+            }
         }
     }
 }

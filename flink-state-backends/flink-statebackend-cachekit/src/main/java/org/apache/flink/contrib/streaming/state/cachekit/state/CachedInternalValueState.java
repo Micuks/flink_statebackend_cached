@@ -16,6 +16,7 @@ package org.apache.flink.contrib.streaming.state.cachekit.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
+import org.apache.flink.contrib.streaming.state.cachekit.PrefetchExecutor;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePolicy;
@@ -101,6 +102,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             staging = new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
+     * Keys reserved by submitted-but-not-yet-finished prefetch tasks. Without this set, adjacent
+     * early-lookahead chunks can enqueue the same key repeatedly while the first task is still
+     * waiting behind the shared worker. Values are write generations so stale reservations can be
+     * reclaimed without waiting for their old task.
+     */
+    private final java.util.concurrent.ConcurrentHashMap<KeyNamespaceKey<K, N>, Long> inFlight =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
      * Write generation: bumped on every {@link #update}, {@link #clear} and dirty flush-through.
      * Single writer (mailbox thread); the prefetch worker only reads it to abort stale batches.
      */
@@ -111,7 +121,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     // to the ValueState hot path.
     private volatile long prefetchTasksBuilt;
     private volatile long prefetchTasksExecuted;
+    private volatile long prefetchTasksDropped;
     private volatile long prefetchKeysPrepared;
+    private volatile long prefetchKeysDeduplicated;
     private volatile long prefetchMultiGetCalls;
     private volatile long prefetchMultiGetKeys;
     private volatile long prefetchPointGetCalls;
@@ -564,7 +576,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (prefetchTasksBuilt > 0 || multiGetPrefetchEnabled) {
             LOG.info(
                     "[CACHEKIT VALUE PREFETCH] delegate={} multiGet={} chunkSize={} minBatchSize={} "
-                            + "tasksBuilt={} tasksExecuted={} keysPrepared={} multiGetCalls={} "
+                            + "tasksBuilt={} tasksExecuted={} tasksDropped={} keysPrepared={} "
+                            + "keysDeduplicated={} multiGetCalls={} "
                             + "multiGetKeys={} pointGetCalls={} staged={} missingStaged={} "
                             + "promoted={} staleAborts={} buildFailures={} workerFailures={}",
                     delegate.getClass().getSimpleName(),
@@ -573,7 +586,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     multiGetMinBatchSize,
                     prefetchTasksBuilt,
                     prefetchTasksExecuted,
+                    prefetchTasksDropped,
                     prefetchKeysPrepared,
+                    prefetchKeysDeduplicated,
                     prefetchMultiGetCalls,
                     prefetchMultiGetKeys,
                     prefetchPointGetCalls,
@@ -602,6 +617,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return prefetchValuesPromoted;
     }
 
+    long getPrefetchKeysDeduplicatedForTesting() {
+        return prefetchKeysDeduplicated;
+    }
+
+    long getPrefetchTasksDroppedForTesting() {
+        return prefetchTasksDropped;
+    }
+
     /**
      * Mailbox-side half of the async prefetch: serialize (key, namespace) for every key that is
      * not already cached or staged, then hand the byte[] batch to the shared worker thread. The
@@ -618,35 +641,45 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return buildPreparedMultiGetTask(keys, currentNamespace);
         }
         java.util.ArrayList<byte[]> serialized = new java.util.ArrayList<>();
+        java.util.ArrayList<KeyNamespaceKey<K, N>> reservations = new java.util.ArrayList<>();
+        final long gen = writeGen;
+        final N namespace = currentNamespace;
         try {
             org.apache.flink.core.memory.DataOutputSerializer out =
                     new org.apache.flink.core.memory.DataOutputSerializer(64);
             for (K key : keys) {
-                if (key == null || findCachedValueFor(key, currentNamespace) != null) {
+                if (key == null || findCachedValueFor(key, namespace) != null) {
                     continue;
                 }
-                setLookupKey(key, currentNamespace);
-                if (staging.containsKey(lookupKey)) {
+                if (hasStagedOrInFlightValue(key, namespace, gen)) {
                     continue;
                 }
+                KeyNamespaceKey<K, N> storageKey =
+                        new KeyNamespaceKey<>(key, namespace, keySerializer, namespaceSerializer);
+                if (inFlight.putIfAbsent(storageKey, gen) != null) {
+                    prefetchKeysDeduplicated++;
+                    continue;
+                }
+                reservations.add(storageKey);
                 out.clear();
-                keySerializer.serialize(key, out);
+                keySerializer.serialize(storageKey.key, out);
                 out.writeByte(42); // KvStateSerializer.MAGIC_NUMBER wire format
-                namespaceSerializer.serialize(currentNamespace, out);
+                namespaceSerializer.serialize(storageKey.namespace, out);
                 serialized.add(out.getCopyOfBuffer());
             }
         } catch (Throwable t) {
             prefetchBuildFailures++;
+            releaseReservations(reservations, gen);
             return null; // Best-effort: an unserializable key aborts this batch only.
         }
         if (serialized.isEmpty()) {
             return null;
         }
-        final long gen = writeGen;
         final V defaultValue = getBatchDefaultValue();
         prefetchTasksBuilt++;
         prefetchKeysPrepared += serialized.size();
-        return () -> fetchIntoStaging(serialized, defaultValue, gen);
+        return trackedTask(
+                reservations, gen, () -> fetchIntoStaging(serialized, defaultValue, gen));
     }
 
     /**
@@ -659,6 +692,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private Runnable buildPreparedMultiGetTask(Iterable<? extends K> keys, N namespace) {
         java.util.ArrayList<byte[]> rocksDBKeys = new java.util.ArrayList<>();
         java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys = new java.util.ArrayList<>();
+        final long gen = writeGen;
         RocksDBBatchValueReader<K, N, V> batchReader =
                 (RocksDBBatchValueReader<K, N, V>) delegate;
         try {
@@ -666,34 +700,87 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 if (key == null || findCachedValueFor(key, namespace) != null) {
                     continue;
                 }
-                setLookupKey(key, namespace);
-                if (staging.containsKey(lookupKey)) {
+                if (hasStagedOrInFlightValue(key, namespace, gen)) {
                     continue;
                 }
                 KeyNamespaceKey<K, N> storageKey =
                         new KeyNamespaceKey<>(
                                 key, namespace, keySerializer, namespaceSerializer);
+                if (inFlight.putIfAbsent(storageKey, gen) != null) {
+                    prefetchKeysDeduplicated++;
+                    continue;
+                }
+                storageKeys.add(storageKey);
                 rocksDBKeys.add(
                         batchReader.serializeBatchKeyAndNamespace(
                                 storageKey.key,
                                 storageKey.namespace,
                                 keySerializer,
                                 namespaceSerializer));
-                storageKeys.add(storageKey);
             }
         } catch (Throwable t) {
             prefetchBuildFailures++;
+            releaseReservations(storageKeys, gen);
             return null; // Best-effort: an unserializable key aborts this batch only.
         }
         if (rocksDBKeys.isEmpty()) {
             return null;
         }
-        final long gen = writeGen;
         final V defaultValue = batchReader.getBatchDefaultValue();
         prefetchTasksBuilt++;
         prefetchKeysPrepared += rocksDBKeys.size();
-        return () ->
-                fetchPreparedChunksIntoStaging(rocksDBKeys, storageKeys, defaultValue, gen);
+        return trackedTask(
+                storageKeys,
+                gen,
+                () -> fetchPreparedChunksIntoStaging(rocksDBKeys, storageKeys, defaultValue, gen));
+    }
+
+    private boolean hasStagedOrInFlightValue(K key, N namespace, long gen) {
+        setLookupKey(key, namespace);
+        StagedValue<V> staged = staging.get(lookupKey);
+        if (staged != null) {
+            if (staged.gen == gen) {
+                prefetchKeysDeduplicated++;
+                return true;
+            }
+            staging.remove(lookupKey, staged);
+        }
+        Long reservedGen = inFlight.get(lookupKey);
+        if (reservedGen != null) {
+            if (reservedGen == gen) {
+                prefetchKeysDeduplicated++;
+                return true;
+            }
+            inFlight.remove(lookupKey, reservedGen);
+        }
+        return false;
+    }
+
+    private Runnable trackedTask(
+            java.util.List<KeyNamespaceKey<K, N>> reservations, long gen, Runnable task) {
+        return new PrefetchExecutor.DropAwareTask() {
+            @Override
+            public void run() {
+                try {
+                    task.run();
+                } finally {
+                    releaseReservations(reservations, gen);
+                }
+            }
+
+            @Override
+            public void onDrop() {
+                prefetchTasksDropped++;
+                releaseReservations(reservations, gen);
+            }
+        };
+    }
+
+    private void releaseReservations(
+            java.util.List<KeyNamespaceKey<K, N>> reservations, long gen) {
+        for (KeyNamespaceKey<K, N> key : reservations) {
+            inFlight.remove(key, gen);
+        }
     }
 
     /**
