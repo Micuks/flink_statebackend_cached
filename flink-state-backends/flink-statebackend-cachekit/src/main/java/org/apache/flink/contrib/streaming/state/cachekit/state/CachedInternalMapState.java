@@ -386,12 +386,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (!mapCacheEnabled && !presenceCacheEnabled && !mapSnapshotCacheEnabled) {
             return entries;
         }
-        if (!iterationCacheFillEnabled && !mapSnapshotCacheEnabled) {
-            // Snapshot awareness runs unconditionally when mapSnapshotCacheEnabled is true, 
-            // even if iterationCacheFillEnabled is false for elements.
-            return entries;
-        }
-        return wrapWithSnapshotAwareIterator(entries, currentKey, cacheEntries(entries));
+        return wrapWithSnapshotAwareIterator(
+                entries, currentKey, currentNamespace, iterationCacheFillEnabled);
     }
 
     @Override
@@ -465,10 +461,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (!mapCacheEnabled && !presenceCacheEnabled && !mapSnapshotCacheEnabled) {
             return iterator;
         }
-        if (!iterationCacheFillEnabled && !mapSnapshotCacheEnabled) {
-            return iterator;
-        }
-        return new SnapshotAwareIterator(iterator, currentKey, new CachingEntryIterator(iterator));
+        return new SnapshotAwareIterator(
+                iterator, currentKey, currentNamespace, iterationCacheFillEnabled);
     }
 
     @Override
@@ -605,11 +599,15 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private void updatePresence(K currentKey, UK userKey, boolean present) {
-        if (currentKey == null || currentNamespace == null) {
+        updatePresence(currentKey, currentNamespace, userKey, present);
+    }
+
+    private void updatePresence(K currentKey, N namespace, UK userKey, boolean present) {
+        if (currentKey == null || namespace == null) {
             return;
         }
         if (usePrimitivePresenceCache) {
-            long fp = fingerprint(currentKey, currentNamespace, userKey);
+            long fp = fingerprint(currentKey, namespace, userKey);
             if (present) {
                 l2PrimitivePresenceCache.remove(fp);
                 l1PrimitivePresenceCache.put(fp, PrimitivePresenceCache.PRESENT);
@@ -621,12 +619,12 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         // Need reusable key for removal? Yes.
         // Need immutable key for storage? Yes.
-        setLookupKey(currentKey, currentNamespace, userKey);
+        setLookupKey(currentKey, namespace, userKey);
 
         l2PresenceCache.remove(lookupKey);
 
         // Storage requries deep copy
-        KeyNamespaceUserKey<K, N, UK> storage = new KeyNamespaceUserKey<>(currentKey, currentNamespace, userKey,
+        KeyNamespaceUserKey<K, N, UK> storage = new KeyNamespaceUserKey<>(currentKey, namespace, userKey,
                 keySerializer, namespaceSerializer, userKeySerializer);
         l1PresenceCache.put(storage, present);
     }
@@ -694,16 +692,21 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private void updateValueCache(K currentKey, UK userKey, UV userValue, boolean dirty) {
-        if (currentKey == null || currentNamespace == null) {
+        updateValueCache(currentKey, currentNamespace, userKey, userValue, dirty);
+    }
+
+    private void updateValueCache(
+            K currentKey, N namespace, UK userKey, UV userValue, boolean dirty) {
+        if (currentKey == null || namespace == null) {
             return;
         }
         UV cachedValue = copyUserValue(userValue);
-        KeyNamespaceUserKey<K, N, UK> storage = new KeyNamespaceUserKey<>(currentKey, currentNamespace, userKey,
+        KeyNamespaceUserKey<K, N, UK> storage = new KeyNamespaceUserKey<>(currentKey, namespace, userKey,
                 keySerializer, namespaceSerializer, userKeySerializer);
         CachedMapValue<UV> cached = CachedMapValue.of(cachedValue, dirty);
         l1ValueCache.put(storage, cached);
         // remove allows probe key
-        setLookupKey(currentKey, currentNamespace, userKey);
+        setLookupKey(currentKey, namespace, userKey);
         l2ValueCache.remove(lookupKey);
     }
 
@@ -712,10 +715,6 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             return value;
         }
         return userValueSerializer.copy(value);
-    }
-
-    private Iterable<Map.Entry<UK, UV>> cacheEntries(Iterable<Map.Entry<UK, UV>> entries) {
-        return () -> new CachingEntryIterator(entries.iterator());
     }
 
     private Iterable<UK> cacheKeys(Iterable<Map.Entry<UK, UV>> entries) {
@@ -755,6 +754,10 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private void cacheEntry(Map.Entry<UK, UV> entry) {
+        cacheEntry(currentKeyProvider.getCurrentKey(), currentNamespace, entry);
+    }
+
+    private void cacheEntry(K currentKey, N namespace, Map.Entry<UK, UV> entry) {
         if (entry == null) {
             return;
         }
@@ -762,12 +765,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (userKey == null) {
             return;
         }
-        K currentKey = currentKeyProvider.getCurrentKey();
         if (mapCacheEnabled) {
-            updateValueCache(currentKey, userKey, entry.getValue(), false);
+            updateValueCache(currentKey, namespace, userKey, entry.getValue(), false);
         }
         if (presenceCacheEnabled) {
-            updatePresence(currentKey, userKey, entry.getValue() != null);
+            updatePresence(currentKey, namespace, userKey, entry.getValue() != null);
         }
     }
 
@@ -1082,26 +1084,6 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
     }
 
-    private final class CachingEntryIterator implements Iterator<Map.Entry<UK, UV>> {
-        private final Iterator<Map.Entry<UK, UV>> delegateIterator;
-
-        private CachingEntryIterator(Iterator<Map.Entry<UK, UV>> delegateIterator) {
-            this.delegateIterator = delegateIterator;
-        }
-
-        @Override
-        public boolean hasNext() {
-            return delegateIterator.hasNext();
-        }
-
-        @Override
-        public Map.Entry<UK, UV> next() {
-            Map.Entry<UK, UV> entry = delegateIterator.next();
-            cacheEntry(entry);
-            return entry;
-        }
-    }
-
     private static final class CachedMapValue<V> {
         private final V value;
         private final boolean isNull;
@@ -1147,8 +1129,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         // SINGLE → downgrade to point-get via this.get(cachedUK)
         UV value = this.get(snapshot.cachedUserKey);
         if (value != null) {
-            return Collections.singletonList(
-                    new AbstractMap.SimpleImmutableEntry<>(snapshot.cachedUserKey, value));
+            return singletonSnapshotEntry(snapshot.cachedUserKey, value);
         }
         // Stale cache: get() returned null → invalidate and fallthrough
         mapSnapshotCache.remove(snapshotProbe);
@@ -1156,22 +1137,60 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private void invalidateSnapshot(K currentKey) {
-        if (!mapSnapshotCacheEnabled || currentKey == null || currentNamespace == null) {
+        invalidateSnapshot(currentKey, currentNamespace);
+    }
+
+    private void invalidateSnapshot(K currentKey, N namespace) {
+        if (!mapSnapshotCacheEnabled || currentKey == null || namespace == null) {
             return;
         }
         snapshotProbe.key = currentKey;
-        snapshotProbe.namespace = currentNamespace;
+        snapshotProbe.namespace = namespace;
         mapSnapshotCache.remove(snapshotProbe);
     }
 
     private Iterable<Map.Entry<UK, UV>> wrapWithSnapshotAwareIterator(
-            Iterable<Map.Entry<UK, UV>> delegateEntries, K currentKey, Iterable<Map.Entry<UK, UV>> entryCacheFillWrapper) {
-        if (!mapSnapshotCacheEnabled) {
-            return entryCacheFillWrapper;
-        }
-        return () -> {
-            Iterator<Map.Entry<UK, UV>> underlying = entryCacheFillWrapper.iterator();
-            return new SnapshotAwareIterator(delegateEntries.iterator(), currentKey, underlying);
+            Iterable<Map.Entry<UK, UV>> delegateEntries,
+            K currentKey,
+            N namespace,
+            boolean cacheEntries) {
+        return () ->
+                new SnapshotAwareIterator(
+                        delegateEntries.iterator(), currentKey, namespace, cacheEntries);
+    }
+
+    private Iterable<Map.Entry<UK, UV>> singletonSnapshotEntry(UK userKey, UV value) {
+        return () -> new Iterator<Map.Entry<UK, UV>>() {
+            private boolean hasNext = true;
+            private boolean removable;
+
+            @Override
+            public boolean hasNext() {
+                return hasNext;
+            }
+
+            @Override
+            public Map.Entry<UK, UV> next() {
+                if (!hasNext) {
+                    throw new java.util.NoSuchElementException();
+                }
+                hasNext = false;
+                removable = true;
+                return new AbstractMap.SimpleImmutableEntry<>(userKey, value);
+            }
+
+            @Override
+            public void remove() {
+                if (!removable) {
+                    throw new IllegalStateException("remove() requires a preceding next()");
+                }
+                try {
+                    CachedInternalMapState.this.remove(userKey);
+                } catch (Exception e) {
+                    throw new RuntimeException("Failed to remove MapState entry", e);
+                }
+                removable = false;
+            }
         };
     }
 
@@ -1230,20 +1249,27 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final class SnapshotAwareIterator implements Iterator<Map.Entry<UK, UV>> {
         private final Iterator<Map.Entry<UK, UV>> delegateIterator;
         private final K currentKey;
-        private final Iterator<Map.Entry<UK, UV>> underlyingIterator; // Use CachingEntryIterator if cache enabled
+        private final N namespace;
+        private final boolean cacheEntries;
         private int iteratedCount = 0;
         private UK firstUserKey = null;
+        private UK lastUserKey = null;
         private boolean backfilled = false;
 
-        SnapshotAwareIterator(Iterator<Map.Entry<UK, UV>> delegateIterator, K currentKey, Iterator<Map.Entry<UK, UV>> underlyingIterator) {
+        SnapshotAwareIterator(
+                Iterator<Map.Entry<UK, UV>> delegateIterator,
+                K currentKey,
+                N namespace,
+                boolean cacheEntries) {
             this.delegateIterator = delegateIterator;
             this.currentKey = currentKey;
-            this.underlyingIterator = underlyingIterator != null ? underlyingIterator : delegateIterator;
+            this.namespace = namespace;
+            this.cacheEntries = cacheEntries;
         }
 
         @Override
         public boolean hasNext() {
-            boolean has = underlyingIterator.hasNext();
+            boolean has = delegateIterator.hasNext();
             if (!has && !backfilled && mapSnapshotCacheEnabled) {
                 backfilled = true;
                 backfillSnapshotCache();
@@ -1253,31 +1279,38 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
         @Override
         public Map.Entry<UK, UV> next() {
-            Map.Entry<UK, UV> entry = underlyingIterator.next();
+            Map.Entry<UK, UV> entry = delegateIterator.next();
+            if (cacheEntries) {
+                cacheEntry(currentKey, namespace, entry);
+            }
             iteratedCount++;
             if (iteratedCount == 1) {
                 firstUserKey = entry.getKey();
             }
+            lastUserKey = entry.getKey();
             return entry;
         }
 
         @Override
         public void remove() {
-            // Delegate the actual removal to the underlying iterator (e.g. RocksDBMapIterator)
             delegateIterator.remove();
-            // After a mutation the cached snapshot is potentially stale; invalidate it.
-            if (mapSnapshotCacheEnabled) {
-                invalidateSnapshot(currentKey);
+            if (lastUserKey != null) {
+                if (mapCacheEnabled) {
+                    updateValueCache(currentKey, namespace, lastUserKey, null, false);
+                }
+                if (presenceCacheEnabled) {
+                    updatePresence(currentKey, namespace, lastUserKey, false);
+                }
             }
-            // Don't backfill after a mutation — the tracked count/firstUserKey are stale.
+            invalidateSnapshot(currentKey, namespace);
             backfilled = true;
         }
 
         private void backfillSnapshotCache() {
-            if (currentKey == null || currentNamespace == null) {
+            if (currentKey == null || namespace == null) {
                 return;
             }
-            KeyNamespace<K, N> stored = newStoredKeyNamespace(currentKey, currentNamespace);
+            KeyNamespace<K, N> stored = newStoredKeyNamespace(currentKey, namespace);
             if (iteratedCount == 0) {
                 mapSnapshotCache.put(stored, MapSnapshot.empty());
             } else if (iteratedCount == 1 && firstUserKey != null) {

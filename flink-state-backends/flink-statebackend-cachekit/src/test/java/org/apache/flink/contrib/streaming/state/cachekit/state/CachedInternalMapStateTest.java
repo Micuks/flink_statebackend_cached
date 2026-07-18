@@ -21,9 +21,12 @@ import org.apache.flink.runtime.state.internal.InternalMapState;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -267,5 +270,192 @@ class CachedInternalMapStateTest {
         state.flush();
 
         verify(delegate, times(0)).put(any(), any());
+    }
+
+    @Test
+    void testEntriesIteratorRemoveUsesConsumedDelegateAndInvalidatesValueCache()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        Map<String, Integer> entries = new LinkedHashMap<>();
+        entries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(entries.entrySet());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        true,
+                        100);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Iterator<Map.Entry<String, Integer>> iterator = state.entries().iterator();
+        assertEquals(1, iterator.next().getValue());
+        iterator.remove();
+
+        assertTrue(entries.isEmpty());
+        assertNull(state.get("uk1"));
+        verify(delegate, times(0)).get("uk1");
+    }
+
+    @Test
+    void testDirectIteratorRemoveInvalidatesPresenceCache() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        Map<String, Integer> entries = new LinkedHashMap<>();
+        entries.put("uk1", 1);
+        when(delegate.iterator()).thenAnswer(ignored -> entries.entrySet().iterator());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        true,
+                        100);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Iterator<Map.Entry<String, Integer>> iterator = state.iterator();
+        assertEquals(1, iterator.next().getValue());
+        iterator.remove();
+
+        assertTrue(entries.isEmpty());
+        assertFalse(state.contains("uk1"));
+        verify(delegate, times(0)).contains("uk1");
+    }
+
+    @Test
+    void testEntriesIteratorRemoveWorksWithoutSnapshotCache() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        Map<String, Integer> entries = new LinkedHashMap<>();
+        entries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(entries.entrySet());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        true,
+                        0);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Iterator<Map.Entry<String, Integer>> iterator = state.entries().iterator();
+        iterator.next();
+        iterator.remove();
+
+        assertTrue(entries.isEmpty());
+        assertNull(state.get("uk1"));
+    }
+
+    @Test
+    void testEntriesIteratorRemoveInvalidatesExistingCacheWhenIterationFillDisabled()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        Map<String, Integer> entries = new LinkedHashMap<>();
+        entries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(entries.entrySet());
+        when(delegate.get("uk1")).thenReturn(1);
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        assertEquals(1, state.get("uk1"));
+        Iterator<Map.Entry<String, Integer>> iterator = state.entries().iterator();
+        iterator.next();
+        iterator.remove();
+
+        assertTrue(entries.isEmpty());
+        assertNull(state.get("uk1"));
+        verify(delegate, times(1)).get("uk1");
+    }
+
+    @Test
+    void testSnapshotHitIteratorRemoveUsesMapStateRemove() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        Map<String, Integer> entries = new LinkedHashMap<>();
+        entries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(entries.entrySet());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        true,
+                        100);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        for (Map.Entry<String, Integer> ignored : state.entries()) {
+            // Consume the first traversal to backfill a SINGLE snapshot.
+        }
+
+        Iterator<Map.Entry<String, Integer>> iterator = state.entries().iterator();
+        assertEquals(1, iterator.next().getValue());
+        iterator.remove();
+
+        assertNull(state.get("uk1"));
+        state.flush();
+        verify(delegate).remove("uk1");
     }
 }
