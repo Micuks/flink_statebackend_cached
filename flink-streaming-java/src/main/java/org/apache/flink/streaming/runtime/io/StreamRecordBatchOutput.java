@@ -96,7 +96,6 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
 
     private int count;
     private long firstAppendNanos;
-    private java.util.concurrent.CompletableFuture<Void> asyncPrefetchTail;
     private int asyncPrefetchScheduledUntil;
 
     public StreamRecordBatchOutput(
@@ -166,7 +165,6 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 (this.enabled && headOperator instanceof BatchProcessingOperator)
                         ? (BatchProcessingOperator<T, ?>) headOperator
                         : null;
-        this.asyncPrefetchTail = java.util.concurrent.CompletableFuture.completedFuture(null);
         this.asyncPrefetchScheduledUntil = 0;
     }
 
@@ -311,7 +309,6 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
             }
             count = 0;
             firstAppendNanos = 0L;
-            asyncPrefetchTail = java.util.concurrent.CompletableFuture.completedFuture(null);
             asyncPrefetchScheduledUntil = 0;
         }
     }
@@ -334,13 +331,11 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 asyncPrefetchScheduledUntil = end;
                 return;
             }
-            StreamRecord<?>[] slice = new StreamRecord<?>[end - start];
-            System.arraycopy(buf, start, slice, 0, slice.length);
-            asyncPrefetchTail =
-                    asyncPrefetchTail.thenCompose(
-                            ignored ->
-                                    org.apache.flink.streaming.runtime.tasks.StatePrefetcher
-                                            .prefetchAsync(headOperator, slice, slice.length));
+            // StatePrefetcher only extracts keys and invokes CacheKit's non-blocking submission
+            // hook. Read the live range directly: copying a slice and chaining an already-complete
+            // future added allocation without providing ordering or backpressure semantics.
+            org.apache.flink.streaming.runtime.tasks.StatePrefetcher.prefetch(
+                    headOperator, buf, start, end);
             asyncPrefetchScheduledUntil = end;
         }
     }
