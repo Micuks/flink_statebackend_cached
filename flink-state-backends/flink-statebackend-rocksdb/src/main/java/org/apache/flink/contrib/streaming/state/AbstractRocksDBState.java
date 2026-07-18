@@ -132,9 +132,7 @@ public abstract class AbstractRocksDBState<K, N, V> implements InternalKvState<K
         return backend.db.get(
                 columnFamily,
                 serializeQueryKeyAndNamespace(
-                        serializedKeyAndNamespace,
-                        safeKeySerializer,
-                        safeNamespaceSerializer));
+                        serializedKeyAndNamespace, safeKeySerializer, safeNamespaceSerializer));
     }
 
     protected final byte[] serializeQueryKeyAndNamespace(
@@ -150,10 +148,7 @@ public abstract class AbstractRocksDBState<K, N, V> implements InternalKvState<K
                         serializedKeyAndNamespace, safeKeySerializer, safeNamespaceSerializer);
 
         return serializeKeyAndNamespace(
-                keyAndNamespace.f0,
-                keyAndNamespace.f1,
-                safeKeySerializer,
-                safeNamespaceSerializer);
+                keyAndNamespace.f0, keyAndNamespace.f1, safeKeySerializer, safeNamespaceSerializer);
     }
 
     protected final byte[] serializeKeyAndNamespace(
@@ -164,8 +159,7 @@ public abstract class AbstractRocksDBState<K, N, V> implements InternalKvState<K
             throws IOException {
 
         int keyGroup =
-                KeyGroupRangeAssignment.assignToKeyGroup(
-                        key, backend.getNumberOfKeyGroups());
+                KeyGroupRangeAssignment.assignToKeyGroup(key, backend.getNumberOfKeyGroups());
 
         SerializedCompositeKeyBuilder<K> keyBuilder =
                 new SerializedCompositeKeyBuilder<>(
