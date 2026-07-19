@@ -202,6 +202,7 @@ class CachedInternalValueStateTest {
         assertEquals(1, state.getPrefetchMultiGetCallsForTesting());
         assertEquals(1, state.getPrefetchMissingValuesStagedForTesting());
         assertEquals(3, state.getPrefetchValuesPromotedForTesting());
+        assertTrue(state.supportsRecordKeyPrefetch());
     }
 
     @Test
@@ -256,6 +257,9 @@ class CachedInternalValueStateTest {
         verify(batchReader, times(1))
                 .getSerializedValuesByRocksDBKeys(any(), eq(0), eq(2));
         verify(delegate, never()).value();
+        // A direct caller supplied the stable namespace, so this API remains supported. The
+        // generic record-lookahead broadcast must not guess a future window/session namespace.
+        assertFalse(state.supportsRecordKeyPrefetch());
     }
 
     @Test
