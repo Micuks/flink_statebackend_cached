@@ -83,6 +83,37 @@ public final class LocalPreagg {
     private LocalPreagg() {}
 
     /**
+     * Returns whether this operator is a structural candidate for local pre-aggregation.
+     *
+     * <p>This intentionally stops before the reflective selector/output checks performed by {@link
+     * #dispatch}. The prefetch buffer uses it only as a conservative exclusion: once a batchable
+     * function may consume the whole batch, issuing speculative state reads while the batch is
+     * still filling is more expensive than occasionally forgoing prefetch if dispatch later falls
+     * back.
+     */
+    public static boolean mayHandle(Input<?> headOperator) {
+        return ENABLED && hasBatchableTarget(headOperator);
+    }
+
+    static boolean hasBatchableTarget(Input<?> headOperator) {
+        if (!(headOperator instanceof AbstractStreamOperator)) {
+            return false;
+        }
+        if (headOperator instanceof BatchableKeyedFunction) {
+            return true;
+        }
+        if (!(headOperator instanceof AbstractUdfStreamOperator)) {
+            return false;
+        }
+        try {
+            return ((AbstractUdfStreamOperator<?, ?>) headOperator).getUserFunction()
+                    instanceof BatchableKeyedFunction;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
      * Attempt to dispatch the batch via key-grouped pre-aggregation.
      *
      * @return true if the batch was fully handled here; false to fall back to per-record dispatch.

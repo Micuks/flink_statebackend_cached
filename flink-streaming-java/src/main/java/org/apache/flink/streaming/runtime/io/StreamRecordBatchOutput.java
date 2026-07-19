@@ -89,6 +89,8 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
      * When true, prefetch only fires while backpressured; when false, prefetch fires every flush.
      */
     private final boolean backpressureGated;
+    /** Local-preagg may consume the whole batch, making any early state read dead work. */
+    private final boolean localPreaggCandidate;
 
     // Reusable record buffer. Sized at construction.
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -156,6 +158,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         this.prefetchMode = prefetchMode;
         this.backpressured = backpressured;
         this.backpressureGated = backpressureGated;
+        this.localPreaggCandidate = LocalPreagg.mayHandle(headOperator);
         @SuppressWarnings({"unchecked", "rawtypes"})
         StreamRecord<T>[] tmp = new StreamRecord[this.batchSize];
         this.buf = tmp;
@@ -314,7 +317,11 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
     }
 
     private void scheduleAsyncPrefetchChunks(boolean includeRemainder) {
-        if (!enabled || !prefetchMode || !BP_PREFETCH_ASYNC_CHUNKS || count <= 1) {
+        if (!enabled
+                || !prefetchMode
+                || !BP_PREFETCH_ASYNC_CHUNKS
+                || localPreaggCandidate
+                || count <= 1) {
             return;
         }
         if (backpressureGated && (backpressured == null || !backpressured.getAsBoolean())) {
