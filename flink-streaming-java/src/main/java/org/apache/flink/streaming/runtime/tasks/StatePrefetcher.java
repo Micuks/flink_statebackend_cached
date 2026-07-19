@@ -64,6 +64,10 @@ public final class StatePrefetcher {
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Cache of optional synchronous local-preagg bulk-prefetch methods per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            IMMEDIATE_PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
     /** Cache of optional {@code hasPrefetchableState()} {@link Method} per backend class. */
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             HAS_PREFETCHABLE_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
@@ -184,6 +188,61 @@ public final class StatePrefetcher {
             }
         }
         return true;
+    }
+
+    /**
+     * Bulk-load the already grouped keys immediately before local pre-aggregation consumes them.
+     *
+     * <p>Unlike record lookahead, these keys are no longer speculative: {@code LocalPreagg} has
+     * already built its exact group set and will access each key once. CacheKit may therefore use a
+     * blocking RocksDB MultiGet here; other backends simply lack the optional reflective hook.
+     */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public static boolean prefetchKeysImmediately(
+            Input<?> headOperator, java.util.Collection<?> keys) {
+        if (headOperator == null
+                || keys == null
+                || keys.isEmpty()
+                || !(headOperator instanceof AbstractStreamOperator)) {
+            return false;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            return prefetchKeysImmediately(backend, keys);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    static boolean prefetchKeysImmediately(
+            KeyedStateBackend<?> backend, java.util.Collection<?> keys) {
+        if (backend == null || keys == null || keys.isEmpty() || !hasPrefetchableState(backend)) {
+            return false;
+        }
+        try {
+            Method method =
+                    IMMEDIATE_PREFETCH_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(), StatePrefetcher::lookupImmediatePrefetchMethod);
+            if (method == NO_METHOD) {
+                return false;
+            }
+            method.invoke(backend, keys);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static Method lookupImmediatePrefetchMethod(Class<?> backendClass) {
+        try {
+            Method method =
+                    backendClass.getMethod("prefetchForImmediateUse", java.util.Collection.class);
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
     }
 
     /** Best-effort {@code hasPrefetchableState()} probe; defaults to true when absent. */

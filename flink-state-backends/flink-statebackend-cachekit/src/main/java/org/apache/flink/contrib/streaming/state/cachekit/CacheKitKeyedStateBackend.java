@@ -675,6 +675,30 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
     }
 
+    /**
+     * Synchronously bulk-load keys that local pre-aggregation has already committed to consume.
+     *
+     * <p>This is intentionally separate from speculative record lookahead. It only touches
+     * VoidNamespace ValueState wrappers with the MultiGet option enabled; namespaced state and
+     * MapState remain excluded because the grouping hook does not know their future namespaces or
+     * entries.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public void prefetchForImmediateUse(Collection<? extends K> keys) {
+        synchronized (lifecycleLock) {
+            if (closed || disposed || keys == null || keys.isEmpty()) {
+                return;
+            }
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                if (wrapper instanceof CachedInternalValueState
+                        && ((CachedInternalValueState<?, ?, ?>) wrapper)
+                                .supportsRecordKeyPrefetch()) {
+                    ((CachedInternalValueState) wrapper).prefetchForImmediateUse(keys);
+                }
+            }
+        }
+    }
+
     @Override
     public void close() throws IOException {
         synchronized (lifecycleLock) {
