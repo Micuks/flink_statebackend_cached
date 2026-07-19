@@ -616,7 +616,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 return false;
             }
             for (Object wrapper : wrappersByDelegateIdentity.values()) {
-                if (wrapper instanceof CachedInternalValueState) {
+                if (wrapper instanceof CachedInternalValueState
+                        && ((CachedInternalValueState<?, ?, ?>) wrapper)
+                                .supportsRecordKeyPrefetch()) {
                     return true;
                 }
             }
@@ -635,7 +637,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 // and value deserialization run on the shared prefetch worker. No key-context
                 // save/restore needed — submission never touches the backend key context.
                 for (Object wrapper : wrappersByDelegateIdentity.values()) {
-                    if (wrapper instanceof CachedInternalValueState) {
+                    if (wrapper instanceof CachedInternalValueState
+                            && ((CachedInternalValueState<?, ?, ?>) wrapper)
+                                    .supportsRecordKeyPrefetch()) {
                         Runnable task =
                                 ((CachedInternalValueState) wrapper).buildAsyncPrefetchTask(keys);
                         if (task != null) {
@@ -648,7 +652,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             K previousKey = getCurrentKey();
             try {
                 for (Object wrapper : wrappersByDelegateIdentity.values()) {
-                    if (!BP_PREFETCH_ASYNC && wrapper instanceof CachedInternalValueState) {
+                    if (!BP_PREFETCH_ASYNC
+                            && wrapper instanceof CachedInternalValueState
+                            && ((CachedInternalValueState<?, ?, ?>) wrapper)
+                                    .supportsRecordKeyPrefetch()) {
                         ((CachedInternalValueState) wrapper).prefetch(keys);
                     }
                 }

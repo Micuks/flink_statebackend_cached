@@ -21,6 +21,7 @@ import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.LruCachePolicy;
+import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 
@@ -502,6 +503,20 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return delegate.getValueSerializer();
     }
 
+    /**
+     * Whether future keys extracted from input records are sufficient to identify this state's
+     * entries.
+     *
+     * <p>The generic record-lookahead hook knows future keys but not their future window/session
+     * namespaces. Reusing this wrapper's current non-void namespace therefore warms unrelated
+     * entries (and can issue millions of negative reads). Direct callers that know a stable
+     * namespace may still use {@link #buildAsyncPrefetchTask}; this gate applies only to the
+     * backend's record-key broadcast.
+     */
+    public boolean supportsRecordKeyPrefetch() {
+        return namespaceSerializer instanceof VoidNamespaceSerializer;
+    }
+
     @Override
     public void setCurrentNamespace(@Nonnull N namespace) {
         this.currentNamespace = namespace;
@@ -575,12 +590,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         if (prefetchTasksBuilt > 0 || multiGetPrefetchEnabled) {
             LOG.info(
-                    "[CACHEKIT VALUE PREFETCH] delegate={} multiGet={} chunkSize={} minBatchSize={} "
+                    "[CACHEKIT VALUE PREFETCH] delegate={} namespaceSerializer={} "
+                            + "recordKeyPrefetch={} multiGet={} chunkSize={} minBatchSize={} "
                             + "tasksBuilt={} tasksExecuted={} tasksDropped={} keysPrepared={} "
                             + "keysDeduplicated={} multiGetCalls={} "
                             + "multiGetKeys={} pointGetCalls={} staged={} missingStaged={} "
                             + "promoted={} staleAborts={} buildFailures={} workerFailures={}",
                     delegate.getClass().getSimpleName(),
+                    namespaceSerializer.getClass().getSimpleName(),
+                    supportsRecordKeyPrefetch(),
                     multiGetPrefetchEnabled,
                     multiGetChunkSize,
                     multiGetMinBatchSize,
