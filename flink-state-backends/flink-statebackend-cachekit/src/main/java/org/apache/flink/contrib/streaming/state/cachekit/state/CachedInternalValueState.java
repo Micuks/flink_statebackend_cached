@@ -147,6 +147,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private TypeSerializer<V> immediateValueSerializer;
     private org.apache.flink.core.memory.DataInputDeserializer immediateValueInput;
 
+    // Mailbox-thread-confined signal used by local-preagg's immediate MultiGet hook. The backend
+    // cannot know which of an operator's ValueState wrappers the user function will actually
+    // consult, so each wrapper reports whether it was read in the preceding dispatch. This avoids
+    // broadcasting every grouped key to every registered ValueState (which is particularly
+    // expensive for operators with several conditional states).
+    private boolean immediatePrefetchAccessObserved;
+
     private static int loadStagingMaxEntries() {
         try {
             return Math.max(
@@ -322,6 +329,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     @Override
     public V value() throws IOException {
+        immediatePrefetchAccessObserved = true;
         K currentKey = currentKeyProvider.getCurrentKey();
 
         // 1. Check Sticky Cache (Always Check L0 - Fast Path)
@@ -521,6 +529,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      */
     public boolean supportsRecordKeyPrefetch() {
         return namespaceSerializer instanceof VoidNamespaceSerializer;
+    }
+
+    /**
+     * Returns and clears whether this wrapper was read since the previous immediate-prefetch
+     * decision.
+     *
+     * <p>Both this method and {@link #value()} run on the task mailbox thread. The first
+     * local-preagg dispatch therefore performs no speculative state broadcast; its real accesses
+     * teach the next dispatch which wrappers are worth warming. A conditionally unused wrapper is
+     * removed from the active set after at most one batch and always retains the normal point-read
+     * fallback.
+     */
+    public boolean consumeImmediatePrefetchAccessObserved() {
+        boolean observed = immediatePrefetchAccessObserved;
+        immediatePrefetchAccessObserved = false;
+        return observed;
     }
 
     @Override

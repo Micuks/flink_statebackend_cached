@@ -690,10 +690,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 return;
             }
             for (Object wrapper : wrappersByDelegateIdentity.values()) {
-                if (wrapper instanceof CachedInternalValueState
-                        && ((CachedInternalValueState<?, ?, ?>) wrapper)
-                                .supportsRecordKeyPrefetch()) {
-                    ((CachedInternalValueState) wrapper).prefetchForImmediateUse(keys);
+                if (wrapper instanceof CachedInternalValueState) {
+                    CachedInternalValueState<?, ?, ?> valueState =
+                            (CachedInternalValueState<?, ?, ?>) wrapper;
+                    if (valueState.supportsRecordKeyPrefetch()
+                            && valueState.consumeImmediatePrefetchAccessObserved()) {
+                        ((CachedInternalValueState) valueState).prefetchForImmediateUse(keys);
+                    }
                 }
             }
         }

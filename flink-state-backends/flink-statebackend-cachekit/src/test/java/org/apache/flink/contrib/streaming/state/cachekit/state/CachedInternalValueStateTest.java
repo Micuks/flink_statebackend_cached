@@ -243,6 +243,7 @@ class CachedInternalValueStateTest {
                         8);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
+        assertFalse(state.consumeImmediatePrefetchAccessObserved());
         state.prefetchForImmediateUse(Arrays.asList("k1", "missing", "k2"));
         currentKey.set("k1");
         assertEquals(11, state.value());
@@ -257,6 +258,8 @@ class CachedInternalValueStateTest {
         assertEquals(1, state.getPrefetchMultiGetCallsForTesting());
         assertEquals(1, state.getPrefetchMissingValuesStagedForTesting());
         assertEquals(3, state.getPrefetchValuesPromotedForTesting());
+        assertTrue(state.consumeImmediatePrefetchAccessObserved());
+        assertFalse(state.consumeImmediatePrefetchAccessObserved());
     }
 
     @Test
