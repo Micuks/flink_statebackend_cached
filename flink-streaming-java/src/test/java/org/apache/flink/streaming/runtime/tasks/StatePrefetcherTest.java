@@ -16,16 +16,21 @@
 package org.apache.flink.streaming.runtime.tasks;
 
 import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.runtime.state.KeyedStateBackend;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.LinkedHashSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.withSettings;
 
 class StatePrefetcherTest {
 
@@ -63,5 +68,22 @@ class StatePrefetcherTest {
                         records.length,
                         keys));
         assertTrue(keys.isEmpty());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testImmediatePrefetchInvokesOptionalBackendHook() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(ImmediatePrefetchHook.class));
+        Collection<Integer> keys = Arrays.asList(1, 2, 3);
+
+        assertTrue(StatePrefetcher.prefetchKeysImmediately(backend, keys));
+        verify((ImmediatePrefetchHook) backend).prefetchForImmediateUse(keys);
+    }
+
+    public interface ImmediatePrefetchHook {
+        void prefetchForImmediateUse(Collection<?> keys);
     }
 }

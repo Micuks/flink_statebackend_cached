@@ -207,6 +207,60 @@ class CachedInternalValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testImmediatePrefetchStagesExactLocalPreaggKeys() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
+        stubPreparedKeySerialization(batchReader);
+        when(batchReader.getBatchDefaultValue()).thenReturn(99);
+        when(batchReader.getSerializedValuesByRocksDBKeys(any(), eq(0), eq(3)))
+                .thenReturn(
+                        Arrays.asList(
+                                KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE),
+                                null,
+                                KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE)));
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        state.prefetchForImmediateUse(Arrays.asList("k1", "missing", "k2"));
+        currentKey.set("k1");
+        assertEquals(11, state.value());
+        currentKey.set("missing");
+        assertEquals(99, state.value());
+        currentKey.set("k2");
+        assertEquals(22, state.value());
+
+        verify(batchReader, times(1))
+                .getSerializedValuesByRocksDBKeys(any(), eq(0), eq(3));
+        verify(delegate, never()).value();
+        assertEquals(1, state.getPrefetchMultiGetCallsForTesting());
+        assertEquals(1, state.getPrefetchMissingValuesStagedForTesting());
+        assertEquals(3, state.getPrefetchValuesPromotedForTesting());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testAsyncMultiGetSupportsNamespacedValueState() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
