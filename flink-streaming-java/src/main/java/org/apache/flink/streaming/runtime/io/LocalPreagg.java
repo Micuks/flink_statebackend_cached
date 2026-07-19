@@ -28,6 +28,7 @@ import org.apache.flink.streaming.api.operators.Input;
 import org.apache.flink.streaming.api.operators.Output;
 import org.apache.flink.streaming.api.operators.TimestampedCollector;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.streaming.runtime.tasks.StatePrefetcher;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -176,6 +177,10 @@ public final class LocalPreagg {
             if (groups.isEmpty()) {
                 return false;
             }
+            // The exact set of state keys is now known and deduplicated. CacheKit can issue one
+            // synchronous MultiGet so processBatchForKey observes warm ValueState, without the
+            // wasted per-record speculation that used to run before grouping.
+            StatePrefetcher.prefetchKeysImmediately(headOperator, groups.keySet());
             // Preserve the batch's timestamp context for emitted rows (agg results are not
             // event-time keyed downstream, but keep parity with the per-record path).
             if (lastRec != null && lastRec.hasTimestamp()) {
