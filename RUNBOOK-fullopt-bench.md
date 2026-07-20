@@ -1,10 +1,9 @@
 # CacheKit fullOpt — benchmark handoff runbook
 
-Reproduce the CacheKit fullOpt (D1 + bp-prefetch + local-preagg) nexmark 15q
+Reproduce the CacheKit fullOpt (bp-prefetch + local-preagg) nexmark 15q
 **CDC correctness** and **throughput** results on a fresh server.
 
-- Code: GitHub `Micuks/flink_statebackend_cached`, branch **`cachekit/dev`**
-  (= `merge/cachekit-fullopt-objresident` + D1/bp/preagg; merge-base `a9e86f47bd`).
+- Code: GitHub `Micuks/flink_statebackend_cached`, branch **`cachekit/dev_wutb`**.
 - Expected: **15/15 CDC** (q12 = proc-time, SKIP) · **+32.43% throughput/core** mean
   (50M×3, quiet host; +34.72% excl. q12).
 
@@ -34,7 +33,7 @@ wrong. You must build and stage all three, not just the cachekit jar.
 cd $WORKSPACE
 git clone https://github.com/Micuks/flink_statebackend_cached cachekit-src
 cd cachekit-src
-git checkout cachekit/dev
+git checkout cachekit/dev_wutb
 ```
 
 ## 2. Build the three fullOpt modules
@@ -82,7 +81,7 @@ jar uf $LIB/flink-table-runtime-1.16.3.jar \
   -C $TRC org/apache/flink/table/runtime/operators/aggregate/GroupAggFunction.class \
   -C $TRC org/apache/flink/table/runtime/operators/deduplicate/RowTimeDeduplicateFunction.class
 
-# 3c. cachekit backend = the module jar as-is (full, ~90 KB, has D1 + bp)
+# 3c. cachekit backend = the module jar as-is (full, ~90 KB)
 cp $SRC/flink-state-backends/flink-statebackend-cachekit/target/flink-statebackend-cachekit-1.16-SNAPSHOT.jar \
    $LIB/flink-statebackend-cachekit-1.16-SNAPSHOT.jar
 
@@ -104,7 +103,7 @@ state.backend.incremental: true
 state.backend.rocksdb.memory.managed: true
 state.backend.rocksdb.memory.fixed-per-slot: 1024m
 
-# D1 ValueState object cache (VoidNamespace-gated). value.cache.max-entries=0 disables it.
+# ValueState cache. Set value.cache.max-entries to 0 to disable it.
 state.backend.cachekit.cache.void-namespace-only: true
 state.backend.cachekit.value.cache.max-entries: 8000
 state.backend.cachekit.value.cache.policy: LRU
@@ -113,11 +112,11 @@ state.backend.cachekit.value.bypass.enabled: true
 state.backend.cachekit.value.hit-rate.threshold: 0.03
 state.backend.cachekit.value.hit-rate.window: 5000
 
-# MapState caches OFF — the wrappers regress joins (q3/q4/q9/q20) and q13.
-state.backend.cachekit.map.cache.max-entries: 0
-state.backend.cachekit.map.snapshot.cache.max-entries: 0
+# MapState caches are optional. Set an individual capacity to 0 to disable that cache.
+state.backend.cachekit.map.cache.max-entries: 8000
+state.backend.cachekit.map.snapshot.cache.max-entries: 2000
 state.backend.cachekit.map.presence.cache.max-entries: 0
-state.backend.cachekit.map.bypass.enabled: false
+state.backend.cachekit.map.bypass.enabled: true
 
 # bp-prefetch + mailbox-batch + runtime local pre-aggregation
 state.backend.cachekit.bp-prefetch.enabled: true
@@ -176,7 +175,7 @@ BENCH_ROOT=$WORKSPACE PROJECT=ck-bench COMPOSE_PROJECT_NAME=ck-bench \
 JM=http://localhost:18130 PROM=http://localhost:19830 PUSHGATEWAY_PORT=19831 \
 EVENTS_LIST=50000000 WARMUP_EVENTS=5000000 ROUNDS=3 \
 QUERIES=q3,q4,q5,q7,q8,q9,q11,q12,q13,q15,q16,q17,q18,q19,q20 \
-NO_MAP_CACHE=1 SKIP_DOCKER_BUILD=1 SKIP_BUILD=1 \
+SKIP_DOCKER_BUILD=1 SKIP_BUILD=1 \
 OUT=$WORKSPACE/results-fullopt/$(date +%Y%m%d_%H%M%S) \
 bash $WORKSPACE/cachekit-src/scripts/run_cachekit_bp_prefetch_perf.sh
 ```
@@ -187,6 +186,11 @@ bash $WORKSPACE/cachekit-src/scripts/run_cachekit_bp_prefetch_perf.sh
   rocksdb leg samples 1–2 cores so per-core is inflated (+318%); the wall-time (740s→121s)
   and total TPS (~12×) are the honest signal. Report per-core **and** wall.
 - Comparison table lands in `$OUT/*.md`.
+- Do **not** preserve Flink checkpoint/local-state runtime directories as benchmark artifacts.
+  Keep only `results/...` outputs (`summary.csv`, `query_status.csv`, `input-snapshot/`, and
+  query logs needed for failures). The per-query `runtime/data/<run>/round-N/qX/.../checkpoint`
+  tree can easily reach tens of GB for state-heavy queries such as q9/q20 and must be deleted
+  after the CSV/log artifacts have been copied.
 
 ### Isolation (running alongside other stacks)
 If the host is not exclusively yours:
@@ -203,16 +207,72 @@ If the host is not exclusively yours:
 
 ---
 
-## 7. Gotchas cheat-sheet
+## 7. q4/q16 cancellation-time native crash (fixed 2026-07-16)
+
+The throughput harness cancels the warmup job after roughly 120 seconds. The previous CacheKit
+fullOpt build could crash TaskManager JVMs in `rocksdb::GetColumnFamilyID(ColumnFamilyHandle*)`
+during that teardown, invalidating q4/q16 before their measured query could finish.
+
+The failing path is:
+
+```text
+StreamTask cancel thread
+  -> CacheKitKeyedStateBackend.close()
+  -> flushWrappers()
+  -> CachedInternalValueState.flushEntryToDelegate()
+  -> RocksDB.put() on a disposed ColumnFamilyHandle
+```
+
+This is a CacheKit close/dispose lifecycle race, not a host-memory or MapState-cache failure.
+`dispose()` could free delegate RocksDB handles while `close()` flushed dirty ValueState entries.
+The fix serializes terminal backend operations, quiesces ValueState async prefetch and dirty
+write-back, and closes MapState dirty write-back before native delegate disposal. Keep the
+final-close flush: it persists dirty cache entries; the required invariant is that it completes
+before `delegate.dispose()`.
+
+**Validation (2026-07-16):** JDK 11 CacheKit module tests pass (56/56). The exact fullOpt config
+with MapState cache, bp-prefetch, mailbox batch, and local-preagg enabled then passed one 100M
+round for both q4 (258.433s, 386.95K/s) and q16 (517.146s, 193.37K/s). Both warmup cancellations
+completed normally, and the result tree contained no `hs_err_pid*.log`, `SIGSEGV`, or TaskManager
+failure signature.
+
+The old q4/q16 failure result remains invalid. This confirms the two former blockers only; rerun
+the full 15-query suite before publishing a replacement aggregate result.
+
+---
+
+## 8. MapState iterator removal cache coherence (fixed 2026-07-18)
+
+Older CacheKit builds could use separate delegate iterators for traversal and
+`Iterator.remove()`. On `entries()` this could fail before the removal reached RocksDB; on a
+successful removal, Value/Presence cache entries could still report the deleted key as present.
+With snapshot cache disabled, the cache-filling iterator could also throw
+`UnsupportedOperationException` from `remove()`.
+
+The `cachekit/dev_wutb` patch uses one underlying iterator for `next()` and `remove()`, records a
+clean negative Value cache entry and `presence=false` after a physical iterator deletion, and
+invalidates the affected MapSnapshot. Snapshot `SINGLE` hits now return an iterator whose
+`remove()` follows the ordinary MapState write-back path. This applies even when iteration cache
+fill is disabled, without enabling cache fill itself.
+
+Do not disable MapState cache as a workaround for this issue. Build and stage the CacheKit jar
+from this branch using §3. **Validation (2026-07-18):** JDK 11 CacheKit module tests pass
+61/61, including the five iterator-removal regressions.
+
+---
+
+## 9. Gotchas cheat-sheet
 
 | Symptom | Cause / fix |
 |---|---|
 | `flink-clients` assembly "must set at least one file" | used `-Dmaven.test.skip=true`; use `-DskipTests` |
 | Runtime ClassNotFound in table/runtime, or local-preagg not firing | thin `flink-table-runtime-1.16-SNAPSHOT.jar` staged; patch the FULL jar (§3b) |
-| Joins q3/q4/q9/q20 fail CDC | MapState cache on; set `map.cache.max-entries: 0` |
+| MapState cache needs isolation | Tune its capacities per workload; set an individual capacity to `0` only when isolating that cache |
+| `MapState.entries()/iterator()` removal fails or returns deleted data later | old CacheKit iterator wrapper; build and stage `cachekit/dev_wutb` (§8) |
+| q4/q16 crash while warmup stops | CacheKit close/dispose race in an old build; use the lifecycle fix in §7 and confirm the three staged jars |
 | Windowed q5/q7/q8/q11 differ (even rocksdb-vs-rocksdb) | multi-split source; use single-split <128 MB source at p=1 |
 | q12 "fails" CDC | proc-time windows, inherently non-deterministic → SKIP |
-| D1 won't turn off via `value.bypass.enabled:false` | that only disables adaptive bypass; D1's switch is `value.cache.max-entries` (0 = off) or `cache.void-namespace-only` |
 | `state.backend.cached.*` seems ignored | it is — wrong prefix (old CachingStateBackend); CacheKit reads `state.backend.cachekit.*` |
 | Job never appears in JM (0 running jobs) | host too loaded / harness couldn't submit; run on a quiet host, smoke-test first |
+| RocksDB `No space left on device` / huge runtime dir | stale `runtime/data/<run>/.../checkpoint` trees were preserved; checkpoint/local-state runtime data is not a result artifact and should be cleaned before the next baseline |
 ```

@@ -153,6 +153,13 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         + "Caches (Key, Namespace) -> {EMPTY | SINGLE(UserKey)} to short-circuit "
                                                         + "entries()/iterator() calls. Set 0 to disable.");
 
+        public static final ConfigOption<Boolean> DIAGNOSTICS_ENABLED = ConfigOptions
+                        .key("state.backend.cachekit.diagnostics.enabled")
+                        .booleanType()
+                        .defaultValue(false)
+                        .withDescription(
+                                        "Expose opt-in CacheKit diagnostic metrics through Flink REST reporters.");
+
 	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
 			.noDefaultValue()
@@ -218,6 +225,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final int mapHitRateWindow = config.get(MAP_HIT_RATE_WINDOW);
                 final boolean mapIterationCacheFillEnabled = config.get(MAP_ITERATION_CACHE_FILL_ENABLED);
                 final int mapSnapshotMaxEntries = Math.max(0, config.get(MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
+		final boolean diagnosticsEnabled = config.get(DIAGNOSTICS_ENABLED);
 		final String delegateClass = config.get(DELEGATE_BACKEND);
 
 			final boolean listStateCowEnabled = config.get(LIST_STATE_COW_ENABLED);
@@ -226,7 +234,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 			final boolean priorityQueueOptEnabled = config.get(PRIORITY_QUEUE_OPT_ENABLED);
 
 			System.out.printf(
-							"CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, delegate=%s, listStateCow=%s, listStateRyw=%s, clearedKeysCap=%d, priorityQueueOpt=%s%n",
+				"CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, diagnostics=%s, delegate=%s, listStateCow=%s, listStateRyw=%s, clearedKeysCap=%d, priorityQueueOpt=%s%n",
                                 maxEntries,
                                 policyType,
                                 lruOverflow,
@@ -242,14 +250,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 mapCacheLruOverflow,
                                 mapBypassEnabled,
                                 mapHitRateThreshold,
-                                mapHitRateWindow,
-                                mapIterationCacheFillEnabled,
-								mapSnapshotMaxEntries,
-								delegateClass,
-								listStateCowEnabled,
-								listStateRywEnabled,
-								clearedKeysCapacity,
-								priorityQueueOptEnabled);
+							mapHitRateWindow,
+							mapIterationCacheFillEnabled,
+							mapSnapshotMaxEntries,
+							diagnosticsEnabled,
+							delegateClass,
+							listStateCowEnabled,
+							listStateRywEnabled,
+							clearedKeysCapacity,
+							priorityQueueOptEnabled);
 
                 StateBackend delegate;
                 if (delegateClass == null || delegateClass.isBlank()) {
@@ -291,8 +300,9 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 								mapSnapshotMaxEntries,
 								listStateCowEnabled,
 								listStateRywEnabled,
-								clearedKeysCapacity,
-								priorityQueueOptEnabled);
+							clearedKeysCapacity,
+							priorityQueueOptEnabled,
+							diagnosticsEnabled);
 	}
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

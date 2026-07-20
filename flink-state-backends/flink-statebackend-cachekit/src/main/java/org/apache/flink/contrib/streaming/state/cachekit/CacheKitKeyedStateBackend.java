@@ -24,9 +24,11 @@ import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalLis
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMapState;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalPriorityQueueSet;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalValueState;
+import org.apache.flink.contrib.streaming.state.cachekit.state.MapSnapshotCacheMetrics;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.SavepointResources;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
@@ -102,6 +104,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean listStateRywEnabled;
     private final int listStateClearedKeysCapacity;
     private final boolean priorityQueueOptEnabled;
+    private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
 
     // --- fullOpt: shared flush executors (N wrappers share one thread each) ---
     private final ExecutorService listStateFlushExecutor;
@@ -132,6 +135,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             ExecutionConfig executionConfig,
             TtlTimeProvider ttlTimeProvider,
             CloseableRegistry cancelStreamRegistry,
+            MetricGroup metricGroup,
             int valueCacheMaxEntries,
             CachePolicyType valueCachePolicy,
             int valueCacheLruOverflow,
@@ -153,7 +157,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean listStateCowEnabled,
             boolean listStateRywEnabled,
             int listStateClearedKeysCapacity,
-            boolean priorityQueueOptEnabled) {
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -188,6 +193,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.listStateRywEnabled = listStateRywEnabled;
         this.listStateClearedKeysCapacity = listStateClearedKeysCapacity;
         this.priorityQueueOptEnabled = priorityQueueOptEnabled;
+        this.mapSnapshotCacheMetrics =
+                MapSnapshotCacheMetrics.create(metricGroup, diagnosticsEnabled);
 
         // fullOpt: initialize shared flush executors (daemon threads)
         this.listStateFlushExecutor = listStateCowEnabled
@@ -287,7 +294,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapHitRateThreshold,
                     mapHitRateWindow,
                     mapIterationCacheFillEnabled,
-                    mapSnapshotCacheMaxEntries);
+                    mapSnapshotCacheMaxEntries,
+                    mapSnapshotCacheMetrics);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -417,7 +425,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapHitRateThreshold,
                     mapHitRateWindow,
                     mapIterationCacheFillEnabled,
-                    mapSnapshotCacheMaxEntries);
+                    mapSnapshotCacheMaxEntries,
+                    mapSnapshotCacheMetrics);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }

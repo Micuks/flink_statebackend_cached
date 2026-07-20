@@ -156,6 +156,7 @@ class CacheKitKeyedStateBackendLifecycleTest {
                 new ExecutionConfig(),
                 TtlTimeProvider.DEFAULT,
                 new CloseableRegistry(),
+                null,
                 128,
                 CachePolicyType.LRU,
                 0,
@@ -177,6 +178,7 @@ class CacheKitKeyedStateBackendLifecycleTest {
                 false,
                 false,
                 0,
+                false,
                 false);
     }
 }
