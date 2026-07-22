@@ -43,9 +43,6 @@ public final class MapSnapshotCacheMetrics {
     private final AtomicLong invalidations = new AtomicLong();
     private final AtomicLong staleInvalidations = new AtomicLong();
     private final AtomicLong evictions = new AtomicLong();
-    private final AtomicLong prefetchProbes = new AtomicLong();
-    private final AtomicLong prefetchHits = new AtomicLong();
-    private final AtomicLong prefetchMisses = new AtomicLong();
 
     private MapSnapshotCacheMetrics(boolean enabled) {
         this.enabled = enabled;
@@ -78,9 +75,6 @@ public final class MapSnapshotCacheMetrics {
                 "map_snapshot_cache_stale_invalidations",
                 metrics.staleInvalidations);
         registerGauge(diagnostics, "map_snapshot_cache_evictions", metrics.evictions);
-        registerGauge(diagnostics, "map_snapshot_cache_prefetch_probes", metrics.prefetchProbes);
-        registerGauge(diagnostics, "map_snapshot_cache_prefetch_hits", metrics.prefetchHits);
-        registerGauge(diagnostics, "map_snapshot_cache_prefetch_misses", metrics.prefetchMisses);
         return metrics;
     }
 
@@ -134,18 +128,6 @@ public final class MapSnapshotCacheMetrics {
 
     void recordEviction() {
         increment(evictions);
-    }
-
-    void recordPrefetchProbe() {
-        increment(prefetchProbes);
-    }
-
-    void recordPrefetchHit() {
-        increment(prefetchHits);
-    }
-
-    void recordPrefetchMiss() {
-        increment(prefetchMisses);
     }
 
     long probes() {

@@ -1060,66 +1060,6 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         dirtyValueEntriesByNamespace.remove(dirtyNamespaceProbe);
     }
 
-    public void prefetchSnapshots(Iterable<? extends K> keys) {
-        if (!mapSnapshotCacheEnabled || keys == null || currentNamespace == null) {
-            return;
-        }
-        K previousKey = currentKeyProvider.getCurrentKey();
-        N previousNamespace = currentNamespace;
-        try {
-            flush();
-            for (K key : keys) {
-                if (key == null) {
-                    continue;
-                }
-                snapshotProbe.key = key;
-                snapshotProbe.namespace = currentNamespace;
-                MapSnapshot<UK> existing = lookupSnapshotForPrefetch(key);
-                if (existing != null) {
-                    continue;
-                }
-
-                keyContextSetter.accept(key);
-                delegate.setCurrentNamespace(currentNamespace);
-                Iterator<Map.Entry<UK, UV>> iterator = delegate.entries().iterator();
-                if (!iterator.hasNext()) {
-                    storeSnapshot(
-                            newStoredKeyNamespace(key, currentNamespace), MapSnapshot.empty());
-                    continue;
-                }
-
-                Map.Entry<UK, UV> first = iterator.next();
-                if (first == null || first.getKey() == null || iterator.hasNext()) {
-                    mapSnapshotCacheMetrics.recordMultiEntrySkip();
-                    removeSnapshot(newStoredKeyNamespace(key, currentNamespace));
-                    continue;
-                }
-
-                UK copiedUK = first.getKey();
-                if (copiedUK instanceof org.apache.flink.table.data.binary.BinaryRowData) {
-                    copiedUK = (UK) ((org.apache.flink.table.data.binary.BinaryRowData) copiedUK).copy();
-                } else if (userKeySerializer != null) {
-                    copiedUK = userKeySerializer.copy(copiedUK);
-                }
-                storeSnapshot(
-                        newStoredKeyNamespace(key, currentNamespace), new MapSnapshot<>(copiedUK));
-                if (mapCacheEnabled) {
-                    updateValueCache(key, first.getKey(), first.getValue(), false);
-                }
-                if (presenceCacheEnabled) {
-                    updatePresence(key, first.getKey(), first.getValue() != null);
-                }
-            }
-        } catch (Throwable ignored) {
-            // Best-effort cache warmup. Authoritative reads still go through entries().
-        } finally {
-            keyContextSetter.accept(previousKey);
-            if (previousNamespace != null) {
-                delegate.setCurrentNamespace(previousNamespace);
-            }
-        }
-    }
-
     private void flushEntryToDelegate(KeyNamespaceUserKey<K, N, UK> key, CachedMapValue<UV> value) {
         lifecycleLock.readLock().lock();
         try {
@@ -1294,19 +1234,6 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             mapSnapshotCacheMetrics.recordMiss();
         } else {
             mapSnapshotCacheMetrics.recordHit();
-        }
-        return snapshot;
-    }
-
-    private MapSnapshot<UK> lookupSnapshotForPrefetch(K key) {
-        snapshotProbe.key = key;
-        snapshotProbe.namespace = currentNamespace;
-        mapSnapshotCacheMetrics.recordPrefetchProbe();
-        MapSnapshot<UK> snapshot = mapSnapshotCache.get(snapshotProbe);
-        if (snapshot == null) {
-            mapSnapshotCacheMetrics.recordPrefetchMiss();
-        } else {
-            mapSnapshotCacheMetrics.recordPrefetchHit();
         }
         return snapshot;
     }

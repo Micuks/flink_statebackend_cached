@@ -587,14 +587,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private static final boolean BP_PREFETCH_ASYNC =
             loadBooleanFlag("state.backend.cachekit.bp-prefetch.async.enabled", true);
 
-    /**
-     * MapState snapshot prefetch is disabled by default: it flushes dirty entries and pays a full
-     * RocksDB prefix-iterator per key on the mailbox thread, while only single-entry maps are ever
-     * cached — a net loss on multi-entry (join) MapState.
-     */
-    private static final boolean BP_PREFETCH_MAP_SNAPSHOTS =
-            loadBooleanFlag("state.backend.cachekit.bp-prefetch.map-snapshots.enabled", false);
-
     private static boolean loadBooleanFlag(String key, boolean defaultValue) {
         try {
             return org.apache.flink.configuration.GlobalConfiguration.loadConfiguration()
@@ -608,7 +600,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     }
 
     /**
-     * True when at least one cached-state wrapper exists, i.e. a prefetch could land somewhere.
+     * True when at least one cached ValueState wrapper exists, i.e. a prefetch could land.
      * Called reflectively by StatePrefetcher BEFORE it pays the per-batch key extraction: window
      * operators only hold namespaced states (never wrapped under the VoidNamespace gate), so
      * without this check every lookahead batch would extract and dedup up to `distance` keys for
@@ -617,7 +609,15 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
      */
     public boolean hasPrefetchableState() {
         synchronized (lifecycleLock) {
-            return !closed && !disposed && !wrappersByDelegateIdentity.isEmpty();
+            if (closed || disposed) {
+                return false;
+            }
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                if (wrapper instanceof CachedInternalValueState) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 
@@ -640,18 +640,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         }
                     }
                 }
-                if (!BP_PREFETCH_MAP_SNAPSHOTS) {
-                    return;
-                }
+                return;
             }
             K previousKey = getCurrentKey();
             try {
                 for (Object wrapper : wrappersByDelegateIdentity.values()) {
                     if (!BP_PREFETCH_ASYNC && wrapper instanceof CachedInternalValueState) {
                         ((CachedInternalValueState) wrapper).prefetch(keys);
-                    } else if (BP_PREFETCH_MAP_SNAPSHOTS
-                            && wrapper instanceof CachedInternalMapState) {
-                        ((CachedInternalMapState) wrapper).prefetchSnapshots(keys);
                     }
                 }
             } catch (Throwable ignored) {
