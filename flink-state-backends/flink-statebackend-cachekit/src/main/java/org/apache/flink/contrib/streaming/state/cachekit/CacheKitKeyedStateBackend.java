@@ -24,7 +24,9 @@ import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalLis
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMapState;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalPriorityQueueSet;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalValueState;
+import org.apache.flink.contrib.streaming.state.cachekit.state.ListStateDistributionMetrics;
 import org.apache.flink.contrib.streaming.state.cachekit.state.MapSnapshotCacheMetrics;
+import org.apache.flink.contrib.streaming.state.cachekit.state.ValueStateAccessMetrics;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.core.fs.CloseableRegistry;
@@ -105,6 +107,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int listStateClearedKeysCapacity;
     private final boolean priorityQueueOptEnabled;
     private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
+    private final MetricGroup metricGroup;
+    private final boolean diagnosticsEnabled;
 
     // --- fullOpt: shared flush executors (N wrappers share one thread each) ---
     private final ExecutorService listStateFlushExecutor;
@@ -193,6 +197,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.listStateRywEnabled = listStateRywEnabled;
         this.listStateClearedKeysCapacity = listStateClearedKeysCapacity;
         this.priorityQueueOptEnabled = priorityQueueOptEnabled;
+        this.metricGroup = metricGroup;
+        this.diagnosticsEnabled = diagnosticsEnabled;
         this.mapSnapshotCacheMetrics =
                 MapSnapshotCacheMetrics.create(metricGroup, diagnosticsEnabled);
 
@@ -266,7 +272,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueCacheLruOverflow,
                     valueBypassEnabled,
                     valueHitRateThreshold,
-                    valueHitRateWindow);
+                    valueHitRateWindow,
+                    ValueStateAccessMetrics.create(
+                            metricGroup, diagnosticsEnabled, stateDescriptor.getName()));
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -300,10 +308,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             return (S) wrapped;
         }
 
-        // fullOpt: ListState COW + RYW wrapper
+        // fullOpt ListState wrapper, also used in passthrough mode for opt-in diagnostics.
         if (stateDescriptor.getType() == StateDescriptor.Type.LIST
                 && internal instanceof InternalListState
-                && (listStateCowEnabled || listStateRywEnabled)) {
+                && (listStateCowEnabled || listStateRywEnabled || diagnosticsEnabled)) {
             Object existing = wrappersByDelegateIdentity.get(internal);
             if (existing != null) {
                 return (S) existing;
@@ -328,7 +336,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                             listStateRywEnabled,
                             elementSerializer,
                             listStateFlushExecutor,
-                            listStateClearedKeysCapacity);
+                            listStateClearedKeysCapacity,
+                            ListStateDistributionMetrics.create(
+                                    metricGroup,
+                                    diagnosticsEnabled,
+                                    stateDescriptor.getName()));
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -397,7 +409,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueCacheLruOverflow,
                     valueBypassEnabled,
                     valueHitRateThreshold,
-                    valueHitRateWindow);
+                    valueHitRateWindow,
+                    ValueStateAccessMetrics.create(
+                            metricGroup, diagnosticsEnabled, stateDesc.getName()));
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
@@ -431,10 +445,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             return (IS) wrapped;
         }
 
-        // fullOpt: ListState COW + RYW wrapper
+        // fullOpt ListState wrapper, also used in passthrough mode for opt-in diagnostics.
         if (stateDesc.getType() == StateDescriptor.Type.LIST
                 && internal instanceof InternalListState
-                && (listStateCowEnabled || listStateRywEnabled)) {
+                && (listStateCowEnabled || listStateRywEnabled || diagnosticsEnabled)) {
             Object existing = wrappersByDelegateIdentity.get(internal);
             if (existing != null) {
                 return (IS) existing;
@@ -458,7 +472,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                             listStateRywEnabled,
                             elementSerializer,
                             listStateFlushExecutor,
-                            listStateClearedKeysCapacity);
+                            listStateClearedKeysCapacity,
+                            ListStateDistributionMetrics.create(
+                                    metricGroup, diagnosticsEnabled, stateDesc.getName()));
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }

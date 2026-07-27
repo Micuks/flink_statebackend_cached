@@ -45,6 +45,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final boolean bypassEnabled;
     private final double hitRateThreshold;
     private final int hitRateWindow;
+    private final ValueStateAccessMetrics accessMetrics;
 
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
@@ -131,6 +132,30 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             boolean bypassEnabled,
             double hitRateThreshold,
             int hitRateWindow) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                ValueStateAccessMetrics.disabled());
+    }
+
+    public CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            ValueStateAccessMetrics accessMetrics) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -139,6 +164,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.bypassEnabled = bypassEnabled;
         this.hitRateThreshold = hitRateThreshold;
         this.hitRateWindow = hitRateWindow;
+        this.accessMetrics = Objects.requireNonNull(accessMetrics, "accessMetrics");
 
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
@@ -173,6 +199,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             // Sampling: Check cache every ~100 requests to see if we should re-enable
             opsSinceLastSample++;
             if (opsSinceLastSample < 100) {
+                accessMetrics.recordRead(false);
                 return delegate.value();
             }
             // Sample this request
@@ -250,6 +277,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             clear();
             return;
         }
+        accessMetrics.recordUpdate();
         K currentKey = currentKeyProvider.getCurrentKey();
 
         // Note on staging soundness: a plain write-back update lands dirty in L1, and the
@@ -302,6 +330,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     @Override
     public void clear() {
+        accessMetrics.recordClear();
         K currentKey = currentKeyProvider.getCurrentKey();
         KeyNamespaceKey<K, N> cacheKey;
         // Reuse sticky key if possible
@@ -600,6 +629,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     private void recordAccess(boolean isHit) {
+        accessMetrics.recordRead(isHit);
         if (!bypassEnabled) {
             return;
         }

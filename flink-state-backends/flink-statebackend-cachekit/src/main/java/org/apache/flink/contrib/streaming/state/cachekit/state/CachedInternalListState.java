@@ -91,6 +91,7 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
     // ---- COW config ----
     private final boolean cowEnabled;
     private final boolean rywEnabled;
+    private final ListStateDistributionMetrics distributionMetrics;
 
     // ---- COW: sync pending buffer ----
     /** Flush threshold: when pending map reaches this size, trigger sync flush. */
@@ -118,11 +119,35 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
             TypeSerializer<V> elementSerializer,
             ExecutorService flushExecutor,
             int clearedKeysCapacity) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                cowEnabled,
+                rywEnabled,
+                elementSerializer,
+                flushExecutor,
+                clearedKeysCapacity,
+                ListStateDistributionMetrics.disabled());
+    }
+
+    public CachedInternalListState(
+            InternalListState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            boolean cowEnabled,
+            boolean rywEnabled,
+            TypeSerializer<V> elementSerializer,
+            ExecutorService flushExecutor,
+            int clearedKeysCapacity,
+            ListStateDistributionMetrics distributionMetrics) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
         this.cowEnabled = cowEnabled;
         this.rywEnabled = rywEnabled;
+        this.distributionMetrics =
+                Objects.requireNonNull(distributionMetrics, "distributionMetrics");
         this.elementSerializer = Objects.requireNonNull(elementSerializer, "elementSerializer");
         this.listSerializer = new ListSerializer<>(elementSerializer);
 
@@ -163,6 +188,7 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
     @Override
     public void add(V value) throws Exception {
         Preconditions.checkNotNull(value, "You cannot add null to a ListState.");
+        distributionMetrics.recordAdd(1);
         if (!cowEnabled) {
             delegate.add(value);
             return;
@@ -202,6 +228,7 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
         if (values == null || values.isEmpty()) {
             return;
         }
+        distributionMetrics.recordAdd(values.size());
         if (!cowEnabled) {
             delegate.addAll(values);
             return;
@@ -243,10 +270,10 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
         if (!cowEnabled) {
             // passthrough
             Iterable<V> result = delegate.get();
-            if (result == null) return null;
+            if (result == null) return recordRead(null);
             List<V> list = new ArrayList<>();
             for (V item : result) list.add(item);
-            return list;
+            return recordRead(list);
         }
 
         NamespaceKeyWrapper wrapped = wrapCurrentKey();
@@ -254,7 +281,8 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
         // RYW fast path: key was cleared, all data lives in pendingMap
         if (rywEnabled && clearedKeys.containsKey(wrapped)) {
             List<V> pending = pendingMap.get(wrapped);
-            return (pending != null && !pending.isEmpty()) ? new ArrayList<>(pending) : null;
+            return recordRead(
+                    (pending != null && !pending.isEmpty()) ? new ArrayList<>(pending) : null);
         }
 
         // Slow path: flush pending then read from delegate
@@ -289,10 +317,10 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
         }
 
         Iterable<V> result = delegate.get();
-        if (result == null) return null;
+        if (result == null) return recordRead(null);
         List<V> list = new ArrayList<>();
         for (V item : result) list.add(item);
-        return list;
+        return recordRead(list);
     }
 
     @Override
@@ -335,34 +363,38 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
 
     @Override
     public void clear() {
+        distributionMetrics.recordClear();
+        if (!cowEnabled) {
+            delegate.clear();
+            return;
+        }
+
         NamespaceKeyWrapper wrapped = wrapCurrentKey();
 
         // Discard buffered data
         pendingMap.remove(wrapped);
 
-        if (cowEnabled) {
-            // LS-3 fix: synchronous flush before marking cleared
-            // This ensures the delegate state is also cleared before checkpoint.
-            flushPendingMapSync();
+        // LS-3 fix: synchronous flush before marking cleared
+        // This ensures the delegate state is also cleared before checkpoint.
+        flushPendingMapSync();
 
-            // LS-3.2 fix: delegate.clear() must be called whenever COW is enabled,
-            // not just when RYW is enabled. When rywEnabled=true we also track the cleared
-            // key for the RYW fast path.
-            if (rywEnabled) {
-                clearedKeys.put(wrapped, Boolean.TRUE);
-            }
+        // LS-3.2 fix: delegate.clear() must be called whenever COW is enabled,
+        // not just when RYW is enabled. When rywEnabled=true we also track the cleared
+        // key for the RYW fast path.
+        if (rywEnabled) {
+            clearedKeys.put(wrapped, Boolean.TRUE);
+        }
 
-            // LS-1/LS-4 fix: set keyContext before delegate.clear()
-            K originalKey = currentKeyProvider.getCurrentKey();
-            N originalNamespace = currentNamespace;
-            try {
-                keyContextSetter.accept((K) wrapped.key);
-                delegate.setCurrentNamespace((N) wrapped.namespace);
-                delegate.clear();
-            } finally {
-                keyContextSetter.accept(originalKey);
-                delegate.setCurrentNamespace(originalNamespace);
-            }
+        // LS-1/LS-4 fix: set keyContext before delegate.clear()
+        K originalKey = currentKeyProvider.getCurrentKey();
+        N originalNamespace = currentNamespace;
+        try {
+            keyContextSetter.accept((K) wrapped.key);
+            delegate.setCurrentNamespace((N) wrapped.namespace);
+            delegate.clear();
+        } finally {
+            keyContextSetter.accept(originalKey);
+            delegate.setCurrentNamespace(originalNamespace);
         }
 
         LOG.debug(
@@ -414,6 +446,11 @@ public class CachedInternalListState<K, N, V> implements InternalListState<K, N,
         }
         cachedWrapper = new NamespaceKeyWrapper(currentNamespace, key);
         return cachedWrapper;
+    }
+
+    private List<V> recordRead(List<V> values) {
+        distributionMetrics.recordRead(values == null ? 0 : values.size());
+        return values;
     }
 
     /**

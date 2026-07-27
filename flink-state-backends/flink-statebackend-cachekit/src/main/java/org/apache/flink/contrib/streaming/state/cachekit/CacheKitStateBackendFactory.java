@@ -158,7 +158,10 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         .booleanType()
                         .defaultValue(false)
                         .withDescription(
-                                        "Expose opt-in CacheKit diagnostic metrics through Flink REST reporters.");
+                                        "Expose opt-in CacheKit diagnostic metrics through Flink REST reporters, "
+                                                        + "including MapState snapshot-cache activity and per-state "
+                                                        + "ListState read-cardinality distributions and ValueState "
+                                                        + "access locality.");
 
 	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
