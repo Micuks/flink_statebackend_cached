@@ -19,6 +19,7 @@ project(cachekit_native_request_plane LANGUAGES CXX)
 
 option(CACHEKIT_NATIVE_BUILD_TESTS "Build native request-plane tests" ON)
 option(CACHEKIT_NATIVE_BUILD_BENCHMARKS "Build native request-plane microbenchmark" OFF)
+option(CACHEKIT_NATIVE_BUILD_JNI "Build the opt-in JNI bridge" OFF)
 option(CACHEKIT_NATIVE_ENABLE_SANITIZERS "Enable ASan and UBSan" OFF)
 
 set(CACHEKIT_NATIVE_SOURCES
@@ -49,6 +50,10 @@ target_include_directories(
 target_compile_options(
     cachekit_native_request_plane
     PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+if(CACHEKIT_NATIVE_BUILD_JNI)
+    set_target_properties(
+        cachekit_native_request_plane PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 if(CACHEKIT_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
     target_compile_definitions(
@@ -65,6 +70,60 @@ if(CACHEKIT_NATIVE_ENABLE_SANITIZERS)
             -fsanitize=address,undefined -fno-omit-frame-pointer)
     else()
         message(FATAL_ERROR "Sanitizers require GCC or Clang")
+    endif()
+endif()
+
+if(CACHEKIT_NATIVE_BUILD_TESTS OR CACHEKIT_NATIVE_BUILD_JNI)
+    add_library(
+        cachekit_native_batch_codec STATIC src/jni_batch_codec.cpp)
+    target_compile_features(cachekit_native_batch_codec PUBLIC cxx_std_17)
+    target_include_directories(
+        cachekit_native_batch_codec
+        PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_options(
+        cachekit_native_batch_codec
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    target_link_libraries(
+        cachekit_native_batch_codec PUBLIC cachekit_native_request_plane)
+    if(CACHEKIT_NATIVE_BUILD_JNI)
+        set_target_properties(
+            cachekit_native_batch_codec PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    endif()
+    if(CACHEKIT_NATIVE_ENABLE_SANITIZERS AND
+       CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(
+            cachekit_native_batch_codec PRIVATE
+            -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(
+            cachekit_native_batch_codec PRIVATE
+            -fsanitize=address,undefined -fno-omit-frame-pointer)
+    endif()
+endif()
+
+if(CACHEKIT_NATIVE_BUILD_JNI)
+    find_package(JNI REQUIRED)
+    add_library(
+        cachekit_native_request_plane_jni SHARED src/jni_bridge.cpp)
+    target_compile_features(
+        cachekit_native_request_plane_jni PRIVATE cxx_std_17)
+    target_include_directories(
+        cachekit_native_request_plane_jni PRIVATE ${JNI_INCLUDE_DIRS})
+    target_compile_options(
+        cachekit_native_request_plane_jni
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    target_link_libraries(
+        cachekit_native_request_plane_jni PRIVATE cachekit_native_batch_codec)
+    set_target_properties(
+        cachekit_native_request_plane_jni
+        PROPERTIES OUTPUT_NAME "cachekit_native_request_plane_jni")
+    if(CACHEKIT_NATIVE_ENABLE_SANITIZERS AND
+       CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(
+            cachekit_native_request_plane_jni PRIVATE
+            -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(
+            cachekit_native_request_plane_jni PRIVATE
+            -fsanitize=address,undefined -fno-omit-frame-pointer)
     endif()
 endif()
 
@@ -97,6 +156,28 @@ if(CACHEKIT_NATIVE_BUILD_TESTS)
     add_test(
         NAME cachekit_native_request_plane_test
         COMMAND cachekit_native_request_plane_test)
+
+    add_executable(
+        cachekit_native_batch_codec_test tests/jni_batch_codec_test.cpp)
+    target_compile_features(
+        cachekit_native_batch_codec_test PRIVATE cxx_std_17)
+    target_compile_options(
+        cachekit_native_batch_codec_test
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    target_link_libraries(
+        cachekit_native_batch_codec_test PRIVATE cachekit_native_batch_codec)
+    if(CACHEKIT_NATIVE_ENABLE_SANITIZERS AND
+       CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(
+            cachekit_native_batch_codec_test PRIVATE
+            -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(
+            cachekit_native_batch_codec_test PRIVATE
+            -fsanitize=address,undefined -fno-omit-frame-pointer)
+    endif()
+    add_test(
+        NAME cachekit_native_batch_codec_test
+        COMMAND cachekit_native_batch_codec_test)
 endif()
 
 if(CACHEKIT_NATIVE_BUILD_BENCHMARKS)
