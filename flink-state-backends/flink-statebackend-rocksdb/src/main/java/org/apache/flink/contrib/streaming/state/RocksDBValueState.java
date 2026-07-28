@@ -23,6 +23,7 @@ import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.state.RegisteredKeyValueStateBackendMetaInfo;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.util.FlinkRuntimeException;
@@ -31,6 +32,8 @@ import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.RocksDBException;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.Objects;
 
 /**
  * {@link ValueState} implementation that stores state in RocksDB.
@@ -40,7 +43,9 @@ import java.io.IOException;
  * @param <V> The type of value that the state state stores.
  */
 class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
-        implements InternalValueState<K, N, V> {
+        implements InternalValueState<K, N, V>, RocksDBDirectValueAccess<K, N> {
+
+    private final DirectCompositeKeyWriter<K> directKeyWriter;
 
     /**
      * Creates a new {@code RocksDBValueState}.
@@ -59,6 +64,9 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
             RocksDBKeyedStateBackend<K> backend) {
 
         super(columnFamily, namespaceSerializer, valueSerializer, defaultValue, backend);
+        this.directKeyWriter =
+                new DirectCompositeKeyWriter<>(
+                        backend.getKeySerializer(), backend.getKeyGroupPrefixBytes(), 128);
     }
 
     @Override
@@ -74,6 +82,106 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
     @Override
     public TypeSerializer<V> getValueSerializer() {
         return valueSerializer;
+    }
+
+    @Override
+    public int writeKeyAndNamespace(K key, N namespace, ByteBuffer target) throws IOException {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(namespace, "namespace");
+        Objects.requireNonNull(target, "target");
+        if (!target.isDirect()) {
+            throw new IllegalArgumentException("DSTL key target must be a direct ByteBuffer.");
+        }
+        int keyGroup =
+                KeyGroupRangeAssignment.assignToKeyGroup(
+                        key, backend.getNumberOfKeyGroups());
+        return directKeyWriter.write(
+                key, keyGroup, namespace, namespaceSerializer, target);
+    }
+
+    @Override
+    public void readValueBatch(
+            ByteBuffer keyArena,
+            int[] keyOffsets,
+            int[] keyLengths,
+            int count,
+            ByteBuffer valueArena,
+            int valueStride,
+            int[] valueLengths)
+            throws IOException, ValueTooLargeException {
+        validateDirectBatch(
+                keyArena,
+                keyOffsets,
+                keyLengths,
+                count,
+                valueArena,
+                valueStride,
+                valueLengths);
+
+        for (int i = 0; i < count; i++) {
+            ByteBuffer key = keyArena.duplicate();
+            key.position(keyOffsets[i]);
+            key.limit(keyOffsets[i] + keyLengths[i]);
+            key = key.slice();
+
+            int valueOffset = Math.multiplyExact(i, valueStride);
+            ByteBuffer value = valueArena.duplicate();
+            value.position(valueOffset);
+            value.limit(valueOffset + valueStride);
+            value = value.slice();
+
+            final int actualLength;
+            try {
+                actualLength =
+                        backend.db.get(
+                                columnFamily, backend.getReadOptions(), key, value);
+            } catch (RocksDBException e) {
+                throw new IOException("Direct RocksDB value batch failed at index " + i, e);
+            }
+
+            if (actualLength == org.rocksdb.RocksDB.NOT_FOUND) {
+                valueLengths[i] = NOT_FOUND;
+            } else if (actualLength > valueStride) {
+                throw new ValueTooLargeException(i, actualLength, valueStride);
+            } else {
+                valueLengths[i] = actualLength;
+            }
+        }
+    }
+
+    private static void validateDirectBatch(
+            ByteBuffer keyArena,
+            int[] keyOffsets,
+            int[] keyLengths,
+            int count,
+            ByteBuffer valueArena,
+            int valueStride,
+            int[] valueLengths) {
+        Objects.requireNonNull(keyArena, "keyArena");
+        Objects.requireNonNull(keyOffsets, "keyOffsets");
+        Objects.requireNonNull(keyLengths, "keyLengths");
+        Objects.requireNonNull(valueArena, "valueArena");
+        Objects.requireNonNull(valueLengths, "valueLengths");
+        if (!keyArena.isDirect() || !valueArena.isDirect()) {
+            throw new IllegalArgumentException("DSTL arenas must be direct ByteBuffers.");
+        }
+        if (count < 0
+                || count > keyOffsets.length
+                || count > keyLengths.length
+                || count > valueLengths.length) {
+            throw new IllegalArgumentException("Invalid DSTL descriptor count: " + count);
+        }
+        if (valueStride <= 0
+                || (long) count * valueStride > valueArena.capacity()) {
+            throw new IllegalArgumentException("Invalid DSTL value stride/capacity.");
+        }
+        for (int i = 0; i < count; i++) {
+            if (keyOffsets[i] < 0
+                    || keyLengths[i] < 0
+                    || keyOffsets[i] > keyArena.capacity() - keyLengths[i]) {
+                throw new IllegalArgumentException("Invalid DSTL key descriptor at index " + i);
+            }
+        }
     }
 
     @Override
