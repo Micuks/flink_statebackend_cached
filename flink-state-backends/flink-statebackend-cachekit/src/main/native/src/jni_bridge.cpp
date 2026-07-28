@@ -25,6 +25,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -35,6 +36,7 @@ using cachekit::native::Options;
 using cachekit::native::RequestPlane;
 using cachekit::native::bridge::BatchBridgeCode;
 using cachekit::native::bridge::BatchBridgeCodeName;
+using cachekit::native::bridge::BatchScratch;
 using cachekit::native::bridge::ConstBuffer;
 using cachekit::native::bridge::FillDirectBatch;
 using cachekit::native::bridge::MutableBuffer;
@@ -44,6 +46,16 @@ constexpr const char* kIllegalArgument = "java/lang/IllegalArgumentException";
 constexpr const char* kIllegalState = "java/lang/IllegalStateException";
 constexpr const char* kOutOfMemory = "java/lang/OutOfMemoryError";
 
+struct BridgeHandle final {
+    BridgeHandle(
+            std::unique_ptr<RequestPlane> request_plane,
+            std::size_t reserve_entries)
+        : plane(std::move(request_plane)), scratch(reserve_entries) {}
+
+    std::unique_ptr<RequestPlane> plane;
+    BatchScratch scratch;
+};
+
 void Throw(JNIEnv* environment, const char* class_name, const std::string& message) {
     jclass exception_class = environment->FindClass(class_name);
     if (exception_class != nullptr) {
@@ -51,12 +63,12 @@ void Throw(JNIEnv* environment, const char* class_name, const std::string& messa
     }
 }
 
-RequestPlane* FromHandle(jlong handle) noexcept {
-    return reinterpret_cast<RequestPlane*>(static_cast<std::uintptr_t>(handle));
+BridgeHandle* FromHandle(jlong handle) noexcept {
+    return reinterpret_cast<BridgeHandle*>(static_cast<std::uintptr_t>(handle));
 }
 
-jlong ToHandle(RequestPlane* plane) noexcept {
-    return static_cast<jlong>(reinterpret_cast<std::uintptr_t>(plane));
+jlong ToHandle(BridgeHandle* bridge) noexcept {
+    return static_cast<jlong>(reinterpret_cast<std::uintptr_t>(bridge));
 }
 
 bool GetConstBuffer(
@@ -101,10 +113,10 @@ bool ValidateCall(
         JNIEnv* environment,
         jlong handle,
         jint count,
-        RequestPlane** plane,
+        BridgeHandle** bridge,
         std::size_t* unsigned_count) {
-    *plane = FromHandle(handle);
-    if (*plane == nullptr) {
+    *bridge = FromHandle(handle);
+    if (*bridge == nullptr) {
         Throw(environment, kIllegalState, "native request plane is closed");
         return false;
     }
@@ -177,7 +189,10 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
                             cachekit::native::ErrorCodeName(error) + ":" + message);
             return 0;
         }
-        return ToHandle(plane.release());
+        std::unique_ptr<BridgeHandle> bridge =
+                std::make_unique<BridgeHandle>(
+                        std::move(plane), options.capacity_entries);
+        return ToHandle(bridge.release());
     } catch (const std::bad_alloc&) {
         Throw(environment, kOutOfMemory, "native request-plane creation allocation failed");
     } catch (const std::exception& exception) {
@@ -206,7 +221,7 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
         jobject value_metadata_object,
         jobject fill_results_object) {
     try {
-        RequestPlane* plane = nullptr;
+        BridgeHandle* bridge = nullptr;
         std::size_t unsigned_count = 0;
         ConstBuffer key_arena;
         ConstBuffer key_metadata;
@@ -214,7 +229,7 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
         ConstBuffer value_metadata;
         MutableBuffer fill_results;
         if (!ValidateCall(
-                    environment, handle, count, &plane, &unsigned_count) ||
+                    environment, handle, count, &bridge, &unsigned_count) ||
             !GetConstBuffer(
                     environment, key_arena_object, "keyArena", &key_arena) ||
             !GetConstBuffer(
@@ -231,7 +246,8 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
             return -1;
         }
         const BatchBridgeCode code = FillDirectBatch(
-                plane,
+                bridge->plane.get(),
+                &bridge->scratch,
                 key_arena,
                 key_metadata,
                 value_arena,
@@ -264,14 +280,14 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
         jobject value_output_object,
         jobject probe_results_object) {
     try {
-        RequestPlane* plane = nullptr;
+        BridgeHandle* bridge = nullptr;
         std::size_t unsigned_count = 0;
         ConstBuffer key_arena;
         ConstBuffer key_metadata;
         MutableBuffer value_output;
         MutableBuffer probe_results;
         if (!ValidateCall(
-                    environment, handle, count, &plane, &unsigned_count) ||
+                    environment, handle, count, &bridge, &unsigned_count) ||
             !GetConstBuffer(
                     environment, key_arena_object, "keyArena", &key_arena) ||
             !GetConstBuffer(
@@ -286,7 +302,8 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
             return -1;
         }
         const BatchBridgeCode code = ProbeDirectBatch(
-                plane,
+                bridge->plane.get(),
+                &bridge->scratch,
                 key_arena,
                 key_metadata,
                 unsigned_count,
@@ -310,23 +327,23 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
 JNIEXPORT jstring JNICALL
 Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequestPlaneBridge_nativeKernelName(
         JNIEnv* environment, jclass, jlong handle) {
-    RequestPlane* plane = FromHandle(handle);
-    if (plane == nullptr) {
+    BridgeHandle* bridge = FromHandle(handle);
+    if (bridge == nullptr) {
         Throw(environment, kIllegalState, "native request plane is closed");
         return nullptr;
     }
-    return environment->NewStringUTF(plane->kernel_name());
+    return environment->NewStringUTF(bridge->plane->kernel_name());
 }
 
 JNIEXPORT jlong JNICALL
 Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequestPlaneBridge_nativeFeatureBits(
         JNIEnv* environment, jclass, jlong handle) {
-    RequestPlane* plane = FromHandle(handle);
-    if (plane == nullptr) {
+    BridgeHandle* bridge = FromHandle(handle);
+    if (bridge == nullptr) {
         Throw(environment, kIllegalState, "native request plane is closed");
         return 0;
     }
-    const HostFeatures features = plane->host_features();
+    const HostFeatures features = bridge->plane->host_features();
     std::uint64_t bits = 0;
     bits |= static_cast<std::uint64_t>(features.aarch64) << 0U;
     bits |= static_cast<std::uint64_t>(features.neon) << 1U;

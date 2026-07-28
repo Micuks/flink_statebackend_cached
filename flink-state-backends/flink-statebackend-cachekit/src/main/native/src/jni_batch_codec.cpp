@@ -21,7 +21,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
-#include <vector>
+#include <stdexcept>
 
 namespace cachekit {
 namespace native {
@@ -85,7 +85,6 @@ BatchBridgeCode DecodeKeys(
     }
 
     keys->clear();
-    keys->reserve(count);
     for (std::size_t index = 0; index < count; ++index) {
         const std::uint8_t* record =
                 key_metadata.data + index * kKeyMetadataRecordBytes;
@@ -118,16 +117,33 @@ BatchBridgeCode DecodeKeys(
 
 }  // namespace
 
+BatchScratch::BatchScratch(std::size_t reserve_entries) {
+    ReserveEntries(reserve_entries);
+}
+
+void BatchScratch::ReserveEntries(std::size_t count) {
+    if (count <= reserved_entries_) {
+        return;
+    }
+    keys_.reserve(count);
+    fills_.reserve(count);
+    fill_results_.reserve(count);
+    probe_results_.reserve(count);
+    reserved_entries_ = count;
+    ++growth_count_;
+}
+
 BatchBridgeCode FillDirectBatch(
         RequestPlane* plane,
+        BatchScratch* scratch,
         ConstBuffer key_arena,
         ConstBuffer key_metadata,
         ConstBuffer value_arena,
         ConstBuffer value_metadata,
         std::size_t count,
         MutableBuffer fill_results) noexcept {
-    if (plane == nullptr || !IsValid(value_arena) || !IsValid(value_metadata) ||
-        !IsValid(fill_results)) {
+    if (plane == nullptr || scratch == nullptr || !IsValid(value_arena) ||
+        !IsValid(value_metadata) || !IsValid(fill_results)) {
         return BatchBridgeCode::kInvalidArgument;
     }
     std::size_t required_value_metadata = 0;
@@ -144,15 +160,14 @@ BatchBridgeCode FillDirectBatch(
     }
 
     try {
-        std::vector<KeyView> keys;
+        scratch->ReserveEntries(count);
         BatchBridgeCode code =
-                DecodeKeys(key_arena, key_metadata, count, &keys);
+                DecodeKeys(key_arena, key_metadata, count, &scratch->keys_);
         if (code != BatchBridgeCode::kOk) {
             return code;
         }
 
-        std::vector<FillView> fills;
-        fills.reserve(count);
+        scratch->fills_.clear();
         for (std::size_t index = 0; index < count; ++index) {
             const std::uint8_t* record =
                     value_metadata.data + index * kFillValueRecordBytes;
@@ -173,8 +188,8 @@ BatchBridgeCode FillDirectBatch(
                 (negative && (arena_offset != 0 || length != 0))) {
                 return BatchBridgeCode::kInputOutOfBounds;
             }
-            fills.push_back(FillView{
-                    keys[index],
+            scratch->fills_.push_back(FillView{
+                    scratch->keys_[index],
                     length == 0
                             ? nullptr
                             : value_arena.data +
@@ -183,8 +198,11 @@ BatchBridgeCode FillDirectBatch(
                     negative});
         }
 
-        std::vector<FillResult> results(count);
-        if (plane->FillBatch(fills.data(), results.data(), count) !=
+        scratch->fill_results_.resize(count);
+        if (plane->FillBatch(
+                    scratch->fills_.data(),
+                    scratch->fill_results_.data(),
+                    count) !=
             ErrorCode::kOk) {
             return BatchBridgeCode::kNativeError;
         }
@@ -193,14 +211,18 @@ BatchBridgeCode FillDirectBatch(
                     fill_results.data + index * kFillResultRecordBytes;
             WriteNative<std::uint32_t>(
                     record + kFillResultStatusOffset,
-                    static_cast<std::uint32_t>(results[index].status));
+                    static_cast<std::uint32_t>(
+                            scratch->fill_results_[index].status));
             WriteNative<std::uint32_t>(
                     record + kFillResultErrorOffset,
-                    static_cast<std::uint32_t>(results[index].error));
+                    static_cast<std::uint32_t>(
+                            scratch->fill_results_[index].error));
         }
         return BatchBridgeCode::kOk;
     } catch (const std::bad_alloc&) {
         return BatchBridgeCode::kAllocationFailed;
+    } catch (const std::length_error&) {
+        return BatchBridgeCode::kOverflow;
     } catch (...) {
         return BatchBridgeCode::kNativeError;
     }
@@ -208,12 +230,14 @@ BatchBridgeCode FillDirectBatch(
 
 BatchBridgeCode ProbeDirectBatch(
         RequestPlane* plane,
+        BatchScratch* scratch,
         ConstBuffer key_arena,
         ConstBuffer key_metadata,
         std::size_t count,
         MutableBuffer value_output,
         MutableBuffer probe_results) noexcept {
-    if (plane == nullptr || !IsValid(value_output) || !IsValid(probe_results)) {
+    if (plane == nullptr || scratch == nullptr || !IsValid(value_output) ||
+        !IsValid(probe_results)) {
         return BatchBridgeCode::kInvalidArgument;
     }
     std::size_t required_results = 0;
@@ -225,20 +249,23 @@ BatchBridgeCode ProbeDirectBatch(
     }
 
     try {
-        std::vector<KeyView> keys;
+        scratch->ReserveEntries(count);
         BatchBridgeCode code =
-                DecodeKeys(key_arena, key_metadata, count, &keys);
+                DecodeKeys(key_arena, key_metadata, count, &scratch->keys_);
         if (code != BatchBridgeCode::kOk) {
             return code;
         }
-        std::vector<ProbeResult> results(count);
-        if (plane->ProbeBatch(keys.data(), results.data(), count) !=
+        scratch->probe_results_.resize(count);
+        if (plane->ProbeBatch(
+                    scratch->keys_.data(),
+                    scratch->probe_results_.data(),
+                    count) !=
             ErrorCode::kOk) {
             return BatchBridgeCode::kNativeError;
         }
 
         std::size_t required_values = 0;
-        for (const ProbeResult& result : results) {
+        for (const ProbeResult& result : scratch->probe_results_) {
             if (result.error != ErrorCode::kOk) {
                 return BatchBridgeCode::kNativeError;
             }
@@ -259,7 +286,7 @@ BatchBridgeCode ProbeDirectBatch(
 
         std::size_t value_offset = 0;
         for (std::size_t index = 0; index < count; ++index) {
-            const ProbeResult& result = results[index];
+            const ProbeResult& result = scratch->probe_results_[index];
             if (result.value_size != 0) {
                 std::memcpy(
                         value_output.data + value_offset,
@@ -287,9 +314,53 @@ BatchBridgeCode ProbeDirectBatch(
         return BatchBridgeCode::kOk;
     } catch (const std::bad_alloc&) {
         return BatchBridgeCode::kAllocationFailed;
+    } catch (const std::length_error&) {
+        return BatchBridgeCode::kOverflow;
     } catch (...) {
         return BatchBridgeCode::kNativeError;
     }
+}
+
+BatchBridgeCode FillDirectBatch(
+        RequestPlane* plane,
+        ConstBuffer key_arena,
+        ConstBuffer key_metadata,
+        ConstBuffer value_arena,
+        ConstBuffer value_metadata,
+        std::size_t count,
+        MutableBuffer fill_results) noexcept {
+    // Retain the original internal codec ABI for standalone callers. JNI uses
+    // the scratch-taking overload owned by BridgeHandle.
+    BatchScratch scratch;
+    return FillDirectBatch(
+            plane,
+            &scratch,
+            key_arena,
+            key_metadata,
+            value_arena,
+            value_metadata,
+            count,
+            fill_results);
+}
+
+BatchBridgeCode ProbeDirectBatch(
+        RequestPlane* plane,
+        ConstBuffer key_arena,
+        ConstBuffer key_metadata,
+        std::size_t count,
+        MutableBuffer value_output,
+        MutableBuffer probe_results) noexcept {
+    // Retain the original internal codec ABI for standalone callers. JNI uses
+    // the scratch-taking overload owned by BridgeHandle.
+    BatchScratch scratch;
+    return ProbeDirectBatch(
+            plane,
+            &scratch,
+            key_arena,
+            key_metadata,
+            count,
+            value_output,
+            probe_results);
 }
 
 const char* BatchBridgeCodeName(BatchBridgeCode code) noexcept {

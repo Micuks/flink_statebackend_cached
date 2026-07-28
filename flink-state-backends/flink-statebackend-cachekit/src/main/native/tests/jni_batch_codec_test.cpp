@@ -298,6 +298,67 @@ void TestGenerationMismatchAndZeroCount() {
           BatchBridgeCode::kOk);
 }
 
+void TestScratchCapacityIsReusedAcrossFillAndProbe() {
+    std::unique_ptr<RequestPlane> plane = MakePlane();
+    BatchScratch scratch(2);
+    CHECK(scratch.reserved_entries() == 2);
+    const std::uint64_t initial_growth_count = scratch.growth_count();
+    CHECK(initial_growth_count == 1);
+
+    const std::string key_arena = "alphabeta";
+    std::vector<std::uint8_t> key_metadata(2 * kKeyMetadataRecordBytes);
+    const std::string value_arena = "onetwo";
+    std::vector<std::uint8_t> value_metadata(2 * kFillValueRecordBytes);
+    WriteValueRecord(&value_metadata, 0, 0, 3, 0);
+    WriteValueRecord(&value_metadata, 1, 3, 3, 0);
+    std::vector<std::uint8_t> fill_results(2 * kFillResultRecordBytes);
+    std::vector<std::uint8_t> value_output(16);
+    std::vector<std::uint8_t> probe_results(2 * kProbeResultRecordBytes);
+
+    for (std::uint64_t generation = 1; generation <= 32; ++generation) {
+        WriteKeyRecord(&key_metadata, 0, 1, generation, 0, 5);
+        WriteKeyRecord(&key_metadata, 1, 1, generation, 5, 4);
+        CHECK(FillDirectBatch(
+                      plane.get(),
+                      &scratch,
+                      {reinterpret_cast<const std::uint8_t*>(key_arena.data()),
+                       key_arena.size()},
+                      {key_metadata.data(), key_metadata.size()},
+                      {reinterpret_cast<const std::uint8_t*>(value_arena.data()),
+                       value_arena.size()},
+                      {value_metadata.data(), value_metadata.size()},
+                      2,
+                      {fill_results.data(), fill_results.size()}) ==
+              BatchBridgeCode::kOk);
+        CHECK(ProbeDirectBatch(
+                      plane.get(),
+                      &scratch,
+                      {reinterpret_cast<const std::uint8_t*>(key_arena.data()),
+                       key_arena.size()},
+                      {key_metadata.data(), key_metadata.size()},
+                      2,
+                      {value_output.data(), value_output.size()},
+                      {probe_results.data(), probe_results.size()}) ==
+              BatchBridgeCode::kOk);
+        CHECK(
+                Read<std::uint32_t>(
+                        probe_results, kProbeResultStatusOffset) == 1);
+        CHECK(
+                Read<std::uint32_t>(
+                        probe_results,
+                        kProbeResultRecordBytes + kProbeResultStatusOffset) == 1);
+        CHECK(scratch.growth_count() == initial_growth_count);
+        CHECK(scratch.reserved_entries() == 2);
+    }
+
+    scratch.ReserveEntries(4);
+    CHECK(scratch.reserved_entries() == 4);
+    CHECK(scratch.growth_count() == initial_growth_count + 1);
+    scratch.ReserveEntries(3);
+    CHECK(scratch.reserved_entries() == 4);
+    CHECK(scratch.growth_count() == initial_growth_count + 1);
+}
+
 }  // namespace
 
 int main() {
@@ -305,6 +366,7 @@ int main() {
     TestMalformedFillIsRejectedBeforeMutation();
     TestProbeOutputTooSmallDoesNotWritePartialRecords();
     TestGenerationMismatchAndZeroCount();
+    TestScratchCapacityIsReusedAcrossFillAndProbe();
     std::cout << "all JNI batch codec tests passed" << std::endl;
     return 0;
 }
