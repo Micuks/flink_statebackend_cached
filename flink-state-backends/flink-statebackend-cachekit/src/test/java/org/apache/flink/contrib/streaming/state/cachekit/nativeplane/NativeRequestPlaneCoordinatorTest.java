@@ -58,6 +58,8 @@ class NativeRequestPlaneCoordinatorTest {
         assertEquals(0x1fL, coordinator.detectedFeatureBits());
         assertEquals("0x000000000000001f", coordinator.detectedFeatureBitsHex());
         assertEquals("aarch64|neon|crc32|sve|vl256", coordinator.detectedFeatures());
+        assertEquals(4_448, coordinator.regularSlotDirectBytesForTesting());
+        assertEquals(2_096, coordinator.mutationSlotDirectBytesForTesting());
         NativeRequestPlaneCoordinator.BatchSlot first = coordinator.tryAcquireBatchSlot();
         assertNotNull(first);
         assertNull(coordinator.tryAcquireBatchSlot());

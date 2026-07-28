@@ -164,6 +164,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeBatchesActivated;
     private volatile long nativeProbeKeys;
     private volatile long nativeHits;
+    private volatile long nativeHitBytesCopied;
     private volatile long nativeNegativeHits;
     private volatile long nativeMisses;
     private volatile long nativeFillBatches;
@@ -1002,7 +1003,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "buildFailures={} workerFailures={} stickyUpdateInPlace={} "
                             + "stickySameKeyAttempts={} stickyInPlaceReuses={} "
                             + "nativeEnabled={} nativeStateId={} nativeActivated={} "
-                            + "nativeProbeKeys={} nativeHits={} nativeNegativeHits={} "
+                            + "nativeProbeKeys={} nativeHits={} nativeHitBytesCopied={} "
+                            + "nativeNegativeHits={} "
                             + "nativeMisses={} nativeFillBatches={} nativeFillKeys={} "
                             + "nativeFillRejected={} nativeFallbackBatches={} "
                             + "nativeRuntimeFailures={} nativeGenerationAdvances={} "
@@ -1048,6 +1050,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeBatchesActivated,
                     nativeProbeKeys,
                     nativeHits,
+                    nativeHitBytesCopied,
                     nativeNegativeHits,
                     nativeMisses,
                     nativeFillBatches,
@@ -1149,6 +1152,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getNativeHitsForTesting() {
         return nativeHits;
+    }
+
+    long getNativeHitBytesCopiedForTesting() {
+        return nativeHitBytesCopied;
     }
 
     long getNativeNegativeHitsForTesting() {
@@ -1695,6 +1702,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         int[] missOriginalIndices = new int[processed];
         int missCount = 0;
         int batchHits = 0;
+        long batchHitBytesCopied = 0;
         int batchNegativeHits = 0;
         int batchMisses = 0;
         try {
@@ -1715,7 +1723,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                     + ".");
                 }
                 if (status == NativeRequestPlaneBridge.PROBE_HIT) {
-                    valuesByOriginalIndex[i] = slot.copyProbeValue(i);
+                    // V1 intentionally materializes each positive native hit into a byte[] for the
+                    // existing serializer/staging APIs. Count those copied bytes explicitly so
+                    // allocation profiles can quantify a future zero-copy boundary.
+                    byte[] copiedValue = slot.copyProbeValue(i);
+                    valuesByOriginalIndex[i] = copiedValue;
+                    batchHitBytesCopied += copiedValue.length;
                     batchHits++;
                 } else if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
                     batchNegativeHits++;
@@ -1726,6 +1739,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 }
             }
         } catch (RuntimeException protocolFailure) {
+            nativeHitBytesCopied += batchHitBytesCopied;
             nativeRequestPlaneCoordinator.disable(protocolFailure);
             nativeRuntimeFailures++;
             nativeFallbackBatches++;
@@ -1734,6 +1748,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         nativeBatchesActivated++;
         nativeProbeKeys += processed;
         nativeHits += batchHits;
+        nativeHitBytesCopied += batchHitBytesCopied;
         nativeNegativeHits += batchNegativeHits;
         nativeMisses += batchMisses;
 

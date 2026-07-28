@@ -30,6 +30,7 @@
 #include <memory_resource>
 #include <new>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -284,6 +285,8 @@ struct RequestPlane::Impl {
               value_arena(
                       options.value_arena_bytes,
                       options.capacity_entries + 1U) {
+        state_generation_watermarks.reserve(
+                std::min<std::size_t>(options.capacity_entries, 64U));
         free_entry_ids.reserve(options.capacity_entries);
         for (std::size_t id = options.capacity_entries; id > 0; --id) {
             free_entry_ids.push_back(static_cast<std::uint32_t>(id));
@@ -665,8 +668,40 @@ struct RequestPlane::Impl {
             return FillResult{
                     FillStatus::kInvalidArgument, ErrorCode::kInvalidArgument};
         }
-        if (fill.key.size > key_arena.capacity() ||
-            (!fill.negative && fill.value_size > value_arena.capacity())) {
+
+        // A ValueState write generation is state-wide. Keep its high-watermark
+        // independently of cache entries so eviction cannot let a delayed
+        // asynchronous fill resurrect an older value. Equal generations are
+        // deliberately accepted because one prepared batch contains many keys
+        // captured at the same generation. Advance before every capacity or
+        // arena check: an authoritative update/clear must fence older fills
+        // even when its own cache insertion cannot be admitted.
+        try {
+            const auto found =
+                    state_generation_watermarks.find(fill.key.state_id);
+            if (found != state_generation_watermarks.end()) {
+                if (fill.key.generation < found->second) {
+                    return FillResult{
+                            FillStatus::kRejectedStaleGeneration,
+                            ErrorCode::kOk};
+                }
+                if (fill.key.generation > found->second) {
+                    found->second = fill.key.generation;
+                }
+            } else {
+                state_generation_watermarks.emplace(
+                        fill.key.state_id, fill.key.generation);
+            }
+        } catch (const std::bad_alloc&) {
+            return FillResult{
+                    FillStatus::kInternalError,
+                    ErrorCode::kAllocationFailed};
+        } catch (...) {
+            return FillResult{
+                    FillStatus::kInternalError, ErrorCode::kInternal};
+        }
+
+        if (fill.key.size > key_arena.capacity()) {
             return FillResult{
                     FillStatus::kRejectedCapacity,
                     ErrorCode::kCapacityExceeded};
@@ -674,7 +709,20 @@ struct RequestPlane::Impl {
 
         const std::uint32_t tag = TagFor(fill.key);
         std::uint32_t existing_id = 0;
-        if (FindExact(fill.key, tag, nullptr, &existing_id)) {
+        const bool existing =
+                FindExact(fill.key, tag, nullptr, &existing_id);
+        if (!fill.negative && fill.value_size > value_arena.capacity()) {
+            // The authoritative value no longer matches this exact resident
+            // key. Preserve other keys in the state, but never leave the old
+            // exact value observable through a latest-generation probe.
+            if (existing) {
+                RemoveEntry(existing_id, false);
+            }
+            return FillResult{
+                    FillStatus::kRejectedCapacity,
+                    ErrorCode::kCapacityExceeded};
+        }
+        if (existing) {
             return UpdateExisting(existing_id, fill);
         }
         return InsertNew(fill, tag);
@@ -689,6 +737,9 @@ struct RequestPlane::Impl {
         }
         key_arena.Reset();
         value_arena.Reset();
+        // Clear is an explicit lifecycle reset, unlike a ValueState key clear
+        // (which arrives above as a negative fill and advances the watermark).
+        state_generation_watermarks.clear();
         entry_count = 0;
         tombstone_count = 0;
         lru_head = 0;
@@ -704,6 +755,8 @@ struct RequestPlane::Impl {
     std::vector<std::uint32_t> free_entry_ids;
     ByteArena key_arena;
     ByteArena value_arena;
+    std::unordered_map<std::uint32_t, std::uint64_t>
+            state_generation_watermarks;
     std::size_t entry_count = 0;
     std::size_t tombstone_count = 0;
     std::uint32_t lru_head = 0;
