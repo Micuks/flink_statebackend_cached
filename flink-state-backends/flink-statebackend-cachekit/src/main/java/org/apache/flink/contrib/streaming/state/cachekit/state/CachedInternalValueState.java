@@ -21,6 +21,9 @@ import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.LruCachePolicy;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneBridge;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneCoordinator;
+import org.apache.flink.queryablestate.client.state.serialization.KvStateSerializer;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
@@ -58,9 +61,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final int multiGetMinBatchSize;
     private final boolean stickyUpdateInPlaceEnabled;
     private final boolean lazyStagingEnabled;
+    private final NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator;
+    private final int nativeStateId;
 
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
+    // Mailbox-thread-only serializers for delegate-visible native write-through. Creating these
+    // once avoids serializer duplicate allocation on every update/clear/dirty flush.
+    private final TypeSerializer<K> nativeMutationKeySerializer;
+    private final TypeSerializer<N> nativeMutationNamespaceSerializer;
+    private final TypeSerializer<V> nativeMutationValueSerializer;
 
     private N currentNamespace;
 
@@ -151,6 +161,24 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchWorkerFailures;
     private volatile long stickyUpdateSameKeyAttempts;
     private volatile long stickyUpdateInPlaceReuses;
+    private volatile long nativeBatchesActivated;
+    private volatile long nativeProbeKeys;
+    private volatile long nativeHits;
+    private volatile long nativeNegativeHits;
+    private volatile long nativeMisses;
+    private volatile long nativeFillBatches;
+    private volatile long nativeFillKeys;
+    private volatile long nativeFillRejected;
+    private volatile long nativeFallbackBatches;
+    private volatile long nativeRuntimeFailures;
+    private volatile long nativeGenerationAdvances;
+    private volatile long nativeMutationAttempts;
+    private volatile long nativeMutationApplied;
+    private volatile long nativeMutationSuperseded;
+    private volatile long nativeMutationFailures;
+    private volatile long nativeMutationTombstonesApplied;
+    private final java.util.concurrent.atomic.AtomicLong nativeWriteEpoch =
+            new java.util.concurrent.atomic.AtomicLong();
 
     // Worker-only serializers and scratch inputs. PrefetchExecutor serializes all tasks on its
     // single shared worker; mailbox paths use separate fields below.
@@ -359,6 +387,42 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 lazyStagingEnabled);
     }
 
+    public CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean multiGetPrefetchEnabled,
+            boolean stickyUpdateInPlaceEnabled,
+            boolean lazyStagingEnabled,
+            NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator,
+            int nativeStateId) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                multiGetPrefetchEnabled,
+                MULTIGET_CHUNK_SIZE,
+                MULTIGET_MIN_BATCH_SIZE,
+                stickyUpdateInPlaceEnabled,
+                lazyStagingEnabled,
+                ASYNC_STAGING_MAX_ENTRIES,
+                ASYNC_STAGING_MAX_RETAINED_BYTES,
+                nativeRequestPlaneCoordinator,
+                nativeStateId);
+    }
+
     CachedInternalValueState(
             InternalValueState<K, N, V> delegate,
             CurrentKeyProvider<K> currentKeyProvider,
@@ -500,6 +564,46 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             boolean lazyStagingEnabled,
             int asyncStagingMaxEntries,
             long asyncStagingMaxRetainedBytes) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                multiGetPrefetchEnabled,
+                multiGetChunkSize,
+                multiGetMinBatchSize,
+                stickyUpdateInPlaceEnabled,
+                lazyStagingEnabled,
+                asyncStagingMaxEntries,
+                asyncStagingMaxRetainedBytes,
+                null,
+                0);
+    }
+
+    CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean multiGetPrefetchEnabled,
+            int multiGetChunkSize,
+            int multiGetMinBatchSize,
+            boolean stickyUpdateInPlaceEnabled,
+            boolean lazyStagingEnabled,
+            int asyncStagingMaxEntries,
+            long asyncStagingMaxRetainedBytes,
+            NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator,
+            int nativeStateId) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -508,7 +612,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.bypassEnabled = bypassEnabled;
         this.hitRateThreshold = hitRateThreshold;
         this.hitRateWindow = hitRateWindow;
-        this.multiGetPrefetchEnabled = multiGetPrefetchEnabled;
+        // The native request plane is defined around prepared RocksDB keys and compacted
+        // MultiGet misses. Explicit native enable therefore also enables this wrapper's prepared
+        // MultiGet capability even when the older bp-prefetch flag was omitted.
+        this.multiGetPrefetchEnabled =
+                multiGetPrefetchEnabled || nativeRequestPlaneCoordinator != null;
         this.multiGetChunkSize = Math.max(2, multiGetChunkSize);
         this.multiGetMinBatchSize =
                 Math.max(2, Math.min(this.multiGetChunkSize, multiGetMinBatchSize));
@@ -516,9 +624,24 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.lazyStagingEnabled = lazyStagingEnabled;
         this.asyncStagingMaxEntries = Math.max(1, asyncStagingMaxEntries);
         this.asyncStagingMaxRetainedBytes = Math.max(0L, asyncStagingMaxRetainedBytes);
+        if ((nativeRequestPlaneCoordinator == null && nativeStateId != 0)
+                || (nativeRequestPlaneCoordinator != null && nativeStateId <= 0)) {
+            throw new IllegalArgumentException(
+                    "Native request-plane coordinator and positive state id must be supplied together.");
+        }
+        this.nativeRequestPlaneCoordinator = nativeRequestPlaneCoordinator;
+        this.nativeStateId = nativeStateId;
 
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
+        this.nativeMutationKeySerializer =
+                nativeRequestPlaneCoordinator == null ? null : keySerializer.duplicate();
+        this.nativeMutationNamespaceSerializer =
+                nativeRequestPlaneCoordinator == null ? null : namespaceSerializer.duplicate();
+        this.nativeMutationValueSerializer =
+                nativeRequestPlaneCoordinator == null
+                        ? null
+                        : delegate.getValueSerializer().duplicate();
 
         // L1 Cache: ~20% of maxEntries or at least 128
         int l1Size = Math.max(128, maxEntries / 5);
@@ -658,8 +781,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             : null;
             CachedValue<V> newValue;
             if (bypassEnabled && isBypassing) {
-                writeGen++; // direct delegate write: staged RocksDB reads may now be stale
+                long nativeEpoch =
+                        advanceWriteGeneration(); // staged/native RocksDB reads may now be stale
                 delegate.update(value);
+                publishNativeMutation(currentKey, currentNamespace, value, nativeEpoch);
                 if (reusableValue != null) {
                     stickyUpdateInPlaceReuses++;
                     reusableValue.replace(value, false);
@@ -684,8 +809,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         if (bypassEnabled && isBypassing) {
             // Write-Through (Bypass Mode)
-            writeGen++; // direct delegate write: staged RocksDB reads may now be stale
+            long nativeEpoch =
+                    advanceWriteGeneration(); // staged/native RocksDB reads may now be stale
             delegate.update(value);
+            publishNativeMutation(currentKey, currentNamespace, value, nativeEpoch);
 
             // Update L1 as Clean so subsequent reads (if sampled or re-enabled) find it.
             KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
@@ -722,8 +849,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         CachedValue<V> newValue;
 
         if (bypassEnabled && isBypassing) {
-            writeGen++; // direct delegate write: staged RocksDB reads may now be stale
+            long nativeEpoch =
+                    advanceWriteGeneration(); // staged/native RocksDB reads may now be stale
             delegate.clear();
+            publishNativeMutation(currentKey, currentNamespace, null, nativeEpoch);
             newValue = CachedValue.of(cacheKey, null, false);
         } else if (existing != null && existing.isNull && !existing.dirty) {
             // Known clean null: avoid scheduling an extra delete.
@@ -858,7 +987,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         } finally {
             lifecycleLock.writeLock().unlock();
         }
-        if (prefetchTasksBuilt > 0 || multiGetPrefetchEnabled) {
+        if (prefetchTasksBuilt > 0
+                || multiGetPrefetchEnabled
+                || nativeRequestPlaneCoordinator != null) {
             LOG.info(
                     "[CACHEKIT VALUE PREFETCH] delegate={} namespaceSerializer={} "
                             + "recordKeyPrefetch={} multiGet={} chunkSize={} minBatchSize={} "
@@ -869,7 +1000,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "lazyMaterializationFailures={} stagingEntries={} retainedBytes={} "
                             + "maxRetainedBytes={} admissionDrops={} staleAborts={} "
                             + "buildFailures={} workerFailures={} stickyUpdateInPlace={} "
-                            + "stickySameKeyAttempts={} stickyInPlaceReuses={}",
+                            + "stickySameKeyAttempts={} stickyInPlaceReuses={} "
+                            + "nativeEnabled={} nativeStateId={} nativeActivated={} "
+                            + "nativeProbeKeys={} nativeHits={} nativeNegativeHits={} "
+                            + "nativeMisses={} nativeFillBatches={} nativeFillKeys={} "
+                            + "nativeFillRejected={} nativeFallbackBatches={} "
+                            + "nativeRuntimeFailures={} nativeGenerationAdvances={} "
+                            + "nativeMutationAttempts={} nativeMutationApplied={} "
+                            + "nativeMutationSuperseded={} nativeMutationFailures={} "
+                            + "nativeMutationTombstonesApplied={} nativeActive={} "
+                            + "nativeKernel={} nativeFeatureBits={} nativeFeatures={} "
+                            + "nativeDisableCause={} coordinatorProbeCalls={} "
+                            + "coordinatorFillCalls={} coordinatorLeaseMisses={}",
                     delegate.getClass().getSimpleName(),
                     namespaceSerializer.getClass().getSimpleName(),
                     supportsRecordKeyPrefetch(),
@@ -900,7 +1042,46 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchWorkerFailures,
                     stickyUpdateInPlaceEnabled,
                     stickyUpdateSameKeyAttempts,
-                    stickyUpdateInPlaceReuses);
+                    stickyUpdateInPlaceReuses,
+                    nativeRequestPlaneCoordinator != null,
+                    nativeStateId,
+                    nativeBatchesActivated,
+                    nativeProbeKeys,
+                    nativeHits,
+                    nativeNegativeHits,
+                    nativeMisses,
+                    nativeFillBatches,
+                    nativeFillKeys,
+                    nativeFillRejected,
+                    nativeFallbackBatches,
+                    nativeRuntimeFailures,
+                    nativeGenerationAdvances,
+                    nativeMutationAttempts,
+                    nativeMutationApplied,
+                    nativeMutationSuperseded,
+                    nativeMutationFailures,
+                    nativeMutationTombstonesApplied,
+                    nativeRequestPlaneCoordinator != null
+                            && nativeRequestPlaneCoordinator.isActive(),
+                    nativeRequestPlaneCoordinator == null
+                            ? "disabled"
+                            : nativeRequestPlaneCoordinator.selectedKernel(),
+                    nativeRequestPlaneCoordinator == null
+                            ? "0x0000000000000000"
+                            : nativeRequestPlaneCoordinator.detectedFeatureBitsHex(),
+                    nativeRequestPlaneCoordinator == null
+                            ? "disabled"
+                            : nativeRequestPlaneCoordinator.detectedFeatures(),
+                    nativeDisableCauseForAudit(),
+                    nativeRequestPlaneCoordinator == null
+                            ? 0
+                            : nativeRequestPlaneCoordinator.probeCalls(),
+                    nativeRequestPlaneCoordinator == null
+                            ? 0
+                            : nativeRequestPlaneCoordinator.fillCalls(),
+                    nativeRequestPlaneCoordinator == null
+                            ? 0
+                            : nativeRequestPlaneCoordinator.leaseMisses());
         }
     }
 
@@ -956,6 +1137,70 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getPrefetchKeysDeduplicatedForTesting() {
         return prefetchKeysDeduplicated;
+    }
+
+    long getNativeBatchesActivatedForTesting() {
+        return nativeBatchesActivated;
+    }
+
+    long getNativeProbeKeysForTesting() {
+        return nativeProbeKeys;
+    }
+
+    long getNativeHitsForTesting() {
+        return nativeHits;
+    }
+
+    long getNativeNegativeHitsForTesting() {
+        return nativeNegativeHits;
+    }
+
+    long getNativeMissesForTesting() {
+        return nativeMisses;
+    }
+
+    long getNativeFillBatchesForTesting() {
+        return nativeFillBatches;
+    }
+
+    long getNativeFillKeysForTesting() {
+        return nativeFillKeys;
+    }
+
+    long getNativeFillRejectedForTesting() {
+        return nativeFillRejected;
+    }
+
+    long getNativeFallbackBatchesForTesting() {
+        return nativeFallbackBatches;
+    }
+
+    long getNativeRuntimeFailuresForTesting() {
+        return nativeRuntimeFailures;
+    }
+
+    long getNativeGenerationAdvancesForTesting() {
+        return nativeGenerationAdvances;
+    }
+
+    long getNativeMutationAttemptsForTesting() {
+        return nativeMutationAttempts;
+    }
+
+    long getNativeMutationAppliedForTesting() {
+        return nativeMutationApplied;
+    }
+
+    long getNativeMutationSupersededForTesting() {
+        return nativeMutationSuperseded;
+    }
+
+    long getNativeMutationFailuresForTesting() {
+        return nativeMutationFailures;
+    }
+
+    long getNativeMutationTombstonesAppliedForTesting() {
+        return nativeMutationTombstonesApplied;
     }
 
     long getPrefetchTasksDroppedForTesting() {
@@ -1082,10 +1327,19 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         prefetchTasksBuilt++;
         prefetchKeysPrepared += rocksDBKeys.size();
+        final NativeRequestPlaneCoordinator.BatchSlot nativeBatchSlot =
+                prepareNativeBatchSlot(rocksDBKeys);
         return trackedTask(
                 storageKeys,
                 gen,
-                () -> fetchPreparedChunksIntoStaging(rocksDBKeys, storageKeys, defaultValue, gen));
+                () ->
+                        fetchPreparedChunksIntoStaging(
+                                rocksDBKeys,
+                                storageKeys,
+                                defaultValue,
+                                gen,
+                                nativeBatchSlot),
+                nativeBatchSlot == null ? null : nativeBatchSlot::close);
     }
 
     /**
@@ -1139,6 +1393,26 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             immediateValueInput = new org.apache.flink.core.memory.DataInputDeserializer();
         }
         final V defaultValue = batchReader.getBatchDefaultValue();
+        NativeRequestPlaneCoordinator.BatchSlot nativeBatchSlot =
+                prepareNativeBatchSlot(rocksDBKeys);
+        if (nativeBatchSlot != null) {
+            try {
+                if (executeNativePreparedBatch(
+                        rocksDBKeys,
+                        storageKeys,
+                        defaultValue,
+                        gen,
+                        nativeBatchSlot,
+                        true)) {
+                    return;
+                }
+            } catch (Exception t) {
+                prefetchWorkerFailures++;
+                return;
+            } finally {
+                nativeBatchSlot.close();
+            }
+        }
         try {
             for (int start = 0; start < rocksDBKeys.size(); start += multiGetChunkSize) {
                 if (closed || gen != writeGen) {
@@ -1220,6 +1494,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private Runnable trackedTask(
             java.util.List<KeyNamespaceKey<K, N>> reservations, long gen, Runnable task) {
+        return trackedTask(reservations, gen, task, null);
+    }
+
+    private Runnable trackedTask(
+            java.util.List<KeyNamespaceKey<K, N>> reservations,
+            long gen,
+            Runnable task,
+            Runnable completion) {
         return new PrefetchExecutor.DropAwareTask() {
             @Override
             public void run() {
@@ -1227,6 +1509,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     task.run();
                 } finally {
                     releaseReservations(reservations, gen);
+                    if (completion != null) {
+                        completion.run();
+                    }
                 }
             }
 
@@ -1234,6 +1519,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             public void onDrop() {
                 prefetchTasksDropped++;
                 releaseReservations(reservations, gen);
+                if (completion != null) {
+                    completion.run();
+                }
             }
         };
     }
@@ -1295,9 +1583,20 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.List<byte[]> rocksDBKeys,
             java.util.List<KeyNamespaceKey<K, N>> storageKeys,
             V defaultValue,
-            long gen) {
+            long gen,
+            NativeRequestPlaneCoordinator.BatchSlot nativeBatchSlot) {
         prefetchTasksExecuted++;
         try {
+            if (nativeBatchSlot != null
+                    && executeNativePreparedBatch(
+                            rocksDBKeys,
+                            storageKeys,
+                            defaultValue,
+                            gen,
+                            nativeBatchSlot,
+                            false)) {
+                return;
+            }
             if (!lazyStagingEnabled) {
                 prepareWorkerValueState();
             }
@@ -1314,6 +1613,283 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             prefetchWorkerFailures++;
             // Best-effort cache warmup; the authoritative read path is untouched.
         }
+    }
+
+    private NativeRequestPlaneCoordinator.BatchSlot prepareNativeBatchSlot(
+            java.util.List<byte[]> rocksDBKeys) {
+        if (nativeRequestPlaneCoordinator == null
+                || !nativeRequestPlaneCoordinator.isActive()
+                || rocksDBKeys.size()
+                        < nativeRequestPlaneCoordinator.options().minBatchSize()) {
+            if (nativeRequestPlaneCoordinator != null) {
+                nativeFallbackBatches++;
+            }
+            return null;
+        }
+        NativeRequestPlaneCoordinator.BatchSlot slot =
+                nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
+        if (slot == null) {
+            nativeFallbackBatches++;
+            return null;
+        }
+        try {
+            slot.prepareLatest(nativeStateId, nativeWriteEpoch.get(), rocksDBKeys);
+            return slot;
+        } catch (IOException | RuntimeException failure) {
+            nativeFallbackBatches++;
+            slot.close();
+            return null;
+        }
+    }
+
+    /**
+     * Executes one native probe over the complete prepared batch, compacts misses for the existing
+     * RocksDB reader, fills only those misses, and publishes all results through the existing
+     * generation-checked staging path.
+     *
+     * @return true when this batch was handled (including a non-fatal fill rejection); false when
+     *     probe failed before any result was published and the caller must use the Java path
+     */
+    @SuppressWarnings("unchecked")
+    private boolean executeNativePreparedBatch(
+            java.util.List<byte[]> rocksDBKeys,
+            java.util.List<KeyNamespaceKey<K, N>> storageKeys,
+            V defaultValue,
+            long gen,
+            NativeRequestPlaneCoordinator.BatchSlot slot,
+            boolean immediate)
+            throws Exception {
+        if (closed || gen != writeGen || !nativeRequestPlaneCoordinator.isActive()) {
+            nativeFallbackBatches++;
+            return false;
+        }
+
+        final int processed;
+        try {
+            processed = nativeRequestPlaneCoordinator.probe(slot);
+        } catch (RuntimeException | LinkageError failure) {
+            nativeRuntimeFailures++;
+            nativeFallbackBatches++;
+            return false;
+        }
+        if (processed != rocksDBKeys.size()) {
+            IllegalStateException failure =
+                    new IllegalStateException(
+                            "Native probe processed "
+                                    + processed
+                                    + " of "
+                                    + rocksDBKeys.size()
+                                    + " prepared keys.");
+            nativeRequestPlaneCoordinator.disable(failure);
+            nativeRuntimeFailures++;
+            nativeFallbackBatches++;
+            return false;
+        }
+        if (closed || gen != writeGen) {
+            prefetchStaleAborts++;
+            return true;
+        }
+
+        byte[][] valuesByOriginalIndex = new byte[processed][];
+        java.util.ArrayList<byte[]> missKeys = new java.util.ArrayList<>(processed);
+        int[] missOriginalIndices = new int[processed];
+        int missCount = 0;
+        int batchHits = 0;
+        int batchNegativeHits = 0;
+        int batchMisses = 0;
+        try {
+            for (int i = 0; i < processed; i++) {
+                int error = slot.probeError(i);
+                int status = slot.probeStatus(i);
+                if (error != NativeRequestPlaneBridge.ERROR_OK
+                        || (status != NativeRequestPlaneBridge.PROBE_MISS
+                                && status != NativeRequestPlaneBridge.PROBE_HIT
+                                && status != NativeRequestPlaneBridge.PROBE_NEGATIVE)) {
+                    throw new IllegalStateException(
+                            "Native probe returned status="
+                                    + status
+                                    + ", error="
+                                    + error
+                                    + " at index "
+                                    + i
+                                    + ".");
+                }
+                if (status == NativeRequestPlaneBridge.PROBE_HIT) {
+                    valuesByOriginalIndex[i] = slot.copyProbeValue(i);
+                    batchHits++;
+                } else if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
+                    batchNegativeHits++;
+                } else {
+                    batchMisses++;
+                    missKeys.add(rocksDBKeys.get(i));
+                    missOriginalIndices[missCount++] = i;
+                }
+            }
+        } catch (RuntimeException protocolFailure) {
+            nativeRequestPlaneCoordinator.disable(protocolFailure);
+            nativeRuntimeFailures++;
+            nativeFallbackBatches++;
+            return false;
+        }
+        nativeBatchesActivated++;
+        nativeProbeKeys += processed;
+        nativeHits += batchHits;
+        nativeNegativeHits += batchNegativeHits;
+        nativeMisses += batchMisses;
+
+        java.util.List<byte[]> missValues =
+                fetchCompactPreparedMissValues(missKeys, gen);
+        if (missValues == null) {
+            return true;
+        }
+        for (int i = 0; i < missValues.size(); i++) {
+            valuesByOriginalIndex[missOriginalIndices[i]] = missValues.get(i);
+        }
+
+        if (!missKeys.isEmpty() && !closed && gen == writeGen) {
+            try {
+                slot.prepareFill(
+                        nativeStateId, slot.preparedGeneration(), missKeys, missValues);
+                int filled = nativeRequestPlaneCoordinator.fill(slot);
+                if (filled != missKeys.size()) {
+                    IllegalStateException failure =
+                            new IllegalStateException(
+                                    "Native fill processed "
+                                            + filled
+                                            + " of "
+                                            + missKeys.size()
+                                            + " compacted misses.");
+                    nativeRequestPlaneCoordinator.disable(failure);
+                    nativeRuntimeFailures++;
+                    nativeFillRejected += missKeys.size();
+                } else {
+                    nativeFillBatches++;
+                    nativeFillKeys += filled;
+                    for (int i = 0; i < filled; i++) {
+                        int status = slot.fillStatus(i);
+                        int error = slot.fillError(i);
+                        boolean accepted =
+                                error == NativeRequestPlaneBridge.ERROR_OK
+                                        && (status == NativeRequestPlaneBridge.FILL_INSERTED
+                                                || status
+                                                        == NativeRequestPlaneBridge.FILL_UPDATED);
+                        boolean nonFatalRejection =
+                                isNonFatalNativeFillRejection(status, error);
+                        if (!accepted) {
+                            nativeFillRejected++;
+                        }
+                        if (!accepted && !nonFatalRejection) {
+                            IllegalStateException failure =
+                                    new IllegalStateException(
+                                            "Native fill returned status="
+                                                    + status
+                                                    + ", error="
+                                                    + error
+                                                    + " at index "
+                                                    + i
+                                                    + ".");
+                            nativeRequestPlaneCoordinator.disable(failure);
+                            nativeRuntimeFailures++;
+                            break;
+                        }
+                    }
+                }
+            } catch (IOException capacityFailure) {
+                // This batch's RocksDB results remain authoritative and are still staged.
+                nativeFillRejected += missKeys.size();
+            } catch (RuntimeException | LinkageError nativeFailure) {
+                nativeRequestPlaneCoordinator.disable(nativeFailure);
+                nativeRuntimeFailures++;
+                // Do not re-read RocksDB after a fill-side runtime/protocol failure.
+            }
+        }
+
+        if (closed || gen != writeGen) {
+            prefetchStaleAborts++;
+            return true;
+        }
+        if (!immediate && !lazyStagingEnabled) {
+            prepareWorkerValueState();
+        }
+        for (int i = 0; i < processed; i++) {
+            if (closed || gen != writeGen) {
+                prefetchStaleAborts++;
+                return true;
+            }
+            byte[] serializedValue = valuesByOriginalIndex[i];
+            boolean published;
+            if (immediate) {
+                V value =
+                        deserializeImmediateValueOrCopyDefault(serializedValue, defaultValue);
+                published =
+                        publishStagedValue(
+                                StagedValue.materialized(storageKeys.get(i), value, gen),
+                                serializedValue == null);
+            } else {
+                published =
+                        stagePreparedValue(
+                                storageKeys.get(i), serializedValue, defaultValue, gen);
+            }
+            if (!published) {
+                return true;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isNonFatalNativeFillRejection(int status, int error) {
+        return (status == NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION
+                        && error == NativeRequestPlaneBridge.ERROR_OK)
+                || (status == NativeRequestPlaneBridge.FILL_REJECTED_CAPACITY
+                        && error == NativeRequestPlaneBridge.ERROR_CAPACITY_EXCEEDED);
+    }
+
+    @SuppressWarnings("unchecked")
+    private java.util.List<byte[]> fetchCompactPreparedMissValues(
+            java.util.List<byte[]> missKeys, long gen) throws Exception {
+        if (missKeys.isEmpty()) {
+            return java.util.Collections.emptyList();
+        }
+        RocksDBBatchValueReader<K, N, V> batchReader =
+                (RocksDBBatchValueReader<K, N, V>) delegate;
+        java.util.ArrayList<byte[]> values = new java.util.ArrayList<>(missKeys.size());
+        for (int start = 0; start < missKeys.size(); start += multiGetChunkSize) {
+            if (closed || gen != writeGen) {
+                prefetchStaleAborts++;
+                return null;
+            }
+            int end = Math.min(start + multiGetChunkSize, missKeys.size());
+            java.util.List<byte[]> chunkValues;
+            lifecycleLock.readLock().lock();
+            try {
+                if (closed || gen != writeGen) {
+                    prefetchStaleAborts++;
+                    return null;
+                }
+                if (end - start < multiGetMinBatchSize) {
+                    chunkValues = new java.util.ArrayList<>(end - start);
+                    for (int i = start; i < end; i++) {
+                        prefetchPointGetCalls++;
+                        chunkValues.add(
+                                batchReader.getSerializedValueByRocksDBKey(missKeys.get(i)));
+                    }
+                } else {
+                    prefetchMultiGetCalls++;
+                    prefetchMultiGetKeys += end - start;
+                    chunkValues =
+                            batchReader.getSerializedValuesByRocksDBKeys(
+                                    missKeys, start, end);
+                }
+            } finally {
+                lifecycleLock.readLock().unlock();
+            }
+            if (chunkValues.size() != end - start) {
+                throw new IllegalStateException(
+                        "RocksDB compacted MultiGet result count does not match miss count.");
+            }
+            values.addAll(chunkValues);
+        }
+        return values;
     }
 
     @SuppressWarnings("unchecked")
@@ -1747,7 +2323,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
 
             // A dirty flush changes RocksDB content: a concurrent prefetch read may now be stale.
-            writeGen++;
+            long nativeEpoch = advanceWriteGeneration();
             // Save current context
             K previousKey = currentKeyProvider.getCurrentKey();
             // We rely on 'currentNamespace' field in this class but it might have changed.
@@ -1777,6 +2353,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 } else {
                     delegate.update(value.value);
                 }
+                publishNativeMutation(
+                        key.key, key.namespace, value.isNull ? null : value.value, nativeEpoch);
             } catch (IOException e) {
                 throw new RuntimeException("Failed to flush state to delegate interaction", e);
             } finally {
@@ -1789,6 +2367,63 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         } finally {
             lifecycleLock.readLock().unlock();
         }
+    }
+
+    private long advanceWriteGeneration() {
+        writeGen++;
+        if (nativeRequestPlaneCoordinator != null) {
+            nativeGenerationAdvances++;
+            return nativeWriteEpoch.incrementAndGet();
+        }
+        return 0L;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void publishNativeMutation(
+            K key, N namespace, V value, long nativeEpoch) {
+        if (nativeRequestPlaneCoordinator == null
+                || !nativeRequestPlaneCoordinator.isActive()
+                || !(delegate instanceof RocksDBBatchValueReader<?, ?, ?>)) {
+            return;
+        }
+        nativeMutationAttempts++;
+        RocksDBBatchValueReader<K, N, V> batchReader =
+                (RocksDBBatchValueReader<K, N, V>) delegate;
+        try {
+            byte[] preparedKey =
+                    batchReader.serializeBatchKeyAndNamespace(
+                            key,
+                            namespace,
+                            nativeMutationKeySerializer,
+                            nativeMutationNamespaceSerializer);
+            byte[] serializedValue =
+                    KvStateSerializer.serializeValue(
+                            value, nativeMutationValueSerializer);
+            int status =
+                    nativeRequestPlaneCoordinator.updateExactKey(
+                            nativeStateId, nativeEpoch, preparedKey, serializedValue);
+            if (status == NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION) {
+                nativeMutationSuperseded++;
+            } else {
+                nativeMutationApplied++;
+                if (value == null) {
+                    nativeMutationTombstonesApplied++;
+                }
+            }
+        } catch (Exception | LinkageError failure) {
+            nativeRequestPlaneCoordinator.disable(failure);
+            nativeMutationFailures++;
+            nativeRuntimeFailures++;
+        }
+    }
+
+    private String nativeDisableCauseForAudit() {
+        if (nativeRequestPlaneCoordinator == null
+                || nativeRequestPlaneCoordinator.disableCause() == null) {
+            return "none";
+        }
+        Throwable cause = nativeRequestPlaneCoordinator.disableCause();
+        return cause.getClass().getSimpleName() + ":" + String.valueOf(cause.getMessage());
     }
 
     private static final class KeyNamespaceKey<K, N> {
