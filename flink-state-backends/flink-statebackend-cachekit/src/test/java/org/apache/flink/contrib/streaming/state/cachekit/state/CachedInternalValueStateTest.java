@@ -117,6 +117,9 @@ class CachedInternalValueStateTest {
         state.update(30);
         state.update(31);
 
+        assertEquals(3, state.getStickyUpdateSameKeyAttemptsForTesting());
+        assertEquals(3, state.getStickyUpdateInPlaceReusesForTesting());
+
         currentKey.set("k1");
         state.setCurrentNamespace("window-a");
         assertEquals(11, state.value());
@@ -136,6 +139,8 @@ class CachedInternalValueStateTest {
         // to the old wrapper, so a subsequent same-entry update must not mutate that detached
         // object.
         state.update(32);
+        assertEquals(4, state.getStickyUpdateSameKeyAttemptsForTesting());
+        assertEquals(3, state.getStickyUpdateInPlaceReusesForTesting());
         assertEquals(32, state.value());
         state.flush();
         assertEquals(4, flushed.size());

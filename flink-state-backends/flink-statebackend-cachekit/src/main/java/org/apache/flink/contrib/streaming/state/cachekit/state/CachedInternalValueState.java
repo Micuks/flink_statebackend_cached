@@ -149,6 +149,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchStaleAborts;
     private volatile long prefetchBuildFailures;
     private volatile long prefetchWorkerFailures;
+    private volatile long stickyUpdateSameKeyAttempts;
+    private volatile long stickyUpdateInPlaceReuses;
 
     // Worker-only serializers and scratch inputs. PrefetchExecutor serializes all tasks on its
     // single shared worker; mailbox paths use separate fields below.
@@ -644,6 +646,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         // Optimistic Sticky Update (Check L0 first)
         if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
+            if (stickyUpdateInPlaceEnabled) {
+                stickyUpdateSameKeyAttempts++;
+            }
             // A clean L1 value may be moved to L2 by eviction. Only mutate when the sticky object
             // is still the exact value owned by L1; otherwise a shared L2 alias could become dirty.
             CachedValue<V> reusableValue =
@@ -656,6 +661,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 writeGen++; // direct delegate write: staged RocksDB reads may now be stale
                 delegate.update(value);
                 if (reusableValue != null) {
+                    stickyUpdateInPlaceReuses++;
                     reusableValue.replace(value, false);
                     return;
                 }
@@ -664,6 +670,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 lastAccessKey, value, false); // Clean because written to delegate
             } else {
                 if (reusableValue != null) {
+                    stickyUpdateInPlaceReuses++;
                     reusableValue.replace(value, true);
                     return;
                 }
@@ -861,7 +868,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "promoted={} lazyStaging={} lazyStaged={} lazyMaterialized={} "
                             + "lazyMaterializationFailures={} stagingEntries={} retainedBytes={} "
                             + "maxRetainedBytes={} admissionDrops={} staleAborts={} "
-                            + "buildFailures={} workerFailures={}",
+                            + "buildFailures={} workerFailures={} stickyUpdateInPlace={} "
+                            + "stickySameKeyAttempts={} stickyInPlaceReuses={}",
                     delegate.getClass().getSimpleName(),
                     namespaceSerializer.getClass().getSimpleName(),
                     supportsRecordKeyPrefetch(),
@@ -889,7 +897,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchStagingAdmissionDrops,
                     prefetchStaleAborts,
                     prefetchBuildFailures,
-                    prefetchWorkerFailures);
+                    prefetchWorkerFailures,
+                    stickyUpdateInPlaceEnabled,
+                    stickyUpdateSameKeyAttempts,
+                    stickyUpdateInPlaceReuses);
         }
     }
 
@@ -933,6 +944,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getPrefetchStagingAdmissionDropsForTesting() {
         return prefetchStagingAdmissionDrops;
+    }
+
+    long getStickyUpdateSameKeyAttemptsForTesting() {
+        return stickyUpdateSameKeyAttempts;
+    }
+
+    long getStickyUpdateInPlaceReusesForTesting() {
+        return stickyUpdateInPlaceReuses;
     }
 
     long getPrefetchKeysDeduplicatedForTesting() {
