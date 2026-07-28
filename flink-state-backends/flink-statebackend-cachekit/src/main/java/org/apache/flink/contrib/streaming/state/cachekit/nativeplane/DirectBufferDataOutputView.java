@@ -82,6 +82,22 @@ public final class DirectBufferDataOutputView implements DataOutputView {
         buffer.clear();
     }
 
+    int checkpoint() {
+        return buffer.position();
+    }
+
+    void truncateTo(int checkpoint) {
+        if (checkpoint < 0 || checkpoint > buffer.position()) {
+            throw new IllegalArgumentException(
+                    "Checkpoint "
+                            + checkpoint
+                            + " is outside written range [0, "
+                            + buffer.position()
+                            + "].");
+        }
+        buffer.position(checkpoint);
+    }
+
     /**
      * Returns a read-only, big-endian, zero-position slice of the bytes written so far.
      *
