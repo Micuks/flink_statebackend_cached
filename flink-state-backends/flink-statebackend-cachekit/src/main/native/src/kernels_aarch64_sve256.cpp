@@ -78,7 +78,7 @@ bool SveEqualBytes(
         const svuint8_t left_bytes = svld1_u8(active, left + index);
         const svuint8_t right_bytes = svld1_u8(active, right + index);
         const svbool_t equal = svcmpeq_u8(active, left_bytes, right_bytes);
-        if (!svptest_all(active, equal)) {
+        if (svcntp_b8(active, equal) != svcntp_b8(active, active)) {
             return false;
         }
         index += svcntb();
