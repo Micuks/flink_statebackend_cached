@@ -23,6 +23,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace cachekit {
 namespace native {
@@ -73,6 +74,65 @@ struct MutableBuffer {
     std::size_t size = 0;
 };
 
+// Single-owner reusable storage for the direct-buffer codec.  ReserveEntries()
+// may allocate only when a caller exceeds the largest batch seen so far.
+// FillDirectBatch()/ProbeDirectBatch() clear and reuse this storage and are
+// therefore allocation-free at steady-state batch sizes.
+class BatchScratch final {
+public:
+    explicit BatchScratch(std::size_t reserve_entries = 0);
+
+    BatchScratch(const BatchScratch&) = delete;
+    BatchScratch& operator=(const BatchScratch&) = delete;
+
+    void ReserveEntries(std::size_t count);
+
+    std::size_t reserved_entries() const noexcept {
+        return reserved_entries_;
+    }
+
+    std::uint64_t growth_count() const noexcept {
+        return growth_count_;
+    }
+
+private:
+    friend BatchBridgeCode FillDirectBatch(
+            RequestPlane* plane,
+            BatchScratch* scratch,
+            ConstBuffer key_arena,
+            ConstBuffer key_metadata,
+            ConstBuffer value_arena,
+            ConstBuffer value_metadata,
+            std::size_t count,
+            MutableBuffer fill_results) noexcept;
+
+    friend BatchBridgeCode ProbeDirectBatch(
+            RequestPlane* plane,
+            BatchScratch* scratch,
+            ConstBuffer key_arena,
+            ConstBuffer key_metadata,
+            std::size_t count,
+            MutableBuffer value_output,
+            MutableBuffer probe_results) noexcept;
+
+    std::vector<KeyView> keys_;
+    std::vector<FillView> fills_;
+    std::vector<FillResult> fill_results_;
+    std::vector<ProbeResult> probe_results_;
+    std::size_t reserved_entries_ = 0;
+    std::uint64_t growth_count_ = 0;
+};
+
+BatchBridgeCode FillDirectBatch(
+        RequestPlane* plane,
+        BatchScratch* scratch,
+        ConstBuffer key_arena,
+        ConstBuffer key_metadata,
+        ConstBuffer value_arena,
+        ConstBuffer value_metadata,
+        std::size_t count,
+        MutableBuffer fill_results) noexcept;
+
 BatchBridgeCode FillDirectBatch(
         RequestPlane* plane,
         ConstBuffer key_arena,
@@ -81,6 +141,15 @@ BatchBridgeCode FillDirectBatch(
         ConstBuffer value_metadata,
         std::size_t count,
         MutableBuffer fill_results) noexcept;
+
+BatchBridgeCode ProbeDirectBatch(
+        RequestPlane* plane,
+        BatchScratch* scratch,
+        ConstBuffer key_arena,
+        ConstBuffer key_metadata,
+        std::size_t count,
+        MutableBuffer value_output,
+        MutableBuffer probe_results) noexcept;
 
 BatchBridgeCode ProbeDirectBatch(
         RequestPlane* plane,
