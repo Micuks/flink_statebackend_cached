@@ -56,6 +56,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final boolean multiGetPrefetchEnabled;
     private final int multiGetChunkSize;
     private final int multiGetMinBatchSize;
+    private final boolean stickyUpdateInPlaceEnabled;
 
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
@@ -260,7 +261,36 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 hitRateWindow,
                 multiGetPrefetchEnabled,
                 MULTIGET_CHUNK_SIZE,
-                MULTIGET_MIN_BATCH_SIZE);
+                MULTIGET_MIN_BATCH_SIZE,
+                false);
+    }
+
+    public CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean multiGetPrefetchEnabled,
+            boolean stickyUpdateInPlaceEnabled) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                multiGetPrefetchEnabled,
+                MULTIGET_CHUNK_SIZE,
+                MULTIGET_MIN_BATCH_SIZE,
+                stickyUpdateInPlaceEnabled);
     }
 
     CachedInternalValueState(
@@ -287,7 +317,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 hitRateWindow,
                 multiGetPrefetchEnabled,
                 multiGetChunkSize,
-                2);
+                2,
+                false);
     }
 
     CachedInternalValueState(
@@ -303,6 +334,36 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             boolean multiGetPrefetchEnabled,
             int multiGetChunkSize,
             int multiGetMinBatchSize) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                multiGetPrefetchEnabled,
+                multiGetChunkSize,
+                multiGetMinBatchSize,
+                false);
+    }
+
+    CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean multiGetPrefetchEnabled,
+            int multiGetChunkSize,
+            int multiGetMinBatchSize,
+            boolean stickyUpdateInPlaceEnabled) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -315,6 +376,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.multiGetChunkSize = Math.max(2, multiGetChunkSize);
         this.multiGetMinBatchSize =
                 Math.max(2, Math.min(this.multiGetChunkSize, multiGetMinBatchSize));
+        this.stickyUpdateInPlaceEnabled = stickyUpdateInPlaceEnabled;
 
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
@@ -429,17 +491,30 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // Only writes that reach the delegate (bypass mode, flush) need to bump writeGen here.
 
         // Optimistic Sticky Update (Check L0 first)
-        // If current key matches sticky key, we can update in place without new
-        // allocation
         if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
+            // A clean L1 value may be moved to L2 by eviction. Only mutate when the sticky object
+            // is still the exact value owned by L1; otherwise a shared L2 alias could become dirty.
+            CachedValue<V> reusableValue =
+                    stickyUpdateInPlaceEnabled
+                                    && l1Cache.get(lastAccessKey) == lastAccessValue
+                            ? lastAccessValue
+                            : null;
             CachedValue<V> newValue;
             if (bypassEnabled && isBypassing) {
                 writeGen++; // direct delegate write: staged RocksDB reads may now be stale
                 delegate.update(value);
+                if (reusableValue != null) {
+                    reusableValue.replace(value, false);
+                    return;
+                }
                 newValue =
                         CachedValue.of(
                                 lastAccessKey, value, false); // Clean because written to delegate
             } else {
+                if (reusableValue != null) {
+                    reusableValue.replace(value, true);
+                    return;
+                }
                 newValue = CachedValue.of(lastAccessKey, value, true); // Dirty
             }
             // Update L1
@@ -1424,9 +1499,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private static final class CachedValue<V> {
         private final KeyNamespaceKey<?, ?> storageKey;
-        private final V value;
-        private final boolean isNull;
-        private final boolean dirty;
+        private V value;
+        private boolean isNull;
+        private boolean dirty;
 
         private CachedValue(
                 KeyNamespaceKey<?, ?> storageKey, V value, boolean isNull, boolean dirty) {
@@ -1444,6 +1519,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         @SuppressWarnings("unchecked")
         private <K, N> KeyNamespaceKey<K, N> storageKey() {
             return (KeyNamespaceKey<K, N>) storageKey;
+        }
+
+        private void replace(V value, boolean dirty) {
+            this.value = value;
+            this.isNull = value == null;
+            this.dirty = dirty;
         }
 
         V valueOrNull() {

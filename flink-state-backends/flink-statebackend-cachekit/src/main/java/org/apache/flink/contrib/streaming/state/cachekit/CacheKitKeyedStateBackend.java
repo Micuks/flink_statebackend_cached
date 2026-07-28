@@ -267,7 +267,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueBypassEnabled,
                     valueHitRateThreshold,
                     valueHitRateWindow,
-                    BP_PREFETCH_MULTIGET);
+                    BP_PREFETCH_MULTIGET,
+                    VALUE_STICKY_UPDATE_IN_PLACE);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -399,7 +400,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueBypassEnabled,
                     valueHitRateThreshold,
                     valueHitRateWindow,
-                    BP_PREFETCH_MULTIGET);
+                    BP_PREFETCH_MULTIGET,
+                    VALUE_STICKY_UPDATE_IN_PLACE);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
@@ -592,6 +594,14 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     /** Uses ordered, incrementally published RocksDB MultiGet chunks for async ValueState reads. */
     private static final boolean BP_PREFETCH_MULTIGET =
             loadBooleanFlag("state.backend.cachekit.bp-prefetch.multiget.enabled", false);
+    /**
+     * Reuses the L1-owned sticky ValueState wrapper for repeated updates to the same key/namespace.
+     * Disabled by default until Nexmark validates that the allocation reduction exceeds its extra
+     * ownership check.
+     */
+    private static final boolean VALUE_STICKY_UPDATE_IN_PLACE =
+            loadBooleanFlag(
+                    "state.backend.cachekit.value.sticky-update-in-place.enabled", false);
     private static boolean loadBooleanFlag(String key, boolean defaultValue) {
         try {
             return org.apache.flink.configuration.GlobalConfiguration.loadConfiguration()
