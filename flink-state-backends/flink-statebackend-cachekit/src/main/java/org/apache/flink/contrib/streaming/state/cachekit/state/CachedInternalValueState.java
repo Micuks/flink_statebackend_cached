@@ -135,11 +135,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchBuildFailures;
     private volatile long prefetchWorkerFailures;
 
-    // Worker-thread-confined duplicated serializers (single shared worker thread => no races).
+    // Worker-only serializers and scratch inputs. PrefetchExecutor serializes all tasks on its
+    // single shared worker; mailbox paths use separate fields below.
     private TypeSerializer<K> workerKeySerializer;
     private TypeSerializer<N> workerNamespaceSerializer;
     private TypeSerializer<V> workerValueSerializer;
+    private org.apache.flink.core.memory.DataInputDeserializer workerKeyNamespaceInput;
     private org.apache.flink.core.memory.DataInputDeserializer workerValueInput;
+
+    // Mailbox-thread-only scratch buffer. Captured prefetch tasks retain copied byte arrays only.
+    private org.apache.flink.core.memory.DataOutputSerializer mailboxKeyOutput;
 
     // Mailbox-thread-confined deserializer for local-preagg's synchronous MultiGet path. Keep it
     // separate from the worker fields because the shared prefetch worker may still be active for
@@ -357,14 +362,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         CachedValue<V> l1Cached = l1Cache.get(lookupKey);
         if (l1Cached != null) {
-            // Sticky update needs an immutable/storage key.
-            // If we found it in L1, the key in L1 IS a storage key.
-            // BUT we don't have access to the entry's key directly from .get() value.
-            // We have to create a new key OR look it up from entries (inefficient).
-            // Actually, for sticky cache, we just need A key copy.
-            // Creating a new storage key is unavoidable if we want to store it in sticky.
-            KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
-                    namespaceSerializer);
+            // Cached values retain the immutable key used at insertion, so switching back to an
+            // L1-resident key does not deep-copy the current key and namespace just for L0.
+            KeyNamespaceKey<K, N> storageKey = l1Cached.storageKey();
             updateSticky(storageKey, l1Cached);
 
             recordAccess(true); // Hit
@@ -375,9 +375,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         CachedValue<V> l2Cached = l2Cache.get(lookupKey);
         if (l2Cached != null) {
             // Promote to L1 (Clean)
-            KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
-                    namespaceSerializer);
-            CachedValue<V> newValue = CachedValue.of(l2Cached.valueOrNull(), false);
+            KeyNamespaceKey<K, N> storageKey = l2Cached.storageKey();
+            CachedValue<V> newValue = CachedValue.of(storageKey, l2Cached.valueOrNull(), false);
             l1Cache.put(storageKey, newValue);
 
             updateSticky(storageKey, newValue);
@@ -392,9 +391,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             StagedValue<V> staged = staging.remove(lookupKey);
             if (staged != null && staged.gen == writeGen) {
                 prefetchValuesPromoted++;
-                KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace,
-                        keySerializer, namespaceSerializer);
-                CachedValue<V> newValue = CachedValue.of(staged.value, false);
+                KeyNamespaceKey<K, N> storageKey = staged.storageKey();
+                CachedValue<V> newValue = CachedValue.of(storageKey, staged.value, false);
                 l1Cache.put(storageKey, newValue);
                 updateSticky(storageKey, newValue);
                 recordAccess(true); // Hit
@@ -410,7 +408,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // Even if bypassing (sampled), we populate L1 to allow hit rate recovery
         KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
                 namespaceSerializer);
-        CachedValue<V> newValue = CachedValue.of(loaded, false);
+        CachedValue<V> newValue = CachedValue.of(storageKey, loaded, false);
         l1Cache.put(storageKey, newValue);
 
         updateSticky(storageKey, newValue);
@@ -438,9 +436,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (bypassEnabled && isBypassing) {
                 writeGen++; // direct delegate write: staged RocksDB reads may now be stale
                 delegate.update(value);
-                newValue = CachedValue.of(value, false); // Clean because written to delegate
+                newValue =
+                        CachedValue.of(
+                                lastAccessKey, value, false); // Clean because written to delegate
             } else {
-                newValue = CachedValue.of(value, true); // Dirty
+                newValue = CachedValue.of(lastAccessKey, value, true); // Dirty
             }
             // Update L1
             l1Cache.put(lastAccessKey, newValue);
@@ -456,7 +456,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             // Update L1 as Clean so subsequent reads (if sampled or re-enabled) find it.
             KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
                     namespaceSerializer);
-            CachedValue<V> newValue = CachedValue.of(value, false); // Clean
+            CachedValue<V> newValue = CachedValue.of(cacheKey, value, false); // Clean
             l1Cache.put(cacheKey, newValue);
             updateSticky(cacheKey, newValue);
             return;
@@ -464,7 +464,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
                 namespaceSerializer);
-        CachedValue<V> newValue = CachedValue.of(value, true);
+        CachedValue<V> newValue = CachedValue.of(cacheKey, value, true);
 
         // Write-Back: Update L1 only (marked dirty)
         l1Cache.put(cacheKey, newValue);
@@ -490,12 +490,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (bypassEnabled && isBypassing) {
             writeGen++; // direct delegate write: staged RocksDB reads may now be stale
             delegate.clear();
-            newValue = CachedValue.of(null, false);
+            newValue = CachedValue.of(cacheKey, null, false);
         } else if (existing != null && existing.isNull && !existing.dirty) {
             // Known clean null: avoid scheduling an extra delete.
             newValue = existing;
         } else {
-            newValue = CachedValue.of(null, true);
+            newValue = CachedValue.of(cacheKey, null, true);
         }
 
         l1Cache.put(cacheKey, newValue);
@@ -593,11 +593,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 if (val.dirty) {
                     // Push to L2 (Write-Through)
                     // We simulate eviction to L2
-                    l2Cache.put(entry.getKey(), CachedValue.of(val.value, false)); // L2 holds clean
+                    l2Cache.put(
+                            entry.getKey(),
+                            CachedValue.of(
+                                    entry.getKey(), val.value, false)); // L2 holds clean
                     flushEntryToDelegate(entry.getKey(), val); // Write-through to delegate
 
                     // Mark L1 clean
-                    l1Cache.put(entry.getKey(), CachedValue.of(val.value, false));
+                    l1Cache.put(
+                            entry.getKey(), CachedValue.of(entry.getKey(), val.value, false));
                 }
             }
         } finally {
@@ -693,8 +697,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         final long gen = writeGen;
         final N namespace = currentNamespace;
         try {
-            org.apache.flink.core.memory.DataOutputSerializer out =
-                    new org.apache.flink.core.memory.DataOutputSerializer(64);
+            if (mailboxKeyOutput == null) {
+                mailboxKeyOutput = new org.apache.flink.core.memory.DataOutputSerializer(64);
+            }
             for (K key : keys) {
                 if (key == null || findCachedValueFor(key, namespace) != null) {
                     continue;
@@ -709,11 +714,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     continue;
                 }
                 reservations.add(storageKey);
-                out.clear();
-                keySerializer.serialize(storageKey.key, out);
-                out.writeByte(42); // KvStateSerializer.MAGIC_NUMBER wire format
-                namespaceSerializer.serialize(storageKey.namespace, out);
-                serialized.add(out.getCopyOfBuffer());
+                mailboxKeyOutput.clear();
+                keySerializer.serialize(storageKey.key, mailboxKeyOutput);
+                mailboxKeyOutput.writeByte(42); // KvStateSerializer.MAGIC_NUMBER wire format
+                namespaceSerializer.serialize(storageKey.namespace, mailboxKeyOutput);
+                serialized.add(mailboxKeyOutput.getCopyOfBuffer());
             }
         } catch (Throwable t) {
             prefetchBuildFailures++;
@@ -874,7 +879,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             deserializeImmediateValueOrCopyDefault(
                                     serializedValue, defaultValue);
                     staging.put(
-                            storageKeys.get(start + i), new StagedValue<>(value, gen));
+                            storageKeys.get(start + i),
+                            new StagedValue<>(storageKeys.get(start + i), value, gen));
                     prefetchValuesStaged++;
                 }
             }
@@ -972,6 +978,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             workerKeySerializer = keySerializer.duplicate();
             workerNamespaceSerializer = namespaceSerializer.duplicate();
             workerValueSerializer = delegate.getValueSerializer().duplicate();
+            workerKeyNamespaceInput = new org.apache.flink.core.memory.DataInputDeserializer();
             workerValueInput = new org.apache.flink.core.memory.DataInputDeserializer();
         }
         if (staging.size() > ASYNC_STAGING_MAX_ENTRIES) {
@@ -1060,7 +1067,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             prefetchMissingValuesStaged++;
         }
         V value = deserializeValueOrCopyDefault(valueBytes, defaultValue);
-        staging.put(storageKey, new StagedValue<>(value, gen));
+        staging.put(storageKey, new StagedValue<>(storageKey, value, gen));
         prefetchValuesStaged++;
     }
 
@@ -1157,16 +1164,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private void stageSerializedValue(
             byte[] skn, byte[] valueBytes, V defaultValue, long gen) throws IOException {
-        org.apache.flink.core.memory.DataInputDeserializer in =
-                new org.apache.flink.core.memory.DataInputDeserializer(skn, 0, skn.length);
-        K key = workerKeySerializer.deserialize(in);
-        in.readByte(); // magic number
-        N namespace = workerNamespaceSerializer.deserialize(in);
+        workerKeyNamespaceInput.setBuffer(skn, 0, skn.length);
+        K key = workerKeySerializer.deserialize(workerKeyNamespaceInput);
+        workerKeyNamespaceInput.readByte(); // magic number
+        N namespace = workerNamespaceSerializer.deserialize(workerKeyNamespaceInput);
         if (valueBytes == null) {
             prefetchMissingValuesStaged++;
         }
         V value = deserializeValueOrCopyDefault(valueBytes, defaultValue);
-        staging.put(new KeyNamespaceKey<>(key, namespace), new StagedValue<>(value, gen));
+        KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(key, namespace);
+        staging.put(storageKey, new StagedValue<>(storageKey, value, gen));
         prefetchValuesStaged++;
     }
 
@@ -1202,7 +1209,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 KeyNamespaceKey<K, N> storageKey =
                         new KeyNamespaceKey<>(
                                 key, currentNamespace, keySerializer, namespaceSerializer);
-                l1Cache.put(storageKey, CachedValue.of(loaded, false));
+                l1Cache.put(storageKey, CachedValue.of(storageKey, loaded, false));
             }
         } catch (Throwable ignored) {
             // Best-effort cache warmup. Authoritative reads still go through value().
@@ -1257,7 +1264,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             flushEntryToDelegate(key, value);
 
             // 2. Put to L2 (Clean)
-            l2Cache.put(key, CachedValue.of(value.valueOrNull(), false));
+            l2Cache.put(key, CachedValue.of(key, value.valueOrNull(), false));
 
         } else {
             // Clean L1 eviction: Just move to L2
@@ -1393,34 +1400,50 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         @Override
         public int hashCode() {
-            return Objects.hash(key, namespace);
+            return CacheKeyHash.hash(key, namespace);
         }
     }
 
     /** A value fetched by the prefetch worker, tagged with the write generation at submission. */
     private static final class StagedValue<V> {
+        private final KeyNamespaceKey<?, ?> storageKey;
         private final V value;
         private final long gen;
 
-        private StagedValue(V value, long gen) {
+        private StagedValue(KeyNamespaceKey<?, ?> storageKey, V value, long gen) {
+            this.storageKey = storageKey;
             this.value = value;
             this.gen = gen;
+        }
+
+        @SuppressWarnings("unchecked")
+        private <K, N> KeyNamespaceKey<K, N> storageKey() {
+            return (KeyNamespaceKey<K, N>) storageKey;
         }
     }
 
     private static final class CachedValue<V> {
+        private final KeyNamespaceKey<?, ?> storageKey;
         private final V value;
         private final boolean isNull;
         private final boolean dirty;
 
-        private CachedValue(V value, boolean isNull, boolean dirty) {
+        private CachedValue(
+                KeyNamespaceKey<?, ?> storageKey, V value, boolean isNull, boolean dirty) {
+            this.storageKey = storageKey;
             this.value = value;
             this.isNull = isNull;
             this.dirty = dirty;
         }
 
-        static <V> CachedValue<V> of(V value, boolean dirty) {
-            return new CachedValue<>(value, value == null, dirty);
+        static <V> CachedValue<V> of(
+                KeyNamespaceKey<?, ?> storageKey, V value, boolean dirty) {
+            return new CachedValue<>(storageKey, value, value == null, dirty);
+        }
+
+        @SuppressWarnings("unchecked")
+        private <K, N> KeyNamespaceKey<K, N> storageKey() {
+            return (KeyNamespaceKey<K, N>) storageKey;
         }
 
         V valueOrNull() {

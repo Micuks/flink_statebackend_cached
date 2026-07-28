@@ -14,6 +14,7 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
@@ -203,6 +204,61 @@ class CachedInternalValueStateTest {
         assertEquals(1, state.getPrefetchMissingValuesStagedForTesting());
         assertEquals(3, state.getPrefetchValuesPromotedForTesting());
         assertTrue(state.supportsRecordKeyPrefetch());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testStagingPromotionReusesReservedStorageKey() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        TypeSerializer<String> keySerializer = mock(TypeSerializer.class);
+        TypeSerializer<String> namespaceSerializer = mock(TypeSerializer.class);
+        when(delegate.getKeySerializer()).thenReturn(keySerializer);
+        when(delegate.getNamespaceSerializer()).thenReturn(namespaceSerializer);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(keySerializer.copy(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(namespaceSerializer.copy(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(keySerializer.duplicate()).thenReturn(keySerializer);
+        when(namespaceSerializer.duplicate()).thenReturn(namespaceSerializer);
+
+        RocksDBBatchValueReader<String, String, Integer> batchReader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(batchReader.serializeBatchKeyAndNamespace(
+                        any(), eq("window-1"), eq(keySerializer), eq(namespaceSerializer)))
+                .thenReturn(new byte[] {1});
+        when(batchReader.getSerializedValuesByRocksDBKeys(any(), eq(0), eq(2)))
+                .thenReturn(
+                        Arrays.asList(
+                                KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE),
+                                KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE)));
+
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8);
+        state.setCurrentNamespace("window-1");
+
+        Runnable prefetch = state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2"));
+        prefetch.run();
+        currentKey.set("k1");
+        assertEquals(11, state.value());
+
+        verify(delegate, never()).value();
+        verify(keySerializer, times(2)).copy(any());
+        verify(namespaceSerializer, times(2)).copy(any());
     }
 
     @Test
@@ -642,6 +698,45 @@ class CachedInternalValueStateTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void testL1HitReusesStoredKeyWithoutAnotherSerializerCopy() throws IOException {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalValueState<String, String, Integer> delegate = mock(InternalValueState.class);
+        TypeSerializer<String> keySerializer = mock(TypeSerializer.class);
+        TypeSerializer<String> namespaceSerializer = mock(TypeSerializer.class);
+        when(delegate.getKeySerializer()).thenReturn(keySerializer);
+        when(delegate.getNamespaceSerializer()).thenReturn(namespaceSerializer);
+        when(keySerializer.copy(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(namespaceSerializer.copy(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(delegate.value()).thenReturn(42);
+
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        ignored -> {},
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        false);
+        state.setCurrentNamespace("window-1");
+
+        assertEquals(42, state.value()); // k1 miss: one immutable storage-key copy
+        currentKey.set("k2");
+        assertEquals(42, state.value()); // k2 miss: one immutable storage-key copy
+        currentKey.set("k1");
+        assertEquals(42, state.value()); // k1 L1 hit: reuse its stored copy
+
+        verify(delegate, times(2)).value();
+        verify(keySerializer, times(2)).copy(any());
+        verify(namespaceSerializer, times(2)).copy(any());
+    }
+
+    @Test
     void testL1WriteBack() throws IOException {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
         CurrentKeyProvider<String> currentKeyProvider = currentKey::get;
@@ -786,11 +881,8 @@ class CachedInternalValueStateTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     void testMutableKeyIsolation() throws IOException {
-        // Simulate a mutable key like BinaryRowData (simulated here with a
-        // StringBuilder wrapper or just AtomicReference passed as key?)
-        // The test uses String which is immutable. We need a mutable key class.
-
         class MutableKey {
             int id;
 
@@ -812,45 +904,41 @@ class CachedInternalValueStateTest {
         final MutableKey keyInstance = new MutableKey(1);
         AtomicReference<MutableKey> currentKey = new AtomicReference<>(keyInstance);
 
-        InternalValueState<MutableKey, VoidNamespace, Integer> delegate = mock(InternalValueState.class);
+        InternalValueState<MutableKey, String, Integer> delegate =
+                mock(InternalValueState.class);
+        TypeSerializer<MutableKey> keySerializer = mock(TypeSerializer.class);
+        TypeSerializer<String> namespaceSerializer = mock(TypeSerializer.class);
+        when(delegate.getKeySerializer()).thenReturn(keySerializer);
+        when(delegate.getNamespaceSerializer()).thenReturn(namespaceSerializer);
+        when(keySerializer.copy(any()))
+                .thenAnswer(
+                        invocation ->
+                                new MutableKey(((MutableKey) invocation.getArgument(0)).id));
+        when(namespaceSerializer.copy(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
 
-        CachedInternalValueState<MutableKey, VoidNamespace, Integer> state = new CachedInternalValueState<>(delegate,
-                currentKey::get, k -> {
-                }, 100, CachePolicyType.LRU, 0, false, 0.05, 1000, false);
-        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        CachedInternalValueState<MutableKey, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        ignored -> {},
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        false);
+        state.setCurrentNamespace("window-1");
 
         state.update(12345);
-
-        // Mutate the key object!
         keyInstance.id = 999;
-
-        // If deep copy is NOT working, the cache now stores a key with id=999.
-        // Or the key stored in the map (by reference) now has id=999.
-
-        // Access with NEW key instance for original ID (1)
         currentKey.set(new MutableKey(1));
 
-        // Should find 12345.
-        // If the stored key was mutated, its hashcode changed in the map?
-        // The HashMap behavior is undefined if key mutates.
-        // But if we Deep Copy, we stored a copy with id=1.
-
-        // NOTE: The current Deep Copy implementation in KeyNamespaceKey ONLY handles
-        // BinaryRowData.
-        // Regular objects are NOT deep copied.
-        // See: CachedInternalValueState.java lines 295-298:
-        // if (deepCopy && key instanceof BinaryRowData) ...
-
-        // So for this test to actually verify Deep Copy logic, we need to mock
-        // BinaryRowData
-        // or be aware that IT ONLY WORKS FOR BinaryRowData.
-        // We can try to mock BinaryRowData or just accept that we validated the *logic*
-        // by reading the code.
-        // Let's rely on reading expectation.
-        // If the user uses a custom mutable key that is NOT BinaryRowData, it will
-        // break.
-        // But the user constraint specifically mentioned BinaryRowData issues
-        // previously.
+        assertEquals(12345, state.value());
+        verify(delegate, never()).value();
+        verify(keySerializer, times(1)).copy(any());
+        verify(namespaceSerializer, times(1)).copy(any());
     }
 
     @Test
