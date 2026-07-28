@@ -22,6 +22,7 @@
 #include "kernels_internal.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -222,6 +223,8 @@ void TestGenerationAndNegativeEntries() {
           FillStatus::kInserted);
     CHECK(Probe(*plane, Key(1, 1, key)).status == ProbeStatus::kMiss);
     CHECK(ResultValue(Probe(*plane, Key(1, 2, key))) == "v2");
+    CHECK(ResultValue(Probe(*plane, Key(1, cachekit::native::kLatestGeneration, key))) ==
+          "v2");
 
     const FillResult stale = Fill(*plane, Key(1, 1, key), std::string("stale"));
     CHECK(stale.status == FillStatus::kRejectedStaleGeneration);
@@ -231,7 +234,8 @@ void TestGenerationAndNegativeEntries() {
     CHECK(Fill(*plane, Key(1, 3, key), std::string(), true).status ==
           FillStatus::kUpdated);
     CHECK(Probe(*plane, Key(1, 2, key)).status == ProbeStatus::kMiss);
-    const ProbeResult negative = Probe(*plane, Key(1, 3, key));
+    const ProbeResult negative =
+            Probe(*plane, Key(1, cachekit::native::kLatestGeneration, key));
     CHECK(negative.status == ProbeStatus::kNegative);
     CHECK(negative.value == nullptr);
     CHECK(negative.value_size == 0);
@@ -241,6 +245,34 @@ void TestGenerationAndNegativeEntries() {
     const ProbeResult empty_positive = Probe(*plane, Key(1, 4, key));
     CHECK(empty_positive.status == ProbeStatus::kHit);
     CHECK(empty_positive.value_size == 0);
+
+    // A write-heavy exact-key trace must not invalidate an unrelated key. The explicit latest
+    // sentinel observes that key's newest write, while ordinary generation mismatches remain misses.
+    const std::string stable_key = "stable";
+    CHECK(Fill(*plane, Key(1, 4, stable_key), std::string("stable-value")).status ==
+          FillStatus::kInserted);
+    for (std::uint64_t epoch = 5; epoch <= 100; ++epoch) {
+        CHECK(Fill(*plane, Key(1, epoch, key), std::to_string(epoch)).status ==
+              FillStatus::kUpdated);
+        CHECK(ResultValue(
+                      Probe(*plane,
+                            Key(1,
+                                cachekit::native::kLatestGeneration,
+                                stable_key))) ==
+              "stable-value");
+    }
+    const FillResult old_async_fill =
+            Fill(*plane, Key(1, 50, key), std::string("old-async"));
+    CHECK(old_async_fill.status == FillStatus::kRejectedStaleGeneration);
+    CHECK(Probe(*plane, Key(1, 101, key)).status == ProbeStatus::kMiss);
+    CHECK(ResultValue(
+                  Probe(*plane,
+                        Key(1, cachekit::native::kLatestGeneration, key))) ==
+          "100");
+    CHECK(Fill(*plane,
+               Key(1, cachekit::native::kLatestGeneration, key),
+               std::string("invalid"))
+                  .status == FillStatus::kInvalidArgument);
 }
 
 void TestEvictionAndArenaReuse() {
@@ -273,6 +305,71 @@ void TestEvictionAndArenaReuse() {
     CHECK(Fill(*plane, Key(1, 2, b), std::string("reused")).status ==
           FillStatus::kInserted);
     CHECK(ResultValue(Probe(*plane, Key(1, 2, b))) == "reused");
+}
+
+void TestIntrusiveLruOrderAndSustainedCapacityChurn() {
+    Options options;
+    options.capacity_entries = 4;
+    options.key_arena_bytes = 128;
+    options.value_arena_bytes = 256;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+
+    const std::string a = "a";
+    const std::string b = "b";
+    const std::string c = "c";
+    const std::string d = "d";
+    const std::string e = "e";
+    const std::string f = "f";
+    const std::string g = "g";
+    for (const std::string* key : {&a, &b, &c, &d}) {
+        CHECK(Fill(*plane, Key(3, 1, *key), *key).status ==
+              FillStatus::kInserted);
+    }
+
+    // Insertion order is a,b,c,d. A probe and an update must both move the
+    // exact entry to the MRU tail, producing c,d,a,b before the first churn.
+    CHECK(Probe(*plane, Key(3, 1, a)).status == ProbeStatus::kHit);
+    CHECK(Fill(*plane, Key(3, 2, b), std::string("b2")).status ==
+          FillStatus::kUpdated);
+    CHECK(Fill(*plane, Key(3, 1, e), e).status == FillStatus::kInserted);
+    CHECK(Probe(*plane, Key(3, 1, c)).status == ProbeStatus::kMiss);
+    CHECK(Fill(*plane, Key(3, 1, f), f).status == FillStatus::kInserted);
+    CHECK(Probe(*plane, Key(3, 1, d)).status == ProbeStatus::kMiss);
+    CHECK(Probe(*plane, Key(3, 1, a)).status == ProbeStatus::kHit);
+    CHECK(Fill(*plane, Key(3, 1, g), g).status == FillStatus::kInserted);
+    CHECK(Probe(*plane, Key(3, 2, b)).status == ProbeStatus::kMiss);
+    CHECK(plane->size() == options.capacity_entries);
+    CHECK(plane->evictions() == 3);
+
+    // Keep a full plane under many more insert/evict cycles. Fixed-size keys
+    // and varying values exercise both arena release/reuse lists without
+    // permitting entry-count growth or capacity rejection.
+    constexpr std::size_t kChurnCapacity = 256;
+    constexpr std::size_t kChurnOperations = 50000;
+    Options churn_options;
+    churn_options.capacity_entries = kChurnCapacity;
+    churn_options.key_arena_bytes = kChurnCapacity * 32U;
+    churn_options.value_arena_bytes = kChurnCapacity * 128U;
+    churn_options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> churn = MakePlane(churn_options);
+    std::array<char, 32> key_bytes{};
+    std::array<char, 96> value_bytes{};
+    std::fill(value_bytes.begin(), value_bytes.end(), 'v');
+    for (std::size_t operation = 0;
+         operation < kChurnCapacity + kChurnOperations;
+         ++operation) {
+        std::fill(key_bytes.begin(), key_bytes.end(), '\0');
+        const std::string suffix = std::to_string(operation);
+        std::copy(suffix.begin(), suffix.end(), key_bytes.begin());
+        const std::string key(key_bytes.data(), key_bytes.size());
+        const std::size_t value_size = 16U + (operation % 6U) * 16U;
+        const std::string value(value_bytes.data(), value_size);
+        CHECK(Fill(*churn, Key(9, 1, key), value).status ==
+              FillStatus::kInserted);
+    }
+    CHECK(churn->size() == kChurnCapacity);
+    CHECK(churn->evictions() == kChurnOperations);
 }
 
 void TestUpdateCanReclaimFragmentedArena() {
@@ -401,16 +498,19 @@ void TestRandomDifferentialAgainstReference() {
                         ReferenceValue{generation, negative, negative ? "" : value};
             }
         } else {
-            const std::uint64_t generation =
-                    found == reference.end()
+            const std::uint32_t probe_mode = random() % 4U;
+            const std::uint64_t generation = found == reference.end()
                     ? 1U
-                    : ((random() % 4U) == 0
-                                       ? found->second.generation + 1U
-                                       : found->second.generation);
+                    : (probe_mode == 0
+                               ? found->second.generation + 1U
+                               : (probe_mode == 1
+                                          ? cachekit::native::kLatestGeneration
+                                          : found->second.generation));
             const ProbeResult actual =
                     Probe(*plane, Key(state_id, generation, key));
             if (found == reference.end() ||
-                found->second.generation != generation) {
+                (generation != cachekit::native::kLatestGeneration &&
+                 generation != found->second.generation)) {
                 CHECK(actual.status == ProbeStatus::kMiss);
             } else if (found->second.negative) {
                 CHECK(actual.status == ProbeStatus::kNegative);
@@ -519,6 +619,7 @@ int main() {
     TestCollisionRequiresExactCompare();
     TestGenerationAndNegativeEntries();
     TestEvictionAndArenaReuse();
+    TestIntrusiveLruOrderAndSustainedCapacityChurn();
     TestUpdateCanReclaimFragmentedArena();
     TestCapacityAndOverflowRejection();
     TestRandomDifferentialAgainstReference();

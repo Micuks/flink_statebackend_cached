@@ -248,7 +248,7 @@ void TestProbeOutputTooSmallDoesNotWritePartialRecords() {
     }
 }
 
-void TestGenerationMismatchAndZeroCount() {
+void TestGenerationMismatchLatestProbeAndZeroCount() {
     std::unique_ptr<RequestPlane> plane = MakePlane();
     const std::string key_arena = "key";
     std::vector<std::uint8_t> key_metadata(kKeyMetadataRecordBytes);
@@ -289,6 +289,27 @@ void TestGenerationMismatchAndZeroCount() {
     CHECK(Read<std::uint32_t>(probe_results, kProbeResultStatusOffset) == 0);
     CHECK(Read<std::uint32_t>(probe_results, kProbeResultErrorOffset) == 0);
     CHECK(Read<std::uint32_t>(probe_results, kProbeResultLengthOffset) == 0);
+
+    WriteKeyRecord(
+            &key_metadata,
+            0,
+            3,
+            cachekit::native::kLatestGeneration,
+            0,
+            3);
+    CHECK(ProbeDirectBatch(
+                  plane.get(),
+                  {reinterpret_cast<const std::uint8_t*>(key_arena.data()),
+                   key_arena.size()},
+                  {key_metadata.data(), key_metadata.size()},
+                  1,
+                  {value_output.data(), value_output.size()},
+                  {probe_results.data(), probe_results.size()}) ==
+          BatchBridgeCode::kOk);
+    CHECK(Read<std::uint32_t>(probe_results, kProbeResultStatusOffset) == 1);
+    CHECK(Read<std::uint32_t>(probe_results, kProbeResultLengthOffset) ==
+          value_arena.size());
+    CHECK(std::memcmp(value_output.data(), value_arena.data(), value_arena.size()) == 0);
 
     CHECK(FillDirectBatch(
                   plane.get(), {nullptr, 0}, {nullptr, 0}, {nullptr, 0}, {nullptr, 0}, 0,
@@ -365,7 +386,7 @@ int main() {
     TestFillAndProbeRoundTrip();
     TestMalformedFillIsRejectedBeforeMutation();
     TestProbeOutputTooSmallDoesNotWritePartialRecords();
-    TestGenerationMismatchAndZeroCount();
+    TestGenerationMismatchLatestProbeAndZeroCount();
     TestScratchCapacityIsReusedAcrossFillAndProbe();
     std::cout << "all JNI batch codec tests passed" << std::endl;
     return 0;

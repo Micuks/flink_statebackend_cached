@@ -49,6 +49,24 @@ class NativeRequestPlaneBridgeTest {
 
   @Test
   @EnabledIfSystemProperty(named = NativeRequestPlaneBridge.LIBRARY_PATH_PROPERTY, matches = ".+")
+  void testAutoKernelKeepsPlaneEnabledWithAuditableScalarX86Fallback() {
+    try (NativeRequestPlaneBridge bridge =
+        NativeRequestPlaneBridge.open(
+            true, 16, 1024, 1024, NativeRequestPlaneBridge.KERNEL_AUTO)) {
+      String selectedKernel = bridge.selectedKernel();
+      assertTrue(
+          selectedKernel.equals("scalar-crc32c")
+              || selectedKernel.equals("aarch64-neon-crc32c")
+              || selectedKernel.equals("aarch64-sve256-hybrid-crc32c"));
+      String architecture = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT);
+      if (architecture.equals("amd64") || architecture.equals("x86_64")) {
+        assertEquals("scalar-crc32c", selectedKernel);
+      }
+    }
+  }
+
+  @Test
+  @EnabledIfSystemProperty(named = NativeRequestPlaneBridge.LIBRARY_PATH_PROPERTY, matches = ".+")
   void testSingleJniFillAndProbeRoundTripIsAuditable() throws Exception {
     try (NativeRequestPlaneBridge bridge = openScalarBridge()) {
       SerializedKeyBatch<Integer, String> keys = newBatch(4);
@@ -72,26 +90,32 @@ class NativeRequestPlaneBridgeTest {
       assertTrue(bridge.detectedFeatureBits() >= 0);
 
       keys.clear();
-      keys.append(7, 11L, 10, "ns-a");
-      keys.append(7, 12L, 20, "ns-b");
+      // Ordinary generation mismatch is a miss; the explicit sentinel asks for the latest exact
+      // key after Java has write-through versioned that key.
+      keys.append(7, 111L, 10, "ns-a");
+      keys.append(7, NativeRequestPlaneBridge.PROBE_LATEST_GENERATION, 10, "ns-a");
+      keys.append(7, NativeRequestPlaneBridge.PROBE_LATEST_GENERATION, 20, "ns-b");
       keys.append(8, 13L, 30, "missing");
       ByteBuffer valueOutput = directNative(32);
       ByteBuffer probeResults =
-          directNative(3 * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
+          directNative(4 * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
 
-      assertEquals(3, bridge.probeBatch(keys, valueOutput, probeResults));
-      assertEquals(NativeRequestPlaneBridge.PROBE_HIT, probeStatus(probeResults, 0));
+      assertEquals(4, bridge.probeBatch(keys, valueOutput, probeResults));
+      assertEquals(NativeRequestPlaneBridge.PROBE_MISS, probeStatus(probeResults, 0));
       assertEquals(0, probeError(probeResults, 0));
-      assertEquals(0, probeValueOffset(probeResults, 0));
-      assertEquals(5, probeValueLength(probeResults, 0));
+      assertEquals(0, probeValueLength(probeResults, 0));
+      assertEquals(NativeRequestPlaneBridge.PROBE_HIT, probeStatus(probeResults, 1));
+      assertEquals(0, probeError(probeResults, 1));
+      assertEquals(0, probeValueOffset(probeResults, 1));
+      assertEquals(5, probeValueLength(probeResults, 1));
       assertEquals(
           "value",
           readAscii(
-              valueOutput, probeValueOffset(probeResults, 0), probeValueLength(probeResults, 0)));
-      assertEquals(NativeRequestPlaneBridge.PROBE_NEGATIVE, probeStatus(probeResults, 1));
-      assertEquals(0, probeValueLength(probeResults, 1));
-      assertEquals(NativeRequestPlaneBridge.PROBE_MISS, probeStatus(probeResults, 2));
+              valueOutput, probeValueOffset(probeResults, 1), probeValueLength(probeResults, 1)));
+      assertEquals(NativeRequestPlaneBridge.PROBE_NEGATIVE, probeStatus(probeResults, 2));
       assertEquals(0, probeValueLength(probeResults, 2));
+      assertEquals(NativeRequestPlaneBridge.PROBE_MISS, probeStatus(probeResults, 3));
+      assertEquals(0, probeValueLength(probeResults, 3));
     }
   }
 

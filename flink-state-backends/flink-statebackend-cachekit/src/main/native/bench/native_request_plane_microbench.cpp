@@ -46,6 +46,8 @@ struct Config {
     std::size_t warmup_keys = 8192;
     std::size_t measured_keys = 32768;
     std::size_t workload_batches = 8;
+    std::size_t churn_capacity = 16384;
+    std::size_t churn_operations = 250000;
     std::uint64_t seed = kDefaultSeed;
 };
 
@@ -90,6 +92,8 @@ void PrintUsage(const char* executable) {
             << "  --warmup-keys N        minimum warmup keys per kernel (default 8192)\n"
             << "  --measured-keys N      minimum timed keys per ABBA leg (default 32768)\n"
             << "  --workload-batches N   deterministic hot batches retained (default 8)\n"
+            << "  --churn-capacity N     full-plane churn capacity (default 16384)\n"
+            << "  --churn-operations N   timed insert/evict operations (default 250000)\n"
             << "  --seed N               fixed workload seed (default 0x43414348454b4954)\n"
             << "  --help                 show this message\n"
             << "The matrix is fixed at key lengths 16/32/64/128, batches "
@@ -119,6 +123,12 @@ Config ParseArgs(int argc, char** argv) {
         } else if (argument == "--workload-batches") {
             config.workload_batches =
                     ParsePositiveSize("--workload-batches", value);
+        } else if (argument == "--churn-capacity") {
+            config.churn_capacity =
+                    ParsePositiveSize("--churn-capacity", value);
+        } else if (argument == "--churn-operations") {
+            config.churn_operations =
+                    ParsePositiveSize("--churn-operations", value);
         } else if (argument == "--seed") {
             config.seed = ParseSeed(value);
         } else {
@@ -648,6 +658,135 @@ void RunPair(
             candidate_samples);
 }
 
+void RunCapacityChurn(
+        CsvWriter* writer,
+        const Config& config,
+        const HostFeatures& features) {
+    if (config.churn_capacity >
+                std::numeric_limits<std::size_t>::max() / 128U ||
+        config.churn_operations >
+                std::numeric_limits<std::size_t>::max() -
+                        config.churn_capacity) {
+        throw std::overflow_error("capacity-churn configuration overflow");
+    }
+
+    Options options;
+    options.capacity_entries = config.churn_capacity;
+    options.key_arena_bytes = config.churn_capacity * 32U;
+    options.value_arena_bytes = config.churn_capacity * 128U;
+    options.kernel = KernelPreference::kAuto;
+    ErrorCode error = ErrorCode::kInternal;
+    std::string message;
+    std::unique_ptr<RequestPlane> plane =
+            RequestPlane::Create(options, &error, &message);
+    if (!plane) {
+        throw std::runtime_error(
+                std::string("capacity-churn plane creation failed: ") +
+                cachekit::native::ErrorCodeName(error) + ":" + message);
+    }
+
+    std::array<std::uint8_t, 32> key{};
+    std::array<std::uint8_t, 96> value{};
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        value[index] = static_cast<std::uint8_t>(
+                (config.seed + index * 131U) & 0xffU);
+    }
+    const auto fill_one = [&](std::size_t logical_id) {
+        std::uint64_t state =
+                config.seed ^
+                static_cast<std::uint64_t>(logical_id) *
+                        0x9e3779b97f4a7c15ULL;
+        for (std::uint8_t& byte : key) {
+            state ^= state >> 12U;
+            state ^= state << 25U;
+            state ^= state >> 27U;
+            byte = static_cast<std::uint8_t>(state >> 56U);
+        }
+        const std::uint64_t encoded_id =
+                static_cast<std::uint64_t>(logical_id);
+        for (unsigned shift = 0; shift < 64; shift += 8) {
+            key[shift / 8U] =
+                    static_cast<std::uint8_t>(encoded_id >> shift);
+        }
+        const std::size_t value_size =
+                16U + (logical_id % 6U) * 16U;
+        const KeyView key_view{
+                1U + static_cast<std::uint32_t>(logical_id % 31U),
+                1,
+                key.data(),
+                key.size()};
+        const FillView fill{
+                key_view, value.data(), value_size, false};
+        FillResult result;
+        if (plane->FillBatch(&fill, &result, 1) != ErrorCode::kOk ||
+            result.error != ErrorCode::kOk ||
+            result.status != FillStatus::kInserted) {
+            throw std::runtime_error(
+                    "full-capacity churn rejected a fill");
+        }
+    };
+
+    for (std::size_t logical_id = 0;
+         logical_id < config.churn_capacity;
+         ++logical_id) {
+        fill_one(logical_id);
+    }
+    if (plane->size() != config.churn_capacity ||
+        plane->evictions() != 0) {
+        throw std::runtime_error(
+                "full-capacity churn prefill invariant failed");
+    }
+
+    std::uint64_t checksum = 0xcbf29ce484222325ULL;
+    const auto start = std::chrono::steady_clock::now();
+    const std::size_t end =
+            config.churn_capacity + config.churn_operations;
+    for (std::size_t logical_id = config.churn_capacity;
+         logical_id < end;
+         ++logical_id) {
+        fill_one(logical_id);
+        checksum ^=
+                static_cast<std::uint64_t>(logical_id) +
+                plane->evictions();
+        checksum *= 0x100000001b3ULL;
+    }
+    const auto stop = std::chrono::steady_clock::now();
+    const auto elapsed =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    stop - start)
+                    .count();
+    if (elapsed <= 0 ||
+        plane->size() != config.churn_capacity ||
+        plane->evictions() != config.churn_operations) {
+        throw std::runtime_error(
+                "full-capacity churn completion invariant failed");
+    }
+    const double elapsed_ns = static_cast<double>(elapsed);
+    const double ns_per_operation =
+            elapsed_ns / static_cast<double>(config.churn_operations);
+    g_checksum_sink =
+            (g_checksum_sink ^ checksum ^ plane->evictions()) *
+            0x100000001b3ULL;
+
+    std::vector<std::string> row =
+            CommonRow("churn_summary", "ok", "", config, features);
+    row[9] = "full_capacity_fill_eviction";
+    row[12] = "auto";
+    row[13] = plane->kernel_name();
+    row[14] = Number(key.size());
+    row[15] = "1";
+    row[16] = "0";
+    row[17] = Number(config.churn_capacity);
+    row[18] = Number(config.churn_operations);
+    row[19] = Number(static_cast<std::uint64_t>(elapsed));
+    row[20] = Number(ns_per_operation);
+    row[21] = Number(1000.0 / ns_per_operation);
+    row[22] = Number(checksum);
+    row[23] = "1";
+    row[27] = "fill_full_capacity_o1_lru_and_arena_reuse";
+    writer->Write(row);
+}
+
 int Run(int argc, char** argv) {
     const Config config = ParseArgs(argc, argv);
     std::ofstream file;
@@ -702,6 +841,7 @@ int Run(int argc, char** argv) {
             }
         }
     }
+    RunCapacityChurn(&writer, config, features);
     std::vector<std::string> complete =
             CommonRow("complete", "ok", "", config, features);
     complete[22] = Number(g_checksum_sink);

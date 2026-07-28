@@ -14,6 +14,8 @@ The default matrix is fixed:
 - five repeated `A-B-B-A` cycles after per-kernel warmup
 - 8,192 warmup keys and at least 32,768 measured keys per leg
 - eight deterministic hot workload batches per scenario
+- one full-capacity churn leg at 16,384 entries and 250,000 timed
+  insert/evict operations
 - fixed seed: `0x43414348454b4954`
 
 Build and run on the target host:
@@ -30,6 +32,11 @@ cmake --build build-release -j
 
 `raw` rows contain every timed leg. `summary` rows contain the median `ns/key`
 and its corresponding `Mkeys/s` for each requested kernel in each pair.
+The `churn_summary` row reports `ns/op` for a full native plane whose every
+timed fill performs one O(1) intrusive-LRU eviction and reuses the bounded key
+and value arenas. The churn uses fixed 32-byte keys and varying 16--96-byte
+values so free-list fragmentation/reuse remains visible instead of measuring
+only a single allocation size.
 `metadata` records the fixed seed and detected AArch64/NEON/CRC/SVE features.
 A valid complete run ends with a `complete,ok` row; a partial file is not a
 successful benchmark.
@@ -52,5 +59,7 @@ For a short plumbing/sanitizer check without changing the matrix:
   --cycles 1 \
   --warmup-keys 128 \
   --measured-keys 256 \
-  --workload-batches 2
+  --workload-batches 2 \
+  --churn-capacity 256 \
+  --churn-operations 1024
 ```

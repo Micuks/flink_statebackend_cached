@@ -28,18 +28,21 @@ import org.apache.flink.annotation.Internal;
 /**
  * Opt-in, fail-closed JNI owner for one native CacheKit request plane.
  *
- * <p>This class is deliberately not connected to ValueState, MapState, or ListState. {@link
- * #open()} is disabled unless {@link #ENABLED_PROPERTY} is explicitly true. An enabled bridge
- * either loads and uses the native implementation or throws; it never falls back to a Java path.
+ * <p>{@link #open()} is disabled unless {@link #ENABLED_PROPERTY} is explicitly true. Production
+ * ValueState integration passes its Flink configuration through the explicit {@link
+ * #open(boolean, int, long, long, int, String)} overload. An enabled bridge either loads and uses
+ * the native implementation or throws during keyed-backend creation; runtime recovery is owned by
+ * the coordinator above this low-level bridge.
  *
  * <p>Each {@link #fillBatch} or {@link #probeBatch} method makes one JNI call for the entire {@link
  * SerializedKeyBatch}. All buffers are interpreted from their current position to limit; caller
  * positions and limits are not changed. Input/output metadata uses native byte order.
  *
- * <p>The bridge and its native request plane are single-owner and not thread-safe.
+ * <p>The bridge and its native request plane are not thread-safe. The keyed-backend coordinator
+ * serializes all calls.
  */
 @Internal
-public final class NativeRequestPlaneBridge implements AutoCloseable {
+public final class NativeRequestPlaneBridge implements NativeRequestPlane {
 
   public static final String ENABLED_PROPERTY =
       "state.backend.cachekit.native.request-plane.enabled";
@@ -50,6 +53,8 @@ public final class NativeRequestPlaneBridge implements AutoCloseable {
   public static final int KERNEL_SCALAR = 1;
   public static final int KERNEL_NEON_CRC = 2;
   public static final int KERNEL_SVE256 = 3;
+  /** Unsigned UINT64_MAX on the native side; valid only for latest-version probes, never fills. */
+  public static final long PROBE_LATEST_GENERATION = -1L;
 
   public static final int FILL_VALUE_ARENA_OFFSET = 0;
   public static final int FILL_VALUE_LENGTH_OFFSET = 4;
@@ -61,6 +66,17 @@ public final class NativeRequestPlaneBridge implements AutoCloseable {
   public static final int FILL_RESULT_STATUS_OFFSET = 0;
   public static final int FILL_RESULT_ERROR_OFFSET = 4;
   public static final int FILL_RESULT_RECORD_BYTES = 8;
+  public static final int FILL_INSERTED = 0;
+  public static final int FILL_UPDATED = 1;
+  public static final int FILL_REJECTED_STALE_GENERATION = 2;
+  public static final int FILL_REJECTED_CAPACITY = 3;
+  public static final int FILL_INVALID_ARGUMENT = 4;
+  public static final int FILL_INTERNAL_ERROR = 5;
+
+  public static final int ERROR_OK = 0;
+  public static final int ERROR_INVALID_ARGUMENT = 1;
+  public static final int ERROR_CAPACITY_EXCEEDED = 2;
+  public static final int ERROR_INTERNAL = 6;
 
   public static final int PROBE_RESULT_STATUS_OFFSET = 0;
   public static final int PROBE_RESULT_ERROR_OFFSET = 4;
@@ -77,6 +93,7 @@ public final class NativeRequestPlaneBridge implements AutoCloseable {
   public static final long FEATURE_CRC32 = 1L << 2;
   public static final long FEATURE_SVE = 1L << 3;
   public static final long FEATURE_SVE_VL256 = 1L << 4;
+  // Deliberately no SVE2 bit: the native runtime currently proves SVE and vector length only.
 
   private static final String LIBRARY_NAME = "cachekit_native_request_plane_jni";
   private static final Object LIBRARY_LOAD_LOCK = new Object();
@@ -109,6 +126,23 @@ public final class NativeRequestPlaneBridge implements AutoCloseable {
       long keyArenaBytes,
       long valueArenaBytes,
       int kernelPreference) {
+    return open(
+        enabled,
+        capacityEntries,
+        keyArenaBytes,
+        valueArenaBytes,
+        kernelPreference,
+        System.getProperty(LIBRARY_PATH_PROPERTY, ""));
+  }
+
+  /** Opens one native request plane using an explicit Flink-configured library path. */
+  public static NativeRequestPlaneBridge open(
+      boolean enabled,
+      int capacityEntries,
+      long keyArenaBytes,
+      long valueArenaBytes,
+      int kernelPreference,
+      String libraryPath) {
     if (!enabled) {
       throw new IllegalStateException(
           "Native request plane is disabled; explicitly enable " + ENABLED_PROPERTY + ".");
@@ -120,7 +154,7 @@ public final class NativeRequestPlaneBridge implements AutoCloseable {
     if (kernelPreference < KERNEL_AUTO || kernelPreference > KERNEL_SVE256) {
       throw new IllegalArgumentException("Unknown native kernel preference.");
     }
-    ensureLibraryLoaded();
+    ensureLibraryLoaded(libraryPath);
     return new NativeRequestPlaneBridge(
         nativeCreate(capacityEntries, keyArenaBytes, valueArenaBytes, kernelPreference));
   }
@@ -233,7 +267,7 @@ public final class NativeRequestPlaneBridge implements AutoCloseable {
     }
   }
 
-  private static void ensureLibraryLoaded() {
+  private static void ensureLibraryLoaded(String configuredPath) {
     if (libraryLoaded) {
       return;
     }
@@ -246,7 +280,6 @@ public final class NativeRequestPlaneBridge implements AutoCloseable {
             "Native request-plane JNI previously failed to load.", libraryLoadFailure);
       }
       try {
-        String configuredPath = System.getProperty(LIBRARY_PATH_PROPERTY);
         if (configuredPath == null || configuredPath.trim().isEmpty()) {
           System.loadLibrary(LIBRARY_NAME);
         } else {

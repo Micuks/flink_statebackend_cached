@@ -20,6 +20,7 @@ import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneOptions;
 import org.apache.flink.contrib.streaming.state.RocksDBStateBackendFactory;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.StateBackendFactory;
@@ -160,6 +161,80 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         .withDescription(
                                         "Expose opt-in CacheKit diagnostic metrics through Flink REST reporters.");
 
+        public static final ConfigOption<Boolean> NATIVE_REQUEST_PLANE_ENABLED =
+                        ConfigOptions.key("state.backend.cachekit.native.request-plane.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Enable the experimental native prepared-key ValueState request plane.");
+
+        public static final ConfigOption<String> NATIVE_REQUEST_PLANE_LIBRARY =
+                        ConfigOptions.key("state.backend.cachekit.native.request-plane.library")
+                                        .stringType()
+                                        .defaultValue("")
+                                        .withDescription(
+                                                        "Absolute JNI library path. Empty uses java.library.path.");
+
+        public static final ConfigOption<String> NATIVE_REQUEST_PLANE_KERNEL =
+                        ConfigOptions.key("state.backend.cachekit.native.request-plane.kernel")
+                                        .stringType()
+                                        .defaultValue("auto")
+                                        .withDescription(
+                                                        "Native fingerprint kernel: auto, neon, or sve256. "
+                                                                        + "Kunpeng SVE-256 does not imply SVE2.");
+
+        public static final ConfigOption<Integer> NATIVE_REQUEST_PLANE_CAPACITY_ENTRIES =
+                        ConfigOptions.key("state.backend.cachekit.native.request-plane.capacity-entries")
+                                        .intType()
+                                        .defaultValue(16_384)
+                                        .withDescription("Shared native clean-entry capacity per keyed backend.");
+
+        public static final ConfigOption<Long> NATIVE_REQUEST_PLANE_KEY_ARENA_BYTES =
+                        ConfigOptions.key("state.backend.cachekit.native.request-plane.key-arena-bytes")
+                                        .longType()
+                                        .defaultValue(4L << 20)
+                                        .withDescription("Shared native serialized-key arena bytes.");
+
+        public static final ConfigOption<Long> NATIVE_REQUEST_PLANE_VALUE_ARENA_BYTES =
+                        ConfigOptions.key("state.backend.cachekit.native.request-plane.value-arena-bytes")
+                                        .longType()
+                                        .defaultValue(16L << 20)
+                                        .withDescription("Shared native serialized-value arena bytes.");
+
+        public static final ConfigOption<Integer> NATIVE_REQUEST_PLANE_BATCH_ENTRIES =
+                        ConfigOptions.key("state.backend.cachekit.native.request-plane.batch-entries")
+                                        .intType()
+                                        .defaultValue(1024)
+                                        .withDescription("Maximum entries in one prepared native batch.");
+
+        public static final ConfigOption<Integer> NATIVE_REQUEST_PLANE_BATCH_KEY_ARENA_BYTES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.request-plane.batch-key-arena-bytes")
+                                        .intType()
+                                        .defaultValue(256 << 10)
+                                        .withDescription("Direct prepared-key bytes per bounded batch slot.");
+
+        public static final ConfigOption<Integer> NATIVE_REQUEST_PLANE_BATCH_VALUE_ARENA_BYTES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.request-plane.batch-value-arena-bytes")
+                                        .intType()
+                                        .defaultValue(4 << 20)
+                                        .withDescription("Direct probe/fill value bytes per bounded batch slot.");
+
+        public static final ConfigOption<Integer> NATIVE_REQUEST_PLANE_MIN_BATCH_SIZE =
+                        ConfigOptions.key("state.backend.cachekit.native.request-plane.min-batch-size")
+                                        .intType()
+                                        .defaultValue(64)
+                                        .withDescription(
+                                                        "Batches below this threshold use the existing Java/RocksDB path.");
+
+        public static final ConfigOption<Integer> NATIVE_REQUEST_PLANE_BATCH_SLOTS =
+                        ConfigOptions.key("state.backend.cachekit.native.request-plane.batch-slots")
+                                        .intType()
+                                        .defaultValue(2)
+                                        .withDescription(
+                                                        "Bounded direct batch slots; exhaustion falls back to Java.");
+
 	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
 			.noDefaultValue()
@@ -226,6 +301,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final boolean mapIterationCacheFillEnabled = config.get(MAP_ITERATION_CACHE_FILL_ENABLED);
                 final int mapSnapshotMaxEntries = Math.max(0, config.get(MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
 		final boolean diagnosticsEnabled = config.get(DIAGNOSTICS_ENABLED);
+		final NativeRequestPlaneOptions nativeRequestPlaneOptions =
+				nativeRequestPlaneOptions(config);
 		final String delegateClass = config.get(DELEGATE_BACKEND);
 
 			final boolean listStateCowEnabled = config.get(LIST_STATE_COW_ENABLED);
@@ -302,8 +379,24 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 								listStateRywEnabled,
 							clearedKeysCapacity,
 							priorityQueueOptEnabled,
-							diagnosticsEnabled);
+							diagnosticsEnabled,
+							nativeRequestPlaneOptions);
 	}
+
+        static NativeRequestPlaneOptions nativeRequestPlaneOptions(ReadableConfig config) {
+                return new NativeRequestPlaneOptions(
+                                config.get(NATIVE_REQUEST_PLANE_ENABLED),
+                                config.get(NATIVE_REQUEST_PLANE_LIBRARY),
+                                config.get(NATIVE_REQUEST_PLANE_KERNEL),
+                                config.get(NATIVE_REQUEST_PLANE_CAPACITY_ENTRIES),
+                                config.get(NATIVE_REQUEST_PLANE_KEY_ARENA_BYTES),
+                                config.get(NATIVE_REQUEST_PLANE_VALUE_ARENA_BYTES),
+                                config.get(NATIVE_REQUEST_PLANE_BATCH_ENTRIES),
+                                config.get(NATIVE_REQUEST_PLANE_BATCH_KEY_ARENA_BYTES),
+                                config.get(NATIVE_REQUEST_PLANE_BATCH_VALUE_ARENA_BYTES),
+                                config.get(NATIVE_REQUEST_PLANE_MIN_BATCH_SIZE),
+                                config.get(NATIVE_REQUEST_PLANE_BATCH_SLOTS));
+        }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {
                 try {
