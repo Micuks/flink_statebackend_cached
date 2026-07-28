@@ -18,6 +18,7 @@ cmake_minimum_required(VERSION 3.16)
 project(cachekit_native_request_plane LANGUAGES CXX)
 
 option(CACHEKIT_NATIVE_BUILD_TESTS "Build native request-plane tests" ON)
+option(CACHEKIT_NATIVE_BUILD_BENCHMARKS "Build native request-plane microbenchmark" OFF)
 option(CACHEKIT_NATIVE_ENABLE_SANITIZERS "Enable ASan and UBSan" OFF)
 
 set(CACHEKIT_NATIVE_SOURCES
@@ -96,4 +97,27 @@ if(CACHEKIT_NATIVE_BUILD_TESTS)
     add_test(
         NAME cachekit_native_request_plane_test
         COMMAND cachekit_native_request_plane_test)
+endif()
+
+if(CACHEKIT_NATIVE_BUILD_BENCHMARKS)
+    add_executable(
+        cachekit_native_request_plane_microbench
+        bench/native_request_plane_microbench.cpp)
+    target_compile_features(
+        cachekit_native_request_plane_microbench PRIVATE cxx_std_17)
+    target_compile_options(
+        cachekit_native_request_plane_microbench
+        PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    target_link_libraries(
+        cachekit_native_request_plane_microbench
+        PRIVATE cachekit_native_request_plane)
+    if(CACHEKIT_NATIVE_ENABLE_SANITIZERS AND
+       CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(
+            cachekit_native_request_plane_microbench PRIVATE
+            -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(
+            cachekit_native_request_plane_microbench PRIVATE
+            -fsanitize=address,undefined -fno-omit-frame-pointer)
+    endif()
 endif()
