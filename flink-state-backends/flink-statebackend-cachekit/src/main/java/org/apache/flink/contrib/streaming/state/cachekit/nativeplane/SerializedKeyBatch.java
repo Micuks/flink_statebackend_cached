@@ -30,9 +30,9 @@ import java.util.Objects;
 /**
  * Reusable direct-memory batch of serialized key/namespace pairs.
  *
- * <p>Each append writes key bytes immediately followed by namespace bytes into a direct arena. A
- * separate direct metadata region contains fixed-width records suitable for a future single JNI
- * request. This class only prepares input; it is not connected to a state path or native call.
+ * <p>Each append writes either serialized key/namespace bytes or an exact already-prepared
+ * RocksDB composite key into a direct arena. A separate direct metadata region contains
+ * fixed-width records suitable for one JNI request.
  *
  * <p>The caller-owned buffers' positions and limits are never changed. The batch is not
  * thread-safe, stores no key/namespace references, and creates no per-entry wrapper, list, or byte
@@ -110,6 +110,43 @@ public final class SerializedKeyBatch<K, N> {
         }
     }
 
+    /**
+     * Appends one already-prepared RocksDB composite key.
+     *
+     * <p>The exact prepared bytes include key-group and namespace encoding and are therefore the
+     * authoritative identity used by both native lookup and the RocksDB fallback. This avoids a
+     * second serializer pass and avoids ambiguous naked {@code key || namespace} boundaries.
+     */
+    public int appendSerialized(int stateId, long generation, byte[] serializedKey)
+            throws IOException {
+        Objects.requireNonNull(serializedKey, "serializedKey");
+        if (entryCount >= maxEntries) {
+            throw new EOFException(
+                    "Direct metadata capacity is exhausted at " + entryCount + " entries.");
+        }
+        int arenaCheckpoint = arenaOutput.checkpoint();
+        try {
+            arenaOutput.write(serializedKey);
+            return commitMetadata(
+                    stateId, generation, arenaCheckpoint, serializedKey.length);
+        } catch (IOException | RuntimeException failure) {
+            arenaOutput.truncateTo(arenaCheckpoint);
+            throw failure;
+        }
+    }
+
+    /** Creates a raw-prepared-key batch whose object serializers are never consulted. */
+    public static SerializedKeyBatch<byte[], byte[]> forSerializedBytes(
+            ByteBuffer arena, ByteBuffer metadata) {
+        return new SerializedKeyBatch<>(
+                org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer
+                        .INSTANCE,
+                org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer
+                        .INSTANCE,
+                arena,
+                metadata);
+    }
+
     /** Clears logical contents while retaining both direct buffers and serializer instances. */
     public void clear() {
         arenaOutput.reset();
@@ -171,6 +208,17 @@ public final class SerializedKeyBatch<K, N> {
                     "Entry index " + entryIndex + " outside [0, " + entryCount + ").");
         }
         return entryIndex * METADATA_RECORD_BYTES;
+    }
+
+    private int commitMetadata(
+            int stateId, long generation, int arenaOffset, int serializedLength) {
+        int metadataBase = entryCount * METADATA_RECORD_BYTES;
+        metadata.putInt(metadataBase + STATE_ID_OFFSET, stateId);
+        metadata.putInt(metadataBase + RESERVED_OFFSET, 0);
+        metadata.putLong(metadataBase + GENERATION_OFFSET, generation);
+        metadata.putInt(metadataBase + ARENA_OFFSET_OFFSET, arenaOffset);
+        metadata.putInt(metadataBase + LENGTH_OFFSET, serializedLength);
+        return entryCount++;
     }
 
     private static ByteBuffer directWritableSlice(ByteBuffer buffer, String name) {

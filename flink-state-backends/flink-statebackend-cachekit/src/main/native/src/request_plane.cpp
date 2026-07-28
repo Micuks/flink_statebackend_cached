@@ -23,7 +23,11 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <iterator>
 #include <limits>
+#include <map>
+#include <memory_resource>
 #include <new>
 #include <stdexcept>
 #include <utility>
@@ -39,16 +43,22 @@ using internal::kEmptyTag;
 using internal::kSlotsPerBucket;
 using internal::kTombstoneTag;
 
-struct Block {
-    std::size_t offset;
-    std::size_t size;
-};
-
 class ByteArena {
 public:
     ByteArena(std::size_t capacity, std::size_t max_free_blocks)
-            : bytes_(capacity) {
-        free_.reserve(max_free_blocks);
+            : bytes_(capacity),
+              free_by_offset_(&node_pool_),
+              free_by_size_(&node_pool_) {
+        // Prime both PMR map node-size pools up to the proven maximum number
+        // of disjoint free intervals. Subsequent fill/evict churn reuses these
+        // nodes instead of returning to the process allocator.
+        for (std::size_t index = 0; index < max_free_blocks; ++index) {
+            free_by_offset_.emplace(index, 0);
+            free_by_size_.emplace(
+                    std::make_pair(std::size_t{0}, index), std::uint8_t{0});
+        }
+        free_by_offset_.clear();
+        free_by_size_.clear();
         Reset();
     }
 
@@ -60,20 +70,19 @@ public:
             *offset = 0;
             return true;
         }
-        for (std::size_t index = 0; index < free_.size(); ++index) {
-            Block& block = free_[index];
-            if (block.size < size) {
-                continue;
-            }
-            *offset = block.offset;
-            block.offset += size;
-            block.size -= size;
-            if (block.size == 0) {
-                free_.erase(free_.begin() + static_cast<std::ptrdiff_t>(index));
-            }
-            return true;
+        const auto sized =
+                free_by_size_.lower_bound(std::make_pair(size, std::size_t{0}));
+        if (sized == free_by_size_.end()) {
+            return false;
         }
-        return false;
+        const std::size_t block_size = sized->first.first;
+        const std::size_t block_offset = sized->first.second;
+        RemoveFreeBlock(block_offset, block_size);
+        *offset = block_offset;
+        if (block_size > size) {
+            AddFreeBlock(block_offset + size, block_size - size);
+        }
+        return true;
     }
 
     void Release(std::size_t offset, std::size_t size) {
@@ -83,16 +92,23 @@ public:
         if (offset > bytes_.size() || size > bytes_.size() - offset) {
             return;
         }
-        const Block released{offset, size};
-        const auto position = std::lower_bound(
-                free_.begin(),
-                free_.end(),
-                released,
-                [](const Block& left, const Block& right) {
-                    return left.offset < right.offset;
-                });
-        free_.insert(position, released);
-        Coalesce();
+        std::size_t merged_offset = offset;
+        std::size_t merged_size = size;
+        auto next = free_by_offset_.lower_bound(offset);
+        if (next != free_by_offset_.begin()) {
+            const auto previous = std::prev(next);
+            if (previous->first + previous->second == offset) {
+                merged_offset = previous->first;
+                merged_size += previous->second;
+                RemoveFreeBlock(previous->first, previous->second);
+            }
+        }
+        if (next != free_by_offset_.end() &&
+            merged_offset + merged_size == next->first) {
+            merged_size += next->second;
+            RemoveFreeBlock(next->first, next->second);
+        }
+        AddFreeBlock(merged_offset, merged_size);
     }
 
     void Write(std::size_t offset, const std::uint8_t* data, std::size_t size) {
@@ -110,45 +126,42 @@ public:
     }
 
     void Reset() {
-        free_.clear();
+        free_by_offset_.clear();
+        free_by_size_.clear();
         if (!bytes_.empty()) {
-            free_.push_back(Block{0, bytes_.size()});
+            AddFreeBlock(0, bytes_.size());
         }
     }
 
 private:
-    void Coalesce() {
-        if (free_.size() < 2) {
-            return;
-        }
-        std::size_t output = 0;
-        for (std::size_t input = 1; input < free_.size(); ++input) {
-            Block& current = free_[output];
-            const Block& next = free_[input];
-            if (current.offset + current.size == next.offset) {
-                current.size += next.size;
-            } else {
-                ++output;
-                free_[output] = next;
-            }
-        }
-        free_.resize(output + 1);
+    void AddFreeBlock(std::size_t offset, std::size_t size) {
+        free_by_offset_.emplace(offset, size);
+        free_by_size_.emplace(
+                std::make_pair(size, offset), std::uint8_t{0});
+    }
+
+    void RemoveFreeBlock(std::size_t offset, std::size_t size) {
+        free_by_offset_.erase(offset);
+        free_by_size_.erase(std::make_pair(size, offset));
     }
 
     std::vector<std::uint8_t> bytes_;
-    std::vector<Block> free_;
+    std::pmr::unsynchronized_pool_resource node_pool_;
+    std::pmr::map<std::size_t, std::size_t> free_by_offset_;
+    std::pmr::map<std::pair<std::size_t, std::size_t>, std::uint8_t> free_by_size_;
 };
 
 struct Entry {
     bool occupied = false;
     bool negative = false;
     std::uint32_t state_id = 0;
+    std::uint32_t lru_previous = 0;
+    std::uint32_t lru_next = 0;
     std::uint64_t generation = 0;
     std::size_t key_offset = 0;
     std::size_t key_size = 0;
     std::size_t value_offset = 0;
     std::size_t value_size = 0;
-    std::uint64_t last_use = 0;
     std::size_t bucket_index = 0;
     std::size_t slot_index = 0;
 };
@@ -277,16 +290,40 @@ struct RequestPlane::Impl {
         }
     }
 
-    std::uint64_t NextTick() noexcept {
-        if (clock == std::numeric_limits<std::uint64_t>::max()) {
-            for (std::size_t id = 1; id < entries.size(); ++id) {
-                if (entries[id].occupied) {
-                    entries[id].last_use = 1;
-                }
-            }
-            clock = 1;
+    void UnlinkLru(std::uint32_t id) noexcept {
+        Entry& entry = entries[id];
+        if (entry.lru_previous == 0) {
+            lru_head = entry.lru_next;
+        } else {
+            entries[entry.lru_previous].lru_next = entry.lru_next;
         }
-        return ++clock;
+        if (entry.lru_next == 0) {
+            lru_tail = entry.lru_previous;
+        } else {
+            entries[entry.lru_next].lru_previous = entry.lru_previous;
+        }
+        entry.lru_previous = 0;
+        entry.lru_next = 0;
+    }
+
+    void LinkLruTail(std::uint32_t id) noexcept {
+        Entry& entry = entries[id];
+        entry.lru_previous = lru_tail;
+        entry.lru_next = 0;
+        if (lru_tail == 0) {
+            lru_head = id;
+        } else {
+            entries[lru_tail].lru_next = id;
+        }
+        lru_tail = id;
+    }
+
+    void TouchLru(std::uint32_t id) noexcept {
+        if (id == lru_tail) {
+            return;
+        }
+        UnlinkLru(id);
+        LinkLruTail(id);
     }
 
     std::uint32_t TagFor(const KeyView& key) const noexcept {
@@ -365,14 +402,45 @@ struct RequestPlane::Impl {
         return false;
     }
 
+    void RebuildBuckets() noexcept {
+        buckets.Reset();
+        for (std::size_t id = 1; id < entries.size(); ++id) {
+            Entry& entry = entries[id];
+            if (!entry.occupied) {
+                continue;
+            }
+            const KeyView key{
+                    entry.state_id,
+                    entry.generation,
+                    key_arena.Pointer(entry.key_offset, entry.key_size),
+                    entry.key_size};
+            const std::uint32_t tag = TagFor(key);
+            SlotLocation location;
+            if (!FindFreeSlot(tag, &location)) {
+                // The table is provisioned for <=50% occupancy, so rebuilding
+                // only live entries cannot fail.
+                std::terminate();
+            }
+            Bucket& bucket = buckets[location.bucket_index];
+            bucket.tags[location.slot_index] = tag;
+            bucket.entry_ids[location.slot_index] =
+                    static_cast<std::uint32_t>(id);
+            entry.bucket_index = location.bucket_index;
+            entry.slot_index = location.slot_index;
+        }
+        tombstone_count = 0;
+    }
+
     void RemoveEntry(std::uint32_t id, bool eviction) noexcept {
         if (id == 0 || id >= entries.size() || !entries[id].occupied) {
             return;
         }
         Entry& entry = entries[id];
+        UnlinkLru(id);
         Bucket& bucket = buckets[entry.bucket_index];
         bucket.tags[entry.slot_index] = kTombstoneTag;
         bucket.entry_ids[entry.slot_index] = 0;
+        ++tombstone_count;
         key_arena.Release(entry.key_offset, entry.key_size);
         if (!entry.negative) {
             value_arena.Release(entry.value_offset, entry.value_size);
@@ -383,20 +451,22 @@ struct RequestPlane::Impl {
         if (eviction) {
             ++eviction_count;
         }
+        // Linear-probe tombstones otherwise accumulate until every miss scans
+        // the complete metadata table. Periodic allocation-free rehashing
+        // keeps lookup cost bounded and is O(1) amortized over churn.
+        const std::size_t rebuild_threshold =
+                std::max<std::size_t>(1U, options.capacity_entries / 4U);
+        if (tombstone_count >= rebuild_threshold) {
+            RebuildBuckets();
+        }
     }
 
     bool EvictOldest(std::uint32_t excluded_id = 0) noexcept {
-        std::uint32_t victim = 0;
-        std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
-        for (std::size_t id = 1; id < entries.size(); ++id) {
-            const Entry& entry = entries[id];
-            if (!entry.occupied || id == excluded_id) {
-                continue;
-            }
-            if (victim == 0 || entry.last_use < oldest) {
-                victim = static_cast<std::uint32_t>(id);
-                oldest = entry.last_use;
-            }
+        // The intrusive LRU makes capacity-full miss/fill churn O(1) instead
+        // of scanning every configured entry for each eviction.
+        std::uint32_t victim = lru_head;
+        if (victim == excluded_id && victim != 0) {
+            victim = entries[victim].lru_next;
         }
         if (victim == 0) {
             return false;
@@ -420,7 +490,7 @@ struct RequestPlane::Impl {
             entry.value_offset = 0;
             entry.value_size = 0;
             entry.generation = fill.key.generation;
-            entry.last_use = NextTick();
+            TouchLru(id);
             return FillResult{FillStatus::kUpdated, ErrorCode::kOk};
         }
 
@@ -433,7 +503,7 @@ struct RequestPlane::Impl {
             }
             entry.value_size = fill.value_size;
             entry.generation = fill.key.generation;
-            entry.last_use = NextTick();
+            TouchLru(id);
             return FillResult{FillStatus::kUpdated, ErrorCode::kOk};
         }
 
@@ -473,7 +543,7 @@ struct RequestPlane::Impl {
         entry.value_offset = new_offset;
         entry.value_size = fill.value_size;
         entry.generation = fill.key.generation;
-        entry.last_use = NextTick();
+        TouchLru(id);
         return FillResult{FillStatus::kUpdated, ErrorCode::kOk};
     }
 
@@ -537,13 +607,16 @@ struct RequestPlane::Impl {
             entry.key_size = fill.key.size;
             entry.value_offset = value_offset;
             entry.value_size = fill.negative ? 0 : fill.value_size;
-            entry.last_use = NextTick();
             entry.bucket_index = location.bucket_index;
             entry.slot_index = location.slot_index;
 
             Bucket& bucket = buckets[location.bucket_index];
+            if (bucket.tags[location.slot_index] == kTombstoneTag) {
+                --tombstone_count;
+            }
             bucket.tags[location.slot_index] = tag;
             bucket.entry_ids[location.slot_index] = id;
+            LinkLruTail(id);
             ++entry_count;
             return FillResult{FillStatus::kInserted, ErrorCode::kOk};
         }
@@ -567,10 +640,14 @@ struct RequestPlane::Impl {
             return result;
         }
         Entry& entry = entries[id];
-        if (entry.generation != key.generation) {
+        // Exact-generation probes preserve mismatch semantics. CacheKit's prepared request path
+        // uses the explicit latest sentinel because exact-key write-through makes the stored
+        // version authoritative; Java's write-generation gate blocks in-flight stale publication.
+        if (key.generation != kLatestGeneration &&
+            entry.generation != key.generation) {
             return result;
         }
-        entry.last_use = NextTick();
+        TouchLru(id);
         if (entry.negative) {
             result.status = ProbeStatus::kNegative;
             return result;
@@ -583,7 +660,8 @@ struct RequestPlane::Impl {
 
     FillResult FillOne(const FillView& fill) noexcept {
         if (!IsValidBytes(fill.key.data, fill.key.size) ||
-            (!fill.negative && !IsValidBytes(fill.value, fill.value_size))) {
+            (!fill.negative && !IsValidBytes(fill.value, fill.value_size)) ||
+            fill.key.generation == kLatestGeneration) {
             return FillResult{
                     FillStatus::kInvalidArgument, ErrorCode::kInvalidArgument};
         }
@@ -612,7 +690,9 @@ struct RequestPlane::Impl {
         key_arena.Reset();
         value_arena.Reset();
         entry_count = 0;
-        clock = 0;
+        tombstone_count = 0;
+        lru_head = 0;
+        lru_tail = 0;
         eviction_count = 0;
     }
 
@@ -625,7 +705,9 @@ struct RequestPlane::Impl {
     ByteArena key_arena;
     ByteArena value_arena;
     std::size_t entry_count = 0;
-    std::uint64_t clock = 0;
+    std::size_t tombstone_count = 0;
+    std::uint32_t lru_head = 0;
+    std::uint32_t lru_tail = 0;
     std::uint64_t eviction_count = 0;
 };
 

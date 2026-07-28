@@ -79,6 +79,42 @@ class SerializedKeyBatchTest {
     }
 
     @Test
+    void testPreparedRocksDbBytesAreCopiedExactlyAndRemainStable() throws Exception {
+        SerializedKeyBatch<byte[], byte[]> batch =
+                SerializedKeyBatch.forSerializedBytes(
+                        ByteBuffer.allocateDirect(64),
+                        ByteBuffer.allocateDirect(2 * SerializedKeyBatch.METADATA_RECORD_BYTES));
+        byte[] prepared = {9, 0, 4, 7, 1};
+
+        batch.appendSerialized(31, 77L, prepared);
+        prepared[0] = 99;
+
+        assertArrayEquals(new byte[] {9, 0, 4, 7, 1}, copyBytes(batch.arenaSlice()));
+        assertEquals(31, batch.stateId(0));
+        assertEquals(77L, batch.generation(0));
+        assertEquals(0, batch.arenaOffset(0));
+        assertEquals(5, batch.serializedLength(0));
+    }
+
+    @Test
+    void testPreparedRocksDbByteOverflowRollsBackAndBatchRemainsReusable() throws Exception {
+        SerializedKeyBatch<byte[], byte[]> batch =
+                SerializedKeyBatch.forSerializedBytes(
+                        ByteBuffer.allocateDirect(4),
+                        ByteBuffer.allocateDirect(SerializedKeyBatch.METADATA_RECORD_BYTES));
+
+        assertThrows(
+                EOFException.class,
+                () -> batch.appendSerialized(1, 1L, new byte[] {1, 2, 3, 4, 5}));
+        assertEquals(0, batch.entryCount());
+        assertEquals(0, batch.arenaBytesWritten());
+
+        batch.appendSerialized(2, 2L, new byte[] {6, 7, 8, 9});
+        assertArrayEquals(new byte[] {6, 7, 8, 9}, copyBytes(batch.arenaSlice()));
+        assertEquals(2, batch.stateId(0));
+    }
+
+    @Test
     void testMultipleMutableKeysAreSerializedContiguouslyWithoutRetainingReferences()
             throws Exception {
         SerializedKeyBatch<byte[], String> batch =

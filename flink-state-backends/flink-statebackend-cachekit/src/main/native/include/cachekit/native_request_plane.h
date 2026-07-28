@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -30,6 +31,10 @@ namespace native {
 // Native request-plane calls are intentionally batch-oriented.  The value is a
 // policy hint for the future JNI bridge, not a restriction on this C++ API.
 constexpr std::uint32_t kDefaultMinNativeBatchSize = 64;
+// Probe-only sentinel: return the latest exact-key version. Real fills must use a monotonically
+// increasing per-key write-order token and never this value.
+constexpr std::uint64_t kLatestGeneration =
+        std::numeric_limits<std::uint64_t>::max();
 
 enum class KernelPreference : std::uint32_t {
     kAuto = 0,
@@ -83,6 +88,8 @@ struct Options {
 
 struct KeyView {
     std::uint32_t state_id = 0;
+    // Monotonic write-order token for conditional fills of this exact state/key. A probe must
+    // either provide an exact generation or kLatestGeneration.
     std::uint64_t generation = 0;
     const std::uint8_t* data = nullptr;
     std::size_t size = 0;

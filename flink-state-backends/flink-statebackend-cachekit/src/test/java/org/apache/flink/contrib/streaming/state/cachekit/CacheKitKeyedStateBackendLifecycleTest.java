@@ -21,6 +21,7 @@ import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneOptions;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRange;
@@ -42,6 +43,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
@@ -51,6 +53,27 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CacheKitKeyedStateBackendLifecycleTest {
+
+    @Test
+    void testNativeRequestPlaneRejectsDisabledValueCacheBeforeLoadingLibrary() {
+        NativeRequestPlaneOptions options =
+                new NativeRequestPlaneOptions(
+                        true,
+                        "/does/not/exist/libcachekit_native_request_plane_jni.so",
+                        "auto",
+                        16,
+                        1024,
+                        1024,
+                        4,
+                        1024,
+                        1024,
+                        1,
+                        1);
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> newCacheKitBackend(mockDelegate(), 0, options));
+    }
 
     @Test
     void testDisposeWaitsForConcurrentCloseFlush() throws Exception {
@@ -148,6 +171,13 @@ class CacheKitKeyedStateBackendLifecycleTest {
 
     private static CacheKitKeyedStateBackend<String> newCacheKitBackend(
             AbstractKeyedStateBackend<String> delegate) {
+        return newCacheKitBackend(delegate, 128, NativeRequestPlaneOptions.disabled());
+    }
+
+    private static CacheKitKeyedStateBackend<String> newCacheKitBackend(
+            AbstractKeyedStateBackend<String> delegate,
+            int valueCacheMaxEntries,
+            NativeRequestPlaneOptions nativeRequestPlaneOptions) {
         return new CacheKitKeyedStateBackend<>(
                 delegate,
                 null,
@@ -157,7 +187,7 @@ class CacheKitKeyedStateBackendLifecycleTest {
                 TtlTimeProvider.DEFAULT,
                 new CloseableRegistry(),
                 null,
-                128,
+                valueCacheMaxEntries,
                 CachePolicyType.LRU,
                 0,
                 false,
@@ -179,6 +209,7 @@ class CacheKitKeyedStateBackendLifecycleTest {
                 false,
                 0,
                 false,
-                false);
+                false,
+                nativeRequestPlaneOptions);
     }
 }
