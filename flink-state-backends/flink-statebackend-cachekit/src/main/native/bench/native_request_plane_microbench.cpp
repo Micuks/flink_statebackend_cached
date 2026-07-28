@@ -54,6 +54,8 @@ struct Candidate {
     KernelPreference preference;
 };
 
+constexpr Candidate kScalar = {"scalar", KernelPreference::kScalar};
+
 constexpr std::array<Candidate, 3> kCandidates = {{
         {"neon_crc", KernelPreference::kNeonCrc},
         {"sve256", KernelPreference::kSve256},
@@ -558,9 +560,11 @@ void RunPair(
         CsvWriter* writer,
         const Config& config,
         const HostFeatures& features,
+        const Candidate& baseline,
         const Candidate& candidate,
         const Workload& workload) {
-    const std::string pair = std::string("scalar_vs_") + candidate.label;
+    const std::string pair =
+            std::string(baseline.label) + "_vs_" + candidate.label;
     Runner candidate_runner;
     std::string reason;
     if (!PrepareRunner(
@@ -574,27 +578,29 @@ void RunPair(
         return;
     }
 
-    Runner scalar_runner;
+    Runner baseline_runner;
     if (!PrepareRunner(
-                "scalar",
-                KernelPreference::kScalar,
+                baseline.label,
+                baseline.preference,
                 workload,
-                &scalar_runner,
+                &baseline_runner,
                 &reason)) {
-        throw std::runtime_error("scalar kernel unexpectedly unavailable: " + reason);
+        WriteSkipRow(
+                writer, config, features, pair, baseline, workload, reason);
+        return;
     }
 
     std::cerr << "pair=" << pair << " key=" << workload.key_length
               << " batch=" << workload.batch_size
               << " hit=" << workload.hit_ratio
-              << " selected_A=" << scalar_runner.selected_kernel
+              << " selected_A=" << baseline_runner.selected_kernel
               << " selected_B=" << candidate_runner.selected_kernel << '\n';
-    (void) Measure(&scalar_runner, workload, config.warmup_keys);
+    (void) Measure(&baseline_runner, workload, config.warmup_keys);
     (void) Measure(&candidate_runner, workload, config.warmup_keys);
 
-    std::vector<double> scalar_samples;
+    std::vector<double> baseline_samples;
     std::vector<double> candidate_samples;
-    scalar_samples.reserve(config.cycles * 2U);
+    baseline_samples.reserve(config.cycles * 2U);
     candidate_samples.reserve(config.cycles * 2U);
     constexpr std::array<unsigned, 4> kOrder = {0, 1, 1, 0};
     constexpr std::array<const char*, 4> kLegs = {"A1", "B1", "B2", "A2"};
@@ -602,7 +608,7 @@ void RunPair(
         std::uint64_t expected_checksum = 0;
         for (std::size_t position = 0; position < kOrder.size(); ++position) {
             Runner* runner =
-                    kOrder[position] == 0 ? &scalar_runner : &candidate_runner;
+                    kOrder[position] == 0 ? &baseline_runner : &candidate_runner;
             const Measurement measurement =
                     Measure(runner, workload, config.measured_keys);
             if (position == 0) {
@@ -620,7 +626,7 @@ void RunPair(
                     *runner,
                     workload,
                     measurement);
-            (kOrder[position] == 0 ? scalar_samples : candidate_samples)
+            (kOrder[position] == 0 ? baseline_samples : candidate_samples)
                     .push_back(measurement.ns_per_key);
         }
     }
@@ -629,9 +635,9 @@ void RunPair(
             config,
             features,
             pair,
-            scalar_runner,
+            baseline_runner,
             workload,
-            scalar_samples);
+            baseline_samples);
     WriteSummaryRow(
             writer,
             config,
@@ -679,9 +685,20 @@ int Run(int argc, char** argv) {
                             &writer,
                             config,
                             features,
+                            kScalar,
                             candidate,
                             workload);
                 }
+                // This is the architecture-specific comparison. Both sides use
+                // the AArch64 CRC32C instructions, so it does not confound SVE
+                // with the software scalar CRC implementation.
+                RunPair(
+                        &writer,
+                        config,
+                        features,
+                        kCandidates[0],
+                        kCandidates[1],
+                        workload);
             }
         }
     }

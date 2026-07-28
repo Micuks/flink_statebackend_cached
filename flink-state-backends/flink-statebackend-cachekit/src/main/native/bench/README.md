@@ -10,7 +10,7 @@ The default matrix is fixed:
 - key lengths: 16, 32, 64, 128 bytes
 - batch sizes: 8, 32, 64, 128
 - hit ratios: 0%, 50%, 100%
-- pairs: scalar/NEON+CRC, scalar/SVE-256, scalar/auto
+- pairs: scalar/NEON+CRC, scalar/SVE-256, scalar/auto, NEON+CRC/SVE-256
 - five repeated `A-B-B-A` cycles after per-kernel warmup
 - 8,192 warmup keys and at least 32,768 measured keys per leg
 - eight deterministic hot workload batches per scenario
@@ -33,6 +33,11 @@ and its corresponding `Mkeys/s` for each requested kernel in each pair.
 `metadata` records the fixed seed and detected AArch64/NEON/CRC/SVE features.
 A valid complete run ends with a `complete,ok` row; a partial file is not a
 successful benchmark.
+
+The direct `neon_crc_vs_sve256` pair is the architecture-specific comparison:
+both legs use the AArch64 CRC32C instructions. Scalar comparisons intentionally
+remain in the output as implementation diagnostics, but they must not be
+reported as SVE uplift because the scalar kernel uses a software CRC32C loop.
 
 The timed metric is named `probe_batch_plus_one_result_sample`: the timer
 contains `ProbeBatch` plus one result-dependent checksum update per batch. Each
