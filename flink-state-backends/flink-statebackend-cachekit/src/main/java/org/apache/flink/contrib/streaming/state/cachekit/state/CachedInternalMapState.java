@@ -1137,7 +1137,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
         @Override
         public int hashCode() {
-            return Objects.hash(key, namespace, userKey);
+            return CacheKeyHash.hash(key, namespace, userKey);
         }
     }
 
@@ -1344,7 +1344,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
         @Override
         public int hashCode() {
-            return Objects.hash(key, namespace);
+            return CacheKeyHash.hash(key, namespace);
         }
     }
 
