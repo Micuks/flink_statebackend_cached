@@ -19,9 +19,9 @@
 #include "kernels_internal.h"
 
 #include <arm_acle.h>
+#include <arm_neon.h>
 #include <arm_sve.h>
 
-#include <algorithm>
 #include <cstring>
 
 namespace cachekit {
@@ -46,21 +46,21 @@ std::uint32_t SveCrcFingerprint(
     return ~crc;
 }
 
-std::uint16_t SveMatchTags(const Bucket& bucket, std::uint32_t tag) noexcept {
+std::uint16_t HybridMatchTags(const Bucket& bucket, std::uint32_t tag) noexcept {
+    // Kunpeng's 256-bit SVE implementation wins on exact byte comparison, but
+    // direct ABBA measurements show a stable regression on the all-miss tag
+    // path. A bucket is exactly one 128-byte Kunpeng L3 line; four fixed-width
+    // NEON loads scan its 16 tags more cheaply than materialising SVE predicate
+    // lanes. Keep SVE for the hit-only exact-key comparison below.
+    const uint32x4_t expected = vdupq_n_u32(tag);
     std::uint16_t mask = 0;
-    const std::size_t lanes = svcntw();
-    for (std::size_t base = 0; base < kSlotsPerBucket; base += lanes) {
-        const svbool_t active = svwhilelt_b32(base, kSlotsPerBucket);
-        const svuint32_t values = svld1_u32(active, bucket.tags + base);
-        const svbool_t equal = svcmpeq_n_u32(active, values, tag);
-        const svuint32_t bits = svsel_u32(
-                equal, svdup_n_u32(1U), svdup_n_u32(0U));
-        std::uint32_t lane_bits[8] = {};
-        svst1_u32(active, lane_bits, bits);
-        const std::size_t remaining =
-                std::min<std::size_t>(lanes, kSlotsPerBucket - base);
-        for (std::size_t lane = 0; lane < remaining; ++lane) {
-            if (lane_bits[lane] != 0) {
+    for (std::size_t base = 0; base < kSlotsPerBucket; base += 4) {
+        const uint32x4_t values = vld1q_u32(bucket.tags + base);
+        const uint32x4_t equal = vceqq_u32(values, expected);
+        std::uint32_t lanes[4];
+        vst1q_u32(lanes, equal);
+        for (std::size_t lane = 0; lane < 4; ++lane) {
+            if (lanes[lane] != 0) {
                 mask |= static_cast<std::uint16_t>(1U << (base + lane));
             }
         }
@@ -88,9 +88,9 @@ bool SveEqualBytes(
 
 const KernelOps kSve256Ops = {
         KernelKind::kSve256,
-        "aarch64-sve256-crc32c",
+        "aarch64-sve256-hybrid-crc32c",
         &SveCrcFingerprint,
-        &SveMatchTags,
+        &HybridMatchTags,
         &SveEqualBytes};
 
 }  // namespace
