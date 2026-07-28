@@ -121,6 +121,51 @@ class NativeRequestPlaneBridgeTest {
 
   @Test
   @EnabledIfSystemProperty(named = NativeRequestPlaneBridge.LIBRARY_PATH_PROPERTY, matches = ".+")
+  void testStateGenerationWatermarkRejectsStaleFillAfterEviction() throws Exception {
+    try (NativeRequestPlaneBridge bridge =
+        NativeRequestPlaneBridge.open(
+            true, 1, 1024, 1024, NativeRequestPlaneBridge.KERNEL_SCALAR)) {
+      SerializedKeyBatch<Integer, String> keys = newBatch(1);
+      ByteBuffer valueArena = directNative(8);
+      ByteBuffer valueMetadata =
+          directNative(NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES);
+      ByteBuffer fillResults =
+          directNative(NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES);
+
+      keys.append(41, 10L, 1, "k");
+      valueArena.put(new byte[] {'v', '1', '0'}).flip();
+      putValueRecord(valueMetadata, 0, 0, 3, false);
+      assertEquals(1, bridge.fillBatch(keys, valueArena, valueMetadata, fillResults));
+      assertEquals(NativeRequestPlaneBridge.FILL_INSERTED, fillStatus(fillResults, 0));
+
+      keys.clear();
+      keys.append(41, 11L, 2, "other");
+      valueArena.clear();
+      valueArena.put(new byte[] {'v', '1', '1'}).flip();
+      assertEquals(1, bridge.fillBatch(keys, valueArena, valueMetadata, fillResults));
+      assertEquals(NativeRequestPlaneBridge.FILL_INSERTED, fillStatus(fillResults, 0));
+
+      keys.clear();
+      keys.append(41, 5L, 1, "k");
+      valueArena.clear();
+      valueArena.put(new byte[] {'o', 'l', 'd'}).flip();
+      assertEquals(1, bridge.fillBatch(keys, valueArena, valueMetadata, fillResults));
+      assertEquals(
+          NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION,
+          fillStatus(fillResults, 0));
+      assertEquals(NativeRequestPlaneBridge.ERROR_OK, fillError(fillResults, 0));
+
+      keys.clear();
+      keys.append(41, NativeRequestPlaneBridge.PROBE_LATEST_GENERATION, 1, "k");
+      ByteBuffer probeResults =
+          directNative(NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
+      assertEquals(1, bridge.probeBatch(keys, directNative(8), probeResults));
+      assertEquals(NativeRequestPlaneBridge.PROBE_MISS, probeStatus(probeResults, 0));
+    }
+  }
+
+  @Test
+  @EnabledIfSystemProperty(named = NativeRequestPlaneBridge.LIBRARY_PATH_PROPERTY, matches = ".+")
   void testMalformedBatchFailsClosedAndCloseIsTerminal() throws Exception {
     NativeRequestPlaneBridge bridge = openScalarBridge();
     SerializedKeyBatch<Integer, String> keys = newBatch(1);

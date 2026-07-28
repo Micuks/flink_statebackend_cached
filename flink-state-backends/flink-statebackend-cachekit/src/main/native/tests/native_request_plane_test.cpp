@@ -275,6 +275,134 @@ void TestGenerationAndNegativeEntries() {
                   .status == FillStatus::kInvalidArgument);
 }
 
+void TestStateGenerationWatermarkSurvivesEvictionAndAdmissionFailure() {
+    Options eviction_options;
+    eviction_options.capacity_entries = 1;
+    eviction_options.key_arena_bytes = 16;
+    eviction_options.value_arena_bytes = 16;
+    eviction_options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> eviction_plane =
+            MakePlane(eviction_options);
+
+    const std::string key = "k";
+    const std::string other = "other";
+    CHECK(Fill(*eviction_plane, Key(17, 10, key), std::string("v10")).status ==
+          FillStatus::kInserted);
+    CHECK(Fill(*eviction_plane, Key(17, 11, other), std::string("v11")).status ==
+          FillStatus::kInserted);
+    CHECK(Probe(*eviction_plane,
+                Key(17, cachekit::native::kLatestGeneration, key))
+                  .status == ProbeStatus::kMiss);
+
+    const FillResult delayed =
+            Fill(*eviction_plane, Key(17, 5, key), std::string("stale"));
+    CHECK(delayed.status == FillStatus::kRejectedStaleGeneration);
+    CHECK(delayed.error == ErrorCode::kOk);
+    CHECK(Probe(*eviction_plane,
+                Key(17, cachekit::native::kLatestGeneration, key))
+                  .status == ProbeStatus::kMiss);
+    CHECK(ResultValue(
+                  Probe(*eviction_plane,
+                        Key(17,
+                            cachekit::native::kLatestGeneration,
+                            other))) ==
+          "v11");
+
+    Options batch_options;
+    batch_options.capacity_entries = 2;
+    batch_options.key_arena_bytes = 16;
+    batch_options.value_arena_bytes = 16;
+    batch_options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> batch_plane = MakePlane(batch_options);
+    const std::string first = "a";
+    const std::string second = "b";
+    const std::string first_value = "A";
+    const std::string second_value = "B";
+    const FillView same_generation[] = {
+            FillView{
+                    Key(23, 21, first),
+                    reinterpret_cast<const std::uint8_t*>(
+                            first_value.data()),
+                    first_value.size(),
+                    false},
+            FillView{
+                    Key(23, 21, second),
+                    reinterpret_cast<const std::uint8_t*>(
+                            second_value.data()),
+                    second_value.size(),
+                    false}};
+    FillResult same_generation_results[2];
+    CHECK(batch_plane->FillBatch(
+                  same_generation, same_generation_results, 2) ==
+          ErrorCode::kOk);
+    CHECK(same_generation_results[0].status == FillStatus::kInserted);
+    CHECK(same_generation_results[1].status == FillStatus::kInserted);
+
+    // A newer mutation of one key must fence delayed fills for the state but
+    // must not invalidate a latest probe for another untouched resident key.
+    CHECK(Fill(*batch_plane, Key(23, 22, first), std::string("A2")).status ==
+          FillStatus::kUpdated);
+    CHECK(ResultValue(
+                  Probe(*batch_plane,
+                        Key(23,
+                            cachekit::native::kLatestGeneration,
+                            second))) ==
+          "B");
+    CHECK(Fill(*batch_plane, Key(23, 21, second), std::string("old-B")).status ==
+          FillStatus::kRejectedStaleGeneration);
+    CHECK(ResultValue(
+                  Probe(*batch_plane,
+                        Key(23,
+                            cachekit::native::kLatestGeneration,
+                            second))) ==
+          "B");
+    const std::string oversized_value(17, 'x');
+    CHECK(Fill(*batch_plane, Key(23, 23, first), oversized_value).status ==
+          FillStatus::kRejectedCapacity);
+    CHECK(Probe(*batch_plane,
+                Key(23, cachekit::native::kLatestGeneration, first))
+                  .status == ProbeStatus::kMiss);
+    CHECK(ResultValue(
+                  Probe(*batch_plane,
+                        Key(23,
+                            cachekit::native::kLatestGeneration,
+                            second))) ==
+          "B");
+    CHECK(Fill(*batch_plane, Key(23, 22, second), std::string("old-B2")).status ==
+          FillStatus::kRejectedStaleGeneration);
+    CHECK(ResultValue(
+                  Probe(*batch_plane,
+                        Key(23,
+                            cachekit::native::kLatestGeneration,
+                            second))) ==
+          "B");
+
+    Options admission_options;
+    admission_options.capacity_entries = 1;
+    admission_options.key_arena_bytes = 2;
+    admission_options.value_arena_bytes = 2;
+    admission_options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> admission_plane =
+            MakePlane(admission_options);
+    const std::string oversized_key = "too-large";
+    CHECK(Fill(*admission_plane,
+               Key(31, 30, oversized_key),
+               std::string(),
+               true)
+                  .status == FillStatus::kRejectedCapacity);
+    const FillResult before_failed_clear =
+            Fill(*admission_plane, Key(31, 29, key), std::string("x"));
+    CHECK(before_failed_clear.status ==
+          FillStatus::kRejectedStaleGeneration);
+    CHECK(before_failed_clear.error == ErrorCode::kOk);
+
+    // The explicit plane-wide lifecycle reset intentionally resets the
+    // watermark along with every entry and arena.
+    admission_plane->Clear();
+    CHECK(Fill(*admission_plane, Key(31, 29, key), std::string("x")).status ==
+          FillStatus::kInserted);
+}
+
 void TestEvictionAndArenaReuse() {
     Options options;
     options.capacity_entries = 2;
@@ -332,12 +460,12 @@ void TestIntrusiveLruOrderAndSustainedCapacityChurn() {
     CHECK(Probe(*plane, Key(3, 1, a)).status == ProbeStatus::kHit);
     CHECK(Fill(*plane, Key(3, 2, b), std::string("b2")).status ==
           FillStatus::kUpdated);
-    CHECK(Fill(*plane, Key(3, 1, e), e).status == FillStatus::kInserted);
+    CHECK(Fill(*plane, Key(3, 2, e), e).status == FillStatus::kInserted);
     CHECK(Probe(*plane, Key(3, 1, c)).status == ProbeStatus::kMiss);
-    CHECK(Fill(*plane, Key(3, 1, f), f).status == FillStatus::kInserted);
+    CHECK(Fill(*plane, Key(3, 2, f), f).status == FillStatus::kInserted);
     CHECK(Probe(*plane, Key(3, 1, d)).status == ProbeStatus::kMiss);
     CHECK(Probe(*plane, Key(3, 1, a)).status == ProbeStatus::kHit);
-    CHECK(Fill(*plane, Key(3, 1, g), g).status == FillStatus::kInserted);
+    CHECK(Fill(*plane, Key(3, 2, g), g).status == FillStatus::kInserted);
     CHECK(Probe(*plane, Key(3, 2, b)).status == ProbeStatus::kMiss);
     CHECK(plane->size() == options.capacity_entries);
     CHECK(plane->evictions() == 3);
@@ -461,6 +589,7 @@ void TestRandomDifferentialAgainstReference() {
     options.fingerprint_mask = 0xffU;
     std::unique_ptr<RequestPlane> plane = MakePlane(options);
     std::unordered_map<std::string, ReferenceValue> reference;
+    std::unordered_map<std::uint32_t, std::uint64_t> state_watermarks;
     std::mt19937 random(0x5a17U);
 
     std::vector<std::string> keys;
@@ -477,12 +606,16 @@ void TestRandomDifferentialAgainstReference() {
         auto found = reference.find(reference_key);
 
         if (do_fill) {
-            const bool stale = found != reference.end() &&
-                    found->second.generation > 0 && (random() % 10U) == 0;
+            const std::uint64_t watermark = state_watermarks[state_id];
+            const bool stale =
+                    watermark > 0 && (random() % 10U) == 0;
             const std::uint64_t generation = stale
-                    ? found->second.generation - 1U
-                    : (found == reference.end() ? 1U
-                                                : found->second.generation + 1U);
+                    ? watermark - 1U
+                    : std::max(
+                              watermark,
+                              found == reference.end()
+                                      ? 1U
+                                      : found->second.generation + 1U);
             const bool negative = (random() % 5U) == 0;
             const std::string value =
                     "value-" + std::to_string(iteration) + "-" + key;
@@ -494,6 +627,8 @@ void TestRandomDifferentialAgainstReference() {
                 CHECK(actual.status == (found == reference.end()
                                                 ? FillStatus::kInserted
                                                 : FillStatus::kUpdated));
+                state_watermarks[state_id] =
+                        std::max(watermark, generation);
                 reference[reference_key] =
                         ReferenceValue{generation, negative, negative ? "" : value};
             }
@@ -618,6 +753,7 @@ int main() {
 #endif
     TestCollisionRequiresExactCompare();
     TestGenerationAndNegativeEntries();
+    TestStateGenerationWatermarkSurvivesEvictionAndAdmissionFailure();
     TestEvictionAndArenaReuse();
     TestIntrusiveLruOrderAndSustainedCapacityChurn();
     TestUpdateCanReclaimFragmentedArena();
