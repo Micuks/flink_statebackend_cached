@@ -266,7 +266,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueCacheLruOverflow,
                     valueBypassEnabled,
                     valueHitRateThreshold,
-                    valueHitRateWindow);
+                    valueHitRateWindow,
+                    BP_PREFETCH_MULTIGET,
+                    VALUE_STICKY_UPDATE_IN_PLACE);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -397,7 +399,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueCacheLruOverflow,
                     valueBypassEnabled,
                     valueHitRateThreshold,
-                    valueHitRateWindow);
+                    valueHitRateWindow,
+                    BP_PREFETCH_MULTIGET,
+                    VALUE_STICKY_UPDATE_IN_PLACE);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
@@ -587,6 +591,17 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private static final boolean BP_PREFETCH_ASYNC =
             loadBooleanFlag("state.backend.cachekit.bp-prefetch.async.enabled", true);
 
+    /** Uses ordered, incrementally published RocksDB MultiGet chunks for async ValueState reads. */
+    private static final boolean BP_PREFETCH_MULTIGET =
+            loadBooleanFlag("state.backend.cachekit.bp-prefetch.multiget.enabled", false);
+    /**
+     * Reuses the L1-owned sticky ValueState wrapper for repeated updates to the same key/namespace.
+     * Disabled by default until Nexmark validates that the allocation reduction exceeds its extra
+     * ownership check.
+     */
+    private static final boolean VALUE_STICKY_UPDATE_IN_PLACE =
+            loadBooleanFlag(
+                    "state.backend.cachekit.value.sticky-update-in-place.enabled", false);
     private static boolean loadBooleanFlag(String key, boolean defaultValue) {
         try {
             return org.apache.flink.configuration.GlobalConfiguration.loadConfiguration()
@@ -601,11 +616,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     /**
      * True when at least one cached ValueState wrapper exists, i.e. a prefetch could land.
-     * Called reflectively by StatePrefetcher BEFORE it pays the per-batch key extraction: window
-     * operators only hold namespaced states (never wrapped under the VoidNamespace gate), so
-     * without this check every lookahead batch would extract and dedup up to `distance` keys for
-     * a prefetch that is guaranteed to be a no-op. Wrappers register lazily on first state
-     * access, so this must be re-evaluated per call, not cached by the caller.
+     * Called reflectively by StatePrefetcher before it pays the per-batch key extraction. Wrappers
+     * register lazily on first state access, so this must be re-evaluated per call, not cached by
+     * the caller.
      */
     public boolean hasPrefetchableState() {
         synchronized (lifecycleLock) {
@@ -613,7 +626,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 return false;
             }
             for (Object wrapper : wrappersByDelegateIdentity.values()) {
-                if (wrapper instanceof CachedInternalValueState) {
+                if (wrapper instanceof CachedInternalValueState
+                        && ((CachedInternalValueState<?, ?, ?>) wrapper)
+                                .supportsRecordKeyPrefetch()) {
                     return true;
                 }
             }
@@ -632,7 +647,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 // and value deserialization run on the shared prefetch worker. No key-context
                 // save/restore needed — submission never touches the backend key context.
                 for (Object wrapper : wrappersByDelegateIdentity.values()) {
-                    if (wrapper instanceof CachedInternalValueState) {
+                    if (wrapper instanceof CachedInternalValueState
+                            && ((CachedInternalValueState<?, ?, ?>) wrapper)
+                                    .supportsRecordKeyPrefetch()) {
                         Runnable task =
                                 ((CachedInternalValueState) wrapper).buildAsyncPrefetchTask(keys);
                         if (task != null) {
@@ -645,7 +662,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             K previousKey = getCurrentKey();
             try {
                 for (Object wrapper : wrappersByDelegateIdentity.values()) {
-                    if (!BP_PREFETCH_ASYNC && wrapper instanceof CachedInternalValueState) {
+                    if (!BP_PREFETCH_ASYNC
+                            && wrapper instanceof CachedInternalValueState
+                            && ((CachedInternalValueState<?, ?, ?>) wrapper)
+                                    .supportsRecordKeyPrefetch()) {
                         ((CachedInternalValueState) wrapper).prefetch(keys);
                     }
                 }
@@ -653,6 +673,33 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 // Best-effort cache warmup. Authoritative state access remains unchanged.
             } finally {
                 setCurrentKey(previousKey);
+            }
+        }
+    }
+
+    /**
+     * Synchronously bulk-load keys that local pre-aggregation has already committed to consume.
+     *
+     * <p>This is intentionally separate from speculative record lookahead. It only touches
+     * VoidNamespace ValueState wrappers with the MultiGet option enabled; namespaced state and
+     * MapState remain excluded because the grouping hook does not know their future namespaces or
+     * entries.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public void prefetchForImmediateUse(Collection<? extends K> keys) {
+        synchronized (lifecycleLock) {
+            if (closed || disposed || keys == null || keys.isEmpty()) {
+                return;
+            }
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                if (wrapper instanceof CachedInternalValueState) {
+                    CachedInternalValueState<?, ?, ?> valueState =
+                            (CachedInternalValueState<?, ?, ?>) wrapper;
+                    if (valueState.supportsRecordKeyPrefetch()
+                            && valueState.consumeImmediatePrefetchAccessObserved()) {
+                        ((CachedInternalValueState) valueState).prefetchForImmediateUse(keys);
+                    }
+                }
             }
         }
     }

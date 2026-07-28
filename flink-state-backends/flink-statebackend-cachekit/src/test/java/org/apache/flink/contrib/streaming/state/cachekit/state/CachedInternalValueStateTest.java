@@ -44,6 +44,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.mock;
@@ -54,6 +55,91 @@ import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.inOrder;
 
 class CachedInternalValueStateTest {
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testStickyInPlaceUpdatePreservesArbitraryNamespaceAndLifecycleSemantics()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        AtomicReference<String> delegateNamespace = new AtomicReference<>();
+        java.util.ArrayList<String> flushed = new java.util.ArrayList<>();
+        InternalValueState<String, String, Integer> delegate = mock(InternalValueState.class);
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        doAnswer(
+                        invocation -> {
+                            delegateNamespace.set(invocation.getArgument(0));
+                            return null;
+                        })
+                .when(delegate)
+                .setCurrentNamespace(any());
+        doAnswer(
+                        invocation -> {
+                            flushed.add(
+                                    currentKey.get()
+                                            + "/"
+                                            + delegateNamespace.get()
+                                            + "="
+                                            + invocation.getArgument(0));
+                            return null;
+                        })
+                .when(delegate)
+                .update(any());
+
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        false,
+                        true);
+
+        state.setCurrentNamespace("window-a");
+        state.update(10);
+        state.update(11);
+        state.setCurrentNamespace("window-b");
+        state.update(20);
+        state.update(21);
+        currentKey.set("k2");
+        state.setCurrentNamespace("window-a");
+        state.update(30);
+        state.update(31);
+
+        currentKey.set("k1");
+        state.setCurrentNamespace("window-a");
+        assertEquals(11, state.value());
+        state.setCurrentNamespace("window-b");
+        assertEquals(21, state.value());
+        currentKey.set("k2");
+        state.setCurrentNamespace("window-a");
+        assertEquals(31, state.value());
+
+        state.flush();
+        assertEquals(3, flushed.size());
+        assertTrue(flushed.contains("k1/window-a=11"));
+        assertTrue(flushed.contains("k1/window-b=21"));
+        assertTrue(flushed.contains("k2/window-a=31"));
+
+        // flush() replaces dirty L1 wrappers with clean ones. The sticky pointer may still refer
+        // to the old wrapper, so a subsequent same-entry update must not mutate that detached
+        // object.
+        state.update(32);
+        assertEquals(32, state.value());
+        state.flush();
+        assertEquals(4, flushed.size());
+        assertTrue(flushed.contains("k2/window-a=32"));
+
+        state.close();
+        state.flush();
+        assertEquals(4, flushed.size());
+    }
 
     @Test
     @SuppressWarnings("unchecked")
