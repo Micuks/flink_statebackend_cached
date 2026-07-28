@@ -268,7 +268,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueHitRateThreshold,
                     valueHitRateWindow,
                     BP_PREFETCH_MULTIGET,
-                    VALUE_STICKY_UPDATE_IN_PLACE);
+                    VALUE_STICKY_UPDATE_IN_PLACE,
+                    VALUE_LAZY_STAGING);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -401,7 +402,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueHitRateThreshold,
                     valueHitRateWindow,
                     BP_PREFETCH_MULTIGET,
-                    VALUE_STICKY_UPDATE_IN_PLACE);
+                    VALUE_STICKY_UPDATE_IN_PLACE,
+                    VALUE_LAZY_STAGING);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
@@ -602,6 +604,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private static final boolean VALUE_STICKY_UPDATE_IN_PLACE =
             loadBooleanFlag(
                     "state.backend.cachekit.value.sticky-update-in-place.enabled", false);
+    /**
+     * Defers materialization of speculative RocksDB ValueState results until mailbox promotion.
+     * Synchronous local-preagg prefetch remains eager. Disabled by default pending Nexmark A/B.
+     */
+    private static final boolean VALUE_LAZY_STAGING =
+            loadBooleanFlag("state.backend.cachekit.value.lazy-staging.enabled", false);
     private static boolean loadBooleanFlag(String key, boolean defaultValue) {
         try {
             return org.apache.flink.configuration.GlobalConfiguration.loadConfiguration()
