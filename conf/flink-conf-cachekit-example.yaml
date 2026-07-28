@@ -80,8 +80,12 @@ state.backend.cachekit.bp-prefetch.async.enabled: true
 state.backend.cachekit.bp-prefetch.multiget.enabled: false
 # state.backend.cachekit.bp-prefetch.multiget.chunk-size: 8
 state.backend.cachekit.bp-prefetch.async-chunks.enabled: false
-state.backend.cachekit.bp-prefetch.map-snapshots.enabled: false
 # state.backend.cachekit.bp-prefetch.staging.max-entries: 8192
+
+# Candidate ValueState hot-path switches. Keep disabled for the baseline leg.
+state.backend.cachekit.value.sticky-update-in-place.enabled: false
+state.backend.cachekit.value.lazy-staging.enabled: false
+# state.backend.cachekit.value.lazy-staging.max-retained-bytes: 67108864
 
 # --- Mailbox batch / lookahead buffer -----------------------------------------
 # Required plumbing for prefetch + local-preagg. Size 4096 matched final runs.
