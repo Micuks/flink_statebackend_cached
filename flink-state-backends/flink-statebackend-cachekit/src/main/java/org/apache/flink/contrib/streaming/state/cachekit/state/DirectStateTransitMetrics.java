@@ -40,6 +40,8 @@ public final class DirectStateTransitMetrics {
     private final AtomicLong failureFallbacks = new AtomicLong();
     private final AtomicLong generationDrops = new AtomicLong();
     private final AtomicLong busySkips = new AtomicLong();
+    private final AtomicLong negativeResultsStaged = new AtomicLong();
+    private final AtomicLong negativeHitsServed = new AtomicLong();
 
     private DirectStateTransitMetrics(boolean enabled) {
         this.enabled = enabled;
@@ -62,6 +64,11 @@ public final class DirectStateTransitMetrics {
         register(diagnostics, "dstl_failure_fallbacks", metrics.failureFallbacks);
         register(diagnostics, "dstl_generation_drops", metrics.generationDrops);
         register(diagnostics, "dstl_busy_skips", metrics.busySkips);
+        register(
+                diagnostics,
+                "dstl_negative_results_staged",
+                metrics.negativeResultsStaged);
+        register(diagnostics, "dstl_negative_hits_served", metrics.negativeHitsServed);
         return metrics;
     }
 
@@ -118,6 +125,14 @@ public final class DirectStateTransitMetrics {
         increment(busySkips);
     }
 
+    void recordNegativeResultStaged() {
+        increment(negativeResultsStaged);
+    }
+
+    void recordNegativeHitServed() {
+        increment(negativeHitsServed);
+    }
+
     long batchesPrepared() {
         return batchesPrepared.get();
     }
@@ -140,6 +155,14 @@ public final class DirectStateTransitMetrics {
 
     long generationDrops() {
         return generationDrops.get();
+    }
+
+    long negativeResultsStaged() {
+        return negativeResultsStaged.get();
+    }
+
+    long negativeHitsServed() {
+        return negativeHitsServed.get();
     }
 
     private void increment(AtomicLong counter) {

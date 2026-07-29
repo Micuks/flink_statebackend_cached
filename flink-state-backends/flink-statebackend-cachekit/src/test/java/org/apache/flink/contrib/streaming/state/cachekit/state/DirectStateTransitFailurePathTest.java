@@ -60,7 +60,7 @@ import static org.mockito.Mockito.when;
 class DirectStateTransitFailurePathTest {
 
     @Test
-    void directMissIsCountedAndFallsBackToAuthoritativeValue() throws Exception {
+    void directMissStagesNullAndAvoidsAuthoritativeValueRead() throws Exception {
         DirectValueState delegate = new DirectValueState();
         delegate.authoritativeValue = 41;
         delegate.batchRead = DirectStateTransitFailurePathTest::publishMisses;
@@ -76,8 +76,147 @@ class DirectStateTransitFailurePathTest {
         assertEquals(1, delegate.directReadCalls.get());
         assertEquals(1L, metrics.value("dstl_single_jni_calls"));
         assertEquals(1L, metrics.value("dstl_misses"));
+        assertEquals(1L, metrics.value("dstl_negative_results_staged"));
+        assertNull(state.value());
+        assertEquals(1L, metrics.value("dstl_negative_hits_served"));
+        assertEquals(0, delegate.authoritativeReadCalls.get());
+    }
+
+    @Test
+    void directMissWithNonNullDefaultFallsBackToDelegate() throws Exception {
+        DirectValueState delegate = new DirectValueState();
+        delegate.authoritativeValue = 7;
+        delegate.batchRead = DirectStateTransitFailurePathTest::publishMisses;
+        AtomicReference<String> currentKey = new AtomicReference<>("a");
+        MetricProbe metrics = new MetricProbe();
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                directState(delegate, currentKey, metrics, 7);
+
+        Runnable task = state.buildAsyncPrefetchTask(Arrays.asList("a"));
+        assertNotNull(task);
+        task.run();
+
+        assertEquals(7, state.value());
+        assertEquals(0L, metrics.value("dstl_negative_results_staged"));
+        assertEquals(0L, metrics.value("dstl_negative_hits_served"));
+        assertEquals(1, delegate.authoritativeReadCalls.get());
+    }
+
+    @Test
+    void legacyDirectConstructorFallsBackWhenDefaultIsUnknown() throws Exception {
+        DirectValueState delegate = new DirectValueState();
+        delegate.authoritativeValue = 41;
+        delegate.batchRead = DirectStateTransitFailurePathTest::publishMisses;
+        AtomicReference<String> currentKey = new AtomicReference<>("a");
+        MetricProbe metrics = new MetricProbe();
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                directStateWithUnknownDefault(delegate, currentKey, metrics);
+
+        Runnable task = state.buildAsyncPrefetchTask(Arrays.asList("a"));
+        assertNotNull(task);
+        task.run();
+
         assertEquals(41, state.value());
         assertEquals(1, delegate.authoritativeReadCalls.get());
+        assertEquals(1L, metrics.value("dstl_misses"));
+        assertEquals(0L, metrics.value("dstl_negative_results_staged"));
+    }
+
+    @Test
+    void defaultRefreshInvalidatesStagedAndPromotedNegativeResults() throws Exception {
+        DirectValueState delegate = new DirectValueState();
+        delegate.batchRead = DirectStateTransitFailurePathTest::publishMisses;
+        AtomicReference<String> currentKey = new AtomicReference<>("staged");
+        MetricProbe metrics = new MetricProbe();
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                directState(delegate, currentKey, metrics, null);
+
+        Runnable stagedTask = state.buildAsyncPrefetchTask(Arrays.asList("staged"));
+        assertNotNull(stagedTask);
+        stagedTask.run();
+        delegate.authoritativeValue = 8;
+        state.updateStateDefaultValue(8);
+        assertEquals(8, state.value());
+        assertEquals(1, delegate.authoritativeReadCalls.get());
+
+        currentKey.set("promoted");
+        state.updateStateDefaultValue(null);
+        Runnable promotedTask = state.buildAsyncPrefetchTask(Arrays.asList("promoted"));
+        assertNotNull(promotedTask);
+        promotedTask.run();
+        assertNull(state.value());
+        assertEquals(1, delegate.authoritativeReadCalls.get());
+
+        state.updateStateDefaultValue(9);
+        delegate.authoritativeValue = 9;
+        assertEquals(9, state.value());
+        assertEquals(2, delegate.authoritativeReadCalls.get());
+    }
+
+    @Test
+    void dirtyUpdateAndClearShieldStagedNegativeResult() throws Exception {
+        DirectValueState delegate = new DirectValueState();
+        delegate.batchRead = DirectStateTransitFailurePathTest::publishMisses;
+        AtomicReference<String> currentKey = new AtomicReference<>("updated");
+        MetricProbe metrics = new MetricProbe();
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                directState(delegate, currentKey, metrics, null);
+
+        Runnable updateTask = state.buildAsyncPrefetchTask(Arrays.asList("updated"));
+        assertNotNull(updateTask);
+        updateTask.run();
+        state.update(91);
+        assertEquals(91, state.value());
+
+        currentKey.set("cleared");
+        Runnable clearTask = state.buildAsyncPrefetchTask(Arrays.asList("cleared"));
+        assertNotNull(clearTask);
+        clearTask.run();
+        state.clear();
+        assertNull(state.value());
+        assertEquals(0, delegate.authoritativeReadCalls.get());
+        assertEquals(0L, metrics.value("dstl_negative_hits_served"));
+    }
+
+    @Test
+    void bypassModeConsumesStagedMissBeforeAuthoritativeRead() throws Exception {
+        DirectValueState delegate = new DirectValueState();
+        delegate.authoritativeValue = 41;
+        delegate.batchRead = DirectStateTransitFailurePathTest::publishMisses;
+        AtomicReference<String> currentKey = new AtomicReference<>("warmup");
+        MetricProbe metrics = new MetricProbe();
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        true,
+                        1.0,
+                        1,
+                        true,
+                        true,
+                        4,
+                        512,
+                        128,
+                        metrics.metrics,
+                        null);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        // One miss with a one-operation window enters bypass mode.
+        assertEquals(41, state.value());
+        assertEquals(1, delegate.authoritativeReadCalls.get());
+
+        Runnable task = state.buildAsyncPrefetchTask(Arrays.asList("a"));
+        assertNotNull(task);
+        task.run();
+        currentKey.set("a");
+
+        assertNull(state.value());
+        assertEquals(1, delegate.authoritativeReadCalls.get());
+        assertEquals(1L, metrics.value("dstl_negative_hits_served"));
     }
 
     @Test
@@ -309,6 +448,14 @@ class DirectStateTransitFailurePathTest {
             DirectValueState delegate,
             AtomicReference<String> currentKey,
             MetricProbe metrics) {
+        return directState(delegate, currentKey, metrics, null);
+    }
+
+    private static CachedInternalValueState<String, VoidNamespace, Integer> directState(
+            DirectValueState delegate,
+            AtomicReference<String> currentKey,
+            MetricProbe metrics,
+            Integer defaultValue) {
         CachedInternalValueState<String, VoidNamespace, Integer> state =
                 new CachedInternalValueState<>(
                         delegate,
@@ -320,6 +467,33 @@ class DirectStateTransitFailurePathTest {
                         false,
                         0.05,
                         1000,
+                        true,
+                        true,
+                        4,
+                        512,
+                        128,
+                        metrics.metrics,
+                        defaultValue);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        return state;
+    }
+
+    private static CachedInternalValueState<String, VoidNamespace, Integer>
+            directStateWithUnknownDefault(
+                    DirectValueState delegate,
+                    AtomicReference<String> currentKey,
+                    MetricProbe metrics) {
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        100,
                         true,
                         true,
                         4,

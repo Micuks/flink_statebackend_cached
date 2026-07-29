@@ -59,6 +59,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private long directEnvelopeOwnerToken;
     private final int directStateId;
     private final DirectStateTransitMetrics directStateTransitMetrics;
+    private volatile boolean stateDefaultKnown;
+    private volatile V stateDefaultValue;
 
     private N currentNamespace;
 
@@ -158,7 +160,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 64,
                 16 * 1024,
                 512,
-                DirectStateTransitMetrics.disabled());
+                DirectStateTransitMetrics.disabled(),
+                null);
     }
 
     public CachedInternalValueState(
@@ -177,6 +180,81 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             int directStateTransitKeyArenaBytes,
             int directStateTransitValueStrideBytes,
             DirectStateTransitMetrics directStateTransitMetrics) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                directStateTransitEnabled,
+                directStateTransitRequireSingleJni,
+                directStateTransitMaxBatch,
+                directStateTransitKeyArenaBytes,
+                directStateTransitValueStrideBytes,
+                directStateTransitMetrics,
+                null,
+                false);
+    }
+
+    public CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean directStateTransitEnabled,
+            boolean directStateTransitRequireSingleJni,
+            int directStateTransitMaxBatch,
+            int directStateTransitKeyArenaBytes,
+            int directStateTransitValueStrideBytes,
+            DirectStateTransitMetrics directStateTransitMetrics,
+            V stateDefaultValue) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                directStateTransitEnabled,
+                directStateTransitRequireSingleJni,
+                directStateTransitMaxBatch,
+                directStateTransitKeyArenaBytes,
+                directStateTransitValueStrideBytes,
+                directStateTransitMetrics,
+                stateDefaultValue,
+                true);
+    }
+
+    private CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean directStateTransitEnabled,
+            boolean directStateTransitRequireSingleJni,
+            int directStateTransitMaxBatch,
+            int directStateTransitKeyArenaBytes,
+            int directStateTransitValueStrideBytes,
+            DirectStateTransitMetrics directStateTransitMetrics,
+            V stateDefaultValue,
+            boolean stateDefaultKnown) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -190,6 +268,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.namespaceSerializer = delegate.getNamespaceSerializer();
         this.directStateTransitMetrics =
                 Objects.requireNonNull(directStateTransitMetrics, "directStateTransitMetrics");
+        this.stateDefaultValue = stateDefaultValue;
+        this.stateDefaultKnown = stateDefaultKnown;
         this.directStateId = System.identityHashCode(delegate);
 
         @SuppressWarnings("unchecked")
@@ -243,8 +323,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return lastAccessValue.valueOrNull();
         }
 
-        // 2. Bypass Logic
+        // 2. Bypass Logic. A completed async result gets one chance before the bypass
+        // short-circuit; otherwise the native batch read would be thrown away and the mailbox
+        // would repeat the same point read. tryPromoteStaged() first checks L1/L2 so a dirty
+        // mailbox-side value always shields an older prefetched result.
         if (bypassEnabled && isBypassing) {
+            CachedValue<V> prefetched = tryPromoteStaged(currentKey);
+            if (prefetched != null) {
+                recordAccess(true);
+                return prefetched.valueOrNull();
+            }
             // Sampling: Check cache every ~100 requests to see if we should re-enable
             opsSinceLastSample++;
             if (opsSinceLastSample < 100) {
@@ -293,18 +381,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // 4b. Check async-prefetch staging. Sound only when no write/dirty-flush happened on
         // this state since the fetch was submitted (writeGen match); otherwise fall through to
         // the authoritative delegate read.
-        if (!staging.isEmpty()) {
-            StagedValue<V> staged = staging.remove(lookupKey);
-            if (staged != null && staged.gen == writeGen) {
-                KeyNamespaceKey<K, N> storageKey =
-                        new KeyNamespaceKey<>(
-                                currentKey, currentNamespace, keySerializer, namespaceSerializer);
-                CachedValue<V> newValue = CachedValue.of(staged.value, false);
-                l1Cache.put(storageKey, newValue);
-                updateSticky(storageKey, newValue);
-                recordAccess(true); // Hit
-                return newValue.valueOrNull();
-            }
+        CachedValue<V> prefetched = tryPromoteStaged(currentKey);
+        if (prefetched != null) {
+            recordAccess(true); // Hit
+            return prefetched.valueOrNull();
         }
 
         // 5. Miss -> Load from Delegate
@@ -425,6 +505,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     @Override
     public TypeSerializer<V> getValueSerializer() {
         return delegate.getValueSerializer();
+    }
+
+    /**
+     * Refresh the descriptor default after the delegate updates an existing state instance.
+     *
+     * <p>All clean entries are invalidated because they may represent the previous default. Dirty
+     * mailbox-side values remain authoritative and are preserved. Advancing {@link #writeGen}
+     * also prevents an in-flight worker from publishing a result captured under the old
+     * descriptor.
+     */
+    public void updateStateDefaultValue(V newDefaultValue) {
+        writeGen++;
+        stateDefaultValue = newDefaultValue;
+        stateDefaultKnown = true;
+        staging.clear();
+        invalidateCleanCacheEntries();
     }
 
     @Override
@@ -637,6 +733,21 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 int valueLength = directStateEnvelope.valueLengthOrStatus(index);
                 if (valueLength == RocksDBDirectValueAccess.NOT_FOUND) {
                     directStateTransitMetrics.recordMiss();
+                    if (!stateDefaultKnown || stateDefaultValue != null) {
+                        // Legacy direct constructors do not have descriptor metadata, and the
+                        // existing wrapper's clear path does not model a non-null default. Keep
+                        // both cases on the authoritative path. The golden aggregate states use a
+                        // known null default, for which ABSENT and the returned value are identical.
+                        continue;
+                    }
+                    KeyNamespaceKey<K, N> stagedKey =
+                            new KeyNamespaceKey<>(
+                                    directStateEnvelope.logicalKey(index),
+                                    directStateEnvelope.namespaceSnapshot());
+                    if (!publishStaged(stagedKey, new StagedValue<>(null, gen, true), gen)) {
+                        return;
+                    }
+                    directStateTransitMetrics.recordNegativeResultStaged();
                     continue;
                 }
                 if (valueLength < 0) {
@@ -647,11 +758,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     directStateTransitMetrics.recordEmptyValue();
                 }
                 V value = workerValueSerializer.deserialize(directStateEnvelope.valueInput(index));
-                staging.put(
+                KeyNamespaceKey<K, N> stagedKey =
                         new KeyNamespaceKey<>(
                                 directStateEnvelope.logicalKey(index),
-                                directStateEnvelope.namespaceSnapshot()),
-                        new StagedValue<>(value, gen));
+                                directStateEnvelope.namespaceSnapshot());
+                if (!publishStaged(stagedKey, new StagedValue<>(value, gen), gen)) {
+                    return;
+                }
                 directStateTransitMetrics.recordMaterialized();
             }
         } catch (Throwable failure) {
@@ -733,7 +846,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         new org.apache.flink.core.memory.DataInputDeserializer(
                                 valueBytes, 0, valueBytes.length);
                 V value = workerValueSerializer.deserialize(valueIn);
-                staging.put(new KeyNamespaceKey<>(key, namespace), new StagedValue<>(value, gen));
+                if (!publishStaged(
+                        new KeyNamespaceKey<>(key, namespace), new StagedValue<>(value, gen), gen)) {
+                    return;
+                }
             }
         } catch (Throwable ignored) {
             // Best-effort cache warmup; the authoritative read path is untouched.
@@ -787,6 +903,87 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return l1Value;
         }
         return l2Cache.get(lookupKey);
+    }
+
+    /**
+     * Promote one generation-valid worker result without allowing it to overtake a mailbox-side
+     * dirty value. A {@link CachedValue} is used as the return type so a staged null/default remains
+     * distinguishable from no staged result.
+     */
+    private CachedValue<V> tryPromoteStaged(K currentKey) {
+        if (staging.isEmpty()) {
+            return null;
+        }
+        setLookupKey(currentKey, currentNamespace);
+        StagedValue<V> staged = staging.get(lookupKey);
+        if (staged == null) {
+            return null;
+        }
+
+        CachedValue<V> cached = findCachedValueFor(currentKey, currentNamespace);
+        if (cached != null) {
+            staging.remove(lookupKey);
+            KeyNamespaceKey<K, N> storageKey =
+                    new KeyNamespaceKey<>(
+                            currentKey, currentNamespace, keySerializer, namespaceSerializer);
+            updateSticky(storageKey, cached);
+            return cached;
+        }
+
+        staged = staging.remove(lookupKey);
+        if (staged == null) {
+            return null;
+        }
+        if (staged.gen != writeGen) {
+            directStateTransitMetrics.recordGenerationDrop();
+            return null;
+        }
+        KeyNamespaceKey<K, N> storageKey =
+                new KeyNamespaceKey<>(
+                        currentKey, currentNamespace, keySerializer, namespaceSerializer);
+        CachedValue<V> newValue = CachedValue.of(staged.value, false);
+        l1Cache.put(storageKey, newValue);
+        updateSticky(storageKey, newValue);
+        if (staged.negativeResult) {
+            directStateTransitMetrics.recordNegativeHitServed();
+        }
+        return newValue;
+    }
+
+    /**
+     * Publish a worker result without leaving a stale generation parked in the map. The second
+     * generation check closes the race where a descriptor refresh/write clears staging after the
+     * worker's pre-publication check but before its put.
+     */
+    private boolean publishStaged(
+            KeyNamespaceKey<K, N> key, StagedValue<V> stagedValue, long expectedGeneration) {
+        staging.put(key, stagedValue);
+        if (expectedGeneration == writeGen) {
+            return true;
+        }
+        staging.remove(key, stagedValue);
+        directStateTransitMetrics.recordGenerationDrop();
+        return false;
+    }
+
+    private void invalidateCleanCacheEntries() {
+        java.util.ArrayList<KeyNamespaceKey<K, N>> cleanL1Keys = new java.util.ArrayList<>();
+        for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry :
+                l1Cache.entries()) {
+            if (!entry.getValue().dirty) {
+                cleanL1Keys.add(entry.getKey());
+            }
+        }
+        for (KeyNamespaceKey<K, N> key : cleanL1Keys) {
+            l1Cache.remove(key);
+        }
+
+        // L2 is write-through and therefore contains clean values only.
+        l2Cache.clear();
+        if (lastAccessValue != null && !lastAccessValue.dirty) {
+            lastAccessKey = null;
+            lastAccessValue = null;
+        }
     }
 
     private CachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>> createCachePolicy(
@@ -960,10 +1157,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private static final class StagedValue<V> {
         private final V value;
         private final long gen;
+        private final boolean negativeResult;
 
         private StagedValue(V value, long gen) {
+            this(value, gen, false);
+        }
+
+        private StagedValue(V value, long gen, boolean negativeResult) {
             this.value = value;
             this.gen = gen;
+            this.negativeResult = negativeResult;
         }
     }
 

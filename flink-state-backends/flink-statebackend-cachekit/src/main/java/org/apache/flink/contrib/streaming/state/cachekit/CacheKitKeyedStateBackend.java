@@ -345,6 +345,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 && valueCacheMaxEntries > 0) {
             Object existing = wrappersByDelegateIdentity.get(internal);
             if (existing != null) {
+                ((CachedInternalValueState) existing)
+                        .updateStateDefaultValue(stateDescriptor.getDefaultValue());
                 return (S) existing;
             }
             InternalValueState<K, N, V> delegateValue = (InternalValueState<K, N, V>) internal;
@@ -363,7 +365,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     directStateTransitMaxBatch,
                     directStateTransitKeyArenaBytes,
                     directStateTransitValueStrideBytes,
-                    directStateTransitMetrics);
+                    directStateTransitMetrics,
+                    stateDescriptor.getDefaultValue());
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -482,6 +485,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 && valueCacheMaxEntries > 0) {
             Object existing = wrappersByDelegateIdentity.get(internal);
             if (existing != null) {
+                ((CachedInternalValueState) existing)
+                        .updateStateDefaultValue(stateDesc.getDefaultValue());
                 return (IS) existing;
             }
             InternalValueState<K, N, SV> delegateValue = (InternalValueState<K, N, SV>) internal;
@@ -500,7 +505,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     directStateTransitMaxBatch,
                     directStateTransitKeyArenaBytes,
                     directStateTransitValueStrideBytes,
-                    directStateTransitMetrics);
+                    directStateTransitMetrics,
+                    stateDesc.getDefaultValue());
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
