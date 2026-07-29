@@ -17,11 +17,10 @@ package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.runtime.state.SerializedCompositeKeyBuilder;
 
 import org.junit.jupiter.api.Test;
-
-import java.nio.ByteBuffer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -36,38 +35,27 @@ class DirectCompositeKeyWriterTest {
     @Test
     void writesVariableWidthCompositeKeyWithTwoByteKeyGroupPrefix() throws Exception {
         DirectCompositeKeyWriter<String> writer =
-                new DirectCompositeKeyWriter<>(StringSerializer.INSTANCE, 2, 8);
+                new DirectCompositeKeyWriter<>(StringSerializer.INSTANCE, 2);
         SerializedCompositeKeyBuilder<String> oracle =
                 new SerializedCompositeKeyBuilder<>(StringSerializer.INSTANCE, 2, 8);
 
         String key = "variable-key-\u4e2d\u6587";
         String namespace = "variable-namespace-\u03bb";
         int keyGroup = 4097;
-        ByteBuffer target = ByteBuffer.allocateDirect(512);
+        DataOutputSerializer target = new DataOutputSerializer(512);
 
-        int length =
-                writer.write(
-                        key,
-                        keyGroup,
-                        namespace,
-                        StringSerializer.INSTANCE,
-                        target);
+        writer.write(key, keyGroup, namespace, StringSerializer.INSTANCE, target);
         oracle.setKeyAndKeyGroup(key, keyGroup);
 
-        byte[] actual = new byte[length];
-        target.flip();
-        target.get(actual);
-        assertThat(actual)
-                .isEqualTo(
-                        oracle.buildCompositeKeyNamespace(
-                                namespace, StringSerializer.INSTANCE));
+        assertThat(target.getCopyOfBuffer())
+                .isEqualTo(oracle.buildCompositeKeyNamespace(namespace, StringSerializer.INSTANCE));
     }
 
     @Test
     void reusesScratchWithoutLeakingLongerPreviousKeyBytes() throws Exception {
         DirectCompositeKeyWriter<String> writer =
-                new DirectCompositeKeyWriter<>(StringSerializer.INSTANCE, 1, 4);
-        ByteBuffer target = ByteBuffer.allocateDirect(512);
+                new DirectCompositeKeyWriter<>(StringSerializer.INSTANCE, 1);
+        DataOutputSerializer target = new DataOutputSerializer(512);
 
         writer.write(
                 "a-key-that-forces-the-scratch-buffer-to-grow",
@@ -76,45 +64,27 @@ class DirectCompositeKeyWriterTest {
                 StringSerializer.INSTANCE,
                 target);
         target.clear();
-        int shortLength =
-                writer.write("k", 3, "n", StringSerializer.INSTANCE, target);
+        writer.write("k", 3, "n", StringSerializer.INSTANCE, target);
 
         SerializedCompositeKeyBuilder<String> oracle =
                 new SerializedCompositeKeyBuilder<>(StringSerializer.INSTANCE, 1, 4);
         oracle.setKeyAndKeyGroup("k", 3);
-        byte[] expected =
-                oracle.buildCompositeKeyNamespace("n", StringSerializer.INSTANCE);
-        byte[] actual = new byte[shortLength];
-        target.flip();
-        target.get(actual);
-
-        assertThat(shortLength).isEqualTo(expected.length);
-        assertThat(actual).isEqualTo(expected);
+        byte[] expected = oracle.buildCompositeKeyNamespace("n", StringSerializer.INSTANCE);
+        assertThat(target.length()).isEqualTo(expected.length);
+        assertThat(target.getCopyOfBuffer()).isEqualTo(expected);
     }
 
-    private static void assertParity(
-            int prefixBytes, int keyGroup, int key, String namespace) throws Exception {
+    private static void assertParity(int prefixBytes, int keyGroup, int key, String namespace)
+            throws Exception {
         DirectCompositeKeyWriter<Integer> writer =
-                new DirectCompositeKeyWriter<>(IntSerializer.INSTANCE, prefixBytes, 4);
+                new DirectCompositeKeyWriter<>(IntSerializer.INSTANCE, prefixBytes);
         SerializedCompositeKeyBuilder<Integer> oracle =
                 new SerializedCompositeKeyBuilder<>(IntSerializer.INSTANCE, prefixBytes, 4);
-        ByteBuffer target = ByteBuffer.allocateDirect(128);
+        DataOutputSerializer target = new DataOutputSerializer(128);
 
-        int length =
-                writer.write(
-                        key,
-                        keyGroup,
-                        namespace,
-                        StringSerializer.INSTANCE,
-                        target);
+        writer.write(key, keyGroup, namespace, StringSerializer.INSTANCE, target);
         oracle.setKeyAndKeyGroup(key, keyGroup);
-        byte[] expected =
-                oracle.buildCompositeKeyNamespace(
-                        namespace, StringSerializer.INSTANCE);
-        byte[] actual = new byte[length];
-        target.flip();
-        target.get(actual);
-
-        assertThat(actual).isEqualTo(expected);
+        byte[] expected = oracle.buildCompositeKeyNamespace(namespace, StringSerializer.INSTANCE);
+        assertThat(target.getCopyOfBuffer()).isEqualTo(expected);
     }
 }

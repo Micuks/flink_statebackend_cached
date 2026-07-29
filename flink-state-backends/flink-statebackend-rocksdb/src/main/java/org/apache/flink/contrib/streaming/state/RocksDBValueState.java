@@ -23,16 +23,19 @@ import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.state.RegisteredKeyValueStateBackendMetaInfo;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.util.FlinkRuntimeException;
+import org.apache.flink.util.ResourceGuard;
 
 import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.RocksDBException;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Objects;
 
 /**
@@ -66,7 +69,7 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
         super(columnFamily, namespaceSerializer, valueSerializer, defaultValue, backend);
         this.directKeyWriter =
                 new DirectCompositeKeyWriter<>(
-                        backend.getKeySerializer(), backend.getKeyGroupPrefixBytes(), 128);
+                        backend.getKeySerializer(), backend.getKeyGroupPrefixBytes());
     }
 
     @Override
@@ -85,101 +88,84 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
     }
 
     @Override
-    public int writeKeyAndNamespace(K key, N namespace, ByteBuffer target) throws IOException {
+    public void writeKeyAndNamespace(K key, N namespace, DataOutputView target) throws IOException {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(namespace, "namespace");
         Objects.requireNonNull(target, "target");
-        if (!target.isDirect()) {
-            throw new IllegalArgumentException("DSTL key target must be a direct ByteBuffer.");
-        }
         int keyGroup =
-                KeyGroupRangeAssignment.assignToKeyGroup(
-                        key, backend.getNumberOfKeyGroups());
-        return directKeyWriter.write(
-                key, keyGroup, namespace, namespaceSerializer, target);
+                KeyGroupRangeAssignment.assignToKeyGroup(key, backend.getNumberOfKeyGroups());
+        directKeyWriter.write(key, keyGroup, namespace, namespaceSerializer, target);
     }
 
     @Override
-    public void readValueBatch(
+    public synchronized int readValueBatch(
             ByteBuffer keyArena,
-            int[] keyOffsets,
-            int[] keyLengths,
+            ByteBuffer descriptors,
             int count,
             ByteBuffer valueArena,
-            int valueStride,
-            int[] valueLengths)
-            throws IOException, ValueTooLargeException {
-        validateDirectBatch(
-                keyArena,
-                keyOffsets,
-                keyLengths,
-                count,
-                valueArena,
-                valueStride,
-                valueLengths);
-
-        for (int i = 0; i < count; i++) {
-            ByteBuffer key = keyArena.duplicate();
-            key.position(keyOffsets[i]);
-            key.limit(keyOffsets[i] + keyLengths[i]);
-            key = key.slice();
-
-            int valueOffset = Math.multiplyExact(i, valueStride);
-            ByteBuffer value = valueArena.duplicate();
-            value.position(valueOffset);
-            value.limit(valueOffset + valueStride);
-            value = value.slice();
-
-            final int actualLength;
+            int valueStride)
+            throws IOException {
+        try (ResourceGuard.Lease ignored = backend.acquireDirectStateAccessLease()) {
+            validateDirectBatch(keyArena, descriptors, count, valueArena, valueStride);
             try {
-                actualLength =
-                        backend.db.get(
-                                columnFamily, backend.getReadOptions(), key, value);
+                return backend.db.multiGetDirectArena(
+                        columnFamily,
+                        backend.getReadOptions(),
+                        keyArena,
+                        descriptors,
+                        count,
+                        valueArena,
+                        valueStride);
             } catch (RocksDBException e) {
-                throw new IOException("Direct RocksDB value batch failed at index " + i, e);
-            }
-
-            if (actualLength == org.rocksdb.RocksDB.NOT_FOUND) {
-                valueLengths[i] = NOT_FOUND;
-            } else if (actualLength > valueStride) {
-                throw new ValueTooLargeException(i, actualLength, valueStride);
-            } else {
-                valueLengths[i] = actualLength;
+                throw new IOException("Direct RocksDB value batch failed", e);
             }
         }
+    }
+
+    @Override
+    public boolean usesSingleJniBatchRead() {
+        return true;
     }
 
     private static void validateDirectBatch(
             ByteBuffer keyArena,
-            int[] keyOffsets,
-            int[] keyLengths,
+            ByteBuffer descriptors,
             int count,
             ByteBuffer valueArena,
-            int valueStride,
-            int[] valueLengths) {
+            int valueStride) {
         Objects.requireNonNull(keyArena, "keyArena");
-        Objects.requireNonNull(keyOffsets, "keyOffsets");
-        Objects.requireNonNull(keyLengths, "keyLengths");
+        Objects.requireNonNull(descriptors, "descriptors");
         Objects.requireNonNull(valueArena, "valueArena");
-        Objects.requireNonNull(valueLengths, "valueLengths");
-        if (!keyArena.isDirect() || !valueArena.isDirect()) {
+        if (!keyArena.isDirect() || !descriptors.isDirect() || !valueArena.isDirect()) {
             throw new IllegalArgumentException("DSTL arenas must be direct ByteBuffers.");
         }
+        if (descriptors.isReadOnly() || valueArena.isReadOnly()) {
+            throw new IllegalArgumentException(
+                    "DSTL descriptor and value arenas must be writable.");
+        }
         if (count < 0
-                || count > keyOffsets.length
-                || count > keyLengths.length
-                || count > valueLengths.length) {
+                || count > MAX_BATCH_ENTRIES
+                || (long) count * DESCRIPTOR_BYTES > descriptors.remaining()) {
             throw new IllegalArgumentException("Invalid DSTL descriptor count: " + count);
         }
-        if (valueStride <= 0
-                || (long) count * valueStride > valueArena.capacity()) {
+        if (valueStride <= 0 || (long) count * valueStride > valueArena.remaining()) {
             throw new IllegalArgumentException("Invalid DSTL value stride/capacity.");
         }
+        ByteBuffer descriptorView = descriptors.duplicate().order(ByteOrder.nativeOrder());
+        int descriptorBase = descriptors.position();
+        int keyBytes = keyArena.remaining();
+        int valueBytes = valueArena.remaining();
         for (int i = 0; i < count; i++) {
-            if (keyOffsets[i] < 0
-                    || keyLengths[i] < 0
-                    || keyOffsets[i] > keyArena.capacity() - keyLengths[i]) {
+            int recordBase = descriptorBase + i * DESCRIPTOR_BYTES;
+            int keyOffset = descriptorView.getInt(recordBase + KEY_OFFSET_OFFSET);
+            int keyLength = descriptorView.getInt(recordBase + KEY_LENGTH_OFFSET);
+            int valueOffset = descriptorView.getInt(recordBase + VALUE_OFFSET_OFFSET);
+            if (keyOffset < 0 || keyLength < 0 || keyOffset > keyBytes - keyLength) {
                 throw new IllegalArgumentException("Invalid DSTL key descriptor at index " + i);
+            }
+            if (valueOffset != Math.multiplyExact(i, valueStride)
+                    || valueOffset > valueBytes - valueStride) {
+                throw new IllegalArgumentException("Invalid DSTL value descriptor at index " + i);
             }
         }
     }

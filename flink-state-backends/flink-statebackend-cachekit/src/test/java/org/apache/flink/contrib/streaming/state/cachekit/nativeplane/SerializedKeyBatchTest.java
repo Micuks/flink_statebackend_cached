@@ -72,10 +72,14 @@ class SerializedKeyBatchTest {
         assertEquals(ByteOrder.nativeOrder(), metadata.order());
         assertEquals(SerializedKeyBatch.METADATA_RECORD_BYTES, metadata.remaining());
         assertEquals(stateId, metadata.getInt(SerializedKeyBatch.STATE_ID_OFFSET));
-        assertEquals(0, metadata.getInt(SerializedKeyBatch.RESERVED_OFFSET));
+        assertEquals(0, metadata.getInt(SerializedKeyBatch.ORIGINAL_INDEX_OFFSET));
         assertEquals(generation, metadata.getLong(SerializedKeyBatch.GENERATION_OFFSET));
         assertEquals(0, metadata.getInt(SerializedKeyBatch.ARENA_OFFSET_OFFSET));
         assertEquals(expected.length(), metadata.getInt(SerializedKeyBatch.LENGTH_OFFSET));
+        assertEquals(0, metadata.getInt(SerializedKeyBatch.VALUE_OFFSET_OFFSET));
+        assertEquals(
+                SerializedKeyBatch.VALUE_UNSET,
+                metadata.getInt(SerializedKeyBatch.VALUE_LENGTH_OR_STATUS_OFFSET));
     }
 
     @Test
@@ -118,9 +122,9 @@ class SerializedKeyBatchTest {
         ByteBuffer callerArena = ByteBuffer.allocateDirect(48);
         callerArena.position(4);
         callerArena.limit(36);
-        ByteBuffer callerMetadata = ByteBuffer.allocateDirect(80);
+        ByteBuffer callerMetadata = ByteBuffer.allocateDirect(96);
         callerMetadata.position(8);
-        callerMetadata.limit(56);
+        callerMetadata.limit(72);
 
         SerializedKeyBatch<Integer, String> batch =
                 new SerializedKeyBatch<>(
@@ -135,7 +139,7 @@ class SerializedKeyBatchTest {
         assertEquals(4, callerArena.position());
         assertEquals(36, callerArena.limit());
         assertEquals(8, callerMetadata.position());
-        assertEquals(56, callerMetadata.limit());
+        assertEquals(72, callerMetadata.limit());
 
         batch.clear();
         assertEquals(0, batch.entryCount());
@@ -153,7 +157,7 @@ class SerializedKeyBatchTest {
         assertEquals(4, callerArena.position());
         assertEquals(36, callerArena.limit());
         assertEquals(8, callerMetadata.position());
-        assertEquals(56, callerMetadata.limit());
+        assertEquals(72, callerMetadata.limit());
     }
 
     @Test
@@ -236,8 +240,7 @@ class SerializedKeyBatchTest {
         assertArrayEquals(arenaBeforeFailure, copyBytes(batch.arenaSlice()));
         assertArrayEquals(metadataBeforeFailure, copyBytes(batch.metadataSlice()));
 
-        assertThrows(
-                IllegalStateException.class, () -> batch.append(3, 3L, 30, "bad-runtime"));
+        assertThrows(IllegalStateException.class, () -> batch.append(3, 3L, 30, "bad-runtime"));
         assertEquals(1, batch.entryCount());
         assertArrayEquals(arenaBeforeFailure, copyBytes(batch.arenaSlice()));
         assertArrayEquals(metadataBeforeFailure, copyBytes(batch.metadataSlice()));
@@ -256,7 +259,7 @@ class SerializedKeyBatchTest {
                                 IntSerializer.INSTANCE,
                                 StringSerializer.INSTANCE,
                                 ByteBuffer.allocate(32),
-                                ByteBuffer.allocateDirect(24)));
+                                ByteBuffer.allocateDirect(32)));
         assertThrows(
                 IllegalArgumentException.class,
                 () ->
@@ -264,7 +267,7 @@ class SerializedKeyBatchTest {
                                 IntSerializer.INSTANCE,
                                 StringSerializer.INSTANCE,
                                 ByteBuffer.allocateDirect(32),
-                                ByteBuffer.allocate(24)));
+                                ByteBuffer.allocate(32)));
         assertThrows(
                 IllegalArgumentException.class,
                 () ->
@@ -272,14 +275,14 @@ class SerializedKeyBatchTest {
                                 IntSerializer.INSTANCE,
                                 StringSerializer.INSTANCE,
                                 ByteBuffer.allocateDirect(32),
-                                ByteBuffer.allocateDirect(24).asReadOnlyBuffer()));
+                                ByteBuffer.allocateDirect(32).asReadOnlyBuffer()));
 
         SerializedKeyBatch<Integer, String> noMetadata =
                 new SerializedKeyBatch<>(
                         IntSerializer.INSTANCE,
                         StringSerializer.INSTANCE,
                         ByteBuffer.allocateDirect(32),
-                        ByteBuffer.allocateDirect(23));
+                        ByteBuffer.allocateDirect(31));
         assertEquals(0, noMetadata.maxEntries());
         assertThrows(EOFException.class, () -> noMetadata.append(1, 1L, 1, "ns"));
         assertEquals(0, noMetadata.entryCount());

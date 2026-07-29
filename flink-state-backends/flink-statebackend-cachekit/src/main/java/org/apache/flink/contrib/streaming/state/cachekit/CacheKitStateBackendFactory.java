@@ -18,6 +18,7 @@ package org.apache.flink.contrib.streaming.state.cachekit;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.contrib.streaming.state.RocksDBDirectValueAccess;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.contrib.streaming.state.RocksDBStateBackendFactory;
@@ -160,6 +161,47 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         .withDescription(
                                         "Expose opt-in CacheKit diagnostic metrics through Flink REST reporters.");
 
+        public static final ConfigOption<Boolean> DIRECT_STATE_TRANSIT_ENABLED =
+                        ConfigOptions.key("state.backend.cachekit.value-state.direct-transit.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Enable the experimental prepared-key Direct State Transit Lane. "
+                                                                        + "Disabled by default.");
+
+        public static final ConfigOption<Boolean> DIRECT_STATE_TRANSIT_REQUIRE_SINGLE_JNI =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.value-state.direct-transit.require-single-jni")
+                                        .booleanType()
+                                        .defaultValue(true)
+                                        .withDescription(
+                                                        "Keep the Direct State Transit Lane fail-closed unless the "
+                                                                        + "RocksDB dependency exposes one-JNI direct-arena MultiGet.");
+
+        public static final ConfigOption<Integer> DIRECT_STATE_TRANSIT_MAX_BATCH =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.value-state.direct-transit.max-batch")
+                                        .intType()
+                                        .defaultValue(64)
+                                        .withDescription(
+                                                        "Maximum prepared keys owned by one reusable direct envelope.");
+
+        public static final ConfigOption<Integer> DIRECT_STATE_TRANSIT_KEY_ARENA_BYTES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.value-state.direct-transit.key-arena-bytes")
+                                        .intType()
+                                        .defaultValue(16 * 1024)
+                                        .withDescription(
+                                                        "Direct prepared-key arena bytes per ValueState wrapper.");
+
+        public static final ConfigOption<Integer> DIRECT_STATE_TRANSIT_VALUE_STRIDE_BYTES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.value-state.direct-transit.value-stride-bytes")
+                                        .intType()
+                                        .defaultValue(512)
+                                        .withDescription(
+                                                        "Fixed value slot size, rounded up to a 128-byte cache line.");
+
 	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
 			.noDefaultValue()
@@ -226,6 +268,17 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final boolean mapIterationCacheFillEnabled = config.get(MAP_ITERATION_CACHE_FILL_ENABLED);
                 final int mapSnapshotMaxEntries = Math.max(0, config.get(MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
 		final boolean diagnosticsEnabled = config.get(DIAGNOSTICS_ENABLED);
+		final boolean directStateTransitEnabled = config.get(DIRECT_STATE_TRANSIT_ENABLED);
+		final boolean directStateTransitRequireSingleJni =
+				config.get(DIRECT_STATE_TRANSIT_REQUIRE_SINGLE_JNI);
+		final int directStateTransitMaxBatch =
+				Math.min(
+						RocksDBDirectValueAccess.MAX_BATCH_ENTRIES,
+						Math.max(1, config.get(DIRECT_STATE_TRANSIT_MAX_BATCH)));
+		final int directStateTransitKeyArenaBytes =
+				Math.max(128, config.get(DIRECT_STATE_TRANSIT_KEY_ARENA_BYTES));
+		final int directStateTransitValueStrideBytes =
+				Math.max(1, config.get(DIRECT_STATE_TRANSIT_VALUE_STRIDE_BYTES));
 		final String delegateClass = config.get(DELEGATE_BACKEND);
 
 			final boolean listStateCowEnabled = config.get(LIST_STATE_COW_ENABLED);
@@ -302,6 +355,11 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 								listStateRywEnabled,
 							clearedKeysCapacity,
 							priorityQueueOptEnabled,
+							directStateTransitEnabled,
+							directStateTransitRequireSingleJni,
+							directStateTransitMaxBatch,
+							directStateTransitKeyArenaBytes,
+							directStateTransitValueStrideBytes,
 							diagnosticsEnabled);
 	}
 

@@ -45,7 +45,17 @@ public final class PrefetchExecutor {
                             t.setDaemon(true);
                             return t;
                         },
-                        new ThreadPoolExecutor.DiscardOldestPolicy());
+                        (rejected, executor) -> {
+                            if (executor.isShutdown()) {
+                                notifyDropped(rejected);
+                                return;
+                            }
+                            Runnable oldest = executor.getQueue().poll();
+                            notifyDropped(oldest);
+                            if (!executor.getQueue().offer(rejected)) {
+                                notifyDropped(rejected);
+                            }
+                        });
         EXECUTOR.allowCoreThreadTimeOut(true);
     }
 
@@ -56,7 +66,19 @@ public final class PrefetchExecutor {
         try {
             EXECUTOR.execute(task);
         } catch (Throwable ignored) {
+            notifyDropped(task);
             // Best-effort: dropping a prefetch is always safe.
         }
+    }
+
+    private static void notifyDropped(Runnable task) {
+        if (task instanceof DroppableTask) {
+            ((DroppableTask) task).onDropped();
+        }
+    }
+
+    /** A queued prefetch that owns resources which must be released if it is evicted. */
+    public interface DroppableTask extends Runnable {
+        void onDropped();
     }
 }

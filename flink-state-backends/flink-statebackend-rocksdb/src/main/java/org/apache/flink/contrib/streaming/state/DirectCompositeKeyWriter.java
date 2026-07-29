@@ -16,45 +16,167 @@
 package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.core.memory.DataOutputSerializer;
+import org.apache.flink.core.memory.DataInputView;
+import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.runtime.state.CompositeKeySerializationUtils;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
+import java.util.Objects;
 
-/** Reusable exact-key serializer that writes into a caller-owned direct arena. */
+/** Reusable exact-key serializer that writes into a caller-owned output. */
 final class DirectCompositeKeyWriter<K> {
 
     private final TypeSerializer<K> keySerializer;
     private final int keyGroupPrefixBytes;
-    private final DataOutputSerializer scratch;
+    private final CountingDataOutputView countingOutput = new CountingDataOutputView();
 
-    DirectCompositeKeyWriter(
-            TypeSerializer<K> keySerializer, int keyGroupPrefixBytes, int initialCapacity) {
+    DirectCompositeKeyWriter(TypeSerializer<K> keySerializer, int keyGroupPrefixBytes) {
         this.keySerializer = keySerializer.duplicate();
         this.keyGroupPrefixBytes = keyGroupPrefixBytes;
-        this.scratch = new DataOutputSerializer(initialCapacity);
     }
 
-    <N> int write(
+    <N> void write(
             K key,
             int keyGroup,
             N namespace,
             TypeSerializer<N> namespaceSerializer,
-            ByteBuffer target)
+            DataOutputView target)
             throws IOException {
-        scratch.clear();
-        CompositeKeySerializationUtils.writeKeyGroup(
-                keyGroup, keyGroupPrefixBytes, scratch);
+        countingOutput.reset(target);
+        CompositeKeySerializationUtils.writeKeyGroup(keyGroup, keyGroupPrefixBytes, countingOutput);
         boolean ambiguous =
                 CompositeKeySerializationUtils.isAmbiguousKeyPossible(
                         keySerializer, namespaceSerializer);
-        CompositeKeySerializationUtils.writeKey(key, keySerializer, scratch, ambiguous);
-        CompositeKeySerializationUtils.writeNameSpace(
-                namespace, namespaceSerializer, scratch, ambiguous);
+        int keyStart = countingOutput.bytesWritten();
+        keySerializer.serialize(key, countingOutput);
+        if (ambiguous) {
+            CompositeKeySerializationUtils.writeVariableIntBytes(
+                    countingOutput.bytesWritten() - keyStart, countingOutput);
+        }
+        int namespaceStart = countingOutput.bytesWritten();
+        namespaceSerializer.serialize(namespace, countingOutput);
+        if (ambiguous) {
+            CompositeKeySerializationUtils.writeVariableIntBytes(
+                    countingOutput.bytesWritten() - namespaceStart, countingOutput);
+        }
+    }
 
-        int length = scratch.length();
-        target.put(scratch.getSharedBuffer(), 0, length);
-        return length;
+    /** Reusable byte-counting adapter; it never owns or retains serialized payload. */
+    private static final class CountingDataOutputView implements DataOutputView {
+        private DataOutputView target;
+        private int bytesWritten;
+
+        private void reset(DataOutputView target) {
+            this.target = Objects.requireNonNull(target, "target");
+            bytesWritten = 0;
+        }
+
+        private int bytesWritten() {
+            return bytesWritten;
+        }
+
+        @Override
+        public void write(int value) throws IOException {
+            target.write(value);
+            bytesWritten++;
+        }
+
+        @Override
+        public void write(byte[] source) throws IOException {
+            target.write(source);
+            bytesWritten = Math.addExact(bytesWritten, source.length);
+        }
+
+        @Override
+        public void write(byte[] source, int offset, int length) throws IOException {
+            target.write(source, offset, length);
+            bytesWritten = Math.addExact(bytesWritten, length);
+        }
+
+        @Override
+        public void writeBoolean(boolean value) throws IOException {
+            target.writeBoolean(value);
+            bytesWritten++;
+        }
+
+        @Override
+        public void writeByte(int value) throws IOException {
+            target.writeByte(value);
+            bytesWritten++;
+        }
+
+        @Override
+        public void writeShort(int value) throws IOException {
+            target.writeShort(value);
+            bytesWritten = Math.addExact(bytesWritten, Short.BYTES);
+        }
+
+        @Override
+        public void writeChar(int value) throws IOException {
+            target.writeChar(value);
+            bytesWritten = Math.addExact(bytesWritten, Character.BYTES);
+        }
+
+        @Override
+        public void writeInt(int value) throws IOException {
+            target.writeInt(value);
+            bytesWritten = Math.addExact(bytesWritten, Integer.BYTES);
+        }
+
+        @Override
+        public void writeLong(long value) throws IOException {
+            target.writeLong(value);
+            bytesWritten = Math.addExact(bytesWritten, Long.BYTES);
+        }
+
+        @Override
+        public void writeFloat(float value) throws IOException {
+            target.writeFloat(value);
+            bytesWritten = Math.addExact(bytesWritten, Float.BYTES);
+        }
+
+        @Override
+        public void writeDouble(double value) throws IOException {
+            target.writeDouble(value);
+            bytesWritten = Math.addExact(bytesWritten, Double.BYTES);
+        }
+
+        @Override
+        public void writeBytes(String value) throws IOException {
+            target.writeBytes(value);
+            bytesWritten = Math.addExact(bytesWritten, value.length());
+        }
+
+        @Override
+        public void writeChars(String value) throws IOException {
+            target.writeChars(value);
+            bytesWritten =
+                    Math.addExact(
+                            bytesWritten, Math.multiplyExact(value.length(), Character.BYTES));
+        }
+
+        @Override
+        public void writeUTF(String value) throws IOException {
+            target.writeUTF(value);
+            int encodedBytes = 0;
+            for (int index = 0; index < value.length(); index++) {
+                int character = value.charAt(index);
+                encodedBytes +=
+                        character >= 0x0001 && character <= 0x007f ? 1 : character > 0x07ff ? 3 : 2;
+            }
+            bytesWritten = Math.addExact(bytesWritten, Math.addExact(Short.BYTES, encodedBytes));
+        }
+
+        @Override
+        public void skipBytesToWrite(int numBytes) throws IOException {
+            target.skipBytesToWrite(numBytes);
+            bytesWritten = Math.addExact(bytesWritten, numBytes);
+        }
+
+        @Override
+        public void write(DataInputView source, int numBytes) throws IOException {
+            target.write(source, numBytes);
+            bytesWritten = Math.addExact(bytesWritten, numBytes);
+        }
     }
 }

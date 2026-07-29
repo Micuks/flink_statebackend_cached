@@ -20,6 +20,7 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.contrib.streaming.state.RocksDBDirectValueAccess;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.execution.Environment;
@@ -87,8 +88,14 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final boolean listStateRywEnabled;
     private final int listStateClearedKeysCapacity;
     private final boolean priorityQueueOptEnabled;
+    private final boolean directStateTransitEnabled;
+    private final boolean directStateTransitRequireSingleJni;
+    private final int directStateTransitMaxBatch;
+    private final int directStateTransitKeyArenaBytes;
+    private final int directStateTransitValueStrideBytes;
     private final boolean diagnosticsEnabled;
 
+    /** Backwards-compatible constructor with Direct State Transit disabled. */
     public CacheKitStateBackend(
             StateBackend delegateBackend,
             int valueCacheMaxEntries,
@@ -114,6 +121,68 @@ public class CacheKitStateBackend extends AbstractStateBackend
             int listStateClearedKeysCapacity,
             boolean priorityQueueOptEnabled,
             boolean diagnosticsEnabled) {
+        this(
+                delegateBackend,
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow,
+                valueBypassEnabled,
+                valueHitRateThreshold,
+                valueHitRateWindow,
+                mapPresenceCacheMaxEntries,
+                mapPresenceCachePolicy,
+                mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled,
+                false,
+                true,
+                64,
+                16 * 1024,
+                512,
+                diagnosticsEnabled);
+    }
+
+    public CacheKitStateBackend(
+            StateBackend delegateBackend,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled,
+            boolean directStateTransitEnabled,
+            boolean directStateTransitRequireSingleJni,
+            int directStateTransitMaxBatch,
+            int directStateTransitKeyArenaBytes,
+            int directStateTransitValueStrideBytes,
+            boolean diagnosticsEnabled) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -137,6 +206,11 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.listStateRywEnabled = listStateRywEnabled;
         this.listStateClearedKeysCapacity = listStateClearedKeysCapacity;
         this.priorityQueueOptEnabled = priorityQueueOptEnabled;
+        this.directStateTransitEnabled = directStateTransitEnabled;
+        this.directStateTransitRequireSingleJni = directStateTransitRequireSingleJni;
+        this.directStateTransitMaxBatch = directStateTransitMaxBatch;
+        this.directStateTransitKeyArenaBytes = directStateTransitKeyArenaBytes;
+        this.directStateTransitValueStrideBytes = directStateTransitValueStrideBytes;
         this.diagnosticsEnabled = diagnosticsEnabled;
     }
 
@@ -223,6 +297,11 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 listStateRywEnabled,
                 listStateClearedKeysCapacity,
                 priorityQueueOptEnabled,
+                directStateTransitEnabled,
+                directStateTransitRequireSingleJni,
+                directStateTransitMaxBatch,
+                directStateTransitKeyArenaBytes,
+                directStateTransitValueStrideBytes,
                 diagnosticsEnabled);
     }
 
@@ -304,6 +383,29 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 config.get(CacheKitStateBackendFactory.PRIORITY_QUEUE_OPT_ENABLED);
         final boolean diagnosticsEnabled =
                 config.get(CacheKitStateBackendFactory.DIAGNOSTICS_ENABLED);
+        final boolean directStateTransitEnabled =
+                config.get(CacheKitStateBackendFactory.DIRECT_STATE_TRANSIT_ENABLED);
+        final boolean directStateTransitRequireSingleJni =
+                config.get(CacheKitStateBackendFactory.DIRECT_STATE_TRANSIT_REQUIRE_SINGLE_JNI);
+        final int directStateTransitMaxBatch =
+                Math.min(
+                        RocksDBDirectValueAccess.MAX_BATCH_ENTRIES,
+                        Math.max(
+                                1,
+                                config.get(
+                                        CacheKitStateBackendFactory
+                                                .DIRECT_STATE_TRANSIT_MAX_BATCH)));
+        final int directStateTransitKeyArenaBytes =
+                Math.max(
+                        128,
+                        config.get(
+                                CacheKitStateBackendFactory.DIRECT_STATE_TRANSIT_KEY_ARENA_BYTES));
+        final int directStateTransitValueStrideBytes =
+                Math.max(
+                        1,
+                        config.get(
+                                CacheKitStateBackendFactory
+                                        .DIRECT_STATE_TRANSIT_VALUE_STRIDE_BYTES));
 
         return new CacheKitStateBackend(
                 configuredDelegate,
@@ -329,6 +431,11 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 listStateRywEnabled,
                 clearedKeysCapacity,
                 priorityQueueOptEnabled,
+                directStateTransitEnabled,
+                directStateTransitRequireSingleJni,
+                directStateTransitMaxBatch,
+                directStateTransitKeyArenaBytes,
+                directStateTransitValueStrideBytes,
                 diagnosticsEnabled);
     }
 }

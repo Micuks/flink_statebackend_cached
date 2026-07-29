@@ -552,6 +552,11 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         return readOptions;
     }
 
+    /** Acquires one lease for an internal direct batch that may run off the mailbox thread. */
+    ResourceGuard.Lease acquireDirectStateAccessLease() throws IOException {
+        return rocksDBResourceGuard.acquireResource();
+    }
+
     SerializedCompositeKeyBuilder<K> getSharedRocksKeyBuilder() {
         return sharedRocksKeyBuilder;
     }

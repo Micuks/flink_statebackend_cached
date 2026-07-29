@@ -24,6 +24,7 @@ import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalLis
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMapState;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalPriorityQueueSet;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalValueState;
+import org.apache.flink.contrib.streaming.state.cachekit.state.DirectStateTransitMetrics;
 import org.apache.flink.contrib.streaming.state.cachekit.state.MapSnapshotCacheMetrics;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
@@ -104,7 +105,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean listStateRywEnabled;
     private final int listStateClearedKeysCapacity;
     private final boolean priorityQueueOptEnabled;
+    private final boolean directStateTransitEnabled;
+    private final boolean directStateTransitRequireSingleJni;
+    private final int directStateTransitMaxBatch;
+    private final int directStateTransitKeyArenaBytes;
+    private final int directStateTransitValueStrideBytes;
     private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
+    private final DirectStateTransitMetrics directStateTransitMetrics;
 
     // --- fullOpt: shared flush executors (N wrappers share one thread each) ---
     private final ExecutorService listStateFlushExecutor;
@@ -126,6 +133,78 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     /** Guarded by {@link #lifecycleLock}. */
     private boolean disposed;
+
+    /** Backwards-compatible constructor with Direct State Transit disabled. */
+    public CacheKitKeyedStateBackend(
+            AbstractKeyedStateBackend<K> delegate,
+            TaskKvStateRegistry kvStateRegistry,
+            TypeSerializer<K> keySerializer,
+            ClassLoader userCodeClassLoader,
+            ExecutionConfig executionConfig,
+            TtlTimeProvider ttlTimeProvider,
+            CloseableRegistry cancelStreamRegistry,
+            MetricGroup metricGroup,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled) {
+        this(
+                delegate,
+                kvStateRegistry,
+                keySerializer,
+                userCodeClassLoader,
+                executionConfig,
+                ttlTimeProvider,
+                cancelStreamRegistry,
+                metricGroup,
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow,
+                valueBypassEnabled,
+                valueHitRateThreshold,
+                valueHitRateWindow,
+                mapPresenceCacheMaxEntries,
+                mapPresenceCachePolicy,
+                mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled,
+                false,
+                true,
+                64,
+                16 * 1024,
+                512,
+                diagnosticsEnabled);
+    }
 
     public CacheKitKeyedStateBackend(
             AbstractKeyedStateBackend<K> delegate,
@@ -158,6 +237,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean listStateRywEnabled,
             int listStateClearedKeysCapacity,
             boolean priorityQueueOptEnabled,
+            boolean directStateTransitEnabled,
+            boolean directStateTransitRequireSingleJni,
+            int directStateTransitMaxBatch,
+            int directStateTransitKeyArenaBytes,
+            int directStateTransitValueStrideBytes,
             boolean diagnosticsEnabled) {
         super(
                 kvStateRegistry,
@@ -193,8 +277,15 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.listStateRywEnabled = listStateRywEnabled;
         this.listStateClearedKeysCapacity = listStateClearedKeysCapacity;
         this.priorityQueueOptEnabled = priorityQueueOptEnabled;
+        this.directStateTransitEnabled = directStateTransitEnabled;
+        this.directStateTransitRequireSingleJni = directStateTransitRequireSingleJni;
+        this.directStateTransitMaxBatch = directStateTransitMaxBatch;
+        this.directStateTransitKeyArenaBytes = directStateTransitKeyArenaBytes;
+        this.directStateTransitValueStrideBytes = directStateTransitValueStrideBytes;
         this.mapSnapshotCacheMetrics =
                 MapSnapshotCacheMetrics.create(metricGroup, diagnosticsEnabled);
+        this.directStateTransitMetrics =
+                DirectStateTransitMetrics.create(metricGroup, diagnosticsEnabled);
 
         // fullOpt: initialize shared flush executors (daemon threads)
         this.listStateFlushExecutor = listStateCowEnabled
@@ -266,7 +357,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueCacheLruOverflow,
                     valueBypassEnabled,
                     valueHitRateThreshold,
-                    valueHitRateWindow);
+                    valueHitRateWindow,
+                    directStateTransitEnabled,
+                    directStateTransitRequireSingleJni,
+                    directStateTransitMaxBatch,
+                    directStateTransitKeyArenaBytes,
+                    directStateTransitValueStrideBytes,
+                    directStateTransitMetrics);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -397,7 +494,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueCacheLruOverflow,
                     valueBypassEnabled,
                     valueHitRateThreshold,
-                    valueHitRateWindow);
+                    valueHitRateWindow,
+                    directStateTransitEnabled,
+                    directStateTransitRequireSingleJni,
+                    directStateTransitMaxBatch,
+                    directStateTransitKeyArenaBytes,
+                    directStateTransitValueStrideBytes,
+                    directStateTransitMetrics);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }

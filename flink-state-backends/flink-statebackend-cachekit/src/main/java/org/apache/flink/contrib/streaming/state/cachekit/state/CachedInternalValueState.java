@@ -15,10 +15,14 @@
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.contrib.streaming.state.RocksDBDirectValueAccess;
+import org.apache.flink.contrib.streaming.state.cachekit.PrefetchExecutor;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.LruCachePolicy;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.DirectStateEnvelope;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.SerializedKeyBatch;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 
@@ -30,8 +34,7 @@ import java.util.Objects;
 /**
  * Minimal {@link InternalValueState} wrapper that adds a per-state LRU cache.
  *
- * <p>
- * Keying: (currentKey, namespace).
+ * <p>Keying: (currentKey, namespace).
  */
 public final class CachedInternalValueState<K, N, V> implements InternalValueState<K, N, V> {
 
@@ -48,6 +51,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
+    private final RocksDBDirectValueAccess<K, N> directValueAccess;
+    private final DirectStateEnvelope<K, N> directStateEnvelope;
+    private final SerializedKeyBatch.PreparedKeyWriter<K, N> directKeyWriter;
+    private final Object directEnvelopeOwnershipLock = new Object();
+    private long nextDirectEnvelopeToken;
+    private long directEnvelopeOwnerToken;
+    private final int directStateId;
+    private final DirectStateTransitMetrics directStateTransitMetrics;
 
     private N currentNamespace;
 
@@ -72,6 +83,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      * the backend disposes the RocksDB delegate.
      */
     private volatile boolean closed = false;
+
     private final java.util.concurrent.locks.ReadWriteLock lifecycleLock =
             new java.util.concurrent.locks.ReentrantReadWriteLock();
 
@@ -131,6 +143,40 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             boolean bypassEnabled,
             double hitRateThreshold,
             int hitRateWindow) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                false,
+                true,
+                64,
+                16 * 1024,
+                512,
+                DirectStateTransitMetrics.disabled());
+    }
+
+    public CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean directStateTransitEnabled,
+            boolean directStateTransitRequireSingleJni,
+            int directStateTransitMaxBatch,
+            int directStateTransitKeyArenaBytes,
+            int directStateTransitValueStrideBytes,
+            DirectStateTransitMetrics directStateTransitMetrics) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -142,6 +188,35 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
+        this.directStateTransitMetrics =
+                Objects.requireNonNull(directStateTransitMetrics, "directStateTransitMetrics");
+        this.directStateId = System.identityHashCode(delegate);
+
+        @SuppressWarnings("unchecked")
+        RocksDBDirectValueAccess<K, N> candidate =
+                delegate instanceof RocksDBDirectValueAccess
+                        ? (RocksDBDirectValueAccess<K, N>) delegate
+                        : null;
+        boolean directActive =
+                directStateTransitEnabled
+                        && candidate != null
+                        && (!directStateTransitRequireSingleJni
+                                || candidate.usesSingleJniBatchRead());
+        if (directActive) {
+            this.directValueAccess = candidate;
+            this.directStateEnvelope =
+                    new DirectStateEnvelope<>(
+                            keySerializer,
+                            namespaceSerializer,
+                            directStateTransitMaxBatch,
+                            directStateTransitKeyArenaBytes,
+                            directStateTransitValueStrideBytes);
+            this.directKeyWriter = candidate::writeKeyAndNamespace;
+        } else {
+            this.directValueAccess = null;
+            this.directStateEnvelope = null;
+            this.directKeyWriter = null;
+        }
 
         // L1 Cache: ~20% of maxEntries or at least 128
         int l1Size = Math.max(128, maxEntries / 5);
@@ -191,8 +266,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             // We have to create a new key OR look it up from entries (inefficient).
             // Actually, for sticky cache, we just need A key copy.
             // Creating a new storage key is unavoidable if we want to store it in sticky.
-            KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
-                    namespaceSerializer);
+            KeyNamespaceKey<K, N> storageKey =
+                    new KeyNamespaceKey<>(
+                            currentKey, currentNamespace, keySerializer, namespaceSerializer);
             updateSticky(storageKey, l1Cached);
 
             recordAccess(true); // Hit
@@ -203,8 +279,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         CachedValue<V> l2Cached = l2Cache.get(lookupKey);
         if (l2Cached != null) {
             // Promote to L1 (Clean)
-            KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
-                    namespaceSerializer);
+            KeyNamespaceKey<K, N> storageKey =
+                    new KeyNamespaceKey<>(
+                            currentKey, currentNamespace, keySerializer, namespaceSerializer);
             CachedValue<V> newValue = CachedValue.of(l2Cached.valueOrNull(), false);
             l1Cache.put(storageKey, newValue);
 
@@ -219,8 +296,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (!staging.isEmpty()) {
             StagedValue<V> staged = staging.remove(lookupKey);
             if (staged != null && staged.gen == writeGen) {
-                KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace,
-                        keySerializer, namespaceSerializer);
+                KeyNamespaceKey<K, N> storageKey =
+                        new KeyNamespaceKey<>(
+                                currentKey, currentNamespace, keySerializer, namespaceSerializer);
                 CachedValue<V> newValue = CachedValue.of(staged.value, false);
                 l1Cache.put(storageKey, newValue);
                 updateSticky(storageKey, newValue);
@@ -235,8 +313,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         // 6. Update L1 (Clean)
         // Even if bypassing (sampled), we populate L1 to allow hit rate recovery
-        KeyNamespaceKey<K, N> storageKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
-                namespaceSerializer);
+        KeyNamespaceKey<K, N> storageKey =
+                new KeyNamespaceKey<>(
+                        currentKey, currentNamespace, keySerializer, namespaceSerializer);
         CachedValue<V> newValue = CachedValue.of(loaded, false);
         l1Cache.put(storageKey, newValue);
 
@@ -281,16 +360,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             delegate.update(value);
 
             // Update L1 as Clean so subsequent reads (if sampled or re-enabled) find it.
-            KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
-                    namespaceSerializer);
+            KeyNamespaceKey<K, N> cacheKey =
+                    new KeyNamespaceKey<>(
+                            currentKey, currentNamespace, keySerializer, namespaceSerializer);
             CachedValue<V> newValue = CachedValue.of(value, false); // Clean
             l1Cache.put(cacheKey, newValue);
             updateSticky(cacheKey, newValue);
             return;
         }
 
-        KeyNamespaceKey<K, N> cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer,
-                namespaceSerializer);
+        KeyNamespaceKey<K, N> cacheKey =
+                new KeyNamespaceKey<>(
+                        currentKey, currentNamespace, keySerializer, namespaceSerializer);
         CachedValue<V> newValue = CachedValue.of(value, true);
 
         // Write-Back: Update L1 only (marked dirty)
@@ -308,7 +389,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (lastAccessKey != null && lastAccessKey.isSame(currentKey, currentNamespace)) {
             cacheKey = lastAccessKey;
         } else {
-            cacheKey = new KeyNamespaceKey<>(currentKey, currentNamespace, keySerializer, namespaceSerializer);
+            cacheKey =
+                    new KeyNamespaceKey<>(
+                            currentKey, currentNamespace, keySerializer, namespaceSerializer);
         }
 
         CachedValue<V> existing = findCachedValue(currentKey);
@@ -360,7 +443,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // Must flush to ensure delegate has latest state before serialization
         flush();
         return delegate.getSerializedValue(
-                serializedKeyAndNamespace, safeKeySerializer, safeNamespaceSerializer, safeValueSerializer);
+                serializedKeyAndNamespace,
+                safeKeySerializer,
+                safeNamespaceSerializer,
+                safeValueSerializer);
     }
 
     @Override
@@ -379,8 +465,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
 
             // Flush L1 dirty entries to L2 (which writes through)
-            java.util.List<java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>>> dirtyEntries = new java.util.ArrayList<>();
-            for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : l1Cache.entries()) {
+            java.util.List<java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>>>
+                    dirtyEntries = new java.util.ArrayList<>();
+            for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry :
+                    l1Cache.entries()) {
                 if (entry.getValue().dirty) {
                     dirtyEntries.add(entry);
                 }
@@ -418,16 +506,19 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     /**
-     * Mailbox-side half of the async prefetch: serialize (key, namespace) for every key that is
-     * not already cached or staged, then hand the byte[] batch to the shared worker thread. The
-     * only work on the mailbox thread is key serialization; the RocksDB reads and value
-     * deserialization happen off-thread and overlap with record dispatch / backpressure waits.
+     * Mailbox-side half of the async prefetch. The single-JNI path prepares exact keys in one
+     * reusable direct envelope; the compatibility path serializes individual queryable-state
+     * requests. RocksDB reads and value deserialization happen off-thread and overlap with record
+     * dispatch / backpressure waits.
      *
      * @return a worker task to run via PrefetchExecutor, or null if there is nothing to fetch.
      */
     public Runnable buildAsyncPrefetchTask(Iterable<? extends K> keys) {
         if (closed || keys == null || currentNamespace == null) {
             return null;
+        }
+        if (directStateEnvelope != null) {
+            return buildDirectPrefetchTask(keys);
         }
         java.util.ArrayList<byte[]> serialized = new java.util.ArrayList<>();
         try {
@@ -455,6 +546,143 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         final long gen = writeGen;
         return () -> fetchIntoStaging(serialized, gen);
+    }
+
+    /**
+     * Mailbox-side prepared-key path. Exactly one reusable envelope may be owned by the worker; a
+     * concurrent prefetch request is droppable and never falls back to allocating per-key arrays.
+     */
+    private Runnable buildDirectPrefetchTask(Iterable<? extends K> keys) {
+        final long envelopeToken = acquireDirectEnvelope();
+        if (envelopeToken == 0L) {
+            directStateTransitMetrics.recordBusySkip();
+            return null;
+        }
+        final long gen = writeGen;
+        try {
+            directStateEnvelope.begin(currentNamespace, gen);
+            for (K key : keys) {
+                if (directStateEnvelope.entryCount() >= directStateEnvelope.maxEntries()) {
+                    break;
+                }
+                if (key == null || findCachedValueFor(key, currentNamespace) != null) {
+                    continue;
+                }
+                setLookupKey(key, currentNamespace);
+                if (staging.containsKey(lookupKey)) {
+                    continue;
+                }
+                directStateEnvelope.append(directStateId, key, directKeyWriter);
+            }
+            if (directStateEnvelope.entryCount() == 0) {
+                releaseDirectEnvelope(envelopeToken);
+                return null;
+            }
+            directStateTransitMetrics.recordPrepared(directStateEnvelope.entryCount());
+            return new PrefetchExecutor.DroppableTask() {
+                @Override
+                public void run() {
+                    fetchDirectIntoStaging(gen, envelopeToken);
+                }
+
+                @Override
+                public void onDropped() {
+                    directStateTransitMetrics.recordBusySkip();
+                    releaseDirectEnvelope(envelopeToken);
+                }
+            };
+        } catch (Throwable failure) {
+            directStateTransitMetrics.recordFailureFallback();
+            releaseDirectEnvelope(envelopeToken);
+            return null;
+        }
+    }
+
+    /** Worker-side direct RocksDB read plus direct-buffer state materialization. */
+    private void fetchDirectIntoStaging(long gen, long envelopeToken) {
+        try {
+            if (workerValueSerializer == null) {
+                workerValueSerializer = delegate.getValueSerializer().duplicate();
+            }
+            if (staging.size() > ASYNC_STAGING_MAX_ENTRIES) {
+                staging.clear();
+            }
+            if (gen != writeGen) {
+                directStateTransitMetrics.recordGenerationDrop();
+                return;
+            }
+
+            lifecycleLock.readLock().lock();
+            try {
+                if (closed) {
+                    return;
+                }
+                directStateTransitMetrics.recordReadCall(
+                        directValueAccess.usesSingleJniBatchRead(),
+                        directStateEnvelope.entryCount());
+                directStateEnvelope.read(directValueAccess);
+            } finally {
+                lifecycleLock.readLock().unlock();
+            }
+
+            if (directStateEnvelope.hasOverflow()) {
+                directStateTransitMetrics.recordOverflowFallback();
+                return;
+            }
+            for (int index = 0; index < directStateEnvelope.entryCount(); index++) {
+                if (gen != writeGen) {
+                    directStateTransitMetrics.recordGenerationDrop();
+                    return;
+                }
+                int valueLength = directStateEnvelope.valueLengthOrStatus(index);
+                if (valueLength == RocksDBDirectValueAccess.NOT_FOUND) {
+                    directStateTransitMetrics.recordMiss();
+                    continue;
+                }
+                if (valueLength < 0) {
+                    directStateTransitMetrics.recordFailureFallback();
+                    return;
+                }
+                if (valueLength == 0) {
+                    directStateTransitMetrics.recordEmptyValue();
+                }
+                V value = workerValueSerializer.deserialize(directStateEnvelope.valueInput(index));
+                staging.put(
+                        new KeyNamespaceKey<>(
+                                directStateEnvelope.logicalKey(index),
+                                directStateEnvelope.namespaceSnapshot()),
+                        new StagedValue<>(value, gen));
+                directStateTransitMetrics.recordMaterialized();
+            }
+        } catch (Throwable failure) {
+            directStateTransitMetrics.recordFailureFallback();
+        } finally {
+            releaseDirectEnvelope(envelopeToken);
+        }
+    }
+
+    private long acquireDirectEnvelope() {
+        synchronized (directEnvelopeOwnershipLock) {
+            if (directEnvelopeOwnerToken != 0L) {
+                return 0L;
+            }
+            long token = ++nextDirectEnvelopeToken;
+            if (token == 0L) {
+                token = ++nextDirectEnvelopeToken;
+            }
+            directEnvelopeOwnerToken = token;
+            return token;
+        }
+    }
+
+    private void releaseDirectEnvelope(long envelopeToken) {
+        synchronized (directEnvelopeOwnershipLock) {
+            if (directEnvelopeOwnerToken != envelopeToken) {
+                return;
+            }
+            directStateEnvelope.clear();
+            directEnvelopeOwnerToken = 0L;
+        }
     }
 
     /**
@@ -497,8 +725,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     continue;
                 }
                 org.apache.flink.core.memory.DataInputDeserializer in =
-                        new org.apache.flink.core.memory.DataInputDeserializer(
-                                skn, 0, skn.length);
+                        new org.apache.flink.core.memory.DataInputDeserializer(skn, 0, skn.length);
                 K key = workerKeySerializer.deserialize(in);
                 in.readByte(); // magic number
                 N namespace = workerNamespaceSerializer.deserialize(in);
@@ -506,9 +733,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         new org.apache.flink.core.memory.DataInputDeserializer(
                                 valueBytes, 0, valueBytes.length);
                 V value = workerValueSerializer.deserialize(valueIn);
-                staging.put(
-                        new KeyNamespaceKey<>(key, namespace),
-                        new StagedValue<>(value, gen));
+                staging.put(new KeyNamespaceKey<>(key, namespace), new StagedValue<>(value, gen));
             }
         } catch (Throwable ignored) {
             // Best-effort cache warmup; the authoritative read path is untouched.
@@ -698,14 +923,19 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
 
         // Storage constructor (Deep Copy)
-        private KeyNamespaceKey(K key, N namespace, TypeSerializer<K> keySerializer,
+        private KeyNamespaceKey(
+                K key,
+                N namespace,
+                TypeSerializer<K> keySerializer,
                 TypeSerializer<N> namespaceSerializer) {
             this.key = keySerializer != null ? keySerializer.copy(key) : key;
-            this.namespace = namespaceSerializer != null ? namespaceSerializer.copy(namespace) : namespace;
+            this.namespace =
+                    namespaceSerializer != null ? namespaceSerializer.copy(namespace) : namespace;
         }
 
         boolean isSame(K otherKey, N otherNamespace) {
-            return Objects.equals(this.key, otherKey) && Objects.equals(this.namespace, otherNamespace);
+            return Objects.equals(this.key, otherKey)
+                    && Objects.equals(this.namespace, otherNamespace);
         }
 
         @Override
