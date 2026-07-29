@@ -41,12 +41,16 @@ import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
@@ -144,6 +148,163 @@ class DirectStateTransitFailurePathTest {
         assertEquals(1, delegate.authoritativeReadCalls.get());
     }
 
+    @Test
+    void queuedGenerationChangeSkipsNativeReadAndFallsBack() throws Exception {
+        DirectValueState delegate = new DirectValueState();
+        AtomicReference<String> currentKey = new AtomicReference<>("writer");
+        MetricProbe metrics = new MetricProbe();
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                directState(delegate, currentKey, metrics);
+
+        Runnable task = state.buildAsyncPrefetchTask(Arrays.asList("prefetched"));
+        assertNotNull(task);
+        state.update(91);
+        state.flush();
+        task.run();
+
+        assertEquals(0, delegate.directReadCalls.get());
+        assertEquals(1L, metrics.value("dstl_generation_drops"));
+        currentKey.set("prefetched");
+        assertEquals(91, state.value());
+        assertEquals(1, delegate.authoritativeReadCalls.get());
+    }
+
+    @Test
+    void inFlightGenerationChangeDropsCompletedBatchAndFallsBack() throws Exception {
+        DirectValueState delegate = new DirectValueState();
+        CountDownLatch readEntered = new CountDownLatch(1);
+        CountDownLatch releaseRead = new CountDownLatch(1);
+        delegate.batchRead =
+                (descriptors, count, values, stride) -> {
+                    readEntered.countDown();
+                    await(releaseRead, "release in-flight direct read");
+                    return publishIntValues(descriptors, count, values, stride, 70);
+                };
+        AtomicReference<String> currentKey = new AtomicReference<>("writer");
+        MetricProbe metrics = new MetricProbe();
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                directState(delegate, currentKey, metrics);
+        Runnable task = state.buildAsyncPrefetchTask(Arrays.asList("prefetched"));
+        assertNotNull(task);
+
+        Thread worker = new Thread(task, "dstl-generation-test");
+        worker.setDaemon(true);
+        worker.start();
+        try {
+            assertTrue(readEntered.await(5, TimeUnit.SECONDS));
+            state.update(92);
+            state.flush();
+        } finally {
+            releaseRead.countDown();
+        }
+        worker.join(TimeUnit.SECONDS.toMillis(5));
+
+        assertFalse(worker.isAlive());
+        assertEquals(1, delegate.directReadCalls.get());
+        assertEquals(1L, metrics.value("dstl_generation_drops"));
+        assertEquals(0L, metrics.value("dstl_values_materialized"));
+        currentKey.set("prefetched");
+        assertEquals(92, state.value());
+        assertEquals(1, delegate.authoritativeReadCalls.get());
+    }
+
+    @Test
+    void closeWaitsForInFlightReadAndRejectsNewTasks() throws Exception {
+        DirectValueState delegate = new DirectValueState();
+        CountDownLatch readEntered = new CountDownLatch(1);
+        CountDownLatch releaseRead = new CountDownLatch(1);
+        delegate.batchRead =
+                (descriptors, count, values, stride) -> {
+                    readEntered.countDown();
+                    await(releaseRead, "release direct read before close");
+                    return publishIntValues(descriptors, count, values, stride, 70);
+                };
+        AtomicReference<String> currentKey = new AtomicReference<>("a");
+        MetricProbe metrics = new MetricProbe();
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                directState(delegate, currentKey, metrics);
+        Runnable task = state.buildAsyncPrefetchTask(Arrays.asList("a"));
+        assertNotNull(task);
+
+        CountDownLatch closeStarted = new CountDownLatch(1);
+        CountDownLatch closeReturned = new CountDownLatch(1);
+        Thread worker = new Thread(task, "dstl-close-worker-test");
+        Thread closer =
+                new Thread(
+                        () -> {
+                            closeStarted.countDown();
+                            state.close();
+                            closeReturned.countDown();
+                        },
+                        "dstl-close-barrier-test");
+        worker.setDaemon(true);
+        closer.setDaemon(true);
+        worker.start();
+        try {
+            assertTrue(readEntered.await(5, TimeUnit.SECONDS));
+            closer.start();
+            assertTrue(closeStarted.await(5, TimeUnit.SECONDS));
+            assertFalse(closeReturned.await(200, TimeUnit.MILLISECONDS));
+        } finally {
+            releaseRead.countDown();
+        }
+        worker.join(TimeUnit.SECONDS.toMillis(5));
+        closer.join(TimeUnit.SECONDS.toMillis(5));
+
+        assertFalse(worker.isAlive());
+        assertFalse(closer.isAlive());
+        assertEquals(1, delegate.directReadCalls.get());
+        assertNull(state.buildAsyncPrefetchTask(Arrays.asList("b")));
+    }
+
+    @Test
+    void defaultConstructorKeepsDirectDelegateOnLegacyPath() throws Exception {
+        DirectValueState delegate = new DirectValueState();
+        delegate.setSerializedValue(55);
+        AtomicReference<String> currentKey = new AtomicReference<>("a");
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Runnable task = state.buildAsyncPrefetchTask(Arrays.asList("a"));
+        assertNotNull(task);
+        task.run();
+
+        assertEquals(55, state.value());
+        assertEquals(0, delegate.directReadCalls.get());
+        assertEquals(1, delegate.serializedReadCalls.get());
+        assertEquals(0, delegate.authoritativeReadCalls.get());
+    }
+
+    @Test
+    void nonRocksDBDelegateUsesLegacyPathWhenDirectFlagIsRequested() throws Exception {
+        PlainValueState delegate = new PlainValueState();
+        delegate.setSerializedValue(56);
+        AtomicReference<String> currentKey = new AtomicReference<>("a");
+        MetricProbe metrics = new MetricProbe();
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                requestedDirectState(delegate, currentKey, metrics);
+
+        Runnable task = state.buildAsyncPrefetchTask(Arrays.asList("a"));
+        assertNotNull(task);
+        task.run();
+
+        assertEquals(56, state.value());
+        assertEquals(1, delegate.serializedReadCalls.get());
+        assertEquals(0, delegate.authoritativeReadCalls.get());
+        assertEquals(0L, metrics.value("dstl_batches_prepared"));
+        assertEquals(0L, metrics.value("dstl_single_jni_calls"));
+    }
+
     private static CachedInternalValueState<String, VoidNamespace, Integer> directState(
             DirectValueState delegate,
             AtomicReference<String> currentKey,
@@ -167,6 +328,42 @@ class DirectStateTransitFailurePathTest {
                         metrics.metrics);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
         return state;
+    }
+
+    private static CachedInternalValueState<String, VoidNamespace, Integer> requestedDirectState(
+            PlainValueState delegate,
+            AtomicReference<String> currentKey,
+            MetricProbe metrics) {
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        true,
+                        4,
+                        512,
+                        128,
+                        metrics.metrics);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        return state;
+    }
+
+    private static void await(CountDownLatch latch, String description) throws IOException {
+        try {
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                throw new IOException("Timed out waiting to " + description);
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while waiting to " + description, interrupted);
+        }
     }
 
     private static int publishMisses(
@@ -277,7 +474,7 @@ class DirectStateTransitFailurePathTest {
             return null;
         }
 
-        private void setSerializedValue(int value) throws IOException {
+        void setSerializedValue(int value) throws IOException {
             DataOutputSerializer output = new DataOutputSerializer(Integer.BYTES);
             IntSerializer.INSTANCE.serialize(value, output);
             serializedValue = output.getCopyOfBuffer();
