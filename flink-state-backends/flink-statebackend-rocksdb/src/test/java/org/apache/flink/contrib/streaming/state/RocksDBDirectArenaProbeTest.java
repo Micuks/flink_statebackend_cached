@@ -38,6 +38,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -56,18 +57,28 @@ public class RocksDBDirectArenaProbeTest {
     private static final int[] BATCH_SIZES = {4, 8, 16, 64};
     private static final int[] HIT_RATIOS = {0, 50, 100};
     private static final int VALUE_STRIDE = 128;
-    private static final int SAMPLES = 7;
-    private static final int ITERATIONS_PER_SAMPLE = 10;
+    private static final int WARMUP_ROUNDS = 5;
+    private static final int MEASURED_ROUNDS = 20;
+    private static final int ITERATIONS_PER_ROUND = 10;
+    private static final int EXPECTED_SUMMARY_ROWS = BATCH_SIZES.length * HIT_RATIOS.length * 3;
+    private static final int EXPECTED_RAW_ROWS = EXPECTED_SUMMARY_ROWS * MEASURED_ROUNDS;
 
     @Rule public final TemporaryFolder tmp = new TemporaryFolder();
 
     @Test
     @SuppressWarnings("unchecked")
     public void compareDirectGetListMultiGetAndDirectArena() throws Exception {
-        StringBuilder csv =
+        StringBuilder rawCsv =
                 new StringBuilder(
-                        "batch_size,hit_ratio,path,median_ns_per_batch,median_ns_per_key,"
+                        "batch_size,hit_ratio,path,measured_round,iterations,"
+                                + "ns_per_batch,ns_per_key,present,checksum\n");
+        StringBuilder summaryCsv =
+                new StringBuilder(
+                        "batch_size,hit_ratio,path,warmup_rounds,measured_rounds,"
+                                + "iterations_per_round,median_ns_per_batch,median_ns_per_key,"
                                 + "present,checksum\n");
+        int rawRows = 0;
+        int summaryRows = 0;
         try (RocksDBKeyedStateBackendTestFactory factory =
                 new RocksDBKeyedStateBackendTestFactory()) {
             RocksDBKeyedStateBackend<Integer> backend =
@@ -106,52 +117,75 @@ public class RocksDBDirectArenaProbeTest {
                     assertEquals(directGet, directArena);
                     assertEquals(present, directArena.present);
 
-                    record(
-                            csv,
-                            batchSize,
-                            hitRatio,
-                            "direct_get_n",
-                            measure(
+                    rawRows +=
+                            measureAndRecord(
+                                    rawCsv,
+                                    summaryCsv,
+                                    batchSize,
+                                    hitRatio,
+                                    "direct_get_n",
                                     () ->
                                             runDirectGet(
                                                     backend,
                                                     state.columnFamily,
                                                     prepared.directKeys),
-                                    directGet),
-                            directGet);
-                    record(
-                            csv,
-                            batchSize,
-                            hitRatio,
-                            "multi_get_as_list",
-                            measure(
+                                    directGet);
+                    summaryRows++;
+                    rawRows +=
+                            measureAndRecord(
+                                    rawCsv,
+                                    summaryCsv,
+                                    batchSize,
+                                    hitRatio,
+                                    "multi_get_as_list",
                                     () ->
                                             runListMultiGet(
                                                     backend, state.columnFamily, prepared.heapKeys),
-                                    directGet),
-                            directGet);
-                    record(
-                            csv,
-                            batchSize,
-                            hitRatio,
-                            "direct_arena",
-                            measure(
+                                    directGet);
+                    summaryRows++;
+                    rawRows +=
+                            measureAndRecord(
+                                    rawCsv,
+                                    summaryCsv,
+                                    batchSize,
+                                    hitRatio,
+                                    "direct_arena",
                                     () -> runDirectArena(backend, state.columnFamily, prepared),
-                                    directGet),
-                            directGet);
+                                    directGet);
+                    summaryRows++;
                 }
             }
         }
 
-        Path output = Paths.get("target", "direct-arena-probe.csv");
-        Files.createDirectories(output.getParent());
-        Files.write(
-                output,
-                csv.toString().getBytes(StandardCharsets.UTF_8),
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING);
-        System.out.println("DSTL_PROBE_CSV=" + output.toAbsolutePath());
-        System.out.print(csv);
+        assertEquals(EXPECTED_RAW_ROWS, rawRows);
+        assertEquals(EXPECTED_SUMMARY_ROWS, summaryRows);
+
+        Path rawOutput = Paths.get("target", "direct-arena-probe-raw.csv");
+        Path summaryOutput = Paths.get("target", "direct-arena-probe-summary.csv");
+        Path compatibilityOutput = Paths.get("target", "direct-arena-probe.csv");
+        Path checksumsOutput = Paths.get("target", "direct-arena-probe.sha256");
+        byte[] rawBytes = rawCsv.toString().getBytes(StandardCharsets.UTF_8);
+        byte[] summaryBytes = summaryCsv.toString().getBytes(StandardCharsets.UTF_8);
+        writeArtifact(rawOutput, rawBytes);
+        writeArtifact(summaryOutput, summaryBytes);
+        writeArtifact(compatibilityOutput, summaryBytes);
+        String checksums =
+                sha256Hex(rawBytes)
+                        + "  "
+                        + rawOutput.getFileName()
+                        + '\n'
+                        + sha256Hex(summaryBytes)
+                        + "  "
+                        + summaryOutput.getFileName()
+                        + '\n';
+        writeArtifact(checksumsOutput, checksums.getBytes(StandardCharsets.UTF_8));
+
+        System.out.println("DSTL_PROBE_RAW_CSV=" + rawOutput.toAbsolutePath());
+        System.out.println("DSTL_PROBE_SUMMARY_CSV=" + summaryOutput.toAbsolutePath());
+        System.out.println("DSTL_PROBE_SHA256=" + checksumsOutput.toAbsolutePath());
+        System.out.println("DSTL_PROBE_RAW_ROWS=" + rawRows);
+        System.out.println("DSTL_PROBE_SUMMARY_ROWS=" + summaryRows);
+        System.out.print(summaryCsv);
     }
 
     private static PreparedCase prepare(
@@ -287,22 +321,29 @@ public class RocksDBDirectArenaProbeTest {
         return new ProbeResult(present, checksum);
     }
 
-    private static long measure(CheckedProbe probe, ProbeResult expected) throws Exception {
-        for (int warmup = 0; warmup < 3; warmup++) {
-            assertEquals(expected, probe.run());
+    private static Measurement measure(CheckedProbe probe, ProbeResult expected) throws Exception {
+        for (int warmup = 0; warmup < WARMUP_ROUNDS; warmup++) {
+            ProbeResult actual = null;
+            for (int iteration = 0; iteration < ITERATIONS_PER_ROUND; iteration++) {
+                actual = probe.run();
+            }
+            assertEquals(expected, actual);
         }
-        long[] samples = new long[SAMPLES];
+        long[] samples = new long[MEASURED_ROUNDS];
         for (int sample = 0; sample < samples.length; sample++) {
             long start = System.nanoTime();
             ProbeResult actual = null;
-            for (int iteration = 0; iteration < ITERATIONS_PER_SAMPLE; iteration++) {
+            for (int iteration = 0; iteration < ITERATIONS_PER_ROUND; iteration++) {
                 actual = probe.run();
             }
-            samples[sample] = (System.nanoTime() - start) / ITERATIONS_PER_SAMPLE;
+            samples[sample] = (System.nanoTime() - start) / ITERATIONS_PER_ROUND;
             assertEquals(expected, actual);
         }
-        Arrays.sort(samples);
-        return samples[samples.length / 2];
+        long[] sorted = samples.clone();
+        Arrays.sort(sorted);
+        long lower = sorted[(sorted.length - 1) / 2];
+        long upper = sorted[sorted.length / 2];
+        return new Measurement(samples, lower + (upper - lower) / 2);
     }
 
     private static int decodeInt(ByteBuffer value, int length) {
@@ -324,32 +365,88 @@ public class RocksDBDirectArenaProbeTest {
         return checksum * 0x9e3779b97f4a7c15L + value;
     }
 
-    private static void record(
-            StringBuilder csv,
+    private static int measureAndRecord(
+            StringBuilder rawCsv,
+            StringBuilder summaryCsv,
             int batchSize,
             int hitRatio,
             String path,
-            long medianNanos,
-            ProbeResult result) {
-        csv.append(batchSize)
+            CheckedProbe probe,
+            ProbeResult result)
+            throws Exception {
+        Measurement measurement = measure(probe, result);
+        for (int round = 0; round < measurement.samples.length; round++) {
+            long nanos = measurement.samples[round];
+            rawCsv.append(batchSize)
+                    .append(',')
+                    .append(hitRatio)
+                    .append(',')
+                    .append(path)
+                    .append(',')
+                    .append(round + 1)
+                    .append(',')
+                    .append(ITERATIONS_PER_ROUND)
+                    .append(',')
+                    .append(nanos)
+                    .append(',')
+                    .append((double) nanos / batchSize)
+                    .append(',')
+                    .append(result.present)
+                    .append(',')
+                    .append(result.checksum)
+                    .append('\n');
+        }
+        summaryCsv
+                .append(batchSize)
                 .append(',')
                 .append(hitRatio)
                 .append(',')
                 .append(path)
                 .append(',')
-                .append(medianNanos)
+                .append(WARMUP_ROUNDS)
                 .append(',')
-                .append((double) medianNanos / batchSize)
+                .append(MEASURED_ROUNDS)
+                .append(',')
+                .append(ITERATIONS_PER_ROUND)
+                .append(',')
+                .append(measurement.medianNanos)
+                .append(',')
+                .append((double) measurement.medianNanos / batchSize)
                 .append(',')
                 .append(result.present)
                 .append(',')
                 .append(result.checksum)
                 .append('\n');
+        return measurement.samples.length;
+    }
+
+    private static void writeArtifact(Path output, byte[] bytes) throws Exception {
+        Files.createDirectories(output.getParent());
+        Files.write(output, bytes, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+    }
+
+    private static String sha256Hex(byte[] bytes) throws Exception {
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
+        StringBuilder hex = new StringBuilder(digest.length * 2);
+        for (byte value : digest) {
+            hex.append(String.format("%02x", value & 0xff));
+        }
+        return hex.toString();
     }
 
     @FunctionalInterface
     private interface CheckedProbe {
         ProbeResult run() throws Exception;
+    }
+
+    private static final class Measurement {
+        private final long[] samples;
+        private final long medianNanos;
+
+        private Measurement(long[] samples, long medianNanos) {
+            this.samples = samples;
+            this.medianNanos = medianNanos;
+        }
     }
 
     private static final class PreparedCase {
