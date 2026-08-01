@@ -15,6 +15,12 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit;
 
+import org.apache.flink.configuration.ConfigOptions;
+import org.apache.flink.configuration.GlobalConfiguration;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -30,6 +36,13 @@ import java.util.concurrent.TimeUnit;
  * than a stale one.
  */
 public final class PrefetchExecutor {
+
+    private static final Logger LOG = LoggerFactory.getLogger(PrefetchExecutor.class);
+
+    static final String WORKER_THREAD_NAME = "cachekit-bp-prefetch";
+    static final String WORKER_NATIVE_THREAD_NAME = "cachekit-bp-pre";
+
+    private static final String WORKER_CPU_LIST = loadWorkerCpuList();
 
     /** A queued prefetch that must release any key reservations if the executor drops it. */
     public interface DropAwareTask extends Runnable {
@@ -67,7 +80,33 @@ public final class PrefetchExecutor {
                         TimeUnit.SECONDS,
                         new ArrayBlockingQueue<>(128),
                         runnable -> {
-                            Thread t = new Thread(runnable, "cachekit-bp-prefetch");
+                            Thread t =
+                                    new Thread(
+                                            () -> {
+                                                LinuxThreadAffinity.BindingResult result =
+                                                        LinuxThreadAffinity.bindCurrentThread(
+                                                                WORKER_NATIVE_THREAD_NAME,
+                                                                WORKER_CPU_LIST);
+                                                if (result.isEnabled()) {
+                                                    if (result.isSuccess()) {
+                                                        LOG.info(
+                                                                "CACHEKIT_BP_PREFETCH_AFFINITY "
+                                                                        + "status=bound tid={} "
+                                                                        + "requested={} observed={}",
+                                                                result.getTid(),
+                                                                result.getRequestedCpuList(),
+                                                                result.getObservedCpuList());
+                                                    } else {
+                                                        LOG.error(
+                                                                "CACHEKIT_BP_PREFETCH_AFFINITY "
+                                                                        + "status=failed requested={} reason={}",
+                                                                result.getRequestedCpuList(),
+                                                                result.getReason());
+                                                    }
+                                                }
+                                                runnable.run();
+                                            },
+                                            WORKER_THREAD_NAME);
                             t.setDaemon(true);
                             return t;
                         },
@@ -76,6 +115,18 @@ public final class PrefetchExecutor {
     }
 
     private PrefetchExecutor() {}
+
+    private static String loadWorkerCpuList() {
+        String perTaskManagerOverride = System.getenv("CACHEKIT_BP_PREFETCH_CPU_LIST");
+        if (perTaskManagerOverride != null && !perTaskManagerOverride.trim().isEmpty()) {
+            return perTaskManagerOverride.trim();
+        }
+        return GlobalConfiguration.loadConfiguration()
+                .get(
+                        ConfigOptions.key("state.backend.cachekit.bp-prefetch.affinity.cpu-list")
+                                .stringType()
+                                .defaultValue(""));
+    }
 
     /** Non-blocking, best-effort submission; failures never reach the mailbox thread. */
     public static void trySubmit(Runnable task) {
