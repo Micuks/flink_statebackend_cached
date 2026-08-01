@@ -119,14 +119,28 @@ public final class PrefetchExecutor {
                             return t;
                         },
                         DISCARD_OLDEST_WITH_NOTIFICATION);
-        EXECUTOR.allowCoreThreadTimeOut(true);
+        // Keep the single idle core worker alive after initializeAffinity(). Apart from making the
+        // opt-in affinity observable before the first prefetch, this is effectively free: the
+        // worker blocks on the queue and remains a daemon. A timeout would make affinity coverage
+        // depend on whether a workload happened to submit a prefetch in the previous 60 seconds.
+        EXECUTOR.allowCoreThreadTimeOut(false);
     }
 
     private PrefetchExecutor() {}
 
-    /** Forces affinity watchers to start when the CacheKit backend is created. */
+    /** Forces the affinity watchers and the unique prefetch worker to start with the backend. */
     static void initializeAffinity() {
-        // Class initialization performs the opt-in setup. The executor thread remains lazy.
+        // ThreadPoolExecutor serializes worker creation, so repeated backend construction and
+        // concurrent calls cannot create more than the configured single core worker.
+        EXECUTOR.prestartCoreThread();
+    }
+
+    static int getWorkerCountForTesting() {
+        return EXECUTOR.getPoolSize();
+    }
+
+    static boolean getCoreThreadTimeoutForTesting() {
+        return EXECUTOR.allowsCoreThreadTimeOut();
     }
 
     private static String loadCpuList(String environmentKey, String configurationKey) {
