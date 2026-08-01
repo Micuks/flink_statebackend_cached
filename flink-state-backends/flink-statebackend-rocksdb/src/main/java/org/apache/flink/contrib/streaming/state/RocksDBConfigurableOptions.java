@@ -256,6 +256,22 @@ public class RocksDBConfigurableOptions implements Serializable {
                             "If true, RocksDB will use block-based filter instead of full filter, this only take effect when bloom filter is used. "
                                     + "The default value is 'false'.");
 
+    public static final ConfigOption<Double> MEMTABLE_BLOOM_RATIO =
+            key("state.backend.rocksdb.memtable-bloom.ratio")
+                    .doubleType()
+                    .defaultValue(0.0)
+                    .withDescription(
+                            "The ratio of each memtable reserved for its Bloom filter. "
+                                    + "Set to 0.0 to disable the memtable Bloom filter; valid values are from 0.0 through 0.25.");
+
+    public static final ConfigOption<Boolean> MEMTABLE_BLOOM_WHOLE_KEY =
+            key("state.backend.rocksdb.memtable-bloom.whole-key")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "If true, add and probe whole keys in the memtable Bloom filter. "
+                                    + "This only takes effect when the memtable Bloom ratio is greater than 0.0.");
+
     public static final ConfigOption<Double> RESTORE_OVERLAP_FRACTION_THRESHOLD =
             key("state.backend.rocksdb.restore-overlap-fraction-threshold")
                     .doubleType()
@@ -290,6 +306,8 @@ public class RocksDBConfigurableOptions implements Serializable {
                 USE_BLOOM_FILTER,
                 BLOOM_FILTER_BITS_PER_KEY,
                 BLOOM_FILTER_BLOCK_BASED_MODE,
+                MEMTABLE_BLOOM_RATIO,
+                MEMTABLE_BLOOM_WHOLE_KEY,
                 RESTORE_OVERLAP_FRACTION_THRESHOLD
             };
 
@@ -338,6 +356,11 @@ public class RocksDBConfigurableOptions implements Serializable {
             Preconditions.checkArgument(
                     new File((String) value).isAbsolute(),
                     "Configured path for key " + key + " is not absolute.");
+        } else if (MEMTABLE_BLOOM_RATIO.equals(option)) {
+            double ratio = (Double) value;
+            Preconditions.checkArgument(
+                    ratio >= 0.0 && ratio <= 0.25,
+                    "Configured value for key " + key + " must be between 0.0 and 0.25.");
         }
     }
 }
