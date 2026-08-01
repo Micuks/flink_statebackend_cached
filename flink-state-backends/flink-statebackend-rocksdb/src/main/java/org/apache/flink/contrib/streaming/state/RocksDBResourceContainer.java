@@ -390,6 +390,17 @@ public final class RocksDBResourceContainer implements AutoCloseable {
         currentOptions.setMinWriteBufferNumberToMerge(
                 internalGetOption(RocksDBConfigurableOptions.MIN_WRITE_BUFFER_NUMBER_TO_MERGE));
 
+        final double memtableBloomRatio =
+                internalGetOption(RocksDBConfigurableOptions.MEMTABLE_BLOOM_RATIO);
+        final boolean memtableBloomWholeKey =
+                internalGetOption(RocksDBConfigurableOptions.MEMTABLE_BLOOM_WHOLE_KEY);
+        currentOptions.setMemtablePrefixBloomSizeRatio(memtableBloomRatio);
+        currentOptions.setMemtableWholeKeyFiltering(memtableBloomWholeKey);
+        LOG.info(
+                "Configured RocksDB memtable Bloom filter: ratio={}, whole-key={}",
+                memtableBloomRatio,
+                memtableBloomWholeKey);
+
         TableFormatConfig tableFormatConfig = currentOptions.tableFormatConfig();
 
         BlockBasedTableConfig blockBasedTableConfig;
