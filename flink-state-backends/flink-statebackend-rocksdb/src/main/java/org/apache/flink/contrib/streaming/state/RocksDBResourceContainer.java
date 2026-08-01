@@ -46,6 +46,8 @@ import javax.annotation.Nullable;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Locale;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -59,6 +61,7 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 public final class RocksDBResourceContainer implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(RocksDBResourceContainer.class);
 
+    private static final AtomicBoolean ARMLOCAL_ACTIVATION_LOGGED = new AtomicBoolean();
     // the filename length limit is 255 on most operating systems
     private static final int INSTANCE_PATH_LENGTH_LIMIT = 255 - "_LOG".length();
 
@@ -430,12 +433,76 @@ public final class RocksDBResourceContainer implements AutoCloseable {
                     internalGetOption(RocksDBConfigurableOptions.BLOOM_FILTER_BITS_PER_KEY);
             final boolean blockBasedMode =
                     internalGetOption(RocksDBConfigurableOptions.BLOOM_FILTER_BLOCK_BASED_MODE);
-            BloomFilter bloomFilter = new BloomFilter(bitsPerKey, blockBasedMode);
+            final boolean armLocalConfigured =
+                    configuration
+                                    .getOptional(
+                                            RocksDBConfigurableOptions
+                                                    .BLOOM_FILTER_FASTLOCAL_BLOCK_BYTES)
+                                    .isPresent()
+                            || configuration
+                                    .getOptional(
+                                            RocksDBConfigurableOptions
+                                                    .BLOOM_FILTER_FASTLOCAL_PROBE_MODE)
+                                    .isPresent()
+                            || configuration
+                                    .getOptional(
+                                            RocksDBConfigurableOptions
+                                                    .BLOOM_FILTER_FASTLOCAL_RUNTIME_DISPATCH)
+                                    .isPresent();
+            final BloomFilter bloomFilter;
+            if (armLocalConfigured) {
+                if (blockBasedMode) {
+                    throw new IllegalArgumentException(
+                            "CacheKit ArmLocal Bloom requires full-filter mode");
+                }
+                final boolean runtimeDispatch =
+                        internalGetOption(
+                                RocksDBConfigurableOptions.BLOOM_FILTER_FASTLOCAL_RUNTIME_DISPATCH);
+                final int blockBytes =
+                        runtimeDispatch
+                                ? 0
+                                : internalGetOption(
+                                        RocksDBConfigurableOptions
+                                                .BLOOM_FILTER_FASTLOCAL_BLOCK_BYTES);
+                final BloomFilter.CacheKitFastLocalProbeMode probeMode =
+                        runtimeDispatch
+                                ? BloomFilter.CacheKitFastLocalProbeMode.AUTO
+                                : parseArmLocalProbeMode(
+                                        internalGetOption(
+                                                RocksDBConfigurableOptions
+                                                        .BLOOM_FILTER_FASTLOCAL_PROBE_MODE));
+                bloomFilter = new BloomFilter(bitsPerKey, blockBytes, probeMode);
+                if (ARMLOCAL_ACTIVATION_LOGGED.compareAndSet(false, true)) {
+                    LOG.info(
+                            "CACHEKIT_ARMLOCAL_ACTIVATION block_bytes={} probe_mode={} runtime_dispatch={}",
+                            blockBytes,
+                            probeMode.name().toLowerCase(Locale.ROOT),
+                            runtimeDispatch);
+                }
+            } else {
+                bloomFilter = new BloomFilter(bitsPerKey, blockBasedMode);
+            }
             handlesToClose.add(bloomFilter);
             blockBasedTableConfig.setFilterPolicy(bloomFilter);
         }
 
         return currentOptions.setTableFormatConfig(blockBasedTableConfig);
+    }
+
+    private static BloomFilter.CacheKitFastLocalProbeMode parseArmLocalProbeMode(String value) {
+        switch (value.toLowerCase(Locale.ROOT)) {
+            case "scalar":
+                return BloomFilter.CacheKitFastLocalProbeMode.SCALAR;
+            case "sve":
+                return BloomFilter.CacheKitFastLocalProbeMode.SVE;
+            case "auto":
+                return BloomFilter.CacheKitFastLocalProbeMode.AUTO;
+            case "platform-default":
+                return BloomFilter.CacheKitFastLocalProbeMode.PLATFORM_DEFAULT;
+            default:
+                throw new IllegalArgumentException(
+                        "Unknown CacheKit ArmLocal probe mode: " + value);
+        }
     }
 
     /**

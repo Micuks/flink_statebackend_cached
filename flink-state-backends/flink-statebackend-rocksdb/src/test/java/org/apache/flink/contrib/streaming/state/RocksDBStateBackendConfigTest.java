@@ -515,6 +515,10 @@ public class RocksDBStateBackendConfigTest {
             verifyIllegalArgument(RocksDBConfigurableOptions.COMPACTION_STYLE, "LEV");
             verifyIllegalArgument(RocksDBConfigurableOptions.USE_BLOOM_FILTER, "NO");
             verifyIllegalArgument(RocksDBConfigurableOptions.BLOOM_FILTER_BLOCK_BASED_MODE, "YES");
+            verifyIllegalArgument(
+                    RocksDBConfigurableOptions.BLOOM_FILTER_FASTLOCAL_BLOCK_BYTES, "96");
+            verifyIllegalArgument(
+                    RocksDBConfigurableOptions.BLOOM_FILTER_FASTLOCAL_PROBE_MODE, "sve2");
             verifyIllegalArgument(RocksDBConfigurableOptions.MEMTABLE_BLOOM_RATIO, "-0.1");
             verifyIllegalArgument(RocksDBConfigurableOptions.MEMTABLE_BLOOM_RATIO, "0.26");
             verifyIllegalArgument(
@@ -541,6 +545,13 @@ public class RocksDBStateBackendConfigTest {
             configuration.setString(RocksDBConfigurableOptions.METADATA_BLOCK_SIZE.key(), "8 kb");
             configuration.setString(RocksDBConfigurableOptions.BLOCK_CACHE_SIZE.key(), "512 mb");
             configuration.setString(RocksDBConfigurableOptions.USE_BLOOM_FILTER.key(), "TRUE");
+            configuration.setString(
+                    RocksDBConfigurableOptions.BLOOM_FILTER_FASTLOCAL_BLOCK_BYTES.key(), "128");
+            configuration.setString(
+                    RocksDBConfigurableOptions.BLOOM_FILTER_FASTLOCAL_PROBE_MODE.key(), "scalar");
+            configuration.setString(
+                    RocksDBConfigurableOptions.BLOOM_FILTER_FASTLOCAL_RUNTIME_DISPATCH.key(),
+                    "FALSE");
             configuration.setString(RocksDBConfigurableOptions.MEMTABLE_BLOOM_RATIO.key(), "0.1");
             configuration.setString(
                     RocksDBConfigurableOptions.MEMTABLE_BLOOM_WHOLE_KEY.key(), "TRUE");

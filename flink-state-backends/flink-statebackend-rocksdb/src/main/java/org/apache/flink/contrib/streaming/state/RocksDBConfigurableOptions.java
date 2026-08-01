@@ -256,6 +256,29 @@ public class RocksDBConfigurableOptions implements Serializable {
                             "If true, RocksDB will use block-based filter instead of full filter, this only take effect when bloom filter is used. "
                                     + "The default value is 'false'.");
 
+    public static final ConfigOption<Integer> BLOOM_FILTER_FASTLOCAL_BLOCK_BYTES =
+            key("state.backend.rocksdb.bloom-filter.fastlocal.block-bytes")
+                    .intType()
+                    .defaultValue(64)
+                    .withDescription(
+                            "CacheKit FastLocal Bloom block geometry. Valid values are 64 and 128; "
+                                    + "0 delegates geometry selection to the native runtime dispatcher.");
+
+    public static final ConfigOption<String> BLOOM_FILTER_FASTLOCAL_PROBE_MODE =
+            key("state.backend.rocksdb.bloom-filter.fastlocal.probe-mode")
+                    .stringType()
+                    .defaultValue("platform-default")
+                    .withDescription(
+                            "CacheKit FastLocal Bloom probe implementation: platform-default, scalar, sve, or auto.");
+
+    public static final ConfigOption<Boolean> BLOOM_FILTER_FASTLOCAL_RUNTIME_DISPATCH =
+            key("state.backend.rocksdb.bloom-filter.fastlocal.runtime-dispatch")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "If true, CacheKit selects the FastLocal block geometry and probe implementation "
+                                    + "from the runtime L3 line size, SVE capability, and SVE vector length.");
+
     public static final ConfigOption<Double> MEMTABLE_BLOOM_RATIO =
             key("state.backend.rocksdb.memtable-bloom.ratio")
                     .doubleType()
@@ -306,6 +329,9 @@ public class RocksDBConfigurableOptions implements Serializable {
                 USE_BLOOM_FILTER,
                 BLOOM_FILTER_BITS_PER_KEY,
                 BLOOM_FILTER_BLOCK_BASED_MODE,
+                BLOOM_FILTER_FASTLOCAL_BLOCK_BYTES,
+                BLOOM_FILTER_FASTLOCAL_PROBE_MODE,
+                BLOOM_FILTER_FASTLOCAL_RUNTIME_DISPATCH,
                 MEMTABLE_BLOOM_RATIO,
                 MEMTABLE_BLOOM_WHOLE_KEY,
                 RESTORE_OVERLAP_FRACTION_THRESHOLD
@@ -361,6 +387,21 @@ public class RocksDBConfigurableOptions implements Serializable {
             Preconditions.checkArgument(
                     ratio >= 0.0 && ratio <= 0.25,
                     "Configured value for key " + key + " must be between 0.0 and 0.25.");
+        } else if (BLOOM_FILTER_FASTLOCAL_BLOCK_BYTES.equals(option)) {
+            int blockBytes = (Integer) value;
+            Preconditions.checkArgument(
+                    blockBytes == 0 || blockBytes == 64 || blockBytes == 128,
+                    "Configured value for key " + key + " must be 0, 64, or 128.");
+        } else if (BLOOM_FILTER_FASTLOCAL_PROBE_MODE.equals(option)) {
+            String mode = ((String) value).toLowerCase(java.util.Locale.ROOT);
+            Preconditions.checkArgument(
+                    mode.equals("platform-default")
+                            || mode.equals("scalar")
+                            || mode.equals("sve")
+                            || mode.equals("auto"),
+                    "Configured value for key "
+                            + key
+                            + " must be platform-default, scalar, sve, or auto.");
         }
     }
 }
