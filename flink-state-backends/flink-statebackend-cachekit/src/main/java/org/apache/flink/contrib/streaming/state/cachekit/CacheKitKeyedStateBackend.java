@@ -165,6 +165,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 delegate.getKeyGroupCompressionDecorator(),
                 delegate.getKeyContext());
 
+        PrefetchExecutor.initializeAffinity();
+
         this.delegate = delegate;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;

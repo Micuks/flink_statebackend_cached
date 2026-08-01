@@ -42,7 +42,14 @@ public final class PrefetchExecutor {
     static final String WORKER_THREAD_NAME = "cachekit-bp-prefetch";
     static final String WORKER_NATIVE_THREAD_NAME = "cachekit-bp-pre";
 
-    private static final String WORKER_CPU_LIST = loadWorkerCpuList();
+    private static final String WORKER_CPU_LIST =
+            loadCpuList(
+                    "CACHEKIT_BP_PREFETCH_CPU_LIST",
+                    "state.backend.cachekit.bp-prefetch.affinity.cpu-list");
+    private static final String ROCKSDB_BACKGROUND_CPU_LIST =
+            loadCpuList(
+                    "CACHEKIT_ROCKSDB_BG_CPU_LIST",
+                    "state.backend.cachekit.rocksdb-bg.affinity.cpu-list");
 
     /** A queued prefetch that must release any key reservations if the executor drops it. */
     public interface DropAwareTask extends Runnable {
@@ -72,6 +79,7 @@ public final class PrefetchExecutor {
     private static final ThreadPoolExecutor EXECUTOR;
 
     static {
+        RocksDBBackgroundThreadAffinity.start(ROCKSDB_BACKGROUND_CPU_LIST);
         EXECUTOR =
                 new ThreadPoolExecutor(
                         1,
@@ -116,14 +124,19 @@ public final class PrefetchExecutor {
 
     private PrefetchExecutor() {}
 
-    private static String loadWorkerCpuList() {
-        String perTaskManagerOverride = System.getenv("CACHEKIT_BP_PREFETCH_CPU_LIST");
+    /** Forces affinity watchers to start when the CacheKit backend is created. */
+    static void initializeAffinity() {
+        // Class initialization performs the opt-in setup. The executor thread remains lazy.
+    }
+
+    private static String loadCpuList(String environmentKey, String configurationKey) {
+        String perTaskManagerOverride = System.getenv(environmentKey);
         if (perTaskManagerOverride != null && !perTaskManagerOverride.trim().isEmpty()) {
             return perTaskManagerOverride.trim();
         }
         return GlobalConfiguration.loadConfiguration()
                 .get(
-                        ConfigOptions.key("state.backend.cachekit.bp-prefetch.affinity.cpu-list")
+                        ConfigOptions.key(configurationKey)
                                 .stringType()
                                 .defaultValue(""));
     }

@@ -23,16 +23,20 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Predicate;
 import java.util.concurrent.TimeUnit;
 
-/** Linux-only affinity helper for the single CacheKit prefetch worker. */
+/** Linux-only affinity helper for CacheKit-selected JVM and native worker TIDs. */
 final class LinuxThreadAffinity {
 
-    private static final Path PROC_SELF_TASK = Paths.get("/proc/self/task");
+    static final Path PROC_SELF_TASK = Paths.get("/proc/self/task");
     private static final int TID_LOOKUP_ATTEMPTS = 20;
     private static final int MAX_CPU_ID = 1_048_575;
 
@@ -74,15 +78,57 @@ final class LinuxThreadAffinity {
             return BindingResult.failure(cpuList, null, "named worker TID not found");
         }
 
+        return bindThread(
+                PROC_SELF_TASK,
+                new NativeThread(tid.get(), threadName),
+                cpuList,
+                requested);
+    }
+
+    static BindingResult bindThread(
+            Path taskDirectory, NativeThread thread, String configuredCpuList) {
+        String cpuList = configuredCpuList == null ? "" : configuredCpuList.trim();
+        if (cpuList.isEmpty()) {
+            return BindingResult.disabled();
+        }
+        final Set<Integer> requested;
+        try {
+            requested = parseCpuList(cpuList);
+        } catch (IllegalArgumentException e) {
+            return BindingResult.failure(
+                    cpuList, thread.getTid(), "invalid CPU list: " + e.getMessage());
+        }
+        return bindThread(taskDirectory, thread, cpuList, requested);
+    }
+
+    private static BindingResult bindThread(
+            Path taskDirectory,
+            NativeThread thread,
+            String cpuList,
+            Set<Integer> requested) {
+        if (!thread.getTid().matches("[0-9]+")) {
+            return BindingResult.failure(cpuList, thread.getTid(), "invalid native TID");
+        }
+        Path task = taskDirectory.resolve(thread.getTid());
+        try {
+            if (!thread.getName().equals(readThreadName(task.resolve("comm")))) {
+                return BindingResult.failure(
+                        cpuList, thread.getTid(), "native thread name changed before binding");
+            }
+        } catch (IOException e) {
+            return BindingResult.failure(
+                    cpuList, thread.getTid(), "cannot verify native thread before binding: " + e);
+        }
+
         Process process = null;
         try {
             process =
-                    new ProcessBuilder("taskset", "-pc", cpuList, tid.get())
+                    new ProcessBuilder("taskset", "-pc", cpuList, thread.getTid())
                             .redirectErrorStream(true)
                             .start();
             if (!process.waitFor(5L, TimeUnit.SECONDS)) {
                 process.destroyForcibly();
-                return BindingResult.failure(cpuList, tid.get(), "taskset timed out");
+                return BindingResult.failure(cpuList, thread.getTid(), "taskset timed out");
             }
             String output;
             try (BufferedReader reader =
@@ -102,23 +148,29 @@ final class LinuxThreadAffinity {
             if (process.exitValue() != 0) {
                 return BindingResult.failure(
                         cpuList,
-                        tid.get(),
+                        thread.getTid(),
                         "taskset exit=" + process.exitValue() + " output=" + output);
             }
 
-            String observed = readAllowedCpuList(PROC_SELF_TASK.resolve(tid.get()).resolve("status"));
+            if (!thread.getName().equals(readThreadName(task.resolve("comm")))) {
+                return BindingResult.failure(
+                        cpuList, thread.getTid(), "native thread name changed during binding");
+            }
+            String observed = readAllowedCpuList(task.resolve("status"));
             if (!requested.equals(parseCpuList(observed))) {
                 return BindingResult.failure(
                         cpuList,
-                        tid.get(),
+                        thread.getTid(),
                         "affinity verification mismatch: observed=" + observed);
             }
-            return BindingResult.success(cpuList, tid.get(), observed);
+            return BindingResult.success(cpuList, thread.getTid(), observed);
         } catch (IOException e) {
-            return BindingResult.failure(cpuList, tid.get(), "taskset unavailable: " + e);
+            return BindingResult.failure(
+                    cpuList, thread.getTid(), "cannot bind or verify native thread: " + e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return BindingResult.failure(cpuList, tid.get(), "interrupted while waiting for taskset");
+            return BindingResult.failure(
+                    cpuList, thread.getTid(), "interrupted while waiting for taskset");
         } finally {
             if (process != null && process.isAlive()) {
                 process.destroyForcibly();
@@ -131,24 +183,38 @@ final class LinuxThreadAffinity {
     }
 
     static Optional<String> findUniqueTid(Path taskDirectory, String threadName) throws IOException {
-        String found = null;
+        List<NativeThread> matches =
+                findThreads(taskDirectory, observed -> threadName.equals(observed));
+        return matches.size() == 1
+                ? Optional.of(matches.get(0).getTid())
+                : Optional.empty();
+    }
+
+    static String readThreadName(Path comm) throws IOException {
+        return new String(Files.readAllBytes(comm), StandardCharsets.UTF_8).trim();
+    }
+
+    static List<NativeThread> findThreads(Path taskDirectory, Predicate<String> nameFilter)
+            throws IOException {
+        List<NativeThread> matches = new ArrayList<>();
         try (DirectoryStream<Path> tasks = Files.newDirectoryStream(taskDirectory)) {
             for (Path task : tasks) {
+                String tid = task.getFileName().toString();
+                if (!tid.matches("[0-9]+")) {
+                    continue;
+                }
                 Path comm = task.resolve("comm");
                 if (!Files.isRegularFile(comm)) {
                     continue;
                 }
-                String observed =
-                        new String(Files.readAllBytes(comm), StandardCharsets.UTF_8).trim();
-                if (threadName.equals(observed)) {
-                    if (found != null) {
-                        return Optional.empty();
-                    }
-                    found = task.getFileName().toString();
+                String observed = readThreadName(comm);
+                if (nameFilter.test(observed)) {
+                    matches.add(new NativeThread(tid, observed));
                 }
             }
         }
-        return Optional.ofNullable(found);
+        matches.sort(Comparator.comparingLong(thread -> Long.parseLong(thread.getTid())));
+        return matches;
     }
 
     static String readAllowedCpuList(Path status) throws IOException {
@@ -264,6 +330,28 @@ final class LinuxThreadAffinity {
 
         String getReason() {
             return reason;
+        }
+    }
+
+    static final class NativeThread {
+        private final String tid;
+        private final String name;
+
+        NativeThread(String tid, String name) {
+            this.tid = tid;
+            this.name = name;
+        }
+
+        String getTid() {
+            return tid;
+        }
+
+        String getName() {
+            return name;
+        }
+
+        String key() {
+            return tid + ":" + name;
         }
     }
 }
