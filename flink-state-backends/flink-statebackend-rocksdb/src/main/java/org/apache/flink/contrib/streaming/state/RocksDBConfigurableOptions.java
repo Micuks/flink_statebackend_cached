@@ -295,6 +295,27 @@ public class RocksDBConfigurableOptions implements Serializable {
                             "If true, add and probe whole keys in the memtable Bloom filter. "
                                     + "This only takes effect when the memtable Bloom ratio is greater than 0.0.");
 
+    public static final ConfigOption<Boolean> MEMTABLE_ARM_POINT_ENABLED =
+            key("state.backend.rocksdb.memtable.arm-point.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Use CacheKit's 128-byte ArmPoint memtable for ValueState column families only.");
+
+    public static final ConfigOption<Integer> MEMTABLE_ARM_POINT_BUCKET_COUNT =
+            key("state.backend.rocksdb.memtable.arm-point.bucket-count")
+                    .intType()
+                    .defaultValue(16384)
+                    .withDescription(
+                            "Number of 128-byte buckets in each ArmPoint ValueState memtable directory.");
+
+    public static final ConfigOption<String> MEMTABLE_ARM_POINT_PROBE_MODE =
+            key("state.backend.rocksdb.memtable.arm-point.probe-mode")
+                    .stringType()
+                    .defaultValue("auto")
+                    .withDescription(
+                            "ArmPoint tag probe mode: scalar, sve, or auto. Forced sve fails closed when unavailable.");
+
     public static final ConfigOption<Double> RESTORE_OVERLAP_FRACTION_THRESHOLD =
             key("state.backend.rocksdb.restore-overlap-fraction-threshold")
                     .doubleType()
@@ -334,6 +355,9 @@ public class RocksDBConfigurableOptions implements Serializable {
                 BLOOM_FILTER_FASTLOCAL_RUNTIME_DISPATCH,
                 MEMTABLE_BLOOM_RATIO,
                 MEMTABLE_BLOOM_WHOLE_KEY,
+                MEMTABLE_ARM_POINT_ENABLED,
+                MEMTABLE_ARM_POINT_BUCKET_COUNT,
+                MEMTABLE_ARM_POINT_PROBE_MODE,
                 RESTORE_OVERLAP_FRACTION_THRESHOLD
             };
 
@@ -343,7 +367,8 @@ public class RocksDBConfigurableOptions implements Serializable {
                             MAX_BACKGROUND_THREADS,
                             LOG_FILE_NUM,
                             MAX_WRITE_BUFFER_NUMBER,
-                            MIN_WRITE_BUFFER_NUMBER_TO_MERGE));
+                            MIN_WRITE_BUFFER_NUMBER_TO_MERGE,
+                            MEMTABLE_ARM_POINT_BUCKET_COUNT));
 
     private static final Set<ConfigOption<?>> SIZE_CONFIG_SET =
             new HashSet<>(
@@ -402,6 +427,13 @@ public class RocksDBConfigurableOptions implements Serializable {
                     "Configured value for key "
                             + key
                             + " must be platform-default, scalar, sve, or auto.");
+        } else if (MEMTABLE_ARM_POINT_PROBE_MODE.equals(option)) {
+            String probeMode = ((String) value).toLowerCase(java.util.Locale.ROOT);
+            Preconditions.checkArgument(
+                    probeMode.equals("scalar")
+                            || probeMode.equals("sve")
+                            || probeMode.equals("auto"),
+                    "Configured value for key " + key + " must be one of scalar, sve, or auto.");
         }
     }
 }

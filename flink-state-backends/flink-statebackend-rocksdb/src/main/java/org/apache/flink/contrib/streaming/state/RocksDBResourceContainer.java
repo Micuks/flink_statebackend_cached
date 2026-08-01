@@ -19,13 +19,17 @@
 package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.runtime.memory.OpaqueMemoryResource;
+import org.apache.flink.runtime.state.RegisteredKeyValueStateBackendMetaInfo;
+import org.apache.flink.runtime.state.RegisteredStateMetaInfoBase;
 import org.apache.flink.util.IOUtils;
 import org.apache.flink.util.Preconditions;
 
+import org.rocksdb.ArmPointMemTableConfig;
 import org.rocksdb.BlockBasedTableConfig;
 import org.rocksdb.BloomFilter;
 import org.rocksdb.Cache;
@@ -234,6 +238,63 @@ public final class RocksDBResourceContainer implements AutoCloseable {
         return opt;
     }
 
+    /**
+     * Gets state-aware column-family options without applying point-only layouts to range state.
+     */
+    public ColumnFamilyOptions getColumnOptions(
+            @Nullable RegisteredStateMetaInfoBase stateMetaInfo) {
+        final ColumnFamilyOptions options = getColumnOptions();
+        final boolean enabled =
+                internalGetOption(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_ENABLED);
+        final boolean valueState =
+                stateMetaInfo instanceof RegisteredKeyValueStateBackendMetaInfo
+                        && ((RegisteredKeyValueStateBackendMetaInfo<?, ?>) stateMetaInfo)
+                                        .getStateType()
+                                == StateDescriptor.Type.VALUE;
+        final String stateType =
+                stateMetaInfo instanceof RegisteredKeyValueStateBackendMetaInfo
+                        ? ((RegisteredKeyValueStateBackendMetaInfo<?, ?>) stateMetaInfo)
+                                .getStateType()
+                                .name()
+                        : "NON_KV";
+
+        if (enabled && valueState) {
+            final String previousFactory = options.memTableFactoryName();
+            Preconditions.checkState(
+                    "SkipListFactory".equals(previousFactory),
+                    "ArmPoint refuses to overwrite user memtable factory %s for ValueState %s",
+                    previousFactory,
+                    stateMetaInfo.getName());
+
+            final int bucketCount =
+                    internalGetOption(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_BUCKET_COUNT);
+            final String probeMode =
+                    internalGetOption(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_PROBE_MODE)
+                            .toLowerCase(java.util.Locale.ROOT);
+            options.setMemTableConfig(
+                    new ArmPointMemTableConfig()
+                            .setBucketCount(bucketCount)
+                            .setProbeMode(probeMode));
+            LOG.info(
+                    "[CACHEKIT_ARM_POINT] state={} state_type=VALUE enabled=true factory={} "
+                            + "bucket_count={} tag_bits=16 probe_mode={} sve_supported={}",
+                    stateMetaInfo.getName(),
+                    options.memTableFactoryName(),
+                    bucketCount,
+                    probeMode,
+                    ArmPointMemTableConfig.isSveSupported());
+        } else {
+            LOG.info(
+                    "[CACHEKIT_ARM_POINT] state={} state_type={} enabled=false factory={} "
+                            + "bucket_count=0 tag_bits=0 probe_mode=off sve_supported={}",
+                    stateMetaInfo == null ? "<default>" : stateMetaInfo.getName(),
+                    stateType,
+                    options.memTableFactoryName(),
+                    ArmPointMemTableConfig.isSveSupported());
+        }
+        return options;
+    }
+
     /** Gets the RocksDB {@link WriteOptions} to be used for write operations. */
     public WriteOptions getWriteOptions() {
         // Disable WAL by default
@@ -279,6 +340,25 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
+        final ArmPointMemTableConfig.Stats stats = ArmPointMemTableConfig.stats();
+        LOG.info(
+                "[CACHEKIT_ARM_POINT_STATS] {\"sve_supported\":{},"
+                        + "\"point_lookups\":{},\"tag_rejects\":{},\"bucket_scans\":{},"
+                        + "\"internal_key_candidates\":{},\"scalar_tag_probes\":{},"
+                        + "\"sve_tag_probes\":{},\"tag_directory_overflows\":{},"
+                        + "\"ordered_fallback_lookups\":{},\"hash_indexed_reps\":{},"
+                        + "\"incompatible_comparator_reps\":{}}",
+                ArmPointMemTableConfig.isSveSupported(),
+                stats.pointLookups(),
+                stats.tagRejects(),
+                stats.bucketScans(),
+                stats.internalKeyCandidates(),
+                stats.scalarTagProbes(),
+                stats.sveTagProbes(),
+                stats.tagDirectoryOverflows(),
+                stats.orderedFallbackLookups(),
+                stats.hashIndexedReps(),
+                stats.incompatibleComparatorReps());
         handlesToClose.forEach(IOUtils::closeQuietly);
         handlesToClose.clear();
 

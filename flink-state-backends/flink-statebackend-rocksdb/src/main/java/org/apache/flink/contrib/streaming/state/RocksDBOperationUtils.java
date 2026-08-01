@@ -152,7 +152,7 @@ public class RocksDBOperationUtils {
             @Nullable Long writeBufferManagerCapacity) {
 
         ColumnFamilyOptions options =
-                createColumnFamilyOptions(columnFamilyOptionsFactory, metaInfoBase.getName());
+                createColumnFamilyOptions(columnFamilyOptionsFactory, metaInfoBase);
         if (ttlCompactFiltersManager != null) {
             ttlCompactFiltersManager.setAndRegisterCompactFilterIfStateTtl(metaInfoBase, options);
         }
@@ -219,10 +219,33 @@ public class RocksDBOperationUtils {
     public static ColumnFamilyOptions createColumnFamilyOptions(
             Function<String, ColumnFamilyOptions> columnFamilyOptionsFactory, String stateName) {
 
+        return createColumnFamilyOptions(columnFamilyOptionsFactory, stateName, null);
+    }
+
+    static ColumnFamilyOptions createColumnFamilyOptions(
+            Function<String, ColumnFamilyOptions> columnFamilyOptionsFactory,
+            RegisteredStateMetaInfoBase stateMetaInfo) {
+
+        return createColumnFamilyOptions(
+                columnFamilyOptionsFactory, stateMetaInfo.getName(), stateMetaInfo);
+    }
+
+    private static ColumnFamilyOptions createColumnFamilyOptions(
+            Function<String, ColumnFamilyOptions> columnFamilyOptionsFactory,
+            String stateName,
+            @Nullable RegisteredStateMetaInfoBase stateMetaInfo) {
+
+        final ColumnFamilyOptions options;
+        if (columnFamilyOptionsFactory instanceof RocksDBColumnFamilyOptionsFactory) {
+            options =
+                    ((RocksDBColumnFamilyOptionsFactory) columnFamilyOptionsFactory)
+                            .create(stateName, stateMetaInfo);
+        } else {
+            options = columnFamilyOptionsFactory.apply(stateName);
+        }
+
         // ensure that we use the right merge operator, because other code relies on this
-        return columnFamilyOptionsFactory
-                .apply(stateName)
-                .setMergeOperatorName(MERGE_OPERATOR_NAME);
+        return options.setMergeOperatorName(MERGE_OPERATOR_NAME);
     }
 
     private static ColumnFamilyHandle createColumnFamily(

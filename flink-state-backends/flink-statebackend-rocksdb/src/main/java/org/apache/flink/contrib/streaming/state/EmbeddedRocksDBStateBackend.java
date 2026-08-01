@@ -521,13 +521,15 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
 
         LatencyTrackingStateConfig latencyTrackingStateConfig =
                 latencyTrackingConfigBuilder.setMetricGroup(metricGroup).build();
+        final RocksDBColumnFamilyOptionsFactory columnFamilyOptionsFactory =
+                (stateName, stateMetaInfo) -> resourceContainer.getColumnOptions(stateMetaInfo);
         RocksDBKeyedStateBackendBuilder<K> builder =
                 new RocksDBKeyedStateBackendBuilder<>(
                                 operatorIdentifier,
                                 env.getUserCodeClassLoader().asClassLoader(),
                                 instanceBasePath,
                                 resourceContainer,
-                                stateName -> resourceContainer.getColumnOptions(),
+                                columnFamilyOptionsFactory,
                                 kvStateRegistry,
                                 keySerializer,
                                 numberOfKeyGroups,

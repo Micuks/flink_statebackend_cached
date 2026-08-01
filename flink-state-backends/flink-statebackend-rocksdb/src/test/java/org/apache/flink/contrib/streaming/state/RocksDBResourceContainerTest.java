@@ -18,7 +18,11 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import org.apache.flink.api.common.state.StateDescriptor;
+import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.memory.OpaqueMemoryResource;
+import org.apache.flink.runtime.state.RegisteredKeyValueStateBackendMetaInfo;
 import org.apache.flink.util.function.ThrowingRunnable;
 
 import org.junit.BeforeClass;
@@ -43,11 +47,14 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.fail;
 
 /** Tests to guard {@link RocksDBResourceContainer}. */
@@ -239,6 +246,62 @@ public class RocksDBResourceContainerTest {
             for (ColumnFamilyOptions columnFamilyOption : columnFamilyOptions) {
                 assertThat(columnFamilyOption.isOwningHandle(), is(false));
             }
+        }
+    }
+
+    @Test
+    public void testArmPointMemtableIsScopedToValueState() throws Exception {
+        final Configuration configuration = new Configuration();
+        configuration.set(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_ENABLED, true);
+        configuration.set(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_BUCKET_COUNT, 32768);
+        configuration.set(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_PROBE_MODE, "scalar");
+
+        final RegisteredKeyValueStateBackendMetaInfo<Integer, Integer> valueMeta =
+                new RegisteredKeyValueStateBackendMetaInfo<>(
+                        StateDescriptor.Type.VALUE,
+                        "value-state",
+                        IntSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        final RegisteredKeyValueStateBackendMetaInfo<Integer, Integer> mapMeta =
+                new RegisteredKeyValueStateBackendMetaInfo<>(
+                        StateDescriptor.Type.MAP,
+                        "map-state",
+                        IntSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+
+        try (RocksDBResourceContainer container =
+                        new RocksDBResourceContainer(
+                                configuration, PredefinedOptions.DEFAULT, null, null, null, false);
+                ColumnFamilyOptions valueOptions = container.getColumnOptions(valueMeta);
+                ColumnFamilyOptions mapOptions = container.getColumnOptions(mapMeta);
+                ColumnFamilyOptions defaultOptions = container.getColumnOptions(null)) {
+            assertEquals("CacheKitArmPointMemTableRepFactory", valueOptions.memTableFactoryName());
+            assertEquals("SkipListFactory", mapOptions.memTableFactoryName());
+            assertEquals("SkipListFactory", defaultOptions.memTableFactoryName());
+        }
+    }
+
+    @Test
+    public void testStateMetadataSurvivesColumnFamilyOptionsRouting() {
+        final RegisteredKeyValueStateBackendMetaInfo<Integer, Integer> valueMeta =
+                new RegisteredKeyValueStateBackendMetaInfo<>(
+                        StateDescriptor.Type.VALUE,
+                        "value-state",
+                        IntSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        final AtomicReference<org.apache.flink.runtime.state.RegisteredStateMetaInfoBase> seen =
+                new AtomicReference<>();
+        final RocksDBColumnFamilyOptionsFactory factory =
+                (stateName, stateMetaInfo) -> {
+                    assertEquals("value-state", stateName);
+                    seen.set(stateMetaInfo);
+                    return new ColumnFamilyOptions();
+                };
+
+        try (ColumnFamilyOptions options =
+                RocksDBOperationUtils.createColumnFamilyOptions(factory, valueMeta)) {
+            assertEquals(valueMeta, seen.get());
+            assertNotNull(options);
         }
     }
 

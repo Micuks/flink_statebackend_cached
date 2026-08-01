@@ -42,6 +42,12 @@ state.backend.local-recovery: true
 state.backend.rocksdb.memory.managed: true
 state.backend.rocksdb.memory.fixed-per-slot: 1024m
 state.backend.rocksdb.localdir: /tmp
+
+# CacheKit Kunpeng point-lookup memtable (ValueState column families only).
+# Keep disabled outside an audited AArch64 experiment.
+state.backend.rocksdb.memtable.arm-point.enabled: false
+state.backend.rocksdb.memtable.arm-point.bucket-count: 16384
+state.backend.rocksdb.memtable.arm-point.probe-mode: auto
 execution.checkpointing.interval: 180000
 execution.checkpointing.mode: EXACTLY_ONCE
 execution.checkpointing.tolerable-failed-checkpoints: 0

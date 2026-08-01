@@ -1039,6 +1039,8 @@ public class RocksDBStateBackendConfigTest {
                     RocksDBConfigurableOptions.BLOOM_FILTER_FASTLOCAL_PROBE_MODE, "sve2");
             verifyIllegalArgument(RocksDBConfigurableOptions.MEMTABLE_BLOOM_RATIO, "-0.1");
             verifyIllegalArgument(RocksDBConfigurableOptions.MEMTABLE_BLOOM_RATIO, "0.26");
+            verifyIllegalArgument(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_BUCKET_COUNT, "0");
+            verifyIllegalArgument(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_PROBE_MODE, "neon");
             verifyIllegalArgument(
                     RocksDBConfigurableOptions.RESTORE_OVERLAP_FRACTION_THRESHOLD, "2");
         }
@@ -1073,6 +1075,12 @@ public class RocksDBStateBackendConfigTest {
             configuration.setString(RocksDBConfigurableOptions.MEMTABLE_BLOOM_RATIO.key(), "0.1");
             configuration.setString(
                     RocksDBConfigurableOptions.MEMTABLE_BLOOM_WHOLE_KEY.key(), "TRUE");
+            configuration.setString(
+                    RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_ENABLED.key(), "TRUE");
+            configuration.setString(
+                    RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_BUCKET_COUNT.key(), "32768");
+            configuration.setString(
+                    RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_PROBE_MODE.key(), "scalar");
             configuration.setString(
                     RocksDBConfigurableOptions.RESTORE_OVERLAP_FRACTION_THRESHOLD.key(), "0.5");
 

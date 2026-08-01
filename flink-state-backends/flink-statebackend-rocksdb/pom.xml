@@ -60,7 +60,12 @@ under the License.
 		<dependency>
 			<groupId>com.ververica</groupId>
 			<artifactId>frocksdbjni</artifactId>
-			<version>6.20.3-ververica-1.0-cachekit-packed-directarena3</version>
+			<!--
+				ArmPoint adds a JNI API that is not present in the published Ververica
+				artifact. Keep a distinct coordinate so a clean build fails closed
+				instead of silently compiling or running against the stock binary.
+			-->
+			<version>6.20.3-ververica-1.0-cachekit-arm-point-62e027d06</version>
 		</dependency>
 
 		<!-- test dependencies -->
