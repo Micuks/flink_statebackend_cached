@@ -18,6 +18,7 @@ package org.apache.flink.contrib.streaming.state.cachekit;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
@@ -42,6 +43,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
@@ -51,6 +53,45 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CacheKitKeyedStateBackendLifecycleTest {
+
+    @Test
+    void testCloseRecordsNamespacedValueStateAndEmitsOneBackendSummary() throws Exception {
+        AbstractKeyedStateBackend<String> delegate = mockDelegate();
+        InternalValueState<String, Long, Integer> delegateState = mock(InternalValueState.class);
+        when(delegateState.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegateState.getNamespaceSerializer()).thenReturn(LongSerializer.INSTANCE);
+        when(delegateState.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        doReturn(delegateState).when(delegate).getOrCreateKeyedState(any(), any());
+
+        CacheKitKeyedStateBackend<String> cacheKit = newCacheKitBackend(delegate);
+        ValueStateDescriptor<Integer> descriptor =
+                new ValueStateDescriptor<>("window-value", IntSerializer.INSTANCE);
+        @SuppressWarnings("unchecked")
+        InternalValueState<String, Long, Integer> cachedState =
+                (InternalValueState<String, Long, Integer>)
+                        cacheKit.getOrCreateKeyedState(LongSerializer.INSTANCE, descriptor);
+        cachedState.setCurrentNamespace(7L);
+
+        cacheKit.close();
+        cacheKit.dispose();
+
+        assertTrue(cacheKit.hasPrefetchCloseSummaryForTesting());
+        assertEquals(1, cacheKit.getClosedValueStateWrapperCountForTesting());
+        assertEquals(1, cacheKit.getClosedRecordKeyPrefetchWrapperCountForTesting());
+        verify(delegate).close();
+        verify(delegate).dispose();
+    }
+
+    @Test
+    void testCloseWithoutValueStateStillEmitsBackendSummary() throws Exception {
+        CacheKitKeyedStateBackend<String> cacheKit = newCacheKitBackend(mockDelegate());
+
+        cacheKit.close();
+
+        assertTrue(cacheKit.hasPrefetchCloseSummaryForTesting());
+        assertEquals(0, cacheKit.getClosedValueStateWrapperCountForTesting());
+        assertEquals(0, cacheKit.getClosedRecordKeyPrefetchWrapperCountForTesting());
+    }
 
     @Test
     void testDisposeWaitsForConcurrentCloseFlush() throws Exception {

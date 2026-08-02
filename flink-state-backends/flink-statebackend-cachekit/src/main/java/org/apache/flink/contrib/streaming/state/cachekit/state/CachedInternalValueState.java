@@ -61,6 +61,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final TypeSerializer<N> namespaceSerializer;
 
     private N currentNamespace;
+    private volatile boolean recordKeyPrefetchNamespaceReady;
 
     // Sticky Cache (L1)
     private KeyNamespaceKey<K, N> lastAccessKey;
@@ -144,6 +145,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final Object prefetchTaskMonitor = new Object();
 
     private int pendingPrefetchTasks;
+
+    /** Ensures the terminal per-wrapper activation record is emitted exactly once. */
+    private final java.util.concurrent.atomic.AtomicBoolean prefetchCloseSummaryLogged =
+            new java.util.concurrent.atomic.AtomicBoolean();
 
     // Worker-thread-confined duplicated serializers (single shared worker thread => no races).
     private TypeSerializer<K> workerKeySerializer;
@@ -527,18 +532,33 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return delegate.getValueSerializer();
     }
 
-    /**
-     * Whether future keys extracted from input records are sufficient to identify this state's
-     * entries.
-     *
-     * <p>The generic record-lookahead hook knows future keys but not their future window/session
-     * namespaces. Reusing this wrapper's current non-void namespace therefore warms unrelated
-     * entries (and can issue millions of negative reads). Direct callers that know a stable
-     * namespace may still use {@link #buildAsyncPrefetchTask}; this gate applies only to the
-     * backend's record-key broadcast.
-     */
+    /** Whether this wrapper can snapshot its current namespace for record-key prefetch. */
     public boolean supportsRecordKeyPrefetch() {
+        return true;
+    }
+
+    /** Whether a namespace has been established and can be captured for a new prefetch task. */
+    public boolean hasRecordKeyPrefetchNamespace() {
+        return recordKeyPrefetchNamespaceReady;
+    }
+
+    /**
+     * Whether record keys alone identify entries without a per-task namespace snapshot.
+     *
+     * <p>Local pre-aggregation only supplies future keys, so it deliberately retains this narrower
+     * VoidNamespace gate. Speculative record lookahead uses {@link #snapshotPrefetchNamespace()}
+     * instead and is safe for namespaced ValueState.
+     */
+    public boolean usesVoidNamespaceRecordKeyFastPath() {
         return namespaceSerializer instanceof VoidNamespaceSerializer;
+    }
+
+    private N snapshotPrefetchNamespace() {
+        N namespace = currentNamespace;
+        if (namespace == null || namespaceSerializer instanceof VoidNamespaceSerializer) {
+            return namespace;
+        }
+        return namespaceSerializer.copy(namespace);
     }
 
     /**
@@ -560,6 +580,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     @Override
     public void setCurrentNamespace(@Nonnull N namespace) {
         this.currentNamespace = namespace;
+        this.recordKeyPrefetchNamespaceReady = true;
         delegate.setCurrentNamespace(namespace);
     }
 
@@ -624,24 +645,31 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     public void close() {
         lifecycleLock.writeLock().lock();
         try {
-            closed = true;
+            synchronized (prefetchTaskMonitor) {
+                closed = true;
+            }
         } finally {
             lifecycleLock.writeLock().unlock();
         }
         awaitPrefetchTaskAccounting();
-        boolean accountingValid = prefetchTasksBuilt == prefetchTasksExecuted + prefetchTasksDropped;
-        if (prefetchTasksBuilt > 0 || multiGetPrefetchEnabled) {
+        boolean accountingValid =
+                prefetchTasksBuilt == prefetchTasksExecuted + prefetchTasksDropped;
+        if (prefetchCloseSummaryLogged.compareAndSet(false, true)) {
             LOG.info(
                     "[CACHEKIT VALUE PREFETCH] delegate={} namespaceSerializer={} "
-                            + "recordKeyPrefetch={} multiGet={} chunkSize={} minBatchSize={} "
+                            + "recordKeyPrefetch={} namespaceReady={} multiGet={} chunkSize={} "
+                            + "minBatchSize={} "
                             + "tasksBuilt={} tasksExecuted={} tasksDropped={} keysPrepared={} "
                             + "keysDeduplicated={} multiGetCalls={} "
                             + "multiGetKeys={} pointGetCalls={} staged={} missingStaged={} "
                             + "promoted={} staleAborts={} buildFailures={} workerFailures={} "
                             + "tasksPending={} accountingValid={}",
                     delegate.getClass().getSimpleName(),
-                    namespaceSerializer.getClass().getSimpleName(),
+                    namespaceSerializer == null
+                            ? "null"
+                            : namespaceSerializer.getClass().getSimpleName(),
                     supportsRecordKeyPrefetch(),
+                    hasRecordKeyPrefetchNamespace(),
                     multiGetPrefetchEnabled,
                     multiGetChunkSize,
                     multiGetMinBatchSize,
@@ -728,6 +756,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 && prefetchTasksBuilt == prefetchTasksExecuted + prefetchTasksDropped;
     }
 
+    boolean hasPrefetchCloseSummaryForTesting() {
+        return prefetchCloseSummaryLogged.get();
+    }
+
     /**
      * Mailbox-side half of the async prefetch: serialize (key, namespace) for every key that is
      * not already cached or staged, then hand the byte[] batch to the shared worker thread. The
@@ -737,52 +769,68 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      * @return a worker task to run via PrefetchExecutor, or null if there is nothing to fetch.
      */
     public Runnable buildAsyncPrefetchTask(Iterable<? extends K> keys) {
-        if (closed || keys == null || currentNamespace == null) {
-            return null;
-        }
-        if (multiGetPrefetchEnabled && delegate instanceof RocksDBBatchValueReader<?, ?, ?>) {
-            return buildPreparedMultiGetTask(keys, currentNamespace);
-        }
-        java.util.ArrayList<byte[]> serialized = new java.util.ArrayList<>();
-        java.util.ArrayList<KeyNamespaceKey<K, N>> reservations = new java.util.ArrayList<>();
-        final long gen = writeGen;
-        final N namespace = currentNamespace;
+        lifecycleLock.readLock().lock();
         try {
-            org.apache.flink.core.memory.DataOutputSerializer out =
-                    new org.apache.flink.core.memory.DataOutputSerializer(64);
-            for (K key : keys) {
-                if (key == null || findCachedValueFor(key, namespace) != null) {
-                    continue;
-                }
-                if (hasStagedOrInFlightValue(key, namespace, gen)) {
-                    continue;
-                }
-                KeyNamespaceKey<K, N> storageKey =
-                        new KeyNamespaceKey<>(key, namespace, keySerializer, namespaceSerializer);
-                if (inFlight.putIfAbsent(storageKey, gen) != null) {
-                    prefetchKeysDeduplicated++;
-                    continue;
-                }
-                reservations.add(storageKey);
-                out.clear();
-                keySerializer.serialize(storageKey.key, out);
-                out.writeByte(42); // KvStateSerializer.MAGIC_NUMBER wire format
-                namespaceSerializer.serialize(storageKey.namespace, out);
-                serialized.add(out.getCopyOfBuffer());
+            if (closed || keys == null) {
+                return null;
             }
-        } catch (Throwable t) {
-            prefetchBuildFailures++;
-            releaseReservations(reservations, gen);
-            return null; // Best-effort: an unserializable key aborts this batch only.
+            final N namespace;
+            try {
+                namespace = snapshotPrefetchNamespace();
+            } catch (Throwable t) {
+                prefetchBuildFailures++;
+                return null;
+            }
+            if (namespace == null) {
+                return null;
+            }
+            if (multiGetPrefetchEnabled && delegate instanceof RocksDBBatchValueReader<?, ?, ?>) {
+                return buildPreparedMultiGetTask(keys, namespace);
+            }
+            java.util.ArrayList<byte[]> serialized = new java.util.ArrayList<>();
+            java.util.ArrayList<KeyNamespaceKey<K, N>> reservations =
+                    new java.util.ArrayList<>();
+            final long gen = writeGen;
+            try {
+                org.apache.flink.core.memory.DataOutputSerializer out =
+                        new org.apache.flink.core.memory.DataOutputSerializer(64);
+                for (K key : keys) {
+                    if (key == null || findCachedValueFor(key, namespace) != null) {
+                        continue;
+                    }
+                    if (hasStagedOrInFlightValue(key, namespace, gen)) {
+                        continue;
+                    }
+                    KeyNamespaceKey<K, N> storageKey =
+                            new KeyNamespaceKey<>(
+                                    key, namespace, keySerializer, namespaceSerializer);
+                    if (inFlight.putIfAbsent(storageKey, gen) != null) {
+                        prefetchKeysDeduplicated++;
+                        continue;
+                    }
+                    reservations.add(storageKey);
+                    out.clear();
+                    keySerializer.serialize(storageKey.key, out);
+                    out.writeByte(42); // KvStateSerializer.MAGIC_NUMBER wire format
+                    namespaceSerializer.serialize(storageKey.namespace, out);
+                    serialized.add(out.getCopyOfBuffer());
+                }
+            } catch (Throwable t) {
+                prefetchBuildFailures++;
+                releaseReservations(reservations, gen);
+                return null; // Best-effort: an unserializable key aborts this batch only.
+            }
+            if (serialized.isEmpty()) {
+                return null;
+            }
+            final V defaultValue = getBatchDefaultValue();
+            prefetchTasksBuilt++;
+            prefetchKeysPrepared += serialized.size();
+            return trackedTask(
+                    reservations, gen, () -> fetchIntoStaging(serialized, defaultValue, gen));
+        } finally {
+            lifecycleLock.readLock().unlock();
         }
-        if (serialized.isEmpty()) {
-            return null;
-        }
-        final V defaultValue = getBatchDefaultValue();
-        prefetchTasksBuilt++;
-        prefetchKeysPrepared += serialized.size();
-        return trackedTask(
-                reservations, gen, () -> fetchIntoStaging(serialized, defaultValue, gen));
     }
 
     /**
@@ -971,6 +1019,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private Runnable trackedTask(
             java.util.List<KeyNamespaceKey<K, N>> reservations, long gen, Runnable task) {
         synchronized (prefetchTaskMonitor) {
+            if (closed) {
+                prefetchTasksDropped++;
+                releaseReservations(reservations, gen);
+                return null;
+            }
             pendingPrefetchTasks++;
         }
         return new PrefetchExecutor.DropAwareTask() {
@@ -1270,21 +1323,31 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     public void prefetch(Iterable<? extends K> keys) {
-        if (keys == null || currentNamespace == null) {
+        if (keys == null) {
+            return;
+        }
+        final N namespace;
+        try {
+            namespace = snapshotPrefetchNamespace();
+        } catch (Throwable ignored) {
+            prefetchBuildFailures++;
+            return;
+        }
+        if (namespace == null) {
             return;
         }
         K previousKey = currentKeyProvider.getCurrentKey();
         try {
             for (K key : keys) {
-                if (key == null || findCachedValueFor(key, currentNamespace) != null) {
+                if (key == null || findCachedValueFor(key, namespace) != null) {
                     continue;
                 }
                 keyContextSetter.accept(key);
-                delegate.setCurrentNamespace(currentNamespace);
+                delegate.setCurrentNamespace(namespace);
                 V loaded = delegate.value();
                 KeyNamespaceKey<K, N> storageKey =
                         new KeyNamespaceKey<>(
-                                key, currentNamespace, keySerializer, namespaceSerializer);
+                                key, namespace, keySerializer, namespaceSerializer);
                 l1Cache.put(storageKey, CachedValue.of(loaded, false));
             }
         } catch (Throwable ignored) {

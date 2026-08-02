@@ -127,6 +127,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     /** Guarded by {@link #lifecycleLock}. */
     private boolean disposed;
 
+    /** Guarded by {@link #lifecycleLock}; the backend terminal prefetch record is emitted once. */
+    private boolean prefetchCloseSummaryLogged;
+
+    /** Last terminal wrapper counts, retained for focused lifecycle tests after the map is clear. */
+    private int closedValueStateWrapperCount;
+    private int closedRecordKeyPrefetchWrapperCount;
+
     public CacheKitKeyedStateBackend(
             AbstractKeyedStateBackend<K> delegate,
             TaskKvStateRegistry kvStateRegistry,
@@ -546,6 +553,19 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     }
 
     private void closeWrappers() {
+        int valueStateWrappers = 0;
+        int recordKeyPrefetchWrappers = 0;
+        for (Object wrapper : wrappersByDelegateIdentity.values()) {
+            if (wrapper instanceof CachedInternalValueState) {
+                valueStateWrappers++;
+                CachedInternalValueState<?, ?, ?> valueState =
+                        (CachedInternalValueState<?, ?, ?>) wrapper;
+                if (valueState.supportsRecordKeyPrefetch()
+                        && valueState.hasRecordKeyPrefetchNamespace()) {
+                    recordKeyPrefetchWrappers++;
+                }
+            }
+        }
         for (Object wrapper : wrappersByDelegateIdentity.values()) {
             try {
                 if (wrapper instanceof CachedInternalValueState) {
@@ -563,6 +583,18 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             } catch (Exception ignored) {
                 // log and continue
             }
+        }
+        if (!prefetchCloseSummaryLogged) {
+            prefetchCloseSummaryLogged = true;
+            closedValueStateWrapperCount = valueStateWrappers;
+            closedRecordKeyPrefetchWrapperCount = recordKeyPrefetchWrappers;
+            LOG.info(
+                    "[CACHEKIT PREFETCH BACKEND] async={} multiGet={} valueStateWrappers={} "
+                            + "recordKeyPrefetchWrappers={}",
+                    BP_PREFETCH_ASYNC,
+                    BP_PREFETCH_MULTIGET,
+                    valueStateWrappers,
+                    recordKeyPrefetchWrappers);
         }
         wrappersByDelegateIdentity.clear();
     }
@@ -618,7 +650,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             for (Object wrapper : wrappersByDelegateIdentity.values()) {
                 if (wrapper instanceof CachedInternalValueState
                         && ((CachedInternalValueState<?, ?, ?>) wrapper)
-                                .supportsRecordKeyPrefetch()) {
+                                .supportsRecordKeyPrefetch()
+                        && ((CachedInternalValueState<?, ?, ?>) wrapper)
+                                .hasRecordKeyPrefetchNamespace()) {
                     return true;
                 }
             }
@@ -639,7 +673,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 for (Object wrapper : wrappersByDelegateIdentity.values()) {
                     if (wrapper instanceof CachedInternalValueState
                             && ((CachedInternalValueState<?, ?, ?>) wrapper)
-                                    .supportsRecordKeyPrefetch()) {
+                                    .supportsRecordKeyPrefetch()
+                            && ((CachedInternalValueState<?, ?, ?>) wrapper)
+                                    .hasRecordKeyPrefetchNamespace()) {
                         Runnable task =
                                 ((CachedInternalValueState) wrapper).buildAsyncPrefetchTask(keys);
                         if (task != null) {
@@ -655,7 +691,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     if (!BP_PREFETCH_ASYNC
                             && wrapper instanceof CachedInternalValueState
                             && ((CachedInternalValueState<?, ?, ?>) wrapper)
-                                    .supportsRecordKeyPrefetch()) {
+                                    .supportsRecordKeyPrefetch()
+                            && ((CachedInternalValueState<?, ?, ?>) wrapper)
+                                    .hasRecordKeyPrefetchNamespace()) {
                         ((CachedInternalValueState) wrapper).prefetch(keys);
                     }
                 }
@@ -685,7 +723,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 if (wrapper instanceof CachedInternalValueState) {
                     CachedInternalValueState<?, ?, ?> valueState =
                             (CachedInternalValueState<?, ?, ?>) wrapper;
-                    if (valueState.supportsRecordKeyPrefetch()
+                    if (valueState.usesVoidNamespaceRecordKeyFastPath()
                             && valueState.consumeImmediatePrefetchAccessObserved()) {
                         ((CachedInternalValueState) valueState).prefetchForImmediateUse(keys);
                     }
@@ -712,6 +750,24 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 shutdownFlushExecutors();
                 delegate.close();
             }
+        }
+    }
+
+    int getClosedValueStateWrapperCountForTesting() {
+        synchronized (lifecycleLock) {
+            return closedValueStateWrapperCount;
+        }
+    }
+
+    int getClosedRecordKeyPrefetchWrapperCountForTesting() {
+        synchronized (lifecycleLock) {
+            return closedRecordKeyPrefetchWrapperCount;
+        }
+    }
+
+    boolean hasPrefetchCloseSummaryForTesting() {
+        synchronized (lifecycleLock) {
+            return prefetchCloseSummaryLogged;
         }
     }
 

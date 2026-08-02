@@ -20,6 +20,7 @@ package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.queryablestate.client.state.serialization.KvStateSerializer;
 import org.apache.flink.runtime.state.VoidNamespace;
@@ -116,6 +117,51 @@ public class RocksDBBatchValueReaderTest {
             assertEquals("one", deserializeValue(directValues.get(1)));
             assertEquals(
                     "two",
+                    deserializeValue(reader.getSerializedValueByRocksDBKey(rocksDBKeys.get(1))));
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testPreparedBatchKeysDistinguishLongNamespacesForSameKey() throws Exception {
+        try (RocksDBKeyedStateBackendTestFactory factory =
+                new RocksDBKeyedStateBackendTestFactory()) {
+            RocksDBKeyedStateBackend<Integer> backend =
+                    factory.create(tmp, IntSerializer.INSTANCE, 128);
+            InternalValueState<Integer, Long, String> state =
+                    (InternalValueState<Integer, Long, String>)
+                            backend.getPartitionedState(
+                                    7L,
+                                    LongSerializer.INSTANCE,
+                                    new ValueStateDescriptor<>(
+                                            "namespaced-batch-value", StringSerializer.INSTANCE));
+
+            backend.setCurrentKey(1);
+            state.update("namespace-seven");
+            state.setCurrentNamespace(8L);
+            state.update("namespace-eight");
+
+            assertTrue(state instanceof RocksDBBatchValueReader<?, ?, ?>);
+            RocksDBBatchValueReader<Integer, Long, String> reader =
+                    (RocksDBBatchValueReader<Integer, Long, String>) state;
+            List<byte[]> rocksDBKeys =
+                    Arrays.asList(
+                            reader.serializeBatchKeyAndNamespace(
+                                    1, 7L, IntSerializer.INSTANCE, LongSerializer.INSTANCE),
+                            reader.serializeBatchKeyAndNamespace(
+                                    1, 8L, IntSerializer.INSTANCE, LongSerializer.INSTANCE));
+
+            List<byte[]> values =
+                    reader.getSerializedValuesByRocksDBKeys(rocksDBKeys, 0, rocksDBKeys.size());
+
+            assertEquals(2, values.size());
+            assertEquals("namespace-seven", deserializeValue(values.get(0)));
+            assertEquals("namespace-eight", deserializeValue(values.get(1)));
+            assertEquals(
+                    "namespace-seven",
+                    deserializeValue(reader.getSerializedValueByRocksDBKey(rocksDBKeys.get(0))));
+            assertEquals(
+                    "namespace-eight",
                     deserializeValue(reader.getSerializedValueByRocksDBKey(rocksDBKeys.get(1))));
         }
     }
