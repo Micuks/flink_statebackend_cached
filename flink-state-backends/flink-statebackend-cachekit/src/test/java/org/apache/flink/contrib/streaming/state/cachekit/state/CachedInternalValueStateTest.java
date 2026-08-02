@@ -600,6 +600,75 @@ class CachedInternalValueStateTest {
         assertFalse(prefetchThread.isAlive());
         assertFalse(closeThread.isAlive());
         assertEquals(0, closeReturned.getCount());
+        assertEquals(1, state.getPrefetchTasksBuiltForTesting());
+        assertEquals(1, state.getPrefetchTasksExecutedForTesting());
+        assertEquals(0, state.getPrefetchTasksDroppedForTesting());
+        assertEquals(0, state.getPendingPrefetchTasksForTesting());
+        assertTrue(state.hasClosedPrefetchAccountingForTesting());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testCloseWaitsUntilQueuedTaskIsExplicitlyDropped() throws Exception {
+        CountDownLatch closeStarted = new CountDownLatch(1);
+        CountDownLatch closeReturned = new CountDownLatch(1);
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
+        stubPreparedKeySerialization(batchReader);
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        () -> "unused",
+                        ignored -> {},
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        PrefetchExecutor.DropAwareTask queued =
+                (PrefetchExecutor.DropAwareTask)
+                        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2"));
+        assertEquals(1, state.getPendingPrefetchTasksForTesting());
+
+        Thread closeThread =
+                new Thread(
+                        () -> {
+                            closeStarted.countDown();
+                            state.close();
+                            closeReturned.countDown();
+                        },
+                        "test-close-queued");
+        closeThread.start();
+        try {
+            assertTrue(closeStarted.await(5, TimeUnit.SECONDS));
+            assertFalse(closeReturned.await(200, TimeUnit.MILLISECONDS));
+        } finally {
+            queued.onDrop();
+            closeThread.join(5000);
+        }
+
+        assertFalse(closeThread.isAlive());
+        assertEquals(1, state.getPrefetchTasksBuiltForTesting());
+        assertEquals(0, state.getPrefetchTasksExecutedForTesting());
+        assertEquals(1, state.getPrefetchTasksDroppedForTesting());
+        assertEquals(0, state.getPendingPrefetchTasksForTesting());
+        assertTrue(state.hasClosedPrefetchAccountingForTesting());
+
+        queued.run();
+        assertEquals(0, state.getPrefetchTasksExecutedForTesting());
+        verify(batchReader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
     }
 
     private static void stubPreparedKeySerialization(

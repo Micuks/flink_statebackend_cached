@@ -135,6 +135,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchBuildFailures;
     private volatile long prefetchWorkerFailures;
 
+    /**
+     * Per-wrapper completion barrier for tasks handed to the shared executor. The backend must not
+     * log its terminal activation counters, or dispose the delegate, while one of this wrapper's
+     * tasks is still queued. Every tracked task has exactly one terminal transition: executed or
+     * dropped.
+     */
+    private final Object prefetchTaskMonitor = new Object();
+
+    private int pendingPrefetchTasks;
+
     // Worker-thread-confined duplicated serializers (single shared worker thread => no races).
     private TypeSerializer<K> workerKeySerializer;
     private TypeSerializer<N> workerNamespaceSerializer;
@@ -618,6 +628,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         } finally {
             lifecycleLock.writeLock().unlock();
         }
+        awaitPrefetchTaskAccounting();
+        boolean accountingValid = prefetchTasksBuilt == prefetchTasksExecuted + prefetchTasksDropped;
         if (prefetchTasksBuilt > 0 || multiGetPrefetchEnabled) {
             LOG.info(
                     "[CACHEKIT VALUE PREFETCH] delegate={} namespaceSerializer={} "
@@ -625,7 +637,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "tasksBuilt={} tasksExecuted={} tasksDropped={} keysPrepared={} "
                             + "keysDeduplicated={} multiGetCalls={} "
                             + "multiGetKeys={} pointGetCalls={} staged={} missingStaged={} "
-                            + "promoted={} staleAborts={} buildFailures={} workerFailures={}",
+                            + "promoted={} staleAborts={} buildFailures={} workerFailures={} "
+                            + "tasksPending={} accountingValid={}",
                     delegate.getClass().getSimpleName(),
                     namespaceSerializer.getClass().getSimpleName(),
                     supportsRecordKeyPrefetch(),
@@ -645,7 +658,31 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchValuesPromoted,
                     prefetchStaleAborts,
                     prefetchBuildFailures,
-                    prefetchWorkerFailures);
+                    prefetchWorkerFailures,
+                    getPendingPrefetchTasks(),
+                    accountingValid);
+        }
+    }
+
+    private void awaitPrefetchTaskAccounting() {
+        boolean interrupted = false;
+        synchronized (prefetchTaskMonitor) {
+            while (pendingPrefetchTasks > 0) {
+                try {
+                    prefetchTaskMonitor.wait();
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private int getPendingPrefetchTasks() {
+        synchronized (prefetchTaskMonitor) {
+            return pendingPrefetchTasks;
         }
     }
 
@@ -671,6 +708,24 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getPrefetchTasksDroppedForTesting() {
         return prefetchTasksDropped;
+    }
+
+    long getPrefetchTasksBuiltForTesting() {
+        return prefetchTasksBuilt;
+    }
+
+    long getPrefetchTasksExecutedForTesting() {
+        return prefetchTasksExecuted;
+    }
+
+    int getPendingPrefetchTasksForTesting() {
+        return getPendingPrefetchTasks();
+    }
+
+    boolean hasClosedPrefetchAccountingForTesting() {
+        return closed
+                && getPendingPrefetchTasks() == 0
+                && prefetchTasksBuilt == prefetchTasksExecuted + prefetchTasksDropped;
     }
 
     /**
@@ -915,22 +970,46 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private Runnable trackedTask(
             java.util.List<KeyNamespaceKey<K, N>> reservations, long gen, Runnable task) {
+        synchronized (prefetchTaskMonitor) {
+            pendingPrefetchTasks++;
+        }
         return new PrefetchExecutor.DropAwareTask() {
+            private final java.util.concurrent.atomic.AtomicBoolean terminal =
+                    new java.util.concurrent.atomic.AtomicBoolean();
+
             @Override
             public void run() {
+                if (!terminal.compareAndSet(false, true)) {
+                    return;
+                }
                 try {
                     task.run();
                 } finally {
                     releaseReservations(reservations, gen);
+                    finishPrefetchTask();
                 }
             }
 
             @Override
             public void onDrop() {
+                if (!terminal.compareAndSet(false, true)) {
+                    return;
+                }
                 prefetchTasksDropped++;
                 releaseReservations(reservations, gen);
+                finishPrefetchTask();
             }
         };
+    }
+
+    private void finishPrefetchTask() {
+        synchronized (prefetchTaskMonitor) {
+            if (pendingPrefetchTasks <= 0) {
+                throw new IllegalStateException("prefetch task accounting underflow");
+            }
+            pendingPrefetchTasks--;
+            prefetchTaskMonitor.notifyAll();
+        }
     }
 
     private void releaseReservations(
@@ -949,13 +1028,17 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.List<byte[]> serializedKeyAndNamespaces, V defaultValue, long gen) {
         prefetchTasksExecuted++;
         try {
+            if (closed) {
+                prefetchStaleAborts++;
+                return;
+            }
             prepareWorkerState();
             if (multiGetPrefetchEnabled && delegate instanceof RocksDBBatchValueReader<?, ?, ?>) {
                 fetchChunksIntoStaging(serializedKeyAndNamespaces, defaultValue, gen);
                 return;
             }
             for (byte[] skn : serializedKeyAndNamespaces) {
-                if (gen != writeGen) {
+                if (closed || gen != writeGen) {
                     prefetchStaleAborts++;
                     return; // a write already invalidated this batch; stop wasting reads
                 }
