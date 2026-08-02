@@ -188,17 +188,25 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
     }
 
     private DataOutput<IN> maybeWrapWithBatchOutput(DataOutput<IN> output, Counter numRecordsIn) {
+        boolean bpPrefetchRequested = false;
+        boolean bpPrefetchFailClosed = false;
         try {
             org.apache.flink.configuration.Configuration cfg =
                     getEnvironment().getTaskManagerInfo().getConfiguration();
 
-            boolean bpPrefetchEnabled =
+            bpPrefetchRequested =
                     cfg.getBoolean(
                             org.apache.flink.configuration.ConfigOptions.key(
                                             "state.backend.cachekit.bp-prefetch.enabled")
                                     .booleanType()
                                     .defaultValue(false));
-            if (bpPrefetchEnabled) {
+            if (bpPrefetchRequested) {
+                bpPrefetchFailClosed =
+                        cfg.getBoolean(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.fail-closed.enabled")
+                                        .booleanType()
+                                        .defaultValue(false));
                 int distance =
                         cfg.getInteger(
                                 org.apache.flink.configuration.ConfigOptions.key(
@@ -222,17 +230,26 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                 Input<IN> headInput = (Input<IN>) mainOperator;
                 java.util.function.BooleanSupplier bp =
                         () -> recordWriter != null && !recordWriter.isAvailable();
-                return new StreamRecordBatchOutput<>(
-                        output,
-                        headInput,
-                        true,
-                        bpPrefetchKeySort,
+                StreamRecordBatchOutput<IN> prefetchOutput =
+                        new StreamRecordBatchOutput<>(
+                                output,
+                                headInput,
+                                true,
+                                bpPrefetchKeySort,
+                                distance,
+                                0L,
+                                numRecordsIn,
+                                true,
+                                bp,
+                                backpressureGated);
+                LOG.info(
+                        "[CACHEKIT PREFETCH OUTPUT] status=ACTIVE distance={} "
+                                + "backpressureGated={} commutativeKeySort={} failClosed={}",
                         distance,
-                        0L,
-                        numRecordsIn,
-                        true,
-                        bp,
-                        backpressureGated);
+                        backpressureGated,
+                        bpPrefetchKeySort,
+                        bpPrefetchFailClosed);
+                return prefetchOutput;
             }
 
             boolean enabled =
@@ -290,6 +307,20 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                     timeoutNanos,
                     numRecordsIn);
         } catch (Throwable t) {
+            if (bpPrefetchRequested) {
+                LOG.error(
+                        "[CACHEKIT PREFETCH OUTPUT] status=FAILED failClosed={} "
+                                + "errorClass={} message={}",
+                        bpPrefetchFailClosed,
+                        t.getClass().getName(),
+                        String.valueOf(t.getMessage()),
+                        t);
+                if (bpPrefetchFailClosed) {
+                    throw new IllegalStateException(
+                            "CacheKit prefetch was requested but its output wrapper failed to initialize.",
+                            t);
+                }
+            }
             return output;
         }
     }

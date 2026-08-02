@@ -52,6 +52,7 @@ import org.apache.flink.runtime.operators.testutils.MockInputSplitProvider;
 import org.apache.flink.runtime.state.StateInitializationContext;
 import org.apache.flink.runtime.state.StateSnapshotContext;
 import org.apache.flink.runtime.state.TestTaskStateManager;
+import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
 import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.graph.StreamEdge;
 import org.apache.flink.streaming.api.graph.StreamNode;
@@ -102,6 +103,53 @@ public class OneInputStreamTaskTest extends TestLogger {
 
     private static final ListStateDescriptor<Integer> TEST_DESCRIPTOR =
             new ListStateDescriptor<>("test", new IntSerializer());
+
+    @Test
+    public void testBpPrefetchFailClosedOutputIsInstalled() throws Exception {
+        final OneInputStreamTaskTestHarness<String, String> testHarness =
+                new OneInputStreamTaskTestHarness<>(
+                        OneInputStreamTask::new,
+                        BasicTypeInfo.STRING_TYPE_INFO,
+                        BasicTypeInfo.STRING_TYPE_INFO);
+
+        Configuration taskManagerConfiguration = new Configuration();
+        taskManagerConfiguration.setBoolean("state.backend.cachekit.bp-prefetch.enabled", true);
+        taskManagerConfiguration.setBoolean(
+                "state.backend.cachekit.bp-prefetch.fail-closed.enabled", true);
+        taskManagerConfiguration.setInteger("state.backend.cachekit.bp-prefetch.distance", 4);
+        taskManagerConfiguration.setBoolean(
+                "state.backend.cachekit.bp-prefetch.backpressure-gated", false);
+        taskManagerConfiguration.setBoolean(
+                "state.backend.cachekit.bp-prefetch.commutative-key-sort", false);
+        testHarness.taskManagerRuntimeInfo =
+                new TestingTaskManagerRuntimeInfo(taskManagerConfiguration);
+
+        testHarness.setupOutputForSingletonOperatorChain();
+        StreamConfig streamConfig = testHarness.getStreamConfig();
+        streamConfig.setStreamOperator(new StreamMap<>(new IdentityMap()));
+        streamConfig.setOperatorID(new OperatorID());
+
+        testHarness.invoke();
+        testHarness.waitForTaskRunning();
+        testHarness.processElement(new StreamRecord<>("one"));
+        testHarness.processElement(new StreamRecord<>("two"));
+        testHarness.processElement(new StreamRecord<>("three"));
+        testHarness.waitForInputProcessing();
+        assertEquals(
+                "prefetch output did not buffer to its configured distance",
+                0,
+                testHarness.getOutput().size());
+
+        testHarness.processElement(new StreamRecord<>("four"));
+        testHarness.waitForInputProcessing();
+        assertEquals(
+                "prefetch output did not flush at its configured distance",
+                4,
+                testHarness.getOutput().size());
+
+        testHarness.endInput();
+        testHarness.waitForTaskCompletion();
+    }
 
     /**
      * This test verifies that open() and close() are correctly called. This test also verifies that
