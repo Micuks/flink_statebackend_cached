@@ -46,7 +46,31 @@ state.backend.cachekit.bp-prefetch.backpressure-gated: true
 state.backend.cachekit.mailbox-batch.enabled: true
 state.backend.cachekit.mailbox-batch.size: 4096
 state.backend.cachekit.local-preagg.enabled: true
+state.backend.rocksdb.use-bloom-filter: true
+state.backend.rocksdb.bloom-filter.bits-per-key: 10.0
+state.backend.rocksdb.bloom-filter.block-based-mode: false
+state.backend.cachekit.rocksdb.memtable-bloom.ratio: 0.1
+state.backend.cachekit.rocksdb.memtable-bloom.whole-key: true
 ```
+
+### Bloom miss-rejection profile
+
+The SST Bloom filter remains a RocksDB feature, so its three settings keep the
+standard `state.backend.rocksdb.*` names. CacheKit's Memtable Bloom integration
+is configured explicitly under `state.backend.cachekit.rocksdb.*`:
+
+| Layer | Option | Default | Recommended |
+|---|---|---:|---:|
+| SST | `state.backend.rocksdb.use-bloom-filter` | `false` | `true` |
+| SST | `state.backend.rocksdb.bloom-filter.bits-per-key` | `10.0` | `10.0` |
+| SST | `state.backend.rocksdb.bloom-filter.block-based-mode` | `false` | `false` |
+| Memtable | `state.backend.cachekit.rocksdb.memtable-bloom.ratio` | `0.0` | `0.1` |
+| Memtable | `state.backend.cachekit.rocksdb.memtable-bloom.whole-key` | `false` | `true` |
+
+The old `state.backend.rocksdb.memtable-bloom.*` names remain accepted as
+deprecated aliases. Use the CacheKit-prefixed names in new configurations. If
+both forms are set to different values, startup fails instead of silently
+choosing one.
 
 ## Branches
 

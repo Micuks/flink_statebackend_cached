@@ -42,6 +42,16 @@ state.backend.local-recovery: true
 state.backend.rocksdb.memory.managed: true
 state.backend.rocksdb.memory.fixed-per-slot: 1024m
 state.backend.rocksdb.localdir: /tmp
+
+# --- RocksDB miss rejection: SST Bloom + CacheKit Memtable Bloom -------------
+# SST Bloom uses the standard RocksDB backend options. CacheKit owns the
+# Memtable Bloom integration and exposes it under state.backend.cachekit.*.
+state.backend.rocksdb.use-bloom-filter: true
+state.backend.rocksdb.bloom-filter.bits-per-key: 10.0
+state.backend.rocksdb.bloom-filter.block-based-mode: false
+state.backend.cachekit.rocksdb.memtable-bloom.ratio: 0.1
+state.backend.cachekit.rocksdb.memtable-bloom.whole-key: true
+
 execution.checkpointing.interval: 180000
 execution.checkpointing.mode: EXACTLY_ONCE
 execution.checkpointing.tolerable-failed-checkpoints: 0
