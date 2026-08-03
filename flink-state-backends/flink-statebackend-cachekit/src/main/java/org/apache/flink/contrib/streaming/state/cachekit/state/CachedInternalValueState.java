@@ -71,6 +71,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final KeyNamespaceKey<K, N> lookupKey = new KeyNamespaceKey<>(null, null);
 
     private final java.util.function.Consumer<K> keyContextSetter;
+    private final String prefetchJobId;
 
     /**
      * Lifecycle guard for delegate accesses that can overlap backend teardown. The worker reads
@@ -270,7 +271,36 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 hitRateWindow,
                 multiGetPrefetchEnabled,
                 MULTIGET_CHUNK_SIZE,
-                MULTIGET_MIN_BATCH_SIZE);
+                MULTIGET_MIN_BATCH_SIZE,
+                "unknown");
+    }
+
+    public CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean multiGetPrefetchEnabled,
+            String prefetchJobId) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                multiGetPrefetchEnabled,
+                MULTIGET_CHUNK_SIZE,
+                MULTIGET_MIN_BATCH_SIZE,
+                prefetchJobId);
     }
 
     CachedInternalValueState(
@@ -297,7 +327,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 hitRateWindow,
                 multiGetPrefetchEnabled,
                 multiGetChunkSize,
-                2);
+                2,
+                "unknown");
     }
 
     CachedInternalValueState(
@@ -313,9 +344,40 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             boolean multiGetPrefetchEnabled,
             int multiGetChunkSize,
             int multiGetMinBatchSize) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                multiGetPrefetchEnabled,
+                multiGetChunkSize,
+                multiGetMinBatchSize,
+                "unknown");
+    }
+
+    CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean multiGetPrefetchEnabled,
+            int multiGetChunkSize,
+            int multiGetMinBatchSize,
+            String prefetchJobId) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
+        this.prefetchJobId = Objects.requireNonNull(prefetchJobId, "prefetchJobId");
         this.cachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
         this.lruOverflow = Math.max(0, lruOverflow);
         this.bypassEnabled = bypassEnabled;
@@ -656,7 +718,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 prefetchTasksBuilt == prefetchTasksExecuted + prefetchTasksDropped;
         if (prefetchCloseSummaryLogged.compareAndSet(false, true)) {
             LOG.info(
-                    "[CACHEKIT VALUE PREFETCH] delegate={} namespaceSerializer={} "
+                    "[CACHEKIT VALUE PREFETCH] jobId={} delegate={} namespaceSerializer={} "
                             + "recordKeyPrefetch={} namespaceReady={} multiGet={} chunkSize={} "
                             + "minBatchSize={} "
                             + "tasksBuilt={} tasksExecuted={} tasksDropped={} keysPrepared={} "
@@ -664,6 +726,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "multiGetKeys={} pointGetCalls={} staged={} missingStaged={} "
                             + "promoted={} staleAborts={} buildFailures={} workerFailures={} "
                             + "tasksPending={} accountingValid={}",
+                    prefetchJobId,
                     delegate.getClass().getSimpleName(),
                     namespaceSerializer == null
                             ? "null"

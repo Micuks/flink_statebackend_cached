@@ -191,6 +191,7 @@ class CacheKitKeyedStateBackendLifecycleTest {
             AbstractKeyedStateBackend<String> delegate) {
         return new CacheKitKeyedStateBackend<>(
                 delegate,
+                "00000000000000000000000000000000",
                 null,
                 StringSerializer.INSTANCE,
                 CacheKitKeyedStateBackendLifecycleTest.class.getClassLoader(),

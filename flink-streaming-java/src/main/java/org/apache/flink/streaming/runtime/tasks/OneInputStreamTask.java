@@ -243,8 +243,9 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                                 bp,
                                 backpressureGated);
                 LOG.info(
-                        "[CACHEKIT PREFETCH OUTPUT] status=ACTIVE distance={} "
+                        "[CACHEKIT PREFETCH OUTPUT] status=ACTIVE jobId={} distance={} "
                                 + "backpressureGated={} commutativeKeySort={} failClosed={}",
+                        getEnvironment().getJobID(),
                         distance,
                         backpressureGated,
                         bpPrefetchKeySort,
@@ -309,8 +310,9 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
         } catch (Throwable t) {
             if (bpPrefetchRequested) {
                 LOG.error(
-                        "[CACHEKIT PREFETCH OUTPUT] status=FAILED failClosed={} "
+                        "[CACHEKIT PREFETCH OUTPUT] status=FAILED jobId={} failClosed={} "
                                 + "errorClass={} message={}",
+                        getEnvironment().getJobID(),
                         bpPrefetchFailClosed,
                         t.getClass().getName(),
                         String.valueOf(t.getMessage()),

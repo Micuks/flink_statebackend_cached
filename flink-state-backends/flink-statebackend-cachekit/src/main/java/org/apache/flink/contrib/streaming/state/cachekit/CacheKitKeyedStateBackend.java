@@ -82,6 +82,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private static final Logger LOG = LoggerFactory.getLogger(CacheKitKeyedStateBackend.class);
 
     private final AbstractKeyedStateBackend<K> delegate;
+    private final String prefetchJobId;
     private final int valueCacheMaxEntries;
     private final CachePolicyType valueCachePolicy;
     private final int valueCacheLruOverflow;
@@ -136,6 +137,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     public CacheKitKeyedStateBackend(
             AbstractKeyedStateBackend<K> delegate,
+            String prefetchJobId,
             TaskKvStateRegistry kvStateRegistry,
             TypeSerializer<K> keySerializer,
             ClassLoader userCodeClassLoader,
@@ -178,6 +180,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 delegate.getKeyContext());
 
         this.delegate = delegate;
+        this.prefetchJobId = Preconditions.checkNotNull(prefetchJobId, "prefetchJobId");
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
         this.valueCacheLruOverflow = valueCacheLruOverflow;
@@ -274,7 +277,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueBypassEnabled,
                     valueHitRateThreshold,
                     valueHitRateWindow,
-                    BP_PREFETCH_MULTIGET);
+                    BP_PREFETCH_MULTIGET,
+                    prefetchJobId);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -589,8 +593,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             closedValueStateWrapperCount = valueStateWrappers;
             closedRecordKeyPrefetchWrapperCount = recordKeyPrefetchWrappers;
             LOG.info(
-                    "[CACHEKIT PREFETCH BACKEND] async={} multiGet={} valueStateWrappers={} "
+                    "[CACHEKIT PREFETCH BACKEND] jobId={} async={} multiGet={} "
+                            + "valueStateWrappers={} "
                             + "recordKeyPrefetchWrappers={}",
+                    prefetchJobId,
                     BP_PREFETCH_ASYNC,
                     BP_PREFETCH_MULTIGET,
                     valueStateWrappers,

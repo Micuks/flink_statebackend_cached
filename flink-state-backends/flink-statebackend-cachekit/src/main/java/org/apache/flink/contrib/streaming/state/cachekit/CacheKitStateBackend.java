@@ -194,6 +194,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
 
         return new CacheKitKeyedStateBackend<>(
                 delegated,
+                jobID.toHexString(),
                 kvStateRegistry,
                 keySerializer,
                 userCodeClassLoader,
