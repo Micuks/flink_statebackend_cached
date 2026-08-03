@@ -18,6 +18,7 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.memory.OpaqueMemoryResource;
 import org.apache.flink.util.function.ThrowingRunnable;
 
@@ -28,30 +29,46 @@ import org.junit.rules.TemporaryFolder;
 import org.rocksdb.BlockBasedTableConfig;
 import org.rocksdb.BloomFilter;
 import org.rocksdb.Cache;
+import org.rocksdb.ColumnFamilyDescriptor;
+import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.ColumnFamilyOptions;
 import org.rocksdb.DBOptions;
 import org.rocksdb.IndexType;
 import org.rocksdb.LRUCache;
 import org.rocksdb.NativeLibraryLoader;
 import org.rocksdb.ReadOptions;
+import org.rocksdb.RocksDB;
 import org.rocksdb.TableFormatConfig;
 import org.rocksdb.WriteBufferManager;
 import org.rocksdb.WriteOptions;
 
+import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashSet;
 
+import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /** Tests to guard {@link RocksDBResourceContainer}. */
 public class RocksDBResourceContainerTest {
+
+    private static final String LEGACY_MEMTABLE_BLOOM_RATIO_KEY =
+            "state.backend.rocksdb.memtable-bloom.ratio";
+    private static final String LEGACY_MEMTABLE_BLOOM_WHOLE_KEY_KEY =
+            "state.backend.rocksdb.memtable-bloom.whole-key";
 
     @ClassRule public static final TemporaryFolder TMP_FOLDER = new TemporaryFolder();
 
@@ -240,6 +257,91 @@ public class RocksDBResourceContainerTest {
                 assertThat(columnFamilyOption.isOwningHandle(), is(false));
             }
         }
+    }
+
+    @Test
+    public void testMemtableBloomOptionsUseStockNativeParser() throws Exception {
+        final Configuration configuration = new Configuration();
+        configuration.set(RocksDBConfigurableOptions.USE_BLOOM_FILTER, false);
+        configuration.set(RocksDBConfigurableOptions.CACHEKIT_MEMTABLE_BLOOM_RATIO, 0.1);
+        configuration.set(RocksDBConfigurableOptions.CACHEKIT_MEMTABLE_BLOOM_WHOLE_KEY, true);
+
+        assertMemtableBloomOptionsApplied(configuration);
+    }
+
+    @Test
+    public void testLegacyMemtableBloomKeysRemainSupported() throws Exception {
+        final Configuration configuration = new Configuration();
+        configuration.set(RocksDBConfigurableOptions.USE_BLOOM_FILTER, false);
+        configuration.setDouble(LEGACY_MEMTABLE_BLOOM_RATIO_KEY, 0.1);
+        configuration.setBoolean(LEGACY_MEMTABLE_BLOOM_WHOLE_KEY_KEY, true);
+
+        assertMemtableBloomOptionsApplied(configuration);
+    }
+
+    @Test
+    public void testConflictingMemtableBloomRatioKeysAreRejected() {
+        final Configuration configuration = new Configuration();
+        configuration.set(RocksDBConfigurableOptions.CACHEKIT_MEMTABLE_BLOOM_RATIO, 0.1);
+        configuration.setDouble(LEGACY_MEMTABLE_BLOOM_RATIO_KEY, 0.2);
+
+        assertConflictingMemtableBloomKeysRejected(configuration);
+    }
+
+    @Test
+    public void testConflictingMemtableBloomWholeKeyKeysAreRejected() {
+        final Configuration configuration = new Configuration();
+        configuration.set(RocksDBConfigurableOptions.CACHEKIT_MEMTABLE_BLOOM_WHOLE_KEY, true);
+        configuration.setBoolean(LEGACY_MEMTABLE_BLOOM_WHOLE_KEY_KEY, false);
+
+        assertConflictingMemtableBloomKeysRejected(configuration);
+    }
+
+    private static void assertConflictingMemtableBloomKeysRejected(Configuration configuration) {
+        try {
+            new RocksDBResourceContainer(
+                    configuration, PredefinedOptions.DEFAULT, null, null, null, false);
+            fail("Expected conflicting CacheKit and deprecated memtable Bloom keys to fail");
+        } catch (IllegalArgumentException expected) {
+            assertThat(expected.getMessage(), containsString("Conflicting values"));
+        }
+    }
+
+    private static void assertMemtableBloomOptionsApplied(Configuration configuration)
+            throws Exception {
+
+        final File dbDirectory = TMP_FOLDER.newFolder();
+        final ArrayList<ColumnFamilyHandle> handles = new ArrayList<>();
+        try (RocksDBResourceContainer container =
+                new RocksDBResourceContainer(
+                        configuration, PredefinedOptions.DEFAULT, null, null, null, false)) {
+            final DBOptions dbOptions = container.getDbOptions();
+            final ColumnFamilyOptions columnOptions = container.getColumnOptions();
+            try (RocksDB db =
+                    RocksDB.open(
+                            dbOptions,
+                            dbDirectory.getAbsolutePath(),
+                            Collections.singletonList(
+                                    new ColumnFamilyDescriptor(
+                                            RocksDB.DEFAULT_COLUMN_FAMILY, columnOptions)),
+                            handles)) {
+                assertEquals(0.1, columnOptions.memtablePrefixBloomSizeRatio(), 0.0);
+                assertNull(
+                        ((BlockBasedTableConfig) columnOptions.tableFormatConfig()).filterPolicy());
+            }
+        } finally {
+            handles.forEach(ColumnFamilyHandle::close);
+        }
+
+        final File[] optionsFiles =
+                dbDirectory.listFiles((ignored, name) -> name.startsWith("OPTIONS-"));
+        assertNotNull(optionsFiles);
+        assertTrue(optionsFiles.length > 0);
+        final String optionsText =
+                new String(
+                        java.nio.file.Files.readAllBytes(optionsFiles[0].toPath()),
+                        StandardCharsets.UTF_8);
+        assertThat(optionsText, containsString("memtable_whole_key_filtering=true"));
     }
 
     @Test

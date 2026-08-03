@@ -20,6 +20,7 @@ package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.MemorySize;
+import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.configuration.description.Description;
 import org.apache.flink.util.Preconditions;
 
@@ -30,6 +31,8 @@ import java.io.File;
 import java.io.Serializable;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.apache.flink.configuration.ConfigOptions.key;
@@ -256,6 +259,48 @@ public class RocksDBConfigurableOptions implements Serializable {
                             "If true, RocksDB will use block-based filter instead of full filter, this only take effect when bloom filter is used. "
                                     + "The default value is 'false'.");
 
+    private static final String CACHEKIT_MEMTABLE_BLOOM_RATIO_KEY =
+            "state.backend.cachekit.rocksdb.memtable-bloom.ratio";
+
+    private static final String CACHEKIT_MEMTABLE_BLOOM_WHOLE_KEY_KEY =
+            "state.backend.cachekit.rocksdb.memtable-bloom.whole-key";
+
+    private static final String LEGACY_MEMTABLE_BLOOM_RATIO_KEY =
+            "state.backend.rocksdb.memtable-bloom.ratio";
+
+    private static final String LEGACY_MEMTABLE_BLOOM_WHOLE_KEY_KEY =
+            "state.backend.rocksdb.memtable-bloom.whole-key";
+
+    public static final ConfigOption<Double> CACHEKIT_MEMTABLE_BLOOM_RATIO =
+            key(CACHEKIT_MEMTABLE_BLOOM_RATIO_KEY)
+                    .doubleType()
+                    .defaultValue(0.0)
+                    .withDescription(
+                            "The ratio of each RocksDB memtable that CacheKit reserves for its memtable Bloom filter. "
+                                    + "Set to 0.0 to disable the CacheKit memtable Bloom integration; valid values are from 0.0 through 0.25.")
+                    .withDeprecatedKeys(LEGACY_MEMTABLE_BLOOM_RATIO_KEY);
+
+    public static final ConfigOption<Boolean> CACHEKIT_MEMTABLE_BLOOM_WHOLE_KEY =
+            key(CACHEKIT_MEMTABLE_BLOOM_WHOLE_KEY_KEY)
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "If true, CacheKit adds and probes whole keys in RocksDB's memtable Bloom filter. "
+                                    + "This only takes effect when the CacheKit memtable Bloom ratio is greater than 0.0.")
+                    .withDeprecatedKeys(LEGACY_MEMTABLE_BLOOM_WHOLE_KEY_KEY);
+
+    private static final ConfigOption<Double> CACHEKIT_MEMTABLE_BLOOM_RATIO_PRIMARY =
+            key(CACHEKIT_MEMTABLE_BLOOM_RATIO_KEY).doubleType().noDefaultValue();
+
+    private static final ConfigOption<Double> LEGACY_MEMTABLE_BLOOM_RATIO =
+            key(LEGACY_MEMTABLE_BLOOM_RATIO_KEY).doubleType().noDefaultValue();
+
+    private static final ConfigOption<Boolean> CACHEKIT_MEMTABLE_BLOOM_WHOLE_KEY_PRIMARY =
+            key(CACHEKIT_MEMTABLE_BLOOM_WHOLE_KEY_KEY).booleanType().noDefaultValue();
+
+    private static final ConfigOption<Boolean> LEGACY_MEMTABLE_BLOOM_WHOLE_KEY =
+            key(LEGACY_MEMTABLE_BLOOM_WHOLE_KEY_KEY).booleanType().noDefaultValue();
+
     public static final ConfigOption<Double> RESTORE_OVERLAP_FRACTION_THRESHOLD =
             key("state.backend.rocksdb.restore-overlap-fraction-threshold")
                     .doubleType()
@@ -290,6 +335,8 @@ public class RocksDBConfigurableOptions implements Serializable {
                 USE_BLOOM_FILTER,
                 BLOOM_FILTER_BITS_PER_KEY,
                 BLOOM_FILTER_BLOCK_BASED_MODE,
+                CACHEKIT_MEMTABLE_BLOOM_RATIO,
+                CACHEKIT_MEMTABLE_BLOOM_WHOLE_KEY,
                 RESTORE_OVERLAP_FRACTION_THRESHOLD
             };
 
@@ -338,6 +385,37 @@ public class RocksDBConfigurableOptions implements Serializable {
             Preconditions.checkArgument(
                     new File((String) value).isAbsolute(),
                     "Configured path for key " + key + " is not absolute.");
+        } else if (CACHEKIT_MEMTABLE_BLOOM_RATIO.equals(option)) {
+            double ratio = (Double) value;
+            Preconditions.checkArgument(
+                    ratio >= 0.0 && ratio <= 0.25,
+                    "Configured value for key " + key + " must be between 0.0 and 0.25.");
         }
+    }
+
+    static void validateCacheKitMemtableBloomCompatibility(ReadableConfig configuration) {
+        rejectConflictingValues(
+                configuration, CACHEKIT_MEMTABLE_BLOOM_RATIO_PRIMARY, LEGACY_MEMTABLE_BLOOM_RATIO);
+        rejectConflictingValues(
+                configuration,
+                CACHEKIT_MEMTABLE_BLOOM_WHOLE_KEY_PRIMARY,
+                LEGACY_MEMTABLE_BLOOM_WHOLE_KEY);
+    }
+
+    private static <T> void rejectConflictingValues(
+            ReadableConfig configuration,
+            ConfigOption<T> cacheKitOption,
+            ConfigOption<T> legacyOption) {
+        final Optional<T> cacheKitValue = configuration.getOptional(cacheKitOption);
+        final Optional<T> legacyValue = configuration.getOptional(legacyOption);
+        Preconditions.checkArgument(
+                !cacheKitValue.isPresent()
+                        || !legacyValue.isPresent()
+                        || Objects.equals(cacheKitValue.get(), legacyValue.get()),
+                "Conflicting values for CacheKit option '%s' (%s) and deprecated option '%s' (%s).",
+                cacheKitOption.key(),
+                cacheKitValue.orElse(null),
+                legacyOption.key(),
+                legacyValue.orElse(null));
     }
 }

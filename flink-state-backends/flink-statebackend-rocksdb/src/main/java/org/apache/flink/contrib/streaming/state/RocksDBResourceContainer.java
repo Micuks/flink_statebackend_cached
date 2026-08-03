@@ -46,6 +46,7 @@ import javax.annotation.Nullable;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Properties;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -58,6 +59,8 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  */
 public final class RocksDBResourceContainer implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(RocksDBResourceContainer.class);
+
+    private static final String MEMTABLE_WHOLE_KEY_NATIVE_OPTION = "memtable_whole_key_filtering";
 
     // the filename length limit is 255 on most operating systems
     private static final int INSTANCE_PATH_LENGTH_LIMIT = 255 - "_LOG".length();
@@ -127,6 +130,7 @@ public final class RocksDBResourceContainer implements AutoCloseable {
             @Nullable File instanceBasePath,
             boolean enableStatistics) {
 
+        RocksDBConfigurableOptions.validateCacheKitMemtableBloomCompatibility(configuration);
         this.configuration = configuration;
         this.predefinedOptions = checkNotNull(predefinedOptions);
         this.optionsFactory = optionsFactory;
@@ -308,7 +312,22 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
     /** Create a {@link ColumnFamilyOptions} for RocksDB, including some common settings. */
     ColumnFamilyOptions createBaseCommonColumnOptions() {
-        return new ColumnFamilyOptions();
+        if (!internalGetOption(RocksDBConfigurableOptions.CACHEKIT_MEMTABLE_BLOOM_WHOLE_KEY)) {
+            return new ColumnFamilyOptions();
+        }
+
+        // FRocksDB 6.20 already supports this native option, but its RocksJava
+        // ColumnFamilyOptions binding does not expose a typed setter. Constructing the native
+        // options from a property keeps the stock, published JNI artifact usable on every
+        // architecture while still setting the option before the first memtable is created.
+        final Properties properties = new Properties();
+        properties.setProperty(MEMTABLE_WHOLE_KEY_NATIVE_OPTION, Boolean.TRUE.toString());
+        final ColumnFamilyOptions options =
+                ColumnFamilyOptions.getColumnFamilyOptionsFromProps(properties);
+        return checkNotNull(
+                options,
+                "FRocksDB rejected native column-family option %s",
+                MEMTABLE_WHOLE_KEY_NATIVE_OPTION);
     }
 
     /**
@@ -389,6 +408,16 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
         currentOptions.setMinWriteBufferNumberToMerge(
                 internalGetOption(RocksDBConfigurableOptions.MIN_WRITE_BUFFER_NUMBER_TO_MERGE));
+
+        final double memtableBloomRatio =
+                internalGetOption(RocksDBConfigurableOptions.CACHEKIT_MEMTABLE_BLOOM_RATIO);
+        final boolean memtableBloomWholeKey =
+                internalGetOption(RocksDBConfigurableOptions.CACHEKIT_MEMTABLE_BLOOM_WHOLE_KEY);
+        currentOptions.setMemtablePrefixBloomSizeRatio(memtableBloomRatio);
+        LOG.info(
+                "Configured CacheKit RocksDB memtable Bloom filter: ratio={}, whole-key={}",
+                memtableBloomRatio,
+                memtableBloomWholeKey);
 
         TableFormatConfig tableFormatConfig = currentOptions.tableFormatConfig();
 

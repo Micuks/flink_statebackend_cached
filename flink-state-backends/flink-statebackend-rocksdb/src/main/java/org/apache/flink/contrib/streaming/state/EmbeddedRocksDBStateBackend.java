@@ -850,6 +850,8 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
         if (base == null) {
             base = new Configuration();
         }
+        RocksDBConfigurableOptions.validateCacheKitMemtableBloomCompatibility(base);
+        RocksDBConfigurableOptions.validateCacheKitMemtableBloomCompatibility(onTop);
         Configuration configuration = new Configuration();
         for (ConfigOption<?> option : RocksDBConfigurableOptions.CANDIDATE_CONFIGS) {
             Optional<?> baseValue = base.getOptional(option);

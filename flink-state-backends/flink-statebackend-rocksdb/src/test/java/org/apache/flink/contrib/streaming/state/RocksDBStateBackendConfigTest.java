@@ -515,6 +515,8 @@ public class RocksDBStateBackendConfigTest {
             verifyIllegalArgument(RocksDBConfigurableOptions.COMPACTION_STYLE, "LEV");
             verifyIllegalArgument(RocksDBConfigurableOptions.USE_BLOOM_FILTER, "NO");
             verifyIllegalArgument(RocksDBConfigurableOptions.BLOOM_FILTER_BLOCK_BASED_MODE, "YES");
+            verifyIllegalArgument(RocksDBConfigurableOptions.CACHEKIT_MEMTABLE_BLOOM_RATIO, "-0.1");
+            verifyIllegalArgument(RocksDBConfigurableOptions.CACHEKIT_MEMTABLE_BLOOM_RATIO, "0.26");
             verifyIllegalArgument(
                     RocksDBConfigurableOptions.RESTORE_OVERLAP_FRACTION_THRESHOLD, "2");
         }
@@ -540,6 +542,10 @@ public class RocksDBStateBackendConfigTest {
             configuration.setString(RocksDBConfigurableOptions.BLOCK_CACHE_SIZE.key(), "512 mb");
             configuration.setString(RocksDBConfigurableOptions.USE_BLOOM_FILTER.key(), "TRUE");
             configuration.setString(
+                    RocksDBConfigurableOptions.CACHEKIT_MEMTABLE_BLOOM_RATIO.key(), "0.1");
+            configuration.setString(
+                    RocksDBConfigurableOptions.CACHEKIT_MEMTABLE_BLOOM_WHOLE_KEY.key(), "TRUE");
+            configuration.setString(
                     RocksDBConfigurableOptions.RESTORE_OVERLAP_FRACTION_THRESHOLD.key(), "0.5");
 
             try (RocksDBResourceContainer optionsContainer =
@@ -561,6 +567,7 @@ public class RocksDBStateBackendConfigTest {
                 assertEquals(4, columnOptions.maxWriteBufferNumber());
                 assertEquals(2, columnOptions.minWriteBufferNumberToMerge());
                 assertEquals(64 * SizeUnit.MB, columnOptions.writeBufferSize());
+                assertEquals(0.1, columnOptions.memtablePrefixBloomSizeRatio(), 0.0);
 
                 BlockBasedTableConfig tableConfig =
                         (BlockBasedTableConfig) columnOptions.tableFormatConfig();
