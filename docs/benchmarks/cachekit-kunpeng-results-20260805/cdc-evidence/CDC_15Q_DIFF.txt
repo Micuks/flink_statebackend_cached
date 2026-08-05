@@ -1,0 +1,21 @@
+combined_status: PASS
+standard_adaptive_cdc_oracle: results-bp-prefetch-cdc-adaptive/diff.txt
+q12_guarded_proctime_oracle: results-bp-prefetch-cdc-q12-proctime-guarded-firstwindow-offon-12k-tps1000/diff.txt
+
+q3: PASS sorted (lines=3145)
+q4: PASS-CDC (5 live rows)
+q5: PASS sorted (lines=65)
+q7: PASS sorted (lines=11)
+q8: PASS sorted (lines=6716)
+q9: PASS-CDC (9625 live rows)
+q11: PASS sorted (lines=7629)
+q12: PASS-PROCTIME-NORMALIZED guarded first_window (live_rows=614)
+q13: PASS sorted (lines=33334)
+q15: PASS-CDC (1 live rows)
+q16: PASS-CDC (8085 live rows)
+q17: PASS-CDC (13265 live rows)
+q18: PASS-CDC (19707 live rows)
+q19: PASS sorted (lines=96913)
+q20: PASS sorted (lines=6936)
+
+note: the default multi-window q12 proctime oracle remains invalid for exact repeated-run comparison; q12 uses the guarded first-window proctime oracle above.
