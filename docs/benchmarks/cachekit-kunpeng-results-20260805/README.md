@@ -1,26 +1,22 @@
-# CacheKit Kunpeng Nexmark results index (2026-08-05)
+# CacheKit 鲲鹏 Nexmark 结果索引（2026-08-05）
 
-This directory freezes four audited result reports in the same reporting format:
-raw K/s/core values (two decimals), per-query uplift, arithmetic-mean group uplift,
-configuration identity, and validity/provenance notes.
+本目录固化四份统一格式的审计报告：每个 query 的原始 K/s/core（两位小数）、
+提升百分比、分组算术平均、有效配置和来源审计。
 
-- [Bloom-only: SST, memtable, and combined](BLOOM_ONLY.md)
-- [FullOpt plus SST/memtable Bloom](FULLOPT_BLOOM.md)
+- [Bloom-only：SST、memtable 及 combined](BLOOM_ONLY.md)
+- [FullOpt + SST/memtable Bloom](FULLOPT_BLOOM.md)
 - [Access-guided MultiGet](MULTIGET.md)
-- [Kunpeng TSV110/LSE compiler contrast](TSV110_LSE.md)
-- [CDC correctness evidence index](CDC_EVIDENCE.md)
-- [Public paste URLs and listed verification](PASTE_URLS.md)
+- [鲲鹏 TSV110/LSE 编译器对照](TSV110_LSE.md)
+- [CDC 正确性证据索引](CDC_EVIDENCE.md)
+- [公开 paste 地址和 listed 核验](PASTE_URLS.md)
 
-The public MicroBin URLs are recorded after upload in `PASTE_URLS.md`. Public
-paste expiration is one week, which is the longest duration exposed by the
-service UI; the Git copies are durable.
+## 统计口径
 
-## Reporting rules
+- 前八：q4、q5、q8、q9、q11、q18、q19、q20。
+- 后七：q3、q7、q12、q13、q15、q16、q17。
+- ValueState-only：q4、q5、q7、q8、q9、q11、q12、q15、q16、q17、q18。
+- 任意 state：ValueState-only 加 q3、q19、q20。
+- 分组提升是组内各 query 提升百分比的算术平均。
+- 原始 K/s/core 固定显示两位小数；有未舍入原值时使用未舍入值计算。
 
-- Front eight: q4, q5, q8, q9, q11, q18, q19, q20.
-- Back seven: q3, q7, q12, q13, q15, q16, q17.
-- ValueState-only: q4, q5, q7, q8, q9, q11, q12, q15, q16, q17, q18.
-- Any-state: ValueState-only plus q3, q19, q20.
-- Group uplift is the arithmetic mean of per-query percentage uplifts.
-- Raw K/s/core is displayed to exactly two decimals; calculations use the
-  underlying unrounded values where available.
+公开 paste 的最长可选保存期为一周；Git 中的报告为长期副本。

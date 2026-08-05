@@ -1,38 +1,35 @@
-# CacheKit Kunpeng TSV110/LSE: Nexmark 15q three-round report
+# CacheKit 鲲鹏 TSV110/LSE：Nexmark 15q 三轮报告
 
-## Verdict
+## 结论
 
-The Kunpeng-specific native build did **not** produce a stable overall gain.
-Keeping every valid leg, the 15-query arithmetic-mean uplift is **-0.16%**.
-R1 q16 is a valid but non-replicated low candidate point; excluding q16 only as
-a sensitivity analysis gives +0.51% over the other 14 queries, still effectively
-flat. No leg is silently removed from the official result.
+鲲鹏专用 native build **没有形成稳定整体提升**。保留全部有效腿后，15-query
+提升百分比的算术平均为 **-0.16%**。R1 q16 是有效但未复现的 candidate 低点；
+仅作敏感性分析时排除 q16，其余 14q 为 +0.51%，仍可视为持平。正式结果没有
+静默删除任何有效腿。
 
-## Configuration
+## 配置
 
-| Field | Generic control | TSV110/LSE candidate |
+| 配置项 | Generic 对照 | TSV110/LSE 候选 |
 |---|---|---|
 | Native flags | `-march=armv8-a+crc+crypto -mno-outline-atomics` | `-mcpu=tsv110 -moutline-atomics` |
-| Compiler | Kunpeng GCC 10.3.1 | same |
-| FrocksDB source | `f8933473ef1eb22d070a199bfecbec55028491d7` | same |
-| SST Bloom | on | on |
-| Memtable whole-key Bloom | ratio 0.1, on | same |
-| Value cache / map snapshot | off / off | same |
-| Prefetch / MultiGet / preagg / mailbox | off | same |
-| Chen COW/RYW/PQ | off | same |
-| Checkpoint interval | absent | absent |
-| Workload | 5M warmup + 100M measured, 8 TMs / 16 slots | same |
+| 编译器 | Kunpeng GCC 10.3.1 | 相同 |
+| FrocksDB 源码 | `f8933473ef1eb22d070a199bfecbec55028491d7` | 相同 |
+| SST Bloom | 开 | 开 |
+| Memtable whole-key Bloom | ratio 0.1，开 | 相同 |
+| Value cache / map snapshot | 关 / 关 | 相同 |
+| Prefetch / MultiGet / preagg / mailbox | 全关 | 相同 |
+| Chen COW/RYW/PQ | 全关 | 相同 |
+| Checkpoint interval | 未配置 | 未配置 |
+| 负载 | 5M warmup + 100M measured，8 TMs / 16 slots | 相同 |
 
-The configs are byte-identical. Both RocksJava builds passed 210 tests. ELF
-audit found 0 LSE instructions in generic and 3,831 in TSV110, proving that the
-mechanism entered the candidate binary.
+两份配置逐字节一致，两套 RocksJava build 均通过 210 个测试。ELF 审计在 generic
+中发现 0 条 LSE 指令，在 TSV110 中发现 3,831 条，证明机制确实进入候选 binary。
 
-## Raw three-round data
+## 三轮原始数据
 
-K/s/core values are raw. Uplift is the mean of the three paired per-round
-`tsv110/generic - 1` percentages.
+表内均为原始 K/s/core；提升是三轮配对 `tsv110/generic - 1` 百分比的算术平均。
 
-| Query | G R1 | T R1 | G R2 | T R2 | G R3 | T R3 | Mean uplift |
+| Query | Generic R1 | TSV110 R1 | Generic R2 | TSV110 R2 | Generic R3 | TSV110 R3 | 平均提升 |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | q4 | 37.84 | 43.53 | 42.71 | 43.26 | 43.03 | 43.35 | +5.69% |
 | q5 | 95.22 | 94.83 | 93.99 | 92.52 | 94.83 | 95.71 | -0.35% |
@@ -50,25 +47,22 @@ K/s/core values are raw. Uplift is the mean of the three paired per-round
 | q16 | 46.74 | 32.36 | 46.86 | 47.81 | 47.16 | 47.19 | -9.56% |
 | q17 | 105.10 | 106.19 | 104.96 | 105.99 | 103.63 | 105.74 | +1.35% |
 
-## Group results
+## 分组结果
 
-| Group | Generic raw mean | TSV110 raw mean | Arithmetic-mean uplift |
+| 分组 | Generic 原始均值 | TSV110 原始均值 | 逐 query 提升算术平均 |
 |---|---:|---:|---:|
-| Front eight | 77.29 | 77.68 | +1.00% |
-| Back seven | 147.14 | 146.02 | -1.48% |
+| 前八 | 77.29 | 77.68 | +1.00% |
+| 后七 | 147.14 | 146.02 | -1.48% |
 | ValueState-only | 88.66 | 88.48 | -0.18% |
-| Any-state | 98.65 | 98.19 | -0.22% |
-| Total 15 | 109.88 | 109.57 | -0.16% |
+| 任意 state | 98.65 | 98.19 | -0.22% |
+| 总计 15q | 109.88 | 109.57 | -0.16% |
 
-## Audit and outlier note
+## 审计与离群值说明
 
-All 90/90 legs are real 100M FINISHED jobs with exactly 8 TMs, positive cores,
-zero checkpoint histories/counts, and verified leg/round hashes. R1 q16 TSV110
-(32.36) is about 32% below its R2/R3 values, while its generic control is stable.
-It remains in the official result because every validity check passed. The 14q
-sensitivity result is reported only to show that the compiler route remains flat
-even without that point.
+90/90 个腿均为真实 100M FINISHED job，具有准确的 8 TMs、正 cores、零 checkpoint
+history/count，以及通过校验的 leg/round hash。R1 q16 TSV110（32.36）比 R2/R3
+低约 32%，但 generic 对照稳定。由于它通过全部有效性检查，正式结果仍保留该点；14q
+敏感性结果仅用于说明即便不计该点，编译器路线仍基本持平。
 
-Authoritative local evidence:
+权威本地证据：
 `dse_results/cachekit-kunpeng-compiler-direct-r1-20260805/final/`.
-

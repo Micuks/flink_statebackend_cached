@@ -1,34 +1,36 @@
-# CacheKit FullOpt + SST/memtable Bloom: Kunpeng Nexmark 15q three-round report
+# CacheKit FullOpt + SST/memtable Bloom：鲲鹏 Nexmark 15q 三轮报告
 
-## Verdict
+## 结论
 
-With the FullOpt stack held constant, enabling SST and whole-key memtable Bloom
-improves the arithmetic mean across 15 queries by **+11.08%** over three rounds.
-This is the clean isolated Bloom increment on top of FullOpt.
+保持 FullOpt 栈完全一致时，开启 SST Bloom 和 whole-key memtable Bloom 后，15q 的
+逐 query 提升算术平均为 **+11.08%**。这是 Bloom 在 FullOpt 之上的同实验纯增量。
 
-## Configuration
+另外附上 checkpoint-off 的三轮 RDB 参考基线。FullOpt+Bloom 相对该 RDB 参考的 15q
+算术平均为 **+20.53%**，但它是**跨实验、跨源码快照的总栈比较**，不能替代 +11.08%
+这一严格 matched 的 Bloom 增量。
 
-| Field | FullOpt control | FullOpt + Bloom candidate |
+## 配置
+
+| 配置项 | FullOpt 对照 | FullOpt + Bloom 候选 |
 |---|---|---|
 | State backend | CacheKit | CacheKit |
-| Value cache | 8,000 LRU | same |
-| Map snapshot | 2,000; point/presence map cache off | same |
-| Prefetch | on; distance 64; async on | same |
-| MultiGet | on; chunk/min-batch 64 | same |
-| Local preagg / mailbox | on / on (4096) | same |
-| Chen COW/RYW/PQ | on | same |
-| SST Bloom | off | on; 10 bits/key; full filter |
-| Memtable Bloom | ratio 0.0; whole-key off | ratio 0.1; whole-key on |
-| Checkpoint interval | absent | absent |
-| Workload | 5M warmup + 100M measured; 8 TMs / 16 slots | same |
+| Value cache | 8,000 LRU | 相同 |
+| Map snapshot | 2,000；point/presence map cache 关 | 相同 |
+| Prefetch | 开；distance 64；async 开 | 相同 |
+| MultiGet | 开；chunk/min-batch 64 | 相同 |
+| Local preagg / mailbox | 开 / 开（4096） | 相同 |
+| Chen COW/RYW/PQ | 开 | 相同 |
+| SST Bloom | 关 | 开；10 bits/key；full filter |
+| Memtable Bloom | ratio 0.0；whole-key 关 | ratio 0.1；whole-key 开 |
+| Checkpoint interval | 未配置 | 未配置 |
+| 负载 | 5M warmup + 100M measured；8 TMs / 16 slots | 相同 |
 
-The audited config diff contains exactly three keys:
-`use-bloom-filter`, `memtable-bloom.ratio`, and
-`memtable-bloom.whole-key`.
+审计后的配置差异严格只有三个 key：`use-bloom-filter`、
+`memtable-bloom.ratio` 和 `memtable-bloom.whole-key`。
 
-## Raw three-round data
+## FullOpt matched 三轮原始数据
 
-| Query | Ctrl R1 | Ctrl R2 | Ctrl R3 | Bloom R1 | Bloom R2 | Bloom R3 | Mean uplift |
+| Query | 对照 R1 | 对照 R2 | 对照 R3 | Bloom R1 | Bloom R2 | Bloom R3 | 平均提升 |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | q4 | 52.13 | 51.81 | 51.89 | 61.13 | 61.14 | 61.55 | +17.96% |
 | q5 | 79.61 | 80.61 | 77.58 | 89.97 | 91.72 | 91.09 | +14.74% |
@@ -46,24 +48,56 @@ The audited config diff contains exactly three keys:
 | q16 | 13.73 | 13.59 | 13.68 | 16.07 | 16.08 | 16.00 | +17.44% |
 | q17 | 194.93 | 193.34 | 183.02 | 203.48 | 197.86 | 202.55 | +5.80% |
 
-## Group results
+## FullOpt matched 分组结果
 
-| Group | Control raw mean | Candidate raw mean | Arithmetic-mean uplift |
+| 分组 | 对照原始均值 | 候选原始均值 | 逐 query 提升算术平均 |
 |---|---:|---:|---:|
-| Front eight | 78.40 | 85.25 | +11.62% |
-| Back seven | 146.88 | 151.75 | +10.46% |
+| 前八 | 78.40 | 85.25 | +11.62% |
+| 后七 | 146.88 | 151.75 | +10.46% |
 | ValueState-only | 90.11 | 97.35 | +13.22% |
-| Any-state | 99.20 | 105.18 | +11.73% |
-| Total 15 | 110.36 | 116.28 | +11.08% |
+| 任意 state | 99.20 | 105.18 | +11.73% |
+| 总计 15q | 110.36 | 116.28 | +11.08% |
 
-## Audit
+## 附：RDB 三轮参考基线
 
-All 90/90 legs and 180 warmup/measured jobs are present, hash-valid, real
-FINISHED, positive-core, 8-TM, and checkpoint-count zero. R1/R3 use
-control→candidate and R2 reverses order. The source identities frozen by the
-manifest are Flink `2f9582a24f98e1d7479b390206eca337c032d207` and FrocksDB
-`f8933473ef1eb22d070a199bfecbec55028491d7`.
+RDB 值取自 Bloom-only 的 checkpoint-off 三轮矩阵，并沿用其透明清洗规则：q3 R1 和
+q13 R2 不计入参考均值。RDB 使用 `rocksdb` backend、关闭全部 CacheKit 优化；FullOpt
+两腿来自另一组 matched 实验。两边都是 5M warmup + 100M measured、8 TMs / 16 slots、
+checkpoint interval 未配置，但源码/runtime 快照不同，因此以下提升只用于总栈效果参考。
 
-Authoritative local evidence:
+| Query | RDB R1 | RDB R2 | RDB R3 | RDB 参考均值 | FullOpt 均值 | FullOpt+Bloom 均值 | FullOpt vs RDB | FullOpt+Bloom vs RDB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| q4 | 37.47 | 37.60 | 37.05 | 37.37 | 51.94 | 61.27 | +38.99% | +63.95% |
+| q5 | 79.92 | 81.22 | 82.33 | 81.16 | 79.27 | 90.93 | -2.33% | +12.04% |
+| q8 | 234.48 | 233.98 | 229.40 | 232.62 | 214.48 | 211.37 | -7.80% | -9.14% |
+| q9 | 23.40 | 23.39 | 23.36 | 23.38 | 26.55 | 29.94 | +13.54% | +28.04% |
+| q11 | 47.78 | 47.97 | 47.81 | 47.85 | 53.81 | 54.22 | +12.45% | +13.30% |
+| q18 | 61.70 | 61.32 | 61.28 | 61.43 | 94.27 | 121.27 | +53.45% | +97.40% |
+| q19 | 71.05 | 70.61 | 70.30 | 70.65 | 70.05 | 67.93 | -0.85% | -3.85% |
+| q20 | 32.53 | 32.59 | 32.51 | 32.54 | 36.82 | 45.11 | +13.13% | +38.62% |
+| q3 | 300.60† | 291.40 | 294.32 | 292.86 | 290.76 | 288.65 | -0.72% | -1.44% |
+| q7 | 34.25 | 34.10 | 34.39 | 34.25 | 34.34 | 50.83 | +0.28% | +48.41% |
+| q12 | 182.04 | 180.03 | 182.58 | 181.55 | 161.07 | 162.32 | -11.28% | -10.59% |
+| q13 | 273.11 | 275.65† | 260.17 | 266.64 | 266.47 | 271.74 | -0.07% | +1.91% |
+| q15 | 79.16 | 81.17 | 80.25 | 80.19 | 71.40 | 71.34 | -10.96% | -11.04% |
+| q16 | 38.58 | 38.54 | 38.32 | 38.48 | 13.67 | 16.05 | -64.48% | -58.29% |
+| q17 | 101.25 | 100.20 | 102.55 | 101.33 | 190.43 | 201.30 | +87.92% | +98.65% |
+
+| 分组 | 覆盖 | RDB 原始均值 | FullOpt 原始均值 | FullOpt+Bloom 原始均值 | FullOpt vs RDB | FullOpt+Bloom vs RDB |
+|---|---:|---:|---:|---:|---:|---:|
+| 前八 | 8/15 | 73.38 | 78.40 | 85.25 | +15.07% | +30.04% |
+| 后七 | 7/15 | 142.19 | 146.88 | 151.75 | +0.10% | +9.66% |
+| ValueState-only | 11/15 | 83.60 | 90.11 | 97.35 | +9.98% | +24.79% |
+| 任意 state | 14/15 | 93.98 | 99.20 | 105.18 | +8.67% | +21.86% |
+| 总计 | 15/15 | 105.49 | 110.36 | 116.28 | +8.09% | +20.53% |
+
+## 审计
+
+FullOpt matched 实验的 90/90 legs 和 180 个 warmup/measured job 全部存在、hash-valid、
+真实 FINISHED、positive-core、8-TM 且 checkpoint-count 为零。R1/R3 为
+control→candidate，R2 反序。manifest 固化的源码为 Flink
+`2f9582a24f98e1d7479b390206eca337c032d207` 和 FrocksDB
+`f8933473ef1eb22d070a199bfecbec55028491d7`。
+
+权威本地证据：
 `dse_results/cachekit-kunpeng-fullopt-bloom-matched-r123-20260804/`.
-

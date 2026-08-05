@@ -1,35 +1,32 @@
-# CacheKit Bloom-only: Kunpeng Nexmark 15q report
+# CacheKit Bloom-only：鲲鹏 Nexmark 15q 报告
 
-## Verdict
+## 结论
 
-The clean checkpoint-off one-round sweep shows that **SST Bloom is the useful
-component** (+9.36% across 15q), while memtable Bloom alone is -1.36%.
-The combined leg was extended to three rounds. After transparently excluding
-two paired directional anomalies (q3 R1 and q13 R2), Combined reaches
-**+9.60%**; the untouched all-row result is **+9.18%**.
+干净的 checkpoint-off 单轮 sweep 表明，**SST Bloom 是有效组件**（15q +9.36%），
+而 memtable Bloom 单独开启为 -1.36%。Combined 补至三轮后，透明排除两个成对
+方向性异常（q3 R1、q13 R2），结果为 **+9.60%**；保留全部原始行时为 **+9.18%**。
 
-This RDB→Combined comparison is a **stack comparison**, because the RDB leg uses
-the RocksDB backend and the Bloom legs use the CacheKit backend factory with all
-CacheKit optimizations disabled. It must not be presented as an isolated
-three-Boolean comparison.
+RDB→Combined 是**总栈比较**：RDB 腿使用 RocksDB backend，Bloom 腿使用 CacheKit
+backend factory，但关闭全部 CacheKit 优化。因此不能把它表述成严格隔离的三个 Boolean
+开关消融。
 
-## Configuration
+## 配置
 
-| Variant | Backend | SST Bloom | Memtable Bloom |
+| 变体 | Backend | SST Bloom | Memtable Bloom |
 |---|---|---|---|
-| RDB | `rocksdb` | off | ratio 0.0; whole-key off |
-| SST-only | CacheKit | on | ratio 0.0; whole-key off |
-| Mem-only | CacheKit | off | ratio 0.1; whole-key on |
-| Combined | CacheKit | on | ratio 0.1; whole-key on |
+| RDB | `rocksdb` | 关 | ratio 0.0；whole-key 关 |
+| SST-only | CacheKit | 开 | ratio 0.0；whole-key 关 |
+| Mem-only | CacheKit | 关 | ratio 0.1；whole-key 开 |
+| Combined | CacheKit | 开 | ratio 0.1；whole-key 开 |
 
-All variants disable value cache, map snapshot/cache, prefetch/MultiGet, preagg,
-mailbox, Chen COW/RYW/PQ, incremental/local recovery, and planner mini-batch.
-Checkpoint interval is absent. Workload is 5M warmup + 100M measured with 8 TMs
-/ 16 slots. Source: `5e39087b51124b3c9486b54b8035460233523528`.
+所有变体均关闭 value cache、map snapshot/cache、prefetch/MultiGet、preagg、mailbox、
+Chen COW/RYW/PQ、incremental/local recovery 和 planner mini-batch。Checkpoint
+interval 未配置；负载为 5M warmup + 100M measured，8 TMs / 16 slots。源码：
+`5e39087b51124b3c9486b54b8035460233523528`。
 
-## One-round four-leg sweep
+## 单轮四腿 sweep
 
-| Query | RDB | SST-only | SST uplift | Mem-only | Mem uplift | Combined | Combined uplift |
+| Query | RDB | SST-only | SST 提升 | Mem-only | Mem 提升 | Combined | Combined 提升 |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | q4 | 37.47 | 41.97 | +12.01% | 37.96 | +1.31% | 42.73 | +14.04% |
 | q5 | 79.92 | 90.04 | +12.66% | 83.01 | +3.87% | 93.88 | +17.47% |
@@ -47,19 +44,19 @@ Checkpoint interval is absent. Workload is 5M warmup + 100M measured with 8 TMs
 | q16 | 38.58 | 46.16 | +19.65% | 38.83 | +0.65% | 47.41 | +22.89% |
 | q17 | 101.25 | 106.16 | +4.85% | 100.14 | -1.10% | 104.70 | +3.41% |
 
-| Group | SST-only uplift | Mem-only uplift | Combined uplift |
+| 分组 | SST-only 提升 | Mem-only 提升 | Combined 提升 |
 |---|---:|---:|---:|
-| Front eight | +9.11% | -1.70% | +8.86% |
-| Back seven | +9.65% | -0.97% | +8.28% |
+| 前八 | +9.11% | -1.70% | +8.86% |
+| 后七 | +9.65% | -0.97% | +8.28% |
 | ValueState-only | +11.48% | -0.83% | +11.55% |
-| Any-state | +10.15% | -1.39% | +9.43% |
-| Total 15 | +9.36% | -1.36% | +8.59% |
+| 任意 state | +10.15% | -1.39% | +9.43% |
+| 总计 15q | +9.36% | -1.36% | +8.59% |
 
-## Combined three-round raw data
+## Combined 三轮原始数据
 
-Daggers mark the two paired rounds excluded only from the cleaned summary.
+符号 † 表示仅在清洗汇总中排除的两个成对 round；原始数据仍完整保留。
 
-| Query | RDB R1 | RDB R2 | RDB R3 | Combined R1 | Combined R2 | Combined R3 | Clean uplift |
+| Query | RDB R1 | RDB R2 | RDB R3 | Combined R1 | Combined R2 | Combined R3 | 清洗后提升 |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | q4 | 37.47 | 37.60 | 37.05 | 42.73 | 42.54 | 42.89 | +14.31% |
 | q5 | 79.92 | 81.22 | 82.33 | 93.88 | 92.63 | 92.39 | +14.55% |
@@ -77,20 +74,18 @@ Daggers mark the two paired rounds excluded only from the cleaned summary.
 | q16 | 38.58 | 38.54 | 38.32 | 47.41 | 47.27 | 47.30 | +22.99% |
 | q17 | 101.25 | 100.20 | 102.55 | 104.70 | 107.12 | 104.64 | +4.10% |
 
-| Group | Clean RDB raw mean | Clean Combined raw mean | Clean uplift |
+| 分组 | 清洗后 RDB 原始均值 | 清洗后 Combined 原始均值 | 清洗后提升 |
 |---|---:|---:|---:|
-| Front eight | 73.38 | 76.54 | +8.45% |
-| Back seven | 142.19 | 147.64 | +10.92% |
+| 前八 | 73.38 | 76.54 | +8.45% |
+| 后七 | 142.19 | 147.64 | +10.92% |
 | ValueState-only | 83.60 | 88.09 | +11.61% |
-| Any-state | 93.98 | 98.36 | +10.23% |
-| Total 15 | 105.49 | 109.72 | +9.60% |
+| 任意 state | 93.98 | 98.36 | +10.23% |
+| 总计 15q | 105.49 | 109.72 | +9.60% |
 
-The post-hoc paired directional rule requires the same round to be the RDB
-maximum and Combined minimum, both deviations at least 2.5% from the other two
-rounds' mean, and the remaining pair spread no more than 5%. It flags q3 R1 and
-q13 R2. The original 90 rows remain preserved; the all-row total is +9.18%.
+事后成对方向性规则要求：同一 round 同时为 RDB 最大值和 Combined 最小值；二者相对
+另外两轮均值的偏差均不小于 2.5%；剩余两轮 spread 不超过 5%。该规则标记 q3 R1
+和 q13 R2。原始 90 行保持不变；全部行总计为 +9.18%。
 
-Authoritative local evidence:
+权威本地证据：
 `dse_results/cachekit-kunpeng-clean-bloom-full15-20260803/` and
 `dse_results/cachekit-kunpeng-combined-r23-20260804/final/`.
-
