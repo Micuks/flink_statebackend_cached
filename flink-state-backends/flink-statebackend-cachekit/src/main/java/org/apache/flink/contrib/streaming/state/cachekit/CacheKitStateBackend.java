@@ -197,6 +197,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 executionConfig,
                 ttlTimeProvider,
                 cancelStreamRegistry,
+                metricGroup,
                 valueCacheMaxEntries,
                 valueCachePolicy,
                 valueCacheLruOverflow,

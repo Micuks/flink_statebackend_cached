@@ -205,6 +205,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     // Bypass State
     private volatile boolean isBypassing = false;
+    private volatile double lastWindowHitRate = Double.NaN;
     private long currentWindowAccesses = 0;
     private long currentWindowHits = 0;
     private int opsSinceLastSample = 0;
@@ -671,6 +672,34 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getPrefetchTasksDroppedForTesting() {
         return prefetchTasksDropped;
+    }
+
+    public double getLastWindowHitRate() {
+        return lastWindowHitRate;
+    }
+
+    public boolean isBypassing() {
+        return isBypassing;
+    }
+
+    public long getPrefetchTasksBuilt() {
+        return prefetchTasksBuilt;
+    }
+
+    public long getPrefetchTasksExecuted() {
+        return prefetchTasksExecuted;
+    }
+
+    public long getPrefetchTasksDropped() {
+        return prefetchTasksDropped;
+    }
+
+    public long getPrefetchMissingValuesStaged() {
+        return prefetchMissingValuesStaged;
+    }
+
+    public long getPrefetchValuesPromoted() {
+        return prefetchValuesPromoted;
     }
 
     /**
@@ -1281,6 +1310,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         if (currentWindowAccesses >= hitRateWindow) {
             double hitRate = (double) currentWindowHits / currentWindowAccesses;
+            lastWindowHitRate = hitRate;
 
             boolean shouldBypass = hitRate < hitRateThreshold;
 

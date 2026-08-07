@@ -882,6 +882,36 @@ class CachedInternalValueStateTest {
         verify(delegate, times(1)).value();
     }
 
+    @Test
+    void testLastCompletedHitRateWindowIsExposed() throws IOException {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(InternalValueState.class);
+        when(delegate.value()).thenReturn(1);
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        true,
+                        0.5,
+                        2,
+                        false);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        assertTrue(Double.isNaN(state.getLastWindowHitRate()));
+        assertEquals(1, state.value());
+        currentKey.set("k2");
+        assertEquals(1, state.value());
+
+        assertEquals(0.0, state.getLastWindowHitRate());
+        assertTrue(state.isBypassing());
+    }
+
     // Adding a test for BinaryRowData specifically would be better if we can
     // instantiate it.
     // Assuming we can't easily instantiate Flink internal classes without

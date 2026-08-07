@@ -48,6 +48,9 @@ import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
 
 import org.apache.flink.shaded.curator5.com.google.common.collect.Iterables;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.annotation.Nullable;
 
 import java.util.Arrays;
@@ -62,6 +65,8 @@ import static org.apache.flink.util.Preconditions.checkState;
 /** A {@link StreamTask} for executing a {@link OneInputStreamOperator}. */
 @Internal
 public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamOperator<IN, OUT>> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(OneInputStreamTask.class);
 
     @Nullable private CheckpointBarrierHandler checkpointBarrierHandler;
 
@@ -198,7 +203,39 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                                             "state.backend.cachekit.bp-prefetch.enabled")
                                     .booleanType()
                                     .defaultValue(false));
+            org.apache.flink.metrics.MetricGroup runtimePrefetchMetrics =
+                    mainOperator
+                            .getMetricGroup()
+                            .addGroup("cachekit")
+                            .addGroup("runtimePrefetch");
+            runtimePrefetchMetrics.gauge("configured", () -> bpPrefetchEnabled ? 1 : 0);
             if (bpPrefetchEnabled) {
+                runtimePrefetchMetrics.gauge(
+                        "attempts", StatePrefetcher::getPrefetchAttempts);
+                runtimePrefetchMetrics.gauge(
+                        "invalidInputs", StatePrefetcher::getInvalidInputs);
+                runtimePrefetchMetrics.gauge(
+                        "nonAbstractOperators", StatePrefetcher::getNonAbstractOperators);
+                runtimePrefetchMetrics.gauge(
+                        "backendAccessFailures", StatePrefetcher::getBackendAccessFailures);
+                runtimePrefetchMetrics.gauge(
+                        "missingBackends", StatePrefetcher::getMissingBackends);
+                runtimePrefetchMetrics.gauge(
+                        "missingPrefetchMethods", StatePrefetcher::getMissingPrefetchMethods);
+                runtimePrefetchMetrics.gauge(
+                        "noPrefetchableStates", StatePrefetcher::getNoPrefetchableStates);
+                runtimePrefetchMetrics.gauge(
+                        "missingKeySelectors", StatePrefetcher::getMissingKeySelectors);
+                runtimePrefetchMetrics.gauge(
+                        "keyExtractionFailures", StatePrefetcher::getKeyExtractionFailures);
+                runtimePrefetchMetrics.gauge(
+                        "emptyKeyBatches", StatePrefetcher::getEmptyKeyBatches);
+                runtimePrefetchMetrics.gauge(
+                        "backendInvocationAttempts",
+                        StatePrefetcher::getBackendInvocationAttempts);
+                runtimePrefetchMetrics.gauge(
+                        "backendInvocations", StatePrefetcher::getBackendInvocations);
+                runtimePrefetchMetrics.gauge("failures", StatePrefetcher::getFailures);
                 int distance =
                         cfg.getInteger(
                                 org.apache.flink.configuration.ConfigOptions.key(
@@ -290,6 +327,7 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                     timeoutNanos,
                     numRecordsIn);
         } catch (Throwable t) {
+            LOG.warn("Failed to configure CacheKit batch output; using direct output", t);
             return output;
         }
     }

@@ -27,6 +27,7 @@ import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalVal
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.SavepointResources;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
@@ -80,6 +81,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private static final Logger LOG = LoggerFactory.getLogger(CacheKitKeyedStateBackend.class);
 
     private final AbstractKeyedStateBackend<K> delegate;
+    private final MetricGroup metricGroup;
     private final int valueCacheMaxEntries;
     private final CachePolicyType valueCachePolicy;
     private final int valueCacheLruOverflow;
@@ -109,6 +111,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     private final Map<Object, Object> wrappersByDelegateIdentity = new IdentityHashMap<>();
 
+    /** Runtime-side record-lookahead requests that reached this backend instance. */
+    private volatile long prefetchRequests;
+
+    /** Non-empty wrapper tasks handed to the shared prefetch executor. */
+    private volatile long prefetchTasksSubmitted;
+
     /**
      * Serializes terminal backend operations that Flink may invoke from different task threads.
      *
@@ -132,6 +140,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             ExecutionConfig executionConfig,
             TtlTimeProvider ttlTimeProvider,
             CloseableRegistry cancelStreamRegistry,
+            MetricGroup metricGroup,
             int valueCacheMaxEntries,
             CachePolicyType valueCachePolicy,
             int valueCacheLruOverflow,
@@ -166,6 +175,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 delegate.getKeyContext());
 
         this.delegate = delegate;
+        this.metricGroup = metricGroup;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
         this.valueCacheLruOverflow = valueCacheLruOverflow;
@@ -262,6 +272,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueHitRateWindow,
                     BP_PREFETCH_MULTIGET);
             wrappersByDelegateIdentity.put(internal, wrapped);
+            registerValueStateMetrics(stateDescriptor.getName(), wrapped);
             return (S) wrapped;
         }
 
@@ -393,6 +404,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     valueHitRateWindow,
                     BP_PREFETCH_MULTIGET);
             wrappersByDelegateIdentity.put(internal, wrapped);
+            registerValueStateMetrics(stateDesc.getName(), wrapped);
             return (IS) wrapped;
         }
 
@@ -457,6 +469,31 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
 
         return state;
+    }
+
+    private void registerValueStateMetrics(
+            String stateName, CachedInternalValueState<K, ?, ?> state) {
+        if (metricGroup == null) {
+            return;
+        }
+
+        MetricGroup valueStateMetrics =
+                metricGroup
+                        .addGroup("cachekit")
+                        .addGroup("state")
+                        .addGroup(stateName)
+                        .addGroup("value");
+        valueStateMetrics.gauge("hitRate", state::getLastWindowHitRate);
+        valueStateMetrics.gauge("isBypassing", () -> state.isBypassing() ? 1 : 0);
+        valueStateMetrics.gauge("prefetchTasksBuilt", state::getPrefetchTasksBuilt);
+        valueStateMetrics.gauge("prefetchTasksExecuted", state::getPrefetchTasksExecuted);
+        valueStateMetrics.gauge("prefetchTasksDropped", state::getPrefetchTasksDropped);
+        valueStateMetrics.gauge(
+                "prefetchMissingValuesStaged", state::getPrefetchMissingValuesStaged);
+        valueStateMetrics.gauge("prefetchValuesPromoted", state::getPrefetchValuesPromoted);
+        valueStateMetrics.gauge("backendPrefetchRequests", () -> prefetchRequests);
+        valueStateMetrics.gauge(
+                "backendPrefetchTasksSubmitted", () -> prefetchTasksSubmitted);
     }
 
     @Override
@@ -632,6 +669,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @SuppressWarnings({ "unchecked", "rawtypes" })
     public void prefetch(Collection<? extends K> keys) {
         synchronized (lifecycleLock) {
+            prefetchRequests++;
             if (closed || disposed || keys == null || keys.isEmpty() || wrappersByDelegateIdentity.isEmpty()) {
                 return;
             }
@@ -646,6 +684,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         Runnable task =
                                 ((CachedInternalValueState) wrapper).buildAsyncPrefetchTask(keys);
                         if (task != null) {
+                            prefetchTasksSubmitted++;
                             PrefetchExecutor.trySubmit(task);
                         }
                     }

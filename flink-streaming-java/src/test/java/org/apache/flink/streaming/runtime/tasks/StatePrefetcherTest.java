@@ -35,6 +35,17 @@ import static org.mockito.Mockito.withSettings;
 class StatePrefetcherTest {
 
     @Test
+    void testInvalidPrefetchInputIsDiagnosed() {
+        long attemptsBefore = StatePrefetcher.getPrefetchAttempts();
+        long invalidBefore = StatePrefetcher.getInvalidInputs();
+
+        StatePrefetcher.prefetch(null, null, 0);
+
+        assertEquals(attemptsBefore + 1, StatePrefetcher.getPrefetchAttempts());
+        assertEquals(invalidBefore + 1, StatePrefetcher.getInvalidInputs());
+    }
+
+    @Test
     void testExtractKeysReadsOnlyRequestedRangeAndPreservesOrder() {
         StreamRecord<?>[] records = {
             new StreamRecord<>(100),

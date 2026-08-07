@@ -26,6 +26,7 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Backpressure-driven state prefetch (key extraction + submission side).
@@ -55,6 +56,20 @@ import java.lang.reflect.Method;
  * exclusion. A small static reflection cache mirrors {@link BatchedKeyedOperatorAdapter}.
  */
 public final class StatePrefetcher {
+
+    private static final AtomicLong PREFETCH_ATTEMPTS = new AtomicLong();
+    private static final AtomicLong INVALID_INPUTS = new AtomicLong();
+    private static final AtomicLong NON_ABSTRACT_OPERATORS = new AtomicLong();
+    private static final AtomicLong BACKEND_ACCESS_FAILURES = new AtomicLong();
+    private static final AtomicLong MISSING_BACKENDS = new AtomicLong();
+    private static final AtomicLong MISSING_PREFETCH_METHODS = new AtomicLong();
+    private static final AtomicLong NO_PREFETCHABLE_STATES = new AtomicLong();
+    private static final AtomicLong MISSING_KEY_SELECTORS = new AtomicLong();
+    private static final AtomicLong KEY_EXTRACTION_FAILURES = new AtomicLong();
+    private static final AtomicLong EMPTY_KEY_BATCHES = new AtomicLong();
+    private static final AtomicLong BACKEND_INVOCATION_ATTEMPTS = new AtomicLong();
+    private static final AtomicLong BACKEND_INVOCATIONS = new AtomicLong();
+    private static final AtomicLong FAILURES = new AtomicLong();
 
     /** Cache of {@code stateKeySelector1} {@link Field} per operator class. */
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Field>
@@ -117,15 +132,18 @@ public final class StatePrefetcher {
     @SuppressWarnings({"unchecked", "rawtypes"})
     public static void prefetch(
             Input<?> headOperator, StreamRecord<?>[] buf, int fromIndex, int toIndex) {
+        PREFETCH_ATTEMPTS.incrementAndGet();
         if (headOperator == null
                 || buf == null
                 || fromIndex < 0
                 || toIndex > buf.length
                 || toIndex - fromIndex <= 1) {
+            INVALID_INPUTS.incrementAndGet();
             return; // single record gains nothing from a batched prefetch
         }
         try {
             if (!(headOperator instanceof AbstractStreamOperator)) {
+                NON_ABSTRACT_OPERATORS.incrementAndGet();
                 return;
             }
             AbstractStreamOperator<?> op = (AbstractStreamOperator<?>) headOperator;
@@ -134,10 +152,16 @@ public final class StatePrefetcher {
             try {
                 ksb = op.getKeyedStateBackend();
             } catch (Throwable t) {
+                BACKEND_ACCESS_FAILURES.incrementAndGet();
+                return;
+            }
+            if (ksb == null) {
+                MISSING_BACKENDS.incrementAndGet();
                 return;
             }
             Method prefetchMethod = findPrefetchMethod(ksb);
             if (prefetchMethod == null) {
+                MISSING_PREFETCH_METHODS.incrementAndGet();
                 return;
             }
 
@@ -145,11 +169,13 @@ public final class StatePrefetcher {
             // (e.g. window operators whose namespaced states are never wrapped). Wrappers
             // register lazily, so this is re-checked on every batch, not cached.
             if (!hasPrefetchableState(ksb)) {
+                NO_PREFETCHABLE_STATES.incrementAndGet();
                 return;
             }
 
             KeySelector selector = extractStateKeySelector1(op);
             if (selector == null) {
+                MISSING_KEY_SELECTORS.incrementAndGet();
                 return;
             }
 
@@ -157,12 +183,73 @@ public final class StatePrefetcher {
             // never pays a lookup twice for one lookahead window.
             java.util.Collection keys =
                     new java.util.LinkedHashSet(Math.max(2, toIndex - fromIndex));
-            if (extractKeys(selector, buf, fromIndex, toIndex, keys) && !keys.isEmpty()) {
-                prefetchMethod.invoke(ksb, keys);
+            if (!extractKeys(selector, buf, fromIndex, toIndex, keys)) {
+                KEY_EXTRACTION_FAILURES.incrementAndGet();
+                return;
             }
+            if (keys.isEmpty()) {
+                EMPTY_KEY_BATCHES.incrementAndGet();
+                return;
+            }
+            BACKEND_INVOCATION_ATTEMPTS.incrementAndGet();
+            prefetchMethod.invoke(ksb, keys);
+            BACKEND_INVOCATIONS.incrementAndGet();
         } catch (Throwable t) {
+            FAILURES.incrementAndGet();
             // best-effort: prefetch must never affect the authoritative dispatch path.
         }
+    }
+
+    public static long getPrefetchAttempts() {
+        return PREFETCH_ATTEMPTS.get();
+    }
+
+    public static long getInvalidInputs() {
+        return INVALID_INPUTS.get();
+    }
+
+    public static long getNonAbstractOperators() {
+        return NON_ABSTRACT_OPERATORS.get();
+    }
+
+    public static long getBackendAccessFailures() {
+        return BACKEND_ACCESS_FAILURES.get();
+    }
+
+    public static long getMissingBackends() {
+        return MISSING_BACKENDS.get();
+    }
+
+    public static long getMissingPrefetchMethods() {
+        return MISSING_PREFETCH_METHODS.get();
+    }
+
+    public static long getNoPrefetchableStates() {
+        return NO_PREFETCHABLE_STATES.get();
+    }
+
+    public static long getMissingKeySelectors() {
+        return MISSING_KEY_SELECTORS.get();
+    }
+
+    public static long getKeyExtractionFailures() {
+        return KEY_EXTRACTION_FAILURES.get();
+    }
+
+    public static long getEmptyKeyBatches() {
+        return EMPTY_KEY_BATCHES.get();
+    }
+
+    public static long getBackendInvocationAttempts() {
+        return BACKEND_INVOCATION_ATTEMPTS.get();
+    }
+
+    public static long getBackendInvocations() {
+        return BACKEND_INVOCATIONS.get();
+    }
+
+    public static long getFailures() {
+        return FAILURES.get();
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})

@@ -22,6 +22,7 @@ import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.UncompressedStreamCompressionDecorator;
@@ -44,6 +45,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -51,6 +54,40 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CacheKitKeyedStateBackendLifecycleTest {
+
+    @Test
+    void testValueStateDiagnosticGaugesAreRegistered() throws Exception {
+        AbstractKeyedStateBackend<String> delegate = mockDelegate();
+        InternalValueState<String, VoidNamespace, Integer> delegateState =
+                mock(InternalValueState.class);
+        when(delegateState.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegateState.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegateState.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        doReturn(delegateState).when(delegate).getOrCreateKeyedState(any(), any());
+
+        MetricGroup metricGroup = mock(MetricGroup.class);
+        when(metricGroup.addGroup(anyString())).thenReturn(metricGroup);
+
+        CacheKitKeyedStateBackend<String> cacheKit = newCacheKitBackend(delegate, metricGroup);
+        cacheKit.getOrCreateKeyedState(
+                VoidNamespaceSerializer.INSTANCE,
+                new ValueStateDescriptor<>("probeState", IntSerializer.INSTANCE));
+
+        verify(metricGroup).addGroup("cachekit");
+        verify(metricGroup).addGroup("state");
+        verify(metricGroup).addGroup("probeState");
+        verify(metricGroup).addGroup("value");
+        verify(metricGroup, org.mockito.Mockito.times(9)).gauge(anyString(), any());
+        verify(metricGroup).gauge(eq("hitRate"), any());
+        verify(metricGroup).gauge(eq("isBypassing"), any());
+        verify(metricGroup).gauge(eq("prefetchTasksBuilt"), any());
+        verify(metricGroup).gauge(eq("prefetchTasksExecuted"), any());
+        verify(metricGroup).gauge(eq("prefetchTasksDropped"), any());
+        verify(metricGroup).gauge(eq("prefetchMissingValuesStaged"), any());
+        verify(metricGroup).gauge(eq("prefetchValuesPromoted"), any());
+        verify(metricGroup).gauge(eq("backendPrefetchRequests"), any());
+        verify(metricGroup).gauge(eq("backendPrefetchTasksSubmitted"), any());
+    }
 
     @Test
     void testDisposeWaitsForConcurrentCloseFlush() throws Exception {
@@ -148,6 +185,11 @@ class CacheKitKeyedStateBackendLifecycleTest {
 
     private static CacheKitKeyedStateBackend<String> newCacheKitBackend(
             AbstractKeyedStateBackend<String> delegate) {
+        return newCacheKitBackend(delegate, null);
+    }
+
+    private static CacheKitKeyedStateBackend<String> newCacheKitBackend(
+            AbstractKeyedStateBackend<String> delegate, MetricGroup metricGroup) {
         return new CacheKitKeyedStateBackend<>(
                 delegate,
                 null,
@@ -156,6 +198,7 @@ class CacheKitKeyedStateBackendLifecycleTest {
                 new ExecutionConfig(),
                 TtlTimeProvider.DEFAULT,
                 new CloseableRegistry(),
+                metricGroup,
                 128,
                 CachePolicyType.LRU,
                 0,
