@@ -77,6 +77,25 @@ under the License.
 			<version>8.5.12</version>
 		</dependency>
 
+		<!--
+		Declared so the patched sibling modules build before this one: the shaded
+		artifact overlays a handful of their classes (see maven-dependency-plugin
+		below) so that dropping this single jar into flink/lib/ is enough.
+		-->
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-streaming-java</artifactId>
+			<version>${project.version}</version>
+			<scope>provided</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-table-runtime</artifactId>
+			<version>${project.version}</version>
+			<scope>provided</scope>
+		</dependency>
+
 
 		<!-- test dependencies -->
 		<dependency>
@@ -116,6 +135,148 @@ under the License.
                     <source>11</source>
                     <target>11</target>
                 </configuration>
+            </plugin>
+
+            <!--
+            Single-jar packaging. CacheKit needs a few classes that live in
+            flink-streaming-java, flink-statebackend-rocksdb and
+            flink-table-runtime: some are new (batch/prefetch plumbing), some
+            override an upstream class with an additive hook. Rather than asking
+            operators to drop a patched flink-dist plus several jars into
+            flink/lib/, those classes are copied into this artifact. Flink sorts
+            lib/*.jar and appends flink-dist last, so this jar (f...) precedes
+            flink-table-runtime (flink-t...) and flink-dist, and first-wins
+            class loading makes the overrides take effect.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>overlay-patched-classes</id>
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>unpack</goal>
+                        </goals>
+                        <configuration>
+                            <!-- do not clobber CacheKit's own freshly compiled classes -->
+                            <overWriteReleases>false</overWriteReleases>
+                            <overWriteSnapshots>false</overWriteSnapshots>
+                            <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+                            <artifactItems>
+                                <artifactItem>
+                                    <groupId>org.apache.flink</groupId>
+                                    <artifactId>flink-streaming-java</artifactId>
+                                    <version>${project.version}</version>
+                                    <includes>
+                                        org/apache/flink/streaming/api/operators/BatchProcessingOperator*.class,
+                                        org/apache/flink/streaming/api/operators/BatchableKeyedFunction*.class,
+                                        org/apache/flink/streaming/api/operators/CommutativeKeyedOperator*.class,
+                                        org/apache/flink/streaming/runtime/io/BatchOutput*.class,
+                                        org/apache/flink/streaming/runtime/io/CollapseProbe*.class,
+                                        org/apache/flink/streaming/runtime/io/LocalPreagg*.class,
+                                        org/apache/flink/streaming/runtime/io/StreamRecordBatchOutput*.class,
+                                        org/apache/flink/streaming/runtime/io/StreamOneInputProcessor*.class,
+                                        org/apache/flink/streaming/runtime/tasks/BatchedKeyedOperatorAdapter*.class,
+                                        org/apache/flink/streaming/runtime/tasks/OneInputStreamTask*.class,
+                                        org/apache/flink/streaming/runtime/tasks/StatePrefetcher*.class
+                                    </includes>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>org.apache.flink</groupId>
+                                    <artifactId>flink-statebackend-rocksdb</artifactId>
+                                    <version>${project.version}</version>
+                                    <includes>
+                                        org/apache/flink/contrib/streaming/state/AbstractRocksDBState*.class,
+                                        org/apache/flink/contrib/streaming/state/RocksDBBatchValueReader*.class,
+                                        org/apache/flink/contrib/streaming/state/RocksDBConfigurableOptions*.class,
+                                        org/apache/flink/contrib/streaming/state/RocksDBResourceContainer*.class,
+                                        org/apache/flink/contrib/streaming/state/RocksDBValueState*.class
+                                    </includes>
+                                </artifactItem>
+                                <artifactItem>
+                                    <groupId>org.apache.flink</groupId>
+                                    <artifactId>flink-table-runtime</artifactId>
+                                    <version>${project.version}</version>
+                                    <includes>
+                                        org/apache/flink/table/runtime/operators/aggregate/GroupAggFunction*.class,
+                                        org/apache/flink/table/runtime/operators/deduplicate/RowTimeDeduplicateFunction*.class
+                                    </includes>
+                                </artifactItem>
+                            </artifactItems>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+            Bundle (and relocate) the only two non-Flink runtime dependencies so
+            the jar is self-contained: without this, selecting the Caffeine cache
+            policy or the primitive presence cache would NoClassDefFoundError.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>shade-cachekit-runtime-deps</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <shadedArtifactAttached>false</shadedArtifactAttached>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <!--
+                            fastutil ships a class per primitive combination
+                            (~13k, 26 MB). Bytecode-reachability pruning keeps
+                            only the closure CacheKit actually reaches. Caffeine
+                            is exempted below because it loads its internal
+                            cache/node implementations reflectively by name, so
+                            pruning would break it at runtime.
+                            -->
+                            <minimizeJar>true</minimizeJar>
+                            <artifactSet>
+                                <includes>
+                                    <include>com.github.ben-manes.caffeine:caffeine</include>
+                                    <include>it.unimi.dsi:fastutil</include>
+                                </includes>
+                            </artifactSet>
+                            <relocations>
+                                <relocation>
+                                    <pattern>com.github.benmanes.caffeine</pattern>
+                                    <shadedPattern>org.apache.flink.contrib.streaming.state.cachekit.shaded.caffeine</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>it.unimi.dsi.fastutil</pattern>
+                                    <shadedPattern>org.apache.flink.contrib.streaming.state.cachekit.shaded.fastutil</shadedPattern>
+                                </relocation>
+                            </relocations>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>module-info.class</exclude>
+                                    </excludes>
+                                </filter>
+                                <!--
+                                fastutil is pruned by minimizeJar above; only
+                                the reachable closure survives.
+                                -->
+                                <!-- Caffeine resolves its internal implementations by name -->
+                                <filter>
+                                    <artifact>com.github.ben-manes.caffeine:caffeine</artifact>
+                                    <includes>
+                                        <include>**</include>
+                                    </includes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
 	</build>
