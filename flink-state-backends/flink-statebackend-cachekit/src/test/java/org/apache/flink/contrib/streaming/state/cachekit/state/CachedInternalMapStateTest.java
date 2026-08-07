@@ -458,4 +458,310 @@ class CachedInternalMapStateTest {
         state.flush();
         verify(delegate).remove("uk1");
     }
+
+    @Test
+    void testSnapshotReadPathsAvoidFlushingOtherKeysDirtyMapCache() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        when(delegate.entries()).thenReturn(java.util.Collections.emptyList());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        100);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        // A complete empty traversal creates the K1 EMPTY snapshot.
+        assertFalse(state.entries().iterator().hasNext());
+
+        currentKey.set("k2");
+        state.put("dirty-entries", 1);
+        currentKey.set("k1");
+        clearInvocations(delegate);
+        assertFalse(state.entries().iterator().hasNext());
+        verify(delegate, times(0)).put(any(), any());
+
+        currentKey.set("k2");
+        state.put("dirty-keys", 2);
+        currentKey.set("k1");
+        clearInvocations(delegate);
+        assertFalse(state.keys().iterator().hasNext());
+        verify(delegate, times(0)).put(any(), any());
+
+        currentKey.set("k2");
+        state.put("dirty-values", 3);
+        currentKey.set("k1");
+        clearInvocations(delegate);
+        assertFalse(state.values().iterator().hasNext());
+        verify(delegate, times(0)).put(any(), any());
+
+        currentKey.set("k2");
+        state.put("dirty-iterator", 4);
+        currentKey.set("k1");
+        clearInvocations(delegate);
+        assertFalse(state.iterator().hasNext());
+        verify(delegate, times(0)).put(any(), any());
+
+        currentKey.set("k2");
+        state.put("dirty-is-empty", 5);
+        currentKey.set("k1");
+        clearInvocations(delegate);
+        assertTrue(state.isEmpty());
+        verify(delegate, times(0)).put(any(), any());
+
+        // A snapshot miss must still flush deferred writes for the current key before using delegate.
+        currentKey.set("k2");
+        clearInvocations(delegate);
+        assertFalse(state.entries().iterator().hasNext());
+        verify(delegate, times(5)).put(any(), any());
+    }
+
+    @Test
+    void testSnapshotMissFlushesOnlyCurrentKeyDirtyMapCache() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        when(delegate.entries()).thenReturn(java.util.Collections.emptyList());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        100);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        currentKey.set("k2");
+        state.put("dirty-k2", 1);
+        currentKey.set("k1");
+
+        clearInvocations(delegate);
+        assertFalse(state.entries().iterator().hasNext());
+        verify(delegate, times(0)).put(any(), any());
+
+        currentKey.set("k2");
+        clearInvocations(delegate);
+        assertFalse(state.entries().iterator().hasNext());
+        verify(delegate).put("dirty-k2", 1);
+    }
+
+    @Test
+    void testClearDiscardsDirtyEntriesFromScopedFlushIndex() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        when(delegate.entries()).thenReturn(java.util.Collections.emptyList());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        100);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        state.put("dirty", 1);
+        state.clear();
+        clearInvocations(delegate);
+
+        assertFalse(state.entries().iterator().hasNext());
+        verify(delegate, times(0)).put(any(), any());
+    }
+
+    @Test
+    void testScopedFlushWritesRemainingDirtyEntriesAfterL1Eviction() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        when(delegate.entries()).thenReturn(java.util.Collections.emptyList());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        // L1 has a minimum size of 128. The 129th write flushes exactly one dirty entry on eviction.
+        for (int i = 0; i < 129; i++) {
+            state.put("dirty-" + i, i);
+        }
+        clearInvocations(delegate);
+
+        assertFalse(state.entries().iterator().hasNext());
+        verify(delegate, times(128)).put(any(), any());
+    }
+
+    @Test
+    void testDisabledSnapshotMetricsDoNotRecord() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        when(delegate.entries()).thenReturn(java.util.Collections.emptyList());
+        MapSnapshotCacheMetrics metrics = MapSnapshotCacheMetrics.disabled();
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        100,
+                        metrics);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        assertFalse(state.entries().iterator().hasNext());
+        assertFalse(state.entries().iterator().hasNext());
+
+        assertEquals(0, metrics.probes());
+        assertEquals(0, metrics.hits());
+        assertEquals(0, metrics.misses());
+        assertEquals(0, metrics.emptyShortCircuits());
+        assertEquals(0, metrics.storesEmpty());
+    }
+
+    @Test
+    void testSnapshotMetricsRecordEmptyBackfillAndShortCircuit() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        when(delegate.entries()).thenReturn(java.util.Collections.emptyList());
+        MapSnapshotCacheMetrics metrics = MapSnapshotCacheMetrics.forTesting();
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        100,
+                        metrics);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        for (Map.Entry<String, Integer> ignored : state.entries()) {
+            // Snapshot backfill remains enabled even when element cache fill is disabled.
+        }
+
+        assertEquals(1, metrics.probes());
+        assertEquals(1, metrics.misses());
+        assertEquals(1, metrics.storesEmpty());
+
+        clearInvocations(delegate);
+        assertFalse(state.entries().iterator().hasNext());
+
+        verify(delegate, times(0)).entries();
+        assertEquals(2, metrics.probes());
+        assertEquals(1, metrics.hits());
+        assertEquals(1, metrics.emptyShortCircuits());
+    }
+
+    @Test
+    void testSnapshotMetricsRecordSingleBackfillAndShortCircuit() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        Map<String, Integer> entries = new LinkedHashMap<>();
+        entries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(entries.entrySet());
+        when(delegate.get("uk1")).thenReturn(1);
+        MapSnapshotCacheMetrics metrics = MapSnapshotCacheMetrics.forTesting();
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        100,
+                        metrics);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        for (Map.Entry<String, Integer> ignored : state.entries()) {
+            // Consume the first traversal to backfill a SINGLE snapshot.
+        }
+
+        assertEquals(1, metrics.probes());
+        assertEquals(1, metrics.misses());
+        assertEquals(1, metrics.storesSingle());
+
+        clearInvocations(delegate);
+        assertEquals("uk1", state.entries().iterator().next().getKey());
+
+        verify(delegate, times(0)).entries();
+        verify(delegate, times(1)).get("uk1");
+        assertEquals(2, metrics.probes());
+        assertEquals(1, metrics.hits());
+        assertEquals(1, metrics.singleShortCircuits());
+    }
 }

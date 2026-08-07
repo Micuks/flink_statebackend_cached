@@ -87,6 +87,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final boolean listStateRywEnabled;
     private final int listStateClearedKeysCapacity;
     private final boolean priorityQueueOptEnabled;
+    private final boolean diagnosticsEnabled;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -111,7 +112,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
             boolean listStateCowEnabled,
             boolean listStateRywEnabled,
             int listStateClearedKeysCapacity,
-            boolean priorityQueueOptEnabled) {
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -135,6 +137,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.listStateRywEnabled = listStateRywEnabled;
         this.listStateClearedKeysCapacity = listStateClearedKeysCapacity;
         this.priorityQueueOptEnabled = priorityQueueOptEnabled;
+        this.diagnosticsEnabled = diagnosticsEnabled;
     }
 
     @Override
@@ -219,7 +222,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 listStateCowEnabled,
                 listStateRywEnabled,
                 listStateClearedKeysCapacity,
-                priorityQueueOptEnabled);
+                priorityQueueOptEnabled,
+                diagnosticsEnabled);
     }
 
     @Override
@@ -298,6 +302,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 Math.max(1, config.get(CacheKitStateBackendFactory.LIST_STATE_CLEARED_KEYS_CAPACITY));
         final boolean priorityQueueOptEnabled =
                 config.get(CacheKitStateBackendFactory.PRIORITY_QUEUE_OPT_ENABLED);
+        final boolean diagnosticsEnabled =
+                config.get(CacheKitStateBackendFactory.DIAGNOSTICS_ENABLED);
 
         return new CacheKitStateBackend(
                 configuredDelegate,
@@ -322,6 +328,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 listStateCowEnabled,
                 listStateRywEnabled,
                 clearedKeysCapacity,
-                priorityQueueOptEnabled);
+                priorityQueueOptEnabled,
+                diagnosticsEnabled);
     }
 }

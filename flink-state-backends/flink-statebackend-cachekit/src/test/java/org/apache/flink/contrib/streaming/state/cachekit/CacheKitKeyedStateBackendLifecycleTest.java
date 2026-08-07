@@ -220,6 +220,7 @@ class CacheKitKeyedStateBackendLifecycleTest {
                 false,
                 false,
                 0,
+                false,
                 false);
     }
 }

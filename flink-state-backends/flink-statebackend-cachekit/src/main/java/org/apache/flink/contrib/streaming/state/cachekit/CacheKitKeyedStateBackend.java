@@ -24,6 +24,7 @@ import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalLis
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMapState;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalPriorityQueueSet;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalValueState;
+import org.apache.flink.contrib.streaming.state.cachekit.state.MapSnapshotCacheMetrics;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.core.fs.CloseableRegistry;
@@ -104,6 +105,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean listStateRywEnabled;
     private final int listStateClearedKeysCapacity;
     private final boolean priorityQueueOptEnabled;
+    private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
 
     // --- fullOpt: shared flush executors (N wrappers share one thread each) ---
     private final ExecutorService listStateFlushExecutor;
@@ -162,7 +164,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean listStateCowEnabled,
             boolean listStateRywEnabled,
             int listStateClearedKeysCapacity,
-            boolean priorityQueueOptEnabled) {
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -198,6 +201,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.listStateRywEnabled = listStateRywEnabled;
         this.listStateClearedKeysCapacity = listStateClearedKeysCapacity;
         this.priorityQueueOptEnabled = priorityQueueOptEnabled;
+        this.mapSnapshotCacheMetrics =
+                MapSnapshotCacheMetrics.create(metricGroup, diagnosticsEnabled);
 
         // fullOpt: initialize shared flush executors (daemon threads)
         this.listStateFlushExecutor = listStateCowEnabled
@@ -299,7 +304,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapHitRateThreshold,
                     mapHitRateWindow,
                     mapIterationCacheFillEnabled,
-                    mapSnapshotCacheMaxEntries);
+                    mapSnapshotCacheMaxEntries,
+                    mapSnapshotCacheMetrics);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -431,7 +437,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapHitRateThreshold,
                     mapHitRateWindow,
                     mapIterationCacheFillEnabled,
-                    mapSnapshotCacheMaxEntries);
+                    mapSnapshotCacheMaxEntries,
+                    mapSnapshotCacheMetrics);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
@@ -643,9 +650,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     /**
      * True when at least one cached-state wrapper exists, i.e. a prefetch could land somewhere.
-     * Called reflectively by StatePrefetcher BEFORE it pays the per-batch key extraction. Wrappers
-     * register lazily on first state access, so this must be re-evaluated per call, not cached by
-     * the caller.
+     * Called reflectively by StatePrefetcher BEFORE it pays the per-batch key extraction: window
+     * operators only hold namespaced states (never wrapped under the VoidNamespace gate), so
+     * without this check every lookahead batch would extract and dedup up to `distance` keys for
+     * a prefetch that is guaranteed to be a no-op. Wrappers register lazily on first state
+     * access, so this must be re-evaluated per call, not cached by the caller.
      */
     public boolean hasPrefetchableState() {
         synchronized (lifecycleLock) {
@@ -689,9 +698,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         }
                     }
                 }
-                if (!BP_PREFETCH_MAP_SNAPSHOTS) {
-                    return;
-                }
+                return;
             }
             K previousKey = getCurrentKey();
             try {
@@ -701,9 +708,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                             && ((CachedInternalValueState<?, ?, ?>) wrapper)
                                     .supportsRecordKeyPrefetch()) {
                         ((CachedInternalValueState) wrapper).prefetch(keys);
-                    } else if (BP_PREFETCH_MAP_SNAPSHOTS
-                            && wrapper instanceof CachedInternalMapState) {
-                        ((CachedInternalMapState) wrapper).prefetchSnapshots(keys);
                     }
                 }
             } catch (Throwable ignored) {
