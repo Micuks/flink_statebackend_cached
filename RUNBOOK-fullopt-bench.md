@@ -3,7 +3,7 @@
 Reproduce the CacheKit fullOpt (bp-prefetch + local-preagg) nexmark 15q
 **CDC correctness** and **throughput** results on a fresh server.
 
-- Code: GitHub `Micuks/flink_statebackend_cached`, branch **`cachekit/dev_wutb`**.
+- Code: GitHub `Micuks/flink_statebackend_cached`, branch **`cachekit/dev`**.
 - Expected: **15/15 CDC** (q12 = proc-time, SKIP) · **+32.43% throughput/core** mean
   (50M×3, quiet host; +34.72% excl. q12).
 
@@ -21,8 +21,8 @@ wrong. You must build and stage all three, not just the cachekit jar.
   - `nexmark_bench/` (Python orchestrator: `nexmark_bench.orchestrator`, profiles)
   - the base Flink image **`flink-cluster-jobmanager:latest`** (built once from
     `nexmark_bench/deploy/docker-compose.yml`)
-  - `lib/flink-dist-1.16.3.jar` and `lib/flink-table-runtime-1.16.3.jar` (the FULL
-    ~117 MB / ~3 MB stock jars — keep a pristine copy of each; see staging).
+  - `lib/flink-dist-1.16.3.jar` and `lib/flink-table-runtime-1.16.3.jar` — the
+    **stock** jars, used as-is (CacheKit ships as a single jar; see §2–3).
 - A `$WORKSPACE` root holding `lib/`, `config/`, `nexmark-flink/`, `nexmark_bench/`.
 
 ---
@@ -33,63 +33,68 @@ wrong. You must build and stage all three, not just the cachekit jar.
 cd $WORKSPACE
 git clone https://github.com/Micuks/flink_statebackend_cached cachekit-src
 cd cachekit-src
-git checkout cachekit/dev_wutb
+git checkout cachekit/dev
 ```
 
-## 2. Build the three fullOpt modules
+## 2. Build the single CacheKit jar
 
 `-DskipTests`, **not** `-Dmaven.test.skip=true` (the latter makes `flink-clients`'
 test-jar assembly fail with "You must set at least one file").
 
 ```bash
 cd $WORKSPACE/cachekit-src
-./mvnw -o -pl flink-state-backends/flink-statebackend-cachekit,\
-flink-streaming-java,flink-table/flink-table-runtime \
-  -am package -DskipTests
+./mvnw -o -pl flink-state-backends/flink-statebackend-cachekit -am package -DskipTests
 ```
 
-Produces:
-- `flink-state-backends/flink-statebackend-cachekit/target/flink-statebackend-cachekit-1.16-SNAPSHOT.jar`
-- `flink-streaming-java/target/classes/org/apache/flink/streaming/...` (bp-prefetch + local-preagg)
-- `flink-table/flink-table-runtime/target/classes/.../GroupAggFunction.class`, `RowTimeDeduplicateFunction.class` (local-preagg fold)
+Produces one deployable artifact, ~2.7 MB:
 
-## 3. Stage the jars into `lib/`  ⚠️ the tricky part
+`flink-state-backends/flink-statebackend-cachekit/target/flink-statebackend-cachekit-1.16-SNAPSHOT.jar`
 
-fullOpt modifies classes in **flink-streaming-java** and **flink-table-runtime**,
-which live inside `flink-dist` / the full `flink-table-runtime` jar. You must PATCH
-the modified classes into the FULL jars — do **not** copy the thin `*-SNAPSHOT.jar`
-module outputs over the full runtime jars (the thin `flink-table-runtime-1.16-SNAPSHOT.jar`
-is ~76 KB, shade-filtered, and does **not** even contain GroupAggFunction; and
-`flink-dist` bundles **zero** `org/apache/flink/table/runtime/` classes, so a thin
-replace yields ClassNotFound at runtime).
+It already contains everything CacheKit needs:
 
-Keep pristine copies of the stock jars once (`*.orig`), then patch working copies:
+- its own backend/state/cache classes;
+- the 22 classes it needs from **flink-streaming-java**,
+  **flink-statebackend-rocksdb** and **flink-table-runtime** — some new
+  (bp-prefetch, local-preagg, batch plumbing), some overriding an upstream class
+  with an additive hook (`OneInputStreamTask`, `StreamOneInputProcessor`,
+  `GroupAggFunction`, `RowTimeDeduplicateFunction`, four RocksDB classes);
+- `caffeine` and `fastutil`, shaded under
+  `org.apache.flink.contrib.streaming.state.cachekit.shaded.*`.
+
+Why the overrides take effect: Flink builds its classpath from a **sorted**
+`lib/*.jar` and appends `flink-dist` **last**. `flink-statebackend-cachekit-…jar`
+therefore precedes both `flink-table-runtime-…jar` and `flink-dist-…jar`, and
+class loading is first-wins.
+
+## 3. Stage into `lib/`
 
 ```bash
 WS=$WORKSPACE ; SRC=$WS/cachekit-src ; LIB=$WS/lib
-[ -f $LIB/flink-dist-1.16.3.jar.orig ]         || cp $LIB/flink-dist-1.16.3.jar          $LIB/flink-dist-1.16.3.jar.orig
-[ -f $LIB/flink-table-runtime-1.16.3.jar.orig ]|| cp $LIB/flink-table-runtime-1.16.3.jar $LIB/flink-table-runtime-1.16.3.jar.orig
-
-# 3a. flink-dist  = stock + patched streaming classes (bp-prefetch + local-preagg)
-cp $LIB/flink-dist-1.16.3.jar.orig $LIB/flink-dist-1.16.3.jar
-jar uf $LIB/flink-dist-1.16.3.jar -C $SRC/flink-streaming-java/target/classes org/apache/flink/streaming
-
-# 3b. flink-table-runtime = FULL stock jar + the two patched classes (NOT the thin jar)
-cp $LIB/flink-table-runtime-1.16.3.jar.orig $LIB/flink-table-runtime-1.16.3.jar
-TRC=$SRC/flink-table/flink-table-runtime/target/classes
-jar uf $LIB/flink-table-runtime-1.16.3.jar \
-  -C $TRC org/apache/flink/table/runtime/operators/aggregate/GroupAggFunction.class \
-  -C $TRC org/apache/flink/table/runtime/operators/deduplicate/RowTimeDeduplicateFunction.class
-
-# 3c. cachekit backend = the module jar as-is (full, ~90 KB)
 cp $SRC/flink-state-backends/flink-statebackend-cachekit/target/flink-statebackend-cachekit-1.16-SNAPSHOT.jar \
    $LIB/flink-statebackend-cachekit-1.16-SNAPSHOT.jar
-
-# sanity
-jar tf $LIB/flink-table-runtime-1.16.3.jar | grep GroupAggFunction.class   # must print
 ```
 
-The compose mounts these three from `$LIB` into `/opt/flink/lib/` over the image's copies.
+That is the whole staging step. `flink-dist-1.16.3.jar` and
+`flink-table-runtime-1.16.3.jar` stay **stock** — no `jar uf` patching, no
+`*.orig` copies to keep straight.
+
+```bash
+# sanity: the override classes are in the one jar
+unzip -l $LIB/flink-statebackend-cachekit-1.16-SNAPSHOT.jar \
+  | grep -E "OneInputStreamTask.class|GroupAggFunction.class"   # must print both
+```
+
+> Historical note: fullOpt used to be staged by `jar uf`-patching the modified
+> classes into a copy of `flink-dist` (117 MB) plus the full
+> `flink-table-runtime` jar, because the thin module jars are shade-filtered
+> (`flink-table-runtime-1.16-SNAPSHOT.jar` is ~76 KB and does not even contain
+> `GroupAggFunction`, and `flink-dist` bundles zero
+> `org/apache/flink/table/runtime/` classes, so a thin replace yielded
+> ClassNotFound). Runs recorded before 2026-08-07 were staged that way. The
+> single jar carries a verified superset of those patched classes, so the
+> deployed bytecode is equivalent.
+
+The compose mounts `$LIB` into `/opt/flink/lib/` over the image's copies.
 
 ## 4. Flink conf (fullOpt)
 
