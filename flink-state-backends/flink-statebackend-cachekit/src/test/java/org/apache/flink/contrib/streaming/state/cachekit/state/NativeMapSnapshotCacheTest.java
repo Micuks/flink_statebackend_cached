@@ -95,14 +95,27 @@ class NativeMapSnapshotCacheTest {
     }
 
     @Test
-    void testClassifierFeedsCachedMapStateAndDoesNotBackfillMulti() throws Exception {
+    void testClassifierFeedsNativeSnapshotCacheAndDoesNotBackfillMulti() throws Exception {
+        assertClassifierFeedsSnapshotCache(true, "native-flow-db");
+    }
+
+    @Test
+    void testClassifierFeedsJavaSnapshotCacheAndDoesNotBackfillMulti() throws Exception {
+        assertClassifierFeedsSnapshotCache(false, "java-flow-db");
+    }
+
+    private void assertClassifierFeedsSnapshotCache(
+            boolean nativeSnapshotCacheEnabled, String databaseDirectory) throws Exception {
         String library = nativeLibrary();
         RocksDB.loadLibrary();
         AtomicReference<String> currentKey = new AtomicReference<>("single-key");
         AtomicReference<byte[]> currentPrefix = new AtomicReference<>(new byte[] {21, 1});
 
         try (Options options = new Options().setCreateIfMissing(true);
-                RocksDB db = RocksDB.open(options, temporaryDirectory.resolve("flow-db").toString());
+                RocksDB db =
+                        RocksDB.open(
+                                options,
+                                temporaryDirectory.resolve(databaseDirectory).toString());
                 ColumnFamilyHandle columnFamily = db.getDefaultColumnFamily();
                 ReadOptions readOptions = new ReadOptions()) {
             @SuppressWarnings("unchecked")
@@ -148,7 +161,7 @@ class NativeMapSnapshotCacheTest {
                             false,
                             8,
                             metrics,
-                            true,
+                            nativeSnapshotCacheEnabled,
                             true,
                             "SCALAR",
                             library);

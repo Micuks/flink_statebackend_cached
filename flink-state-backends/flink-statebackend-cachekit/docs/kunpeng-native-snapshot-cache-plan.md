@@ -1,7 +1,8 @@
 # Kunpeng Native snapshot cache：设计、实现与验证记录
 
-基线为 `8be59704462a8f2c6228b6b42e1f0c32f9e32589`，开发分支为
-`cachekit/dev_wutb_kunpeng_native`。本文件只记录此干净 worktree 中的 Native 方案。
+基线为 `8be59704462a8f2c6228b6b42e1f0c32f9e32589`。P1--P4 开发分支为
+`cachekit/dev_wutb_kunpeng_native`；P5 混合边界在
+`cachekit/dev_wutb_kunpeng_native_hybrid` 独立工作树中推进。
 
 ## 目标与成功条件
 
@@ -707,3 +708,83 @@ Tbatch/item = Tpack + Tjni / N + Tnative-table + Tresult + Tstale-check
 MultiGet、批量序列化/反序列化、checkpoint checksum/compression；这些位置才更可能让
 NEON/SVE 的吞吐覆盖 JNI 和数据搬运成本。该转向需要单独立项，不能继续记为 snapshot
 cache 优化。
+
+## P5：保留 Java 热命中，只下沉 RocksDB miss 分类
+
+### 第一性原理边界
+
+q4 已测得 snapshot cache 命中率约为 `87.88%`。因此一次 `entries()` 的期望成本为：
+
+```text
+E[T] = H * Thit + (1 - H) * Tmiss
+```
+
+其中 `H` 接近 0.88。现有数据又证明 Native single lookup 约 `223 ns`，Java snapshot
+lookup 约 `93 ns`。把高频 `Thit` 下沉会让绝大多数访问额外支付 JNI 和 Native table
+成本；这就是完整 Native table 在 q4 回退的根因。真正仍可能受益的是低频但昂贵的
+`Tmiss`：Java 原路径创建 RocksDB iterator、跨 JNI 迭代并在 Java 中判断
+EMPTY/SINGLE/MULTI，而 P3 classifier 能在一次 JNI 内完成相同 prefix 分类。
+
+因此 P5 的职责边界是：
+
+```text
+Java LRU:  lookup / hit / put / remove / eviction
+Native:    只在 Java miss 后读取 RocksDB prefix，返回 EMPTY / SINGLE(userKey) / MULTI
+```
+
+这不是“Native 开关打开后偷偷退回 Java”。两个开关具有独立、可验证的语义：
+
+| native.enabled | classifier.enabled | snapshot table | miss 分类 |
+|---|---|---|---|
+| false | false | Java LRU | 原 Java iterator 路径 |
+| true | false | Native table | 原 Java iterator 路径 |
+| true | true | Native table | Native RocksDB classifier |
+| false | true | **Java LRU** | **Native RocksDB classifier** |
+
+### 2026-08-11 P5 实现记录
+
+已基于 P3 HEAD `a86742d0be` 创建独立分支
+`cachekit/dev_wutb_kunpeng_native_hybrid`，完成第四种组合：
+
+1. classifier 不再要求 `native.enabled=true`，只要求 snapshot cache 容量大于零且 delegate
+   实现 `RocksDBMapStateNativeSnapshotAccess`；
+2. `native.enabled=false` 时始终创建原有 Java `LruCachePolicy`，所有高频 probe、回填、失效
+   和淘汰均不进入 JNI；
+3. `classifier.enabled=true` 时创建 Native JNI handle，仅在 Java cache miss 后调用 P3
+   `classify()`；EMPTY/SINGLE 回填 Java LRU，MULTI 继续走 Flink 原始 iterator；
+4. 增加端到端测试，分别覆盖“Native table + Native classifier”和“Java LRU + Native
+   classifier”，验证 SINGLE 第二次访问命中缓存、MULTI 不回填且两次都走 delegate；
+5. 初始化日志改称 `Native snapshot JNI`，避免 classifier-only 模式被误读为 Native table
+   已启用。
+
+当前实现为降低改动风险，classifier-only 模式复用 P3 `NativeMapSnapshotCache` handle；C++
+内部会分配一个未被 lookup/put/remove 使用的 bytes table。它不进入热路径，但有固定内存
+成本。只有端到端 q4 证明该边界有收益后，才拆出物理独立的
+`NativeSnapshotClassifier` handle；在收益未知前先拆 C++ 类型不会改变每条记录的成本。
+
+已完成的验证：
+
+```text
+NativeMapSnapshotCacheTest + CachedInternalMapStateTest
+Tests run: 25, Failures: 0, Errors: 0, Skipped: 0
+```
+
+### P5 Nexmark 单变量实验
+
+只用本分支构建的同一个 CacheKit JAR、P3 同一份 Native `.so` 和同一份 RocksDB backend
+JAR。固定 CPU、20M events、无 checkpoint，先跑 q4 配对：
+
+```text
+A: native.enabled=false, classifier.enabled=false  # Java table + Java miss
+H: native.enabled=false, classifier.enabled=true   # Java table + Native miss
+顺序: A -> H -> H -> A
+```
+
+必须在 TaskManager 日志确认：A 不加载 Native snapshot JNI；H 打印
+`Native snapshot JNI initialized` 且 classifier 为 RocksDB bridge，同时两组配置中的
+`native.enabled` 均为 false。输入快照必须记录完全相同的 CacheKit/RocksDB JAR SHA-256。
+
+P5 不预设必然提升。H 在 EMPTY/SINGLE miss 上可能省掉 Java iterator 往返，但 MULTI 会先
+做 Native 两步分类、随后再走原 iterator，形成重复扫描。q4 若不能在成对中位数上至少不
+回退，就停止 P5，不跑 q9/q20；q4 不回退后才以相同 `A -> H -> H -> A` 顺序测试 q9、
+q20。只以 Nexmark events/s 作性能结论，内部指标仅用于证明实验开关生效，不能代替吞吐。

@@ -84,7 +84,7 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
             throw new IllegalStateException("Native snapshot cache creation returned a null handle");
         }
         LOG.info(
-                "CacheKit Native MapSnapshot cache initialized: maxEntries={}, kernel={}, classifier={}",
+                "CacheKit Native snapshot JNI initialized: maxEntries={}, kernel={}, classifier={}",
                 maxEntries,
                 kernelName(),
                 classifierEnabled ? nativeBridgeDescription(liveHandle()) : "disabled");

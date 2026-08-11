@@ -328,9 +328,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         this.mapSnapshotCacheEnabled = mapSnapshotCacheMaxEntries > 0;
         this.nativeMapSnapshotCacheEnabled =
                 this.mapSnapshotCacheEnabled && nativeMapSnapshotCacheEnabled;
-        if (nativeSnapshotClassifierEnabled && !this.nativeMapSnapshotCacheEnabled) {
+        if (nativeSnapshotClassifierEnabled && !this.mapSnapshotCacheEnabled) {
             throw new IllegalArgumentException(
-                    "Native snapshot classifier requires Native snapshot cache");
+                    "Native snapshot classifier requires MapSnapshot cache");
         }
         if (nativeSnapshotClassifierEnabled
                 && !(delegate instanceof RocksDBMapStateNativeSnapshotAccess)) {
@@ -345,29 +345,30 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (mapSnapshotCacheEnabled) {
             if (this.nativeMapSnapshotCacheEnabled) {
                 this.mapSnapshotCache = new NoOpCachePolicy<>();
-                this.nativeMapSnapshotCache =
-                        new NativeMapSnapshotCache<>(
-                                mapSnapshotCacheMaxEntries,
-                                nativeMapSnapshotKernel,
-                                nativeMapSnapshotLibraryPath,
-                                nativeSnapshotClassifierEnabled,
-                                Objects.requireNonNull(
-                                        keySerializer,
-                                        "Native snapshot cache requires a key serializer"),
-                                Objects.requireNonNull(
-                                        namespaceSerializer,
-                                        "Native snapshot cache requires a namespace serializer"),
-                                Objects.requireNonNull(
-                                        userKeySerializer,
-                                        "Native snapshot cache requires a user-key serializer"));
             } else {
                 this.mapSnapshotCache =
                         new LruCachePolicy<>(
                                 mapSnapshotCacheMaxEntries,
                                 64,
                                 (key, value) -> mapSnapshotCacheMetrics.recordEviction());
-                this.nativeMapSnapshotCache = null;
             }
+            this.nativeMapSnapshotCache =
+                    this.nativeMapSnapshotCacheEnabled || nativeSnapshotClassifierEnabled
+                            ? new NativeMapSnapshotCache<>(
+                                    mapSnapshotCacheMaxEntries,
+                                    nativeMapSnapshotKernel,
+                                    nativeMapSnapshotLibraryPath,
+                                    nativeSnapshotClassifierEnabled,
+                                    Objects.requireNonNull(
+                                            keySerializer,
+                                            "Native snapshot support requires a key serializer"),
+                                    Objects.requireNonNull(
+                                            namespaceSerializer,
+                                            "Native snapshot support requires a namespace serializer"),
+                                    Objects.requireNonNull(
+                                            userKeySerializer,
+                                            "Native snapshot support requires a user-key serializer"))
+                            : null;
         } else {
             this.mapSnapshotCache = new NoOpCachePolicy<>();
             this.nativeMapSnapshotCache = null;
