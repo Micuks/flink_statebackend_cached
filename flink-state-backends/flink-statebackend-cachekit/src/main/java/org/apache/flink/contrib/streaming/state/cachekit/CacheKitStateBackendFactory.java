@@ -153,6 +153,27 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         + "Caches (Key, Namespace) -> {EMPTY | SINGLE(UserKey)} to short-circuit "
                                                         + "entries()/iterator() calls. Set 0 to disable.");
 
+        public static final ConfigOption<Boolean> MAP_SNAPSHOT_CACHE_NATIVE_ENABLED = ConfigOptions
+                        .key("state.backend.cachekit.map.snapshot.cache.native.enabled")
+                        .booleanType()
+                        .defaultValue(false)
+                        .withDescription(
+                                        "Store MapState EMPTY/SINGLE snapshots in the JNI Native cache. "
+                                                        + "The Java snapshot cache remains the default.");
+
+        public static final ConfigOption<String> MAP_SNAPSHOT_CACHE_NATIVE_KERNEL = ConfigOptions
+                        .key("state.backend.cachekit.map.snapshot.cache.native.kernel")
+                        .stringType()
+                        .defaultValue("AUTO")
+                        .withDescription("Native snapshot probe kernel: AUTO, SCALAR, NEON, or SVE.");
+
+        public static final ConfigOption<String> MAP_SNAPSHOT_CACHE_NATIVE_LIBRARY_PATH = ConfigOptions
+                        .key("state.backend.cachekit.map.snapshot.cache.native.library-path")
+                        .stringType()
+                        .defaultValue("")
+                        .withDescription(
+                                        "Absolute libcachekit_snapshot_jni.so path. Empty uses java.library.path.");
+
         public static final ConfigOption<Boolean> DIAGNOSTICS_ENABLED = ConfigOptions
                         .key("state.backend.cachekit.diagnostics.enabled")
                         .booleanType()
@@ -225,6 +246,9 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final int mapHitRateWindow = config.get(MAP_HIT_RATE_WINDOW);
                 final boolean mapIterationCacheFillEnabled = config.get(MAP_ITERATION_CACHE_FILL_ENABLED);
                 final int mapSnapshotMaxEntries = Math.max(0, config.get(MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
+		final boolean mapSnapshotNativeEnabled = config.get(MAP_SNAPSHOT_CACHE_NATIVE_ENABLED);
+		final String mapSnapshotNativeKernel = config.get(MAP_SNAPSHOT_CACHE_NATIVE_KERNEL);
+		final String mapSnapshotNativeLibraryPath = config.get(MAP_SNAPSHOT_CACHE_NATIVE_LIBRARY_PATH);
 		final boolean diagnosticsEnabled = config.get(DIAGNOSTICS_ENABLED);
 		final String delegateClass = config.get(DELEGATE_BACKEND);
 
@@ -234,7 +258,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 			final boolean priorityQueueOptEnabled = config.get(PRIORITY_QUEUE_OPT_ENABLED);
 
 			System.out.printf(
-				"CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, diagnostics=%s, delegate=%s, listStateCow=%s, listStateRyw=%s, clearedKeysCap=%d, priorityQueueOpt=%s%n",
+				"CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, mapSnapshotNative=%s, mapSnapshotKernel=%s, diagnostics=%s, delegate=%s, listStateCow=%s, listStateRyw=%s, clearedKeysCap=%d, priorityQueueOpt=%s%n",
                                 maxEntries,
                                 policyType,
                                 lruOverflow,
@@ -253,6 +277,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 							mapHitRateWindow,
 							mapIterationCacheFillEnabled,
 							mapSnapshotMaxEntries,
+							mapSnapshotNativeEnabled,
+							mapSnapshotNativeKernel,
 							diagnosticsEnabled,
 							delegateClass,
 							listStateCowEnabled,
@@ -298,6 +324,9 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 								mapHitRateWindow,
 								mapIterationCacheFillEnabled,
 								mapSnapshotMaxEntries,
+								mapSnapshotNativeEnabled,
+								mapSnapshotNativeKernel,
+								mapSnapshotNativeLibraryPath,
 								listStateCowEnabled,
 								listStateRywEnabled,
 							clearedKeysCapacity,

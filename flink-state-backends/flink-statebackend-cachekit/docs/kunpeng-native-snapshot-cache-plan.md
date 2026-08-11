@@ -1,0 +1,429 @@
+# Kunpeng Native snapshot cache：设计、实现与验证记录
+
+基线为 `8be59704462a8f2c6228b6b42e1f0c32f9e32589`，开发分支为
+`cachekit/dev_wutb_kunpeng_native`。本文件只记录此干净 worktree 中的 Native 方案。
+
+## 目标与成功条件
+
+Native 化的目标不是把 Java 代码机械改写成 C++，而是验证以下不等式在鲲鹏机器上是否成立：
+
+```text
+省掉的 Java probe/object/GC 成本
+  > key 编码 + JNI 边界 + Native probe + 返回结果
+```
+
+最终成功条件是 q4、q9、q20 的 Nexmark 吞吐可重复提升。反汇编和 microbenchmark 只用于证明实现及实验有效。
+
+## P0 基线审计
+
+- snapshot cache 位于 `CachedInternalMapState`，当前实现是 Java `LruCachePolicy<KeyNamespace, MapSnapshot>`。
+- lookup 只发生在同步 `iterator()/entries()/isEmpty()` 短路路径；现有 bp-prefetch 只服务 `CachedInternalValueState`，不能直接提供 MapState snapshot batch。
+- cache 是派生数据，不参与 checkpoint；backend `close()` 已是未来释放 Native handle 的生命周期挂点。
+- `newStoredKeyNamespace()` 对 `BinaryRowData` 有专门的 `copy()` 分支。由此推断 Nexmark Table/SQL 的真实 key 很可能是 binary row，而非可直接传入 JNI 的 primitive；必须通过运行日志确认 serializer 后才能选择生产 codec。
+- P0 曾在 snapshot cache 启用时临时记录 key、namespace、userKey serializer 和 delegate
+  类型；取得运行证据后已删除诊断代码，生产 Java 路径没有遗留日志开销。
+
+## P1 最小原型边界
+
+第一版原型不接 Flink，仅回答两个问题：
+
+1. `long key + long namespace` 下，single JNI 的固定成本是多少；
+2. 相同 Native SoA 表上 scalar、NEON、SVE（硬件支持时）的 lookup 是否存在稳定差异，batch 能否摊薄 JNI。
+
+该 primitive 原型是 JNI 成本下限，不代表已经覆盖 Nexmark。它用于暴露成本结构，
+而不是作为停止端到端开发的硬门槛。后续实现必须满足：
+
+- q4/q9/q20 的 serializer 日志已确认；
+- 若 key 是 `BinaryRowData`，已有无需每次新分配的 canonical-bytes/direct-buffer 方案；
+- 随机 differential test 覆盖 hit、miss、hash collision、更新、删除和 wrap-around。
+
+## 可归因实验组
+
+| 组 | 归因 |
+|---|---|
+| Java scalar | Java 基线 |
+| Native scalar generic | JNI + off-heap/SoA |
+| Native scalar Kunpeng tune | `-march=armv8.2-a -mtune=tsv110` |
+| Native NEON | 128-bit control group compare |
+| Native SVE | 运行时检测后的可选宽向量 compare |
+
+Native 库不得整体依赖 SVE。baseline/NEON 和 SVE 放在不同编译单元，由 `AT_HWCAP` 运行时分派；实验输出必须打印实际 kernel 和 SVE vector length。
+
+## 2026-08-10 P1 原型结果
+
+已在 `src/native/snapshot-cache/` 完成长整型 key/namespace 的固定容量 SoA 哈希表、
+scalar/NEON/SVE probe、运行时 HWCAP 分派、JNI single/batch 接口、随机差分测试和
+Java scalar 对照。该 long 表仍是成本下限实验；真实 Flink 路径使用后述 bytes 表。
+
+测试机器上的 SVE vector length 为 32 bytes。20 万次随机操作的 scalar、NEON、SVE
+结果均通过；反汇编确认 NEON 使用了 `cmeq v?.16b`，SVE 使用了 `ptrue`/`ld1b`，
+因此结果不是“源码写了向量、实际退化成标量”。
+
+固定容量 4096、装载 2048、75% hit 的 lookup 结果如下：
+
+| 路径 | ns/op | Mops/s |
+|---|---:|---:|
+| Native core scalar | 21.53 | 46.46 |
+| Native core NEON | 26.67 | 37.50 |
+| Native core SVE | 26.76 | 37.36 |
+| Java scalar SoA | 19.96 | 50.10 |
+| JNI scalar single | 40.31 | 24.81 |
+| JNI scalar batch 8 | 29.08 | 34.39 |
+| JNI scalar batch 32 | 21.79 | 45.89 |
+| JNI scalar batch 64 | 20.53 | 48.71 |
+| JNI NEON batch 64 | 23.15 | 43.20 |
+| JNI SVE batch 64 | 24.96 | 40.06 |
+
+所有 JNI 组 checksum 都是 `411949377536`。结论是：在 50% 装载、短 probe chain
+的表上，向量一次比较更多 control byte 的收益小于向量装载、mask 和分支成本；single
+JNI 又约把 Java lookup 成本翻倍。batch 64 基本摊薄 JNI 后，Native scalar 仍比 Java
+scalar 慢约 2.9%。因此 primitive long 路径本身没有收益，不能仅凭“鲲鹏向量能力强”
+就声称优化成立；但这个结果不再阻止完成真实 RowData 端到端实现。
+收尾复跑的 core 结果为 scalar/NEON/SVE `21.03/21.83/23.89 ns/op`；绝对差距有波动，
+但 scalar 仍最快，因此不改变判定。
+
+验证命令：
+
+```bash
+cmake -S src/native/snapshot-cache -B /tmp/cachekit-kunpeng-native-make-build \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/cachekit-kunpeng-native-make-build -j
+ctest --test-dir /tmp/cachekit-kunpeng-native-make-build --output-on-failure
+/tmp/cachekit-kunpeng-native-make-build/cachekit_snapshot_bench
+```
+
+Java/JNI benchmark 使用 BiSheng JDK 8 运行 `NativeSnapshotBench`。带 serializer 诊断的 CacheKit JAR 也已
+由 JDK 11 完整构建，SHA-256 为
+`91a1fe22bce3f2c67127550d4c1bb7159ec7be895d1e625def6bdcf15336883a`。
+
+## Nexmark 运行时类型证据
+
+使用独立 Compose 项目 `ckkunpnativep0`、REST 端口 `19091`、SSH 端口
+`19221`—`19223` 启动了 100 万事件的 q4/q9/q20 smoke。输入快照和日志位于：
+
+```text
+/home/wutb/nexmark-bench-v2/results/
+  20260810T170619+0800_kunpeng-native-p0-serializer-smoke/
+```
+
+q4 的 TaskManager 实际日志一致显示：
+
+```text
+key=org.apache.flink.table.runtime.typeutils.RowDataSerializer
+namespace=org.apache.flink.runtime.state.VoidNamespaceSerializer
+userKey=org.apache.flink.table.runtime.typeutils.RowDataSerializer
+delegate=org.apache.flink.contrib.streaming.state.RocksDBMapState
+```
+
+这推翻了 primitive long 可直接覆盖 Nexmark 的假设，并确认 namespace 可省略、真正问题
+是两个 RowData 的稳定字节表示。q4 在类型证据产生后因 Nexmark metric reporter 没有采到
+指标而退出异常；启动器随后进入 q9，但为避免把一次诊断烟测拖成 900 秒超时任务而终止，
+所以这次运行**不能**用于 q4/q9/q20 吞吐比较。所有 `ckkunpnativep0` 容器和网络均已清理，
+未操作已有长期任务。
+
+## 第一性原理复核
+
+一次 snapshot 命中的最低工作量，是确定 `(key, namespace)` 是否存在并拿到 snapshot
+引用。向量化只能降低“一次探测中比较 control byte”的指令数，不能消除 hash、内存
+访问、JNI、key 编码和对象/句柄转换。当前装载率下绝大多数 probe 很短，因而没有足够
+的独立比较供 NEON/SVE 摊销固定开销。只有真实 workload 出现长 probe、可批量请求，
+或 key 已天然位于连续 off-heap 内存时，Native/vector 路径才可能改变上述不等式。
+
+更关键的是，`long + long` 是最有利于 Native 的假设。如果 q4/q9/q20 实际使用
+`BinaryRowData`，生产实现还要支付 canonical encoding、变长比较和 snapshot Java
+对象回传成本，收益只会更难成立。因此本实现先保证完整、可回退和可测，再由
+q4/q9/q20 决定实际收益，不能从硬件规格直接外推结果。
+
+## P2：真实 RowData 端到端实现
+
+当前已经完成 snapshot cache 下沉，而不再只是 JNI microbenchmark。数据路径为：
+
+```text
+(currentKey, namespace)
+  -> BinaryRowData + VoidNamespace 时直接使用 canonical row bytes
+     （其他类型回退到 Flink TypeSerializer 的复用 byte[]）
+  -> JNI
+  -> C++ ByteSnapshotTable 查找/更新
+  -> EMPTY，或 Native 持有的已深拷贝 userKey GlobalRef
+  -> SINGLE 命中时直接返回原 Java userKey，再调用原有 point-get
+```
+
+C++ 层保存完整 key bytes、snapshot kind 和 SINGLE userKey 的 JNI GlobalRef；GlobalRef 在
+更新、淘汰、remove、clear 和 close 时精确释放，Java 侧不维护镜像 Map。表具有固定 entry
+上限、LRU 淘汰、deleted slot、scalar、NEON、SVE probe 和运行时 HWCAP 分派。
+`CachedInternalMapState.close()` 会释放 Native handle；Java 入口同步保护
+lookup/put/remove 与 close，避免取消阶段 use-after-free。
+
+实现默认关闭，原有 Java snapshot cache 行为不变。启用配置为：
+
+```yaml
+state.backend.cachekit.map.snapshot.cache.max-entries: 2000
+state.backend.cachekit.map.snapshot.cache.native.enabled: true
+state.backend.cachekit.map.snapshot.cache.native.kernel: SCALAR # AUTO/SCALAR/NEON/SVE
+state.backend.cachekit.map.snapshot.cache.native.library-path: /absolute/path/libcachekit_snapshot_jni.so
+```
+
+若 library-path 为空则使用 `System.loadLibrary("cachekit_snapshot_jni")`。显式要求的 NEON
+或 SVE 在硬件不支持时会拒绝启动，不会静默伪装成向量路径；`AUTO` 才允许运行时选择。
+
+## P2 验证结果
+
+- Native core：long 表和 bytes 表两个 CTest 均通过；bytes 测试覆盖 EMPTY、SINGLE、
+  变长 payload、更新、LRU 淘汰、删除和 clear，并分别运行 scalar/NEON/SVE。
+- Java/JNI：`NativeMapSnapshotCacheTest` 覆盖 reusable buffer、GlobalRef 的替换/淘汰/
+  remove/clear/close，以及带非零 offset 的真实 `BinaryRowData` key；SINGLE 命中返回的
+  userKey 与写入对象保持 identity。
+- Flink：`CachedInternalMapStateTest` 覆盖 Native SINGLE backfill 后第二次 `entries()`
+  不再调用 delegate iterator。当前合计 22 项测试全部通过。
+- API 兼容：保留 `CacheKitStateBackend` 和 `CacheKitKeyedStateBackend` 的旧构造器签名；
+  旧调用路径统一委托到 Native 默认关闭的新构造器。
+- JDK 11 reactor compile 与 package 均成功。2026-08-11 收尾构建的 JAR SHA-256 为
+  `6fc4ce7372cc7a476025bf6afb79fd1abdc2bada39c22ab9fb1fcfbcf6539ca8`，Native 库为
+  `bf5ead04a88a2b21dc2f4ebc84a53d885c7336fbde2f445825ef32324137ff4f`。
+
+使用独立镜像 `nexmark-bench-v2:kunpeng-native-snapshot-20260810` 和 Compose 项目
+`ckkunpnativee2e` 启动了真实 q4。TaskManager 日志确认多个 MapState 使用：
+
+```text
+CacheKit Native MapSnapshot cache initialized: maxEntries=2000, kernel=scalar
+```
+
+未发现 `UnsatisfiedLinkError`、JNI 异常、SIGSEGV 或 Flink FAILED。烟测完成 warmup 后，
+Nexmark runner 长时间停在主查询切换阶段，因此保存日志后主动终止；该次运行目录为：
+
+```text
+/home/wutb/nexmark-bench-v2/results/
+  20260810T192752+0800_kunpeng-native-e2e-smoke/
+```
+
+它证明 JAR、配置、动态库和真实 TaskManager RowData 路径能共同启动，但不是吞吐结果。
+所有 `ckkunpnativee2e` 容器和网络均已清理。
+
+## Java 与 Native snapshot 的关系
+
+两份实现同时保留在代码中，用于开关回退和 A/B 测试，但同一个
+`CachedInternalMapState` 实例只使用其中一份。`native.enabled=true` 时，Java
+`mapSnapshotCache` 被设置成 `NoOpCachePolicy`，lookup/store/remove 只访问
+`NativeMapSnapshotCache`；关闭 Native 时才创建 Java `LruCachePolicy`。因此不存在双写、
+两份缓存互相覆盖或一致性冲突，也不会同时占用两份有效缓存容量。
+
+## JNI 改造先例、当前 Native 边界与工程量
+
+### Flink/RocksDB 已有先例
+
+Flink 的常规 RocksDB MapState 没有自建一套范围查询 JNI：Java 先构造
+`key + namespace` 的序列化 prefix，再通过 RocksJava JNI 创建 `RocksIterator`，调用
+`seek/next/key`，并在 Java 中判断 key 是否仍匹配 prefix。也就是说，RocksDB 存储访问
+已经在 C++，但范围语义和迭代控制仍在 Java。官方实现可参见
+[`RocksDBMapState`](https://raw.githubusercontent.com/apache/flink/master/flink-state-backends/flink-statebackend-rocksdb/src/main/java/org/apache/flink/state/rocksdb/RocksDBMapState.java)。
+
+Flink 为深层优化扩展 Native/JNI 有明确先例。State TTL 的 RocksDB compaction cleanup
+要求实现 Flink 专用 C++ compaction filter；当时既采用过临时 RocksDB 分支 FRocksDB，
+也规划过把独立 C++ 扩展打进 JNI Java client JAR。参见
+[`FLINK-10471`](https://issues.apache.org/jira/browse/FLINK-10471)。对应 Flink 实现提交
+约涉及 46 个文件、`+1232/-370` 行，而且这还不包含独立 FRocksDB 原生分支的改动。
+后续又出现 Native compaction thread 回调 Java 时拿不到用户 ClassLoader 的问题，说明
+JNI 深度接入的真实维护成本还包括线程上下文、ClassLoader、异常和对象生命周期，参见
+[`FLINK-16686`](https://issues.apache.org/jira/browse/FLINK-16686)。
+
+因此结论不是“Flink 不能改 JNI”，而是：有成功先例，但社区通常先复用 RocksJava 已有
+接口；只有现有接口无法消除主要成本时，才承担定制 rocksdbjni 的构建和长期维护成本。
+
+### 当前实现算到哪一层
+
+当前版本已经把 **snapshot cache 的索引表、查找、更新、淘汰及 GlobalRef 生命周期**
+下沉到 C++，因此不是纯 Java cache；但 cache miss 后的 snapshot 构造仍依赖 Java 侧
+MapState/RocksIterator 语义，再把 EMPTY/SINGLE 结果 backfill 给 Native cache。
+
+按本项目的最终目标，只有下面这段也在一次 Native 调用内完成，才能称为“完整的
+snapshot native 化”：
+
+```text
+serialized prefix
+  -> RocksDB iterator Seek(prefix)
+  -> 检查第 1 条是否匹配
+  -> 检查第 2 条是否仍匹配
+  -> 返回 EMPTY / SINGLE(first userKey) / MULTI
+```
+
+因此当前实现应准确称为 **Native snapshot cache table** 或“部分 Native 化”，不能把它
+描述成 snapshot 构造链路已经全部下到 C++。
+
+### 范围语义是否必须大改 JNI
+
+不需要把 Flink Serializer、任意 Comparator 或完整范围迭代器都暴露给 C++。当前
+RocksDB MapState 的逻辑范围已经编码成规范化 prefix；Native 只需得到正确的 DB、
+ColumnFamily、ReadOptions/一致性读取视图和 prefix bytes。最窄接口可以设计为：
+
+```java
+native PrefixResult classifyPrefix(
+    long dbHandle,
+    long columnFamilyHandle,
+    long readOptionsHandle,
+    byte[] prefix,
+    int userKeyOffset);
+```
+
+返回值只表达 `EMPTY/SINGLE/MULTI`，SINGLE 附带第一条 userKey bytes 或安全 token；无需
+扫描完整范围。RocksJava 对象公开底层 `nativeHandle`，参见
+[`RocksObject.getNativeHandle()`](https://javadoc.io/static/org.rocksdb/rocksdbjni/7.0.3/org/rocksdb/RocksObject.html)，
+但“能取得指针”不等于“独立动态库能安全解引用指针”。如果 CacheKit JNI `.so` 与
+Flink 实际加载的 rocksdbjni 不是同一个 RocksDB 二进制、编译选项和 C++ ABI，直接传入
+DB 指针存在未定义行为、崩溃和升级失效风险。
+
+生产实现优先把 `classifyPrefix` 加入 **Flink 实际使用的同一份 rocksdbjni/FRocksDB
+构建**，或者由该构建导出稳定的窄 C 接口；不得让独立 CacheKit `.so` 猜测并解引用外部
+C++ 对象布局，也不得重新打开一个 RocksDB 实例冒充原 backend 的一致性读取视图。
+
+### 工程量估算
+
+以下是基于当前代码边界的工程估算，不是官方工期：
+
+| 方案 | 是否完整 Native snapshot 判定 | 预计改动/周期 |
+|---|---|---|
+| 继续复用 RocksJava iterator，Java 中只看前两条 | 否；仅减少无效全范围扫描 | 约 150–300 行，3–7 天 |
+| 在同一 rocksdbjni 中新增窄 `classifyPrefix` | 是；一次 JNI 内完成 0/1/2+ 判定 | 约 300–700 行；鲲鹏内部原型 2–4 周 |
+| 完整 Native range iterator、缓存和异步 ownership | 是，但接口更通用也更复杂 | 约 1000–3000+ 行，1–2 个月以上 |
+| 长期维护定制 rocksdbjni/FRocksDB 与多平台发布 | 是 | 首版通常 4–8 周起，之后持续跟随版本维护 |
+
+改一个 JNI 方法本身并不大；主要工作是确保 DB/CF/ReadOptions 生命周期、snapshot
+一致性、close/cancel 并发、异常转换、JAR/SO 打包、鲲鹏 ABI、RocksDB 版本固定以及
+SIGSEGV/资源泄漏测试。
+
+### P3：完整 snapshot native 化计划
+
+1. **冻结语义**：用现有 RocksJava iterator 写最小参考实现，只读取至多两条记录；针对
+   EMPTY、SINGLE、MULTI、相邻 prefix、删除、并发 close 和 snapshot/read view 建立
+   differential tests。这一步是 Native 实现的 oracle，不作为性能成果。
+2. **确认二进制边界**：记录 Flink 实际 rocksdbjni/FRocksDB 版本、构建参数、动态/静态
+   链接方式和符号可见性；确认 `RocksDB`、`ColumnFamilyHandle`、`ReadOptions` 的 handle
+   都来自同一 Native 库。若不能证明 ABI 同一，不进入传指针实现。
+3. **实现窄接口**：在同一 rocksdbjni 构建内增加 `classifyPrefix`，C++ 中 Seek 后最多
+   读取两条；不回调 Java Serializer，不返回完整 iterator，不持有超出调用期的 RocksDB
+   Slice 指针。
+4. **接入 CacheKit**：miss 时优先调用 Native classifier，结果写入现有 Native cache
+   table；异常、库缺失或不支持类型时显式回退现有 Java 路径。hit 路径继续复用当前
+   Native table，保持 `native.enabled=false` 的默认止损策略。
+5. **正确性与失效测试**：覆盖 key-group prefix、namespace、变长 BinaryRowData、CF
+   隔离、remove/clear、checkpoint read view、backend close、Task cancellation 和重复
+   load/unload；运行 ASan/UBSan 或等价 Native 检查，并增加错误 handle 的拒绝测试。
+6. **性能归因**：至少设置 Java snapshot、现有 Native table、完整 Native classifier
+   三组；同 JAR、同输入、交错多轮跑 q4/q9/q20。分别统计 hit 和 miss 路径，只有完整
+   Native 组相对 Java 中位数不回退，才继续 NEON/SVE classifier 或批处理研究。
+
+这条路线与后述 batch lookup 是两种不同优化：batch 试图摊薄“访问 CacheKit Native
+table”的 JNI；`classifyPrefix` 试图消除 cache miss 时 Java 与 RocksIterator 之间的多次
+JNI/对象往返。实验中必须分别开关，不能把两者合并后声称收益来自 snapshot native 化。
+
+## 2026-08-10 q4/q9/q20 成对结果
+
+在共享机器存在明显资源竞争的情况下，最初的 100M Java 运行中 q4 成功完成，吞吐为
+`624720 events/s`；q9 运行约 11.5 分钟时只生成约 7306 万事件。为了缩短 Java/Native
+之间的机器状态间隔，停止并清理了仅属于本实验的 `ckkunpcompare` 项目，改用 20M
+正式事件、10M warmup、关闭 checkpoint 的成对归因测试。两组使用完全相同的 JAR
+（SHA-256 均为 `5c43f2a38e190d9796324a76c0004c825c2ca6e350bcbc700f2211e1374e3e8b`），
+配置差异只有 Native enable、SCALAR kernel 和动态库路径。
+
+| Query | Java events/s | Native Scalar events/s | Native 相对变化 |
+|---|---:|---:|---:|
+| q4 | 781400 | 639490 | -18.16% |
+| q9 | 350020 | 348480 | -0.44% |
+| q20 | 539870 | 517240 | -4.19% |
+
+Native TaskManager 日志确认实际 kernel 为 `scalar`，三项查询均通过且无 JNI、SIGSEGV
+或 Flink failure。结果目录为：
+
+```text
+/home/wutb/nexmark-bench-v2/results/
+  20260810T210038+0800_kunpeng-snapshot-java-q4-q9-q20-20m-20260810/
+  20260810T210602+0800_kunpeng-snapshot-native-scalar-q4-q9-q20-20m-20260810/
+```
+
+这轮单次、短规模测试不能给出严谨置信区间，但足以否定“当前 Native 版本在三个查询上
+依然普遍提升”：q4 明显回退，q20 回退，q9 持平。它也符合第一性原理成本模型——当前
+路径每次 probe 额外支付 key/namespace 序列化、JNI 和返回 payload 反序列化，而短 probe
+链上的 Native scalar 查找不足以偿还这些成本。
+
+## 下一步
+
+1. 若继续验证，固定独占 CPU 集合后对 Java/Native SCALAR 做多轮交错 100M 测试，报告
+   中位数和离散度；当前单轮结果不支持默认启用 Native。
+2. 若继续优化，优先消除逐次序列化/JNI，而不是先换 NEON/SVE probe；只有让 key 保持
+   canonical bytes 或实现可摊薄 JNI 的批处理后，向量 probe 才可能成为主要变量。
+3. 优化后再对比 SCALAR/NEON/SVE。性能结果无论正负都保留，不设置任意接入门槛。
+
+## 2026-08-11 q4 热路径优化与止损结论
+
+诊断运行确认 q4 的 snapshot cache 不是低命中缓存：Join[10] 共 probe `16,904,216`
+次，hit `14,855,692` 次，命中率约 `87.88%`；其中 SINGLE short-circuit
+`14,263,371` 次。因此 q4 的主要成本是高频命中路径，而不是 miss 后的 RocksDB 扫描。
+诊断结果位于：
+
+```text
+/home/wutb/nexmark-bench-v2/results/
+  20260811T001212+0800_kunpeng-native-q4-hit-diagnostics-20m-20260811/
+```
+
+已保留两项能直接减少必付成本且通过正确性测试的改动：
+
+1. SINGLE payload 不再序列化/反序列化 userKey，而是保存 backfill 时已经深拷贝的
+   Java userKey GlobalRef；
+2. q4 实际类型为单段 on-heap `BinaryRowData + VoidNamespace` 时，lookup 直接传 row
+   的底层 byte[]、offset 和 length，不再调用 key/namespace serializer；多段、off-heap
+   或其他类型继续走通用序列化回退。
+
+第一项把相同规模 Native q4 从最初 `639490` 提高到 `640330 events/s` 的量级，并消除
+大量对象编解码；第二项后 Native 为 `640120 events/s`，说明 key 序列化已不是剩余主
+瓶颈。第二项的严格同 JAR 配对结果为：
+
+| 路径 | q4 events/s | 相对 Java |
+|---|---:|---:|
+| Java snapshot | 678290 | 基线 |
+| Native GlobalRef + raw BinaryRow key | 640120 | -5.63% |
+
+两份输入快照中的 CacheKit JAR SHA-256 均为
+`e44b934482a0e340afd2665307b501cd6843ad705cb630348a2be102503d67db`，配置差异仍只有
+Native enable/kernel/library-path。结果目录为：
+
+```text
+/home/wutb/nexmark-bench-v2/results/
+  20260811T002843+0800_kunpeng-rawkey-java-q4-20m-20260811/
+  20260811T003024+0800_kunpeng-rawkey-native-q4-20m-20260811/
+```
+
+另外做了四个单变量候选，均未达到可保留标准：
+
+| 候选 | Native q4 events/s | 判定 |
+|---|---:|---|
+| 单条 JNI result memo | 622040 | 回退，撤销 |
+| 256 槽 JVM near-cache | 638260 | 无收益且增加双层复杂度，撤销 |
+| 小 key 栈拷贝 + 直接返回 GlobalRef | 640960 | 噪声范围，撤销 |
+| 移除 Java monitor | 637770 | 无收益且削弱生命周期保护，撤销 |
+
+这些候选不是各自带 Java 对照的正式配对数据，只用于快速淘汰实现方向；不能横向解释
+几千 events/s 的差异。它们共同给出稳定结论：q4 Native 吞吐长期停在约
+`0.64M events/s`，剩余主成本是每次同步 probe 的 JNI 边界和 Native scalar table，
+不是 serializer、短期局部性、GC critical API 或 Java monitor。
+
+### q4 不回退策略与下一开发阶段
+
+当前生产止损策略保持不变：`native.enabled` 默认 `false`，所以默认 q4 仍走原 Java
+snapshot cache，不会因实验 Native 路径回退。不能把“打开 Native 后偷偷改走 Java”
+记作 Native 优化成功；Native 开关的 A/B 语义必须保持真实。
+
+对当前“独立 Native cache table”实现，下一阶段只有批处理值得继续投入。原因不是经验
+猜测，而是现有 microbenchmark 已给出下界：single JNI scalar 为 `40.31 ns/op`，batch
+32/64 可降到 `21.79/20.53 ns/op`。如果接受修改同一份 rocksdbjni，则上一节 P3 的
+`classifyPrefix` 是另一条独立路线，不受“只有批处理”结论限制。批处理路线实施顺序如下：
+
+1. 给 bytes table 增加 `lookupBatch`，输入使用连续 direct buffer，输出使用 kind +
+   GlobalRef token/entry slot；随机 differential test 必须覆盖 batch 内 hit/miss/collision。
+2. 新增 MapState snapshot lookahead 层，不能复用只服务 `CachedInternalValueState` 的现有
+   bp-prefetch；从 mailbox 中收集未来 `(currentKey, namespace)`，一次至少提交 32 个独立
+   lookup，再把结果放入有版本号的短生命周期 result ring。
+3. put/remove/clear 为相应 key 提升 generation；消费 batch 结果前比较 generation，过期
+   结果丢弃并走同步 lookup，保证不因异步/批量查询产生 stale hit。
+4. 若执行路径无法提前知道至少 32 个 snapshot key，则不进入 Native batch，继续 Java
+   snapshot cache；这是由 JNI 摊销下界导出的能力判定，不是任意百分比门槛。
+5. 完成后用同 JAR、20M 预筛，再做 Java/Native 交错多轮 q4；只有 Native q4 中位数
+   不低于 Java 且正确性测试全过，才继续 q9/q20 和 NEON/SVE 对比。
