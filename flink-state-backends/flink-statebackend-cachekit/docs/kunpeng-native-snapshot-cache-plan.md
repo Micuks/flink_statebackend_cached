@@ -537,7 +537,7 @@ Native TaskManager 日志确认实际 kernel 为 `scalar`，三项查询均通�
 路径每次 probe 额外支付 key/namespace 序列化、JNI 和返回 payload 反序列化，而短 probe
 链上的 Native scalar 查找不足以偿还这些成本。
 
-## 下一步
+## 2026-08-10 P2 阶段的下一步（历史记录）
 
 1. 若继续验证，固定独占 CPU 集合后对 Java/Native SCALAR 做多轮交错 100M 测试，报告
    中位数和离散度；当前单轮结果不支持默认启用 Native。
@@ -598,25 +598,112 @@ Native enable/kernel/library-path。结果目录为：
 `0.64M events/s`，剩余主成本是每次同步 probe 的 JNI 边界和 Native scalar table，
 不是 serializer、短期局部性、GC critical API 或 Java monitor。
 
-### q4 不回退策略与下一开发阶段
+### q4 不回退策略与 P4 下一步规划
 
 当前生产止损策略保持不变：`native.enabled` 默认 `false`，所以默认 q4 仍走原 Java
 snapshot cache，不会因实验 Native 路径回退。不能把“打开 Native 后偷偷改走 Java”
 记作 Native 优化成功；Native 开关的 A/B 语义必须保持真实。
 
-对当前“独立 Native cache table”实现，下一阶段只有批处理值得继续投入。原因不是经验
-猜测，而是现有 microbenchmark 已给出下界：single JNI scalar 为 `40.31 ns/op`，batch
-32/64 可降到 `21.79/20.53 ns/op`。上一节 P3 的 `classifyPrefix` 已通过锁定 Build ID 的
-私有 ABI bridge 成为另一条独立路线，不受“只有批处理”结论限制。批处理路线实施顺序如下：
+P3 结果已经否定继续优化单次 miss classifier。下一阶段若仍要研究 Native snapshot，
+只能做一个有明确停止条件的 **P4 batch 可行性验证**，不能直接修改 Flink 热路径。
 
-1. 给 bytes table 增加 `lookupBatch`，输入使用连续 direct buffer，输出使用 kind +
-   GlobalRef token/entry slot；随机 differential test 必须覆盖 batch 内 hit/miss/collision。
-2. 新增 MapState snapshot lookahead 层，不能复用只服务 `CachedInternalValueState` 的现有
-   bp-prefetch；从 mailbox 中收集未来 `(currentKey, namespace)`，一次至少提交 32 个独立
-   lookup，再把结果放入有版本号的短生命周期 result ring。
-3. put/remove/clear 为相应 key 提升 generation；消费 batch 结果前比较 generation，过期
-   结果丢弃并走同步 lookup，保证不因异步/批量查询产生 stale hit。
-4. 若执行路径无法提前知道至少 32 个 snapshot key，则不进入 Native batch，继续 Java
-   snapshot cache；这是由 JNI 摊销下界导出的能力判定，不是任意百分比门槛。
-5. 完成后用同 JAR、20M 预筛，再做 Java/Native 交错多轮 q4；只有 Native q4 中位数
-   不低于 Java 且正确性测试全过，才继续 q9/q20 和 NEON/SVE 对比。
+#### 第一性原理与当前能力缺口
+
+一次批量 Native lookup 的单位成本可以写成：
+
+```text
+Tbatch/item = Tpack + Tjni / N + Tnative-table + Tresult + Tstale-check
+```
+
+要让它胜过 Java snapshot，至少必须同时满足：
+
+1. 包含真实 key 打包和结果消费后的 `Tbatch/item` 低于 Java snapshot lookup；
+2. q4 在不改变记录、watermark、barrier 和双输入调度语义的前提下，能提前得到足够大的
+   `N`；现有数据只证明 `N=32/64` 才能明显摊薄 JNI；
+3. lookahead 必须知道 input side 和将要访问的具体 MapState，不能把所有 future key 盲目
+   查询到所有 MapState table；
+4. 批量结果从生成到消费之间若发生同 key 写入，必须检测 stale，不能牺牲状态语义。
+
+当前工程尚不具备这些条件：
+
+- `NativeSnapshotBench.lookupBatch` 只查询 primitive `SnapshotTable`，不是生产使用的
+  `JniByteSnapshotCache`，也没有计算 `BinaryRowData` 打包、GlobalRef 结果和 Java 消费成本；
+- `StreamRecordBatchOutput` 只接入 `OneInputStreamTask`；q4 热点是 TwoInput
+  `StreamingJoinOperator`，其 `StreamTwoInputProcessorFactory.StreamTaskNetworkOutput`
+  当前每次立即处理一个 record；
+- `StatePrefetcher` 只读取 `stateKeySelector1`，且
+  `CacheKitKeyedStateBackend.hasPrefetchableState()` 只把 `CachedInternalValueState` 视为可
+  prefetch；它不能正确覆盖 q4 的左右输入和 MapState snapshot；
+- 一个 q4 record 内可合并的 snapshot probe 数量远小于 32。没有 future-record
+  lookahead，单纯增加生产 `lookupBatch` API 不会被热路径使用。
+
+#### P4-0：冻结当前基线
+
+- 保留 P3 代码和负结果，两个 Native 开关继续默认 `false`；
+- 不再为当前 P3 跑 100M，也不做 NEON/SVE classifier；
+- 若实施 P4，在 `019d57cda5` 上新建独立 `cachekit/dev_wutb_kunpeng_native_batch_spike`
+  分支/工作树，避免把高风险 runtime spike 混入已验证分支。
+
+#### P4-1：只做生产路径 batch microbenchmark
+
+先修改 Native benchmark 和最窄 JNI 原型，不接入 `CachedInternalMapState`：
+
+1. 给生产 `JniByteSnapshotCache` 增加 bench-only `lookupBatch`：输入为复用的 direct byte
+   arena 加 offsets/lengths，输出写入复用的 Java `Object[]`，覆盖 MISS、EMPTY、SINGLE；
+2. key 使用 q4 已确认的单段 on-heap `BinaryRowData + VoidNamespace`，同时覆盖 q4 实际
+   key 长度；计时必须包含把多个 row 拷入 arena 和 Java 读取 kind/userKey 的成本；
+3. Java 对照必须调用当前真实 `MapSnapshot` Java cache lookup，不得只拿 C++ batch 与
+   C++ scalar 比；分别报告 single、batch 8/32/64；
+4. 随机 differential test 覆盖 hit/miss、EMPTY/SINGLE、hash collision、重复 key、容量
+   淘汰和 close 后 GlobalRef 生命周期。
+
+**硬停止条件**：若 batch 32/64 的完整单位成本仍不低于 Java cache lookup，就停止 P4，
+不修改 Flink runtime。集成只会再增加 result ring、generation 和调度成本，不可能反转
+底层 lookup 已经更慢的事实。
+
+#### P4-2：TwoInput lookahead 能力 spike
+
+仅当 P4-1 通过，才研究 q4 的 future key 来源。该阶段仍不接 Native cache：
+
+1. 为 TwoInput 路径设计显式 `(inputId, key)` lookahead，input 1 使用
+   `stateKeySelector1`，input 2 使用 `stateKeySelector2`；禁止沿用当前只读 selector1 的
+   `StatePrefetcher`；
+2. 只允许观察已经由 runtime 合法缓冲、但尚未执行的 record。不得为了凑 batch 主动消费
+   另一个 network record，因为这会改变 `StreamMultipleInputProcessor` 的左右输入选择和
+   checkpoint barrier 边界；
+3. 为 `StreamingJoinOperator` 建立窄的 input-side 到 state-name 映射：处理左输入只预查
+   将读取的 right state，处理右输入只预查 left state；禁止遍历所有 MapState wrapper；
+4. 用 runtime 单元测试证明 record 顺序、左右输入选择、watermark、aligned/unaligned
+   checkpoint 和 end-of-input 行为与无 lookahead 路径一致；
+5. 记录实际可形成的 batch 大小。若当前 runtime 无法在不改变语义的情况下稳定提供至少
+   32 个 future key，就停止 P4。当前 `emitNext()` 一次只产生一个 record、且没有 peek
+   API，因此这是预期风险最高、也最可能终止路线的一步。
+
+#### P4-3：生产接入（仅在两个必要条件都成立后）
+
+1. 在 `NativeMapSnapshotCache` 增加生产 byte-key `lookupBatch`，复用 P4-1 已验证的 buffer
+   布局；scalar API 和 Java cache 均保留为明确 fallback；
+2. 每个 MapState wrapper 建立有界、短生命周期 batch result ring；结果携带 key 和
+   generation，不保存超出 cache 生命周期的 JNI local ref；
+3. `put/remove/clear` 对对应 key 提升 generation；消费前验证，stale 结果丢弃并走当前
+   同步权威路径；随机测试必须覆盖“批次前查到 hit、前一 record 随后修改同 key”的场景；
+4. 第一版只覆盖已经由 q4 证实的 `BinaryRowData + VoidNamespace`，其他类型不猜测通用
+   codec，直接走 Java；classifier 先保持关闭，单独隔离高频 table hit 的批量化收益。
+
+#### P4-4：性能决策顺序
+
+1. 先跑固定 CPU、同 JAR 的 q4 20M `A -> D -> D -> A`：A 为 Java snapshot，D 为
+   Native batch table 且 classifier 关闭；只看 Nexmark events/s；
+2. D 的 q4 中位数不低于 A 且所有正确性测试通过后，再加入 E（D + P3 classifier），
+   用 `D -> E -> E -> D` 判断完整 Native 是否重新引入回退；
+3. 只有 E 也不低于 A，才跑 q9/q20；只有 scalar batch 端到端成立，才比较
+   SCALAR/NEON/SVE。向量指令优化的是 Native table 内部计算，不能偿还未摊薄的 JNI、
+   打包和双输入调度成本。
+
+#### P4 失败后的方向
+
+任一硬条件失败，就把 Native snapshot 标记为“正确性原型完成、性能路线关闭”，保留
+默认 Java snapshot。后续鲲鹏亲和应转向天然具有连续数据和批量工作的路径，例如 RocksDB
+MultiGet、批量序列化/反序列化、checkpoint checksum/compression；这些位置才更可能让
+NEON/SVE 的吞吐覆盖 JNI 和数据搬运成本。该转向需要单独立项，不能继续记为 snapshot
+cache 优化。
