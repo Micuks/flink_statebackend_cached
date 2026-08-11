@@ -429,8 +429,9 @@ JAVA_HOME=/home/wutb/opt/jdk-11.0.31+11 mvn \
   -Dsurefire.failIfNoSpecifiedTests=false clean test
 ```
 
-尚未完成的是 P3 的 q4/q9/q20 A/B/C 吞吐实验，以及不受 ptrace 限制的 LeakSanitizer/
-长期资源泄漏测试。性能实验必须保持同 JAR、同输入、同 CPU 集合，并只改变下面两个开关：
+P3 的 q4/q9/q20 A/B/C 吞吐实验已经完成。尚未完成的是不受 ptrace 限制的
+LeakSanitizer/长期资源泄漏测试。性能实验保持同 JAR、同输入、同 CPU 集合，并只改变
+下面两个开关：
 
 | 组 | native.enabled | native.classifier.enabled | 含义 |
 |---|---:|---:|---|
@@ -442,7 +443,7 @@ JAVA_HOME=/home/wutb/opt/jdk-11.0.31+11 mvn \
 回答 classifier 是否有效，C 相对 A 回答完整 Native 方案是否值得继续。不得用 B/C 不同
 JAR，也不得把 microbenchmark、辅助指标或单轮烟测当成 Nexmark 吞吐结论。
 
-### 2026-08-11 P3 A/B/C 实验已启动
+### 2026-08-11 P3 A/B/C 实验结果
 
 实际部署必须同时替换同一次 reactor 构建产生的两个 JAR：
 
@@ -458,7 +459,7 @@ JAR 后，q4 20M smoke 通过，吞吐 `407600 events/s`。TaskManager 明确记
 加载目标 rocksdbjni Build ID
 `b4d1b52ddf0f5a33b41010a1dc981eefd834af74`。该单点只证明接入有效，不作为性能结论。
 
-完整 20M 预筛已经在后台启动。每个 query 按 `A -> B -> C -> C -> B -> A` 运行；三组
+完整 20M 预筛已经完成。每个 query 按 `A -> B -> C -> C -> B -> A` 运行；三组
 使用同一镜像、同一组 JAR/SO 和同一 CPU 集合，差异严格只有表中的两个开关。实验 JM
 固定 CPU `240-247`，两个 TM 分别固定 `248-255`、`256-263`；与当时观测到的 `wuql`
 CPU `278-310` 不重叠。Compose project、端口、runtime 和结果目录也完全独立。运行入口
@@ -478,8 +479,34 @@ smoke 结果位于：
   20260811T141751+0800_kunpeng-p3-classifier-smoke-q4-20m-20260811/
 ```
 
-campaign 完成后再汇总每个 query 的 A/B/C 两次观测值、中位数、C 相对 B 和 C 相对 A；
-在完整结果产生前不声明性能提升。
+18 次查询全部通过；所有 C 组 TaskManager 日志都确认 classifier 加载的 rocksdbjni
+Build ID 为上述目标值。每组只有两个观测，因此下表的“中位数”是两者算术平均，足够做
+方向性预筛，但不等价于有统计置信区间的长期基准。
+
+| Query | A 两次值（中位数） | B 两次值（中位数） | C 两次值（中位数） | C 相对 B | C 相对 A |
+|---|---:|---:|---:|---:|---:|
+| q4 | 500730 / 485550（493140） | 401260 / 401440（401350） | 404230 / 404820（404525） | +0.79% | -17.97% |
+| q9 | 249620 / 252690（251155） | 230900 / 230750（230825） | 228570 / 232750（230660） | -0.07% | -8.16% |
+| q20 | 365260 / 361730（363495） | 356420 / 356520（356470） | 359770 / 359170（359470） | +0.84% | -1.11% |
+
+吞吐结论是否定的：classifier 相对 P2 table 的变化全部在约 `±1%` 内，不能证明稳定
+收益；完整 P3 相对 Java 在三个 query 上均未提升，其中 q4、q9 明显回退，q20 小幅回退。
+因此保持两个 Native 开关默认关闭，不把 P3 合入默认性能路径，也没有依据继续做 100M
+放大实验。
+
+第一性原理上，P3 classifier 只在 snapshot miss 时参与，不能消除 P2 Native table 在每次
+高频 hit 上支付的同步 JNI 与 Native probe 成本。以 q4 已测得的 `87.88%` hit 为例，P3
+最多影响约 `12.12%` 的 miss；而剩余绝大多数访问仍承担 B 的固定边界成本。C 相对 B
+仅 `+0.79%`、但相对 A 仍 `-17.97%`，正好验证了这一成本上界。q9/q20 也显示 miss
+分类节省不足以覆盖或显著改变整条执行路径。若继续追求 Native 亲和，必须先改变边界
+形态，例如批量化或让调用链长期停留在 Native，而不是继续优化单次 miss classifier。
+
+全部正式结果目录匹配：
+
+```text
+/home/wutb/nexmark-bench-v2/results/
+  20260811T*_kunpeng-p3-q{4,9,20}-{1..6}-{a,b,c}-20m-20260811/
+```
 
 ## 2026-08-10 q4/q9/q20 成对结果
 
