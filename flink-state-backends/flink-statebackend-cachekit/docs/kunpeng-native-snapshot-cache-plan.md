@@ -870,3 +870,120 @@ P6 的必要正确性测试包括 EMPTY/SINGLE/MULTI、SINGLE value 反序列化
 `A -> P6 -> P6 -> A`。只有 P6 中位数不低于 A 才跑 q9/q20；若仍无收益，则 snapshot
 Native 路线应正式关闭，因为再往下就等价于重写 RocksDB Java iterator，而不是优化
 snapshot cache。
+
+### P6 实现进展：Native prefix batch（2026-08-12）
+
+P6 已实现 SINGLE 与 MULTI 共用的 `nativeReadPrefixBatch`。这里没有把长期存活的
+`RocksIterator` handle 暴露给 Java，因为 Flink 的 `Iterator` 接口没有 `close()`：调用方提前
+停止遍历时，handle 无法得到确定释放。当前实现改用无状态、有界的 Native 分页：
+
+```text
+第一页：Seek(prefix) -> 最多读取 128 组 raw key/value -> 关闭 RocksIterator
+续页：  Seek(lastRawKey) -> 若仍等于 lastRawKey 则 Next -> 继续读取 -> 关闭 RocksIterator
+```
+
+这仍满足“一次 miss 不重复扫描已经消费过的前缀”：每一页从上一页最后一条 raw key
+继续，而不是再次 `Seek(prefix)`。每次 JNI 返回前都执行 iterator status 检查并释放
+RocksIterator，因此正常耗尽、提前停止、Java 解码异常和 state close 都不存在悬挂的 Native
+iterator handle。批大小固定为 128，在 JNI 调用次数、临时对象大小与提前停止浪费之间取一个
+保守平衡。
+
+当前数据路径为：
+
+1. snapshot hit 保留 Java LRU，不改变已验证的热路径；
+2. snapshot miss 先 flush 当前 key 的脏写，随后只由 Native RocksDB iterator 权威读取；
+3. EMPTY 直接回填 EMPTY snapshot；
+4. SINGLE 同一次 Native traversal 返回 raw key 与 raw value，Java 使用 Flink serializer
+   反序列化并回填 SINGLE snapshot，不再执行 RocksDB point-get；
+5. MULTI 直接消费第一页并按 last raw key 续页，不再调用 `delegate.entries()`，因此没有第二次
+   prefix scan；
+6. key/value 必须回到 Java 对象，因为 `InternalMapState` API 和 Flink 的用户 serializer
+   语义位于 Java 层；继续把反序列化下沉 C++ 会要求在 Native 重写任意 TypeSerializer，已经
+   超出 snapshot cache 的合理边界。
+
+正确性测试已经覆盖 EMPTY/SINGLE/MULTI、SINGLE 冷 miss 不调用 `get()`、合法 null value 不被
+误判为 stale、MULTI 不调用 `delegate.entries()`，以及 130 条记录跨越 `128 + 2` 两页时无
+重复、无遗漏且 value 正确。
+验证结果：Native C++ `ctest` 2/2 通过，`NativeMapSnapshotCacheTest` 5/5、
+`CachedInternalMapStateTest` 20/20 通过。
+
+性能门槛使用同一 CacheKit JAR 和同一包含 P6 `.so` 的镜像执行 q4 20M
+`A -> P6 -> P6 -> A`。A 只关闭 classifier，其他 CacheKit 参数保持一致；P6 开启 classifier，
+两组都继续使用 Java snapshot LRU。先比较 q4 中位数，P6 不低于 A 才继续 q9/q20。
+
+### P6 q4 结果（2026-08-12）
+
+上述 `A -> P6 -> P6 -> A` 已按计划执行完毕，四轮均处理 20M events 且通过：
+
+| 位置 | 组 | q4 events/s |
+|---:|---|---:|
+| 1 | A：Java hit + Java miss | 497440 |
+| 2 | P6：Java hit + Native prefix batch miss | 498700 |
+| 3 | P6：Java hit + Native prefix batch miss | 502320 |
+| 4 | A：Java hit + Java miss | 506120 |
+
+A 中位数为 `501780 events/s`，P6 中位数为 `500510 events/s`，P6 相对 A 为 `-0.25%`。
+从测量分辨率看两者近似持平，说明 P6 消除 point-get/重复 prefix scan 后没有形成明显回退；但
+预先定义的是“P6 中位数不低于 A”的严格门槛，因此本轮判定为**未过门槛**，不继续执行
+q9/q20，也不能宣称已有 Nexmark 性能提升。
+
+有效性核对如下：
+
+- 四份输入快照的 CacheKit JAR SHA-256 均为
+  `62492031d1132edfc827dfaebca670cf711b86c534db942ffe4279aa82de312e`；
+- 两轮 A 的 Native 初始化日志数均为 0；两轮 P6 各有 8 个 TaskManager 日志打印
+  `CacheKit Native snapshot JNI initialized`；
+- P6 使用的 rocksdbjni Build ID 均为
+  `b4d1b52ddf0f5a33b41010a1dc981eefd834af74`；
+- 四轮均未发现 `UnsatisfiedLinkError`、JNI symbol 缺失、SIGSEGV 或 fatal error；
+- A 与 P6 配置 diff 只有
+  `state.backend.cachekit.map.snapshot.cache.native.classifier.enabled`。
+
+campaign 与完整结果位于：
+
+```text
+/home/wutb/nexmark-bench-v2/runtime/kunpeng-native-p6-batch-q4-20260812/
+/home/wutb/nexmark-bench-v2/results/
+  20260812T003248+0800_kunpeng-p6-batch-q4-1-a-20m-20260812/
+  20260812T003440+0800_kunpeng-p6-batch-q4-2-p6-20m-20260812/
+  20260812T003631+0800_kunpeng-p6-batch-q4-3-p6-20m-20260812/
+  20260812T003819+0800_kunpeng-p6-batch-q4-4-a-20m-20260812/
+```
+
+第一性原理结论：P6 已经把“范围定位和 raw 数据取得”压缩为一条 Native 权威路径，剩余成本
+主要是 RocksDB iterator 本身、每条 key/value 的 JNI byte[] 物化及 Java TypeSerializer。
+`-0.25%` 不足以证明某个局部成本导致回退，也不足以证明收益；在 q4 过门槛前不扩大到
+q9/q20。
+
+### P6.1 失败实验：紧凑 JNI 返回数组（2026-08-12）
+
+P6 每次 miss 会先分配可容纳 128 条记录的 257 槽 `Object[]`。为验证这个固定分配是否掩盖
+收益，P6.1 改成扫描结束后按实际条数创建数组；代价是扫描期间必须保留最多 256 个 JNI local
+refs。正确性测试仍为 C++ 2/2、Java/JNI 25/25 通过，随后执行独立的
+`A -> P6.1 -> P6.1 -> A` q4 20M：
+
+| 位置 | 组 | q4 events/s |
+|---:|---|---:|
+| 1 | A：Java hit + Java miss | 501030 |
+| 2 | P6.1：紧凑 Native prefix batch | 494630 |
+| 3 | P6.1：紧凑 Native prefix batch | 491150 |
+| 4 | A：Java hit + Java miss | 492450 |
+
+A 中位数为 `496740 events/s`，P6.1 中位数为 `492890 events/s`，相对 A 为 `-0.78%`。
+两轮 A 的 Native 初始化日志数均为 0，两轮 P6.1 均为 8；配置仍只差 classifier 开关。
+因此“紧凑数组能改善 q4”的假设被否定，P6.1 代码已经回退，保留性能更好的原 P6 固定数组
+实现。失败实验保存在：
+
+```text
+/home/wutb/nexmark-bench-v2/runtime/kunpeng-native-p61-compact-q4-20260812/
+/home/wutb/nexmark-bench-v2/results/
+  20260812T004342+0800_kunpeng-p61-compact-q4-1-a-20m-20260812/
+  20260812T004531+0800_kunpeng-p61-compact-q4-2-p61-20m-20260812/
+  20260812T004721+0800_kunpeng-p61-compact-q4-3-p61-20m-20260812/
+  20260812T004912+0800_kunpeng-p61-compact-q4-4-a-20m-20260812/
+```
+
+到这里可以排除“只优化 JNI 容器分配”这条路径。若产品目标仍是 q4 明确提升，下一步必须先
+测量 EMPTY/SINGLE/MULTI miss 占比与每类耗时，再决定是否值得改变批协议；不能继续凭局部对象
+数量猜测优化点。由于本轮目标只看 Nexmark 吞吐，不以辅助指标作为通过证据，当前结论仍是：
+P6 功能实现完成、吞吐近似持平但严格门槛未过，q9/q20 暂停。

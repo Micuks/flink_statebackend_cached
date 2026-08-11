@@ -95,21 +95,21 @@ class NativeMapSnapshotCacheTest {
     }
 
     @Test
-    void testClassifierFeedsNativeSnapshotCacheAndDoesNotBackfillMulti() throws Exception {
-        assertClassifierFeedsSnapshotCache(true, "native-flow-db");
+    void testPrefixBatchFeedsNativeSnapshotCacheWithoutJavaRescan() throws Exception {
+        assertPrefixBatchFeedsSnapshotCache(true, "native-flow-db");
     }
 
     @Test
-    void testClassifierFeedsJavaSnapshotCacheAndDoesNotBackfillMulti() throws Exception {
-        assertClassifierFeedsSnapshotCache(false, "java-flow-db");
+    void testPrefixBatchFeedsJavaSnapshotCacheWithoutJavaRescan() throws Exception {
+        assertPrefixBatchFeedsSnapshotCache(false, "java-flow-db");
     }
 
-    private void assertClassifierFeedsSnapshotCache(
+    private void assertPrefixBatchFeedsSnapshotCache(
             boolean nativeSnapshotCacheEnabled, String databaseDirectory) throws Exception {
         String library = nativeLibrary();
         RocksDB.loadLibrary();
-        AtomicReference<String> currentKey = new AtomicReference<>("single-key");
-        AtomicReference<byte[]> currentPrefix = new AtomicReference<>(new byte[] {21, 1});
+        AtomicReference<String> currentKey = new AtomicReference<>("empty-key");
+        AtomicReference<byte[]> currentPrefix = new AtomicReference<>(new byte[] {21, 0});
 
         try (Options options = new Options().setCreateIfMissing(true);
                 RocksDB db =
@@ -167,35 +167,91 @@ class NativeMapSnapshotCacheTest {
                             library);
             try {
                 state.setCurrentNamespace(VoidNamespace.INSTANCE);
-                db.put(compositeKey(currentPrefix.get(), "first"), new byte[] {1});
+                assertTrue(state.isEmpty());
+                verify(delegate, times(0)).isEmpty();
+                assertEquals(1, metrics.storesEmpty());
+
+                currentKey.set("single-key");
+                currentPrefix.set(new byte[] {21, 1});
+                db.put(compositeKey(currentPrefix.get(), "first"), serializedIntValue(1));
 
                 assertEquals("first", state.entries().iterator().next().getKey());
                 verify(delegate, times(0)).entries();
+                verify(delegate, times(0)).get("first");
                 assertEquals(1, metrics.storesSingle());
 
                 clearInvocations(delegate);
                 assertEquals("first", state.entries().iterator().next().getKey());
                 verify(delegate, times(0)).entries();
+                verify(delegate, times(1)).get("first");
                 assertEquals(1, metrics.hits());
 
                 currentKey.set("multi-key");
                 currentPrefix.set(new byte[] {21, 2});
-                db.put(compositeKey(currentPrefix.get(), "first"), new byte[] {1});
-                db.put(compositeKey(currentPrefix.get(), "second"), new byte[] {2});
+                db.put(compositeKey(currentPrefix.get(), "first"), serializedIntValue(1));
+                db.put(compositeKey(currentPrefix.get(), "second"), serializedIntValue(2));
                 clearInvocations(delegate);
 
-                for (Map.Entry<String, Integer> ignored : state.entries()) {
-                    // Exhaust the iterator. Classifier mode must not Java-backfill MULTI.
+                int firstPass = 0;
+                for (Map.Entry<String, Integer> entry : state.entries()) {
+                    assertEquals(++firstPass, entry.getValue());
                 }
-                for (Map.Entry<String, Integer> ignored : state.entries()) {
-                    // A second miss must classify again and preserve the delegate path.
+                int secondPass = 0;
+                for (Map.Entry<String, Integer> entry : state.entries()) {
+                    assertEquals(++secondPass, entry.getValue());
                 }
-                verify(delegate, times(2)).entries();
+                assertEquals(2, firstPass);
+                assertEquals(2, secondPass);
+                verify(delegate, times(0)).entries();
                 assertEquals(2, metrics.multiEntrySkips());
+
+                currentKey.set("paged-key");
+                currentPrefix.set(new byte[] {21, 3});
+                for (int value = 0; value < 130; value++) {
+                    String userKey = String.format("key-%03d", value);
+                    db.put(
+                            compositeKey(currentPrefix.get(), userKey),
+                            serializedIntValue(value));
+                }
+                clearInvocations(delegate);
+
+                Map<String, Integer> pagedEntries = new LinkedHashMap<>();
+                for (Map.Entry<String, Integer> entry : state.entries()) {
+                    pagedEntries.put(entry.getKey(), entry.getValue());
+                }
+                assertEquals(130, pagedEntries.size());
+                for (int value = 0; value < 130; value++) {
+                    assertEquals(value, pagedEntries.get(String.format("key-%03d", value)));
+                }
+                verify(delegate, times(0)).entries();
+                assertEquals(3, metrics.multiEntrySkips());
+
+                currentKey.set("null-value-key");
+                currentPrefix.set(new byte[] {21, 4});
+                db.put(compositeKey(currentPrefix.get(), "nullable"), new byte[] {1});
+                clearInvocations(delegate);
+
+                Map.Entry<String, Integer> nullValueEntry =
+                        state.entries().iterator().next();
+                assertEquals("nullable", nullValueEntry.getKey());
+                assertNull(nullValueEntry.getValue());
+                verify(delegate, times(0)).entries();
+                verify(delegate, times(0)).get("nullable");
+                assertEquals(2, metrics.storesSingle());
             } finally {
                 state.close();
             }
         }
+    }
+
+    private static byte[] serializedIntValue(int value) {
+        return new byte[] {
+            0,
+            (byte) (value >>> 24),
+            (byte) (value >>> 16),
+            (byte) (value >>> 8),
+            (byte) value
+        };
     }
 
     @Test

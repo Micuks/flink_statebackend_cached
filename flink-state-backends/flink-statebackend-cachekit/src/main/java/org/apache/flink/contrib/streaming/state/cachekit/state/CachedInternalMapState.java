@@ -25,6 +25,7 @@ import org.apache.flink.contrib.streaming.state.cachekit.cache.LruCachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PrimitivePresenceCache;
 import org.apache.flink.contrib.streaming.state.cachekit.util.MurmurHash3;
+import org.apache.flink.core.memory.DataInputDeserializer;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 
@@ -49,6 +50,8 @@ import java.util.Set;
  * Keying: (currentKey, namespace, userKey).
  */
 public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapState<K, N, UK, UV> {
+
+    private static final int NATIVE_PREFIX_BATCH_SIZE = 128;
 
     private final InternalMapState<K, N, UK, UV> delegate;
     private final CurrentKeyProvider<K> currentKeyProvider;
@@ -75,6 +78,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final TypeSerializer<N> namespaceSerializer;
     private final TypeSerializer<UK> userKeySerializer;
     private final TypeSerializer<UV> userValueSerializer;
+    private final DataInputDeserializer nativeSnapshotValueInput = new DataInputDeserializer();
     private final ThreadLocal<DataOutputSerializer> serializerView;
 
     // --- MapSnapshot cache (entries() fast path) ---
@@ -659,7 +663,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                     && nativeSnapshotClassifierEnabled
                     && currentKey != null
                     && currentNamespace != null) {
-                snapshot = classifyAndStoreSnapshot(currentKey);
+                Iterable<Map.Entry<UK, UV>> nativeEntries =
+                        readNativeSnapshotMiss(currentKey);
+                if (nativeEntries != null) {
+                    return !nativeEntries.iterator().hasNext();
+                }
             }
             if (snapshot != null) {
                 if (snapshot.isEmpty()) {
@@ -1345,7 +1353,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 && nativeSnapshotClassifierEnabled
                 && currentKey != null
                 && currentNamespace != null) {
-            snapshot = classifyAndStoreSnapshot(currentKey);
+            return readNativeSnapshotMiss(currentKey);
         }
         if (snapshot == null) {
             return null; // UNKNOWN → fallthrough to delegate
@@ -1367,31 +1375,45 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         return null;
     }
 
-    /**
-     * Classifies a snapshot-cache miss directly against RocksDB. Dirty write-back must be visible
-     * before the native iterator seeks the current key/namespace prefix.
-     *
-     * <p>EMPTY and SINGLE become cache entries. MULTI deliberately remains uncached so the caller
-     * continues through the original Flink iterator path.
-     */
-    private MapSnapshot<UK> classifyAndStoreSnapshot(K currentKey) throws Exception {
+    private Iterable<Map.Entry<UK, UV>> readNativeSnapshotMiss(K currentKey) throws Exception {
         flushCurrentKey(currentKey);
-        NativeMapSnapshotCache.Classification<UK> classification =
-                nativeMapSnapshotCache.classify(nativeSnapshotAccess);
-        if (!classification.isEmpty() && !classification.isSingle()) {
-            mapSnapshotCacheMetrics.recordMultiEntrySkip();
+        byte[] prefix = nativeSnapshotAccess.serializeCurrentKeyNamespacePrefix();
+        NativeMapSnapshotCache.PrefixBatch<UK> batch =
+                nativeMapSnapshotCache.readPrefixBatch(
+                        nativeSnapshotAccess, prefix, null, NATIVE_PREFIX_BATCH_SIZE);
+        if (batch.entries().isEmpty()) {
+            storeSnapshot(
+                    newStoredKeyNamespace(currentKey, currentNamespace), MapSnapshot.empty());
+            mapSnapshotCacheMetrics.recordEmptyShortCircuit();
+            return Collections.emptyList();
+        }
+        if (batch.entries().size() == 1 && !batch.hasMore()) {
+            NativeMapSnapshotCache.PrefixEntry<UK> entry = batch.entries().get(0);
+            UK copiedUserKey = userKeySerializer.copy(entry.userKey());
+            storeSnapshot(
+                    newStoredKeyNamespace(currentKey, currentNamespace),
+                    new MapSnapshot<>(copiedUserKey));
+            UV value = deserializeNativeSnapshotValue(entry.rawValue());
+            mapSnapshotCacheMetrics.recordSingleShortCircuit();
+            return singletonSnapshotEntry(copiedUserKey, value);
+        }
+        mapSnapshotCacheMetrics.recordMultiEntrySkip();
+        K key = currentKey;
+        N namespace = currentNamespace;
+        return () -> new NativePrefixBatchIterator(batch, key, namespace);
+    }
+
+    private UV deserializeNativeSnapshotValue(byte[] rawValue) throws Exception {
+        nativeSnapshotValueInput.setBuffer(rawValue);
+        if (nativeSnapshotValueInput.readBoolean()) {
             return null;
         }
-
-        MapSnapshot<UK> snapshot;
-        if (classification.isEmpty()) {
-            snapshot = MapSnapshot.empty();
-        } else {
-            UK copiedUserKey = userKeySerializer.copy(classification.userKey());
-            snapshot = new MapSnapshot<>(copiedUserKey);
+        UV value = userValueSerializer.deserialize(nativeSnapshotValueInput);
+        if (nativeSnapshotValueInput.available() != 0) {
+            throw new IllegalStateException(
+                    "Native snapshot value was not fully decoded");
         }
-        storeSnapshot(newStoredKeyNamespace(currentKey, currentNamespace), snapshot);
-        return snapshot;
+        return value;
     }
 
     private MapSnapshot<UK> lookupSnapshot(K currentKey) {
@@ -1570,6 +1592,87 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         @SuppressWarnings("unchecked")
         static <UK> MapSnapshot<UK> empty() {
             return new MapSnapshot<>(null);
+        }
+    }
+
+    private final class NativePrefixBatchIterator implements Iterator<Map.Entry<UK, UV>> {
+        private NativeMapSnapshotCache.PrefixBatch<UK> batch;
+        private final K currentKey;
+        private final N namespace;
+        private int index;
+        private NativeMapSnapshotCache.PrefixEntry<UK> lastReturned;
+        private boolean removable;
+
+        private NativePrefixBatchIterator(
+                NativeMapSnapshotCache.PrefixBatch<UK> batch,
+                K currentKey,
+                N namespace) {
+            this.batch = batch;
+            this.currentKey = currentKey;
+            this.namespace = namespace;
+        }
+
+        @Override
+        public boolean hasNext() {
+            loadNextBatch();
+            return index < batch.entries().size();
+        }
+
+        @Override
+        public Map.Entry<UK, UV> next() {
+            loadNextBatch();
+            if (index >= batch.entries().size()) {
+                throw new java.util.NoSuchElementException();
+            }
+            lastReturned = batch.entries().get(index++);
+            removable = true;
+            try {
+                Map.Entry<UK, UV> entry =
+                        new AbstractMap.SimpleImmutableEntry<>(
+                                lastReturned.userKey(),
+                                deserializeNativeSnapshotValue(lastReturned.rawValue()));
+                if (iterationCacheFillEnabled) {
+                    cacheEntry(currentKey, namespace, entry);
+                }
+                return entry;
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to decode Native MapState entry", e);
+            }
+        }
+
+        @Override
+        public void remove() {
+            if (!removable) {
+                throw new IllegalStateException("remove() requires a preceding next()");
+            }
+            try {
+                CachedInternalMapState.this.remove(lastReturned.userKey());
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to remove Native MapState entry", e);
+            }
+            removable = false;
+        }
+
+        private void loadNextBatch() {
+            while (index >= batch.entries().size() && batch.hasMore()) {
+                if (batch.entries().isEmpty()) {
+                    throw new IllegalStateException(
+                            "Native prefix batch reported continuation without entries");
+                }
+                byte[] startAfter =
+                        batch.entries().get(batch.entries().size() - 1).rawKey();
+                try {
+                    batch =
+                            nativeMapSnapshotCache.readPrefixBatch(
+                                    nativeSnapshotAccess,
+                                    batch.prefix(),
+                                    startAfter,
+                                    NATIVE_PREFIX_BATCH_SIZE);
+                    index = 0;
+                } catch (Exception e) {
+                    throw new RuntimeException("Failed to continue Native MapState iterator", e);
+                }
+            }
         }
     }
 

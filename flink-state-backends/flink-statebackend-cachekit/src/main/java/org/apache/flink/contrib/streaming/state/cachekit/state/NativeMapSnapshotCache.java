@@ -18,6 +18,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 
@@ -140,16 +142,61 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
         if (!(result instanceof byte[])) {
             throw new IllegalStateException("Native classifier returned an invalid result");
         }
-        byte[] rawKey = (byte[]) result;
-        if (rawKey.length < prefix.length) {
+        return Classification.single(decodeUserKey((byte[]) result, prefix.length));
+    }
+
+    synchronized PrefixBatch<UK> readPrefixBatch(
+            RocksDBMapStateNativeSnapshotAccess access,
+            byte[] prefix,
+            byte[] startAfter,
+            int maxEntries)
+            throws IOException {
+        if (!classifierEnabled) {
+            throw new IllegalStateException("Native snapshot classifier is disabled");
+        }
+        Object[] result = nativeReadPrefixBatch(
+                liveHandle(),
+                access.getDbNativeHandle(),
+                access.getColumnFamilyNativeHandle(),
+                access.getReadOptionsNativeHandle(),
+                prefix,
+                access.getKeyGroupPrefixBytes(),
+                startAfter,
+                maxEntries);
+        List<PrefixEntry<UK>> entries = new ArrayList<>(maxEntries);
+        for (int index = 0; index < result.length; index += 2) {
+            Object keyOrMarker = result[index];
+            if (keyOrMarker == NATIVE_EMPTY) {
+                return new PrefixBatch<>(prefix, entries, false);
+            }
+            if (keyOrMarker == NATIVE_MULTI) {
+                return new PrefixBatch<>(prefix, entries, true);
+            }
+            if (!(keyOrMarker instanceof byte[])
+                    || index + 1 >= result.length
+                    || !(result[index + 1] instanceof byte[])) {
+                throw new IllegalStateException("Native prefix batch returned an invalid result");
+            }
+            byte[] rawKey = (byte[]) keyOrMarker;
+            entries.add(
+                    new PrefixEntry<>(
+                            rawKey,
+                            decodeUserKey(rawKey, prefix.length),
+                            (byte[]) result[index + 1]));
+        }
+        throw new IllegalStateException("Native prefix batch omitted its continuation marker");
+    }
+
+    private UK decodeUserKey(byte[] rawKey, int userKeyOffset) throws IOException {
+        if (rawKey.length < userKeyOffset) {
             throw new IllegalStateException("Native classifier returned a truncated RocksDB key");
         }
-        userKeyInput.setBuffer(rawKey, prefix.length, rawKey.length - prefix.length);
+        userKeyInput.setBuffer(rawKey, userKeyOffset, rawKey.length - userKeyOffset);
         UK userKey = userKeySerializer.deserialize(userKeyInput);
         if (userKeyInput.available() != 0) {
             throw new IllegalStateException("Native classifier user-key suffix was not fully decoded");
         }
-        return Classification.single(userKey);
+        return userKey;
     }
 
     synchronized boolean remove(K key, N namespace) throws IOException {
@@ -324,6 +371,55 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
         }
     }
 
+    static final class PrefixBatch<T> {
+        private final byte[] prefix;
+        private final List<PrefixEntry<T>> entries;
+        private final boolean hasMore;
+
+        private PrefixBatch(
+                byte[] prefix, List<PrefixEntry<T>> entries, boolean hasMore) {
+            this.prefix = prefix;
+            this.entries = entries;
+            this.hasMore = hasMore;
+        }
+
+        byte[] prefix() {
+            return prefix;
+        }
+
+        List<PrefixEntry<T>> entries() {
+            return entries;
+        }
+
+        boolean hasMore() {
+            return hasMore;
+        }
+    }
+
+    static final class PrefixEntry<T> {
+        private final byte[] rawKey;
+        private final T userKey;
+        private final byte[] rawValue;
+
+        private PrefixEntry(byte[] rawKey, T userKey, byte[] rawValue) {
+            this.rawKey = rawKey;
+            this.userKey = userKey;
+            this.rawValue = rawValue;
+        }
+
+        byte[] rawKey() {
+            return rawKey;
+        }
+
+        T userKey() {
+            return userKey;
+        }
+
+        byte[] rawValue() {
+            return rawValue;
+        }
+    }
+
     private static final class Buffers {
         private final DataOutputSerializer keyOutput = new DataOutputSerializer(128);
         private final KeyBytes keyBytes = new KeyBytes();
@@ -381,4 +477,14 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
             long readOptionsHandle,
             byte[] prefix,
             int compareOffset);
+
+    private static native Object[] nativeReadPrefixBatch(
+            long handle,
+            long dbHandle,
+            long columnFamilyHandle,
+            long readOptionsHandle,
+            byte[] prefix,
+            int compareOffset,
+            byte[] startAfter,
+            int maxEntries);
 }

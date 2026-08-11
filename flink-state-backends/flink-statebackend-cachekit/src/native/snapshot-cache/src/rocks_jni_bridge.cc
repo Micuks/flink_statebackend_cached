@@ -105,6 +105,20 @@ bool Matches(
                        static_cast<std::size_t>(compare_size)) == 0;
 }
 
+bool Equals(JNIEnv* env, jbyteArray left, jbyteArray right) {
+    const jsize size = env->GetArrayLength(left);
+    if (size != env->GetArrayLength(right)) {
+        return false;
+    }
+    std::vector<jbyte> left_bytes(static_cast<std::size_t>(size));
+    std::vector<jbyte> right_bytes(static_cast<std::size_t>(size));
+    env->GetByteArrayRegion(left, 0, size, left_bytes.data());
+    env->GetByteArrayRegion(right, 0, size, right_bytes.data());
+    return !env->ExceptionCheck()
+            && std::memcmp(left_bytes.data(), right_bytes.data(), static_cast<std::size_t>(size))
+                    == 0;
+}
+
 }  // namespace
 
 RocksJniBridge::RocksJniBridge(void* library, std::string description)
@@ -118,6 +132,7 @@ RocksJniBridge::RocksJniBridge(void* library, std::string description)
     iterator_next_ = Symbol<IteratorNext>(library_, "Java_org_rocksdb_RocksIterator_next0");
     iterator_status_ = Symbol<IteratorStatus>(library_, "Java_org_rocksdb_RocksIterator_status0");
     iterator_key_ = Symbol<IteratorKey>(library_, "Java_org_rocksdb_RocksIterator_key0");
+    iterator_value_ = Symbol<IteratorValue>(library_, "Java_org_rocksdb_RocksIterator_value0");
 }
 
 RocksJniBridge::~RocksJniBridge() {
@@ -211,6 +226,106 @@ PrefixClassification RocksJniBridge::Classify(
         first_key = nullptr;
     }
     return {kind, first_key};
+}
+
+jobjectArray RocksJniBridge::ReadPrefixBatch(
+        JNIEnv* env,
+        jlong db_handle,
+        jlong column_family_handle,
+        jlong read_options_handle,
+        jbyteArray prefix,
+        jint compare_offset,
+        jbyteArray start_after,
+        jint max_entries,
+        jobject end_sentinel,
+        jobject more_sentinel) const {
+    const jsize prefix_size = env->GetArrayLength(prefix);
+    std::vector<jbyte> prefix_bytes(static_cast<std::size_t>(prefix_size));
+    env->GetByteArrayRegion(prefix, 0, prefix_size, prefix_bytes.data());
+    if (env->ExceptionCheck()) {
+        return nullptr;
+    }
+
+    jclass object_class = env->FindClass("java/lang/Object");
+    if (object_class == nullptr) {
+        return nullptr;
+    }
+    jobjectArray output = env->NewObjectArray(max_entries * 2 + 1, object_class, nullptr);
+    env->DeleteLocalRef(object_class);
+    if (output == nullptr) {
+        return nullptr;
+    }
+
+    const jlong iterator = iterator_cf_(
+            env, nullptr, db_handle, column_family_handle, read_options_handle);
+    if (iterator == 0 || env->ExceptionCheck()) {
+        env->DeleteLocalRef(output);
+        return nullptr;
+    }
+
+    iterator_seek_(
+            env,
+            nullptr,
+            iterator,
+            start_after == nullptr ? prefix : start_after,
+            start_after == nullptr ? prefix_size : env->GetArrayLength(start_after));
+    if (!env->ExceptionCheck() && start_after != nullptr
+            && iterator_is_valid_(env, nullptr, iterator)) {
+        jbyteArray current_key = iterator_key_(env, nullptr, iterator);
+        if (current_key != nullptr && !env->ExceptionCheck()
+                && Equals(env, current_key, start_after)) {
+            iterator_next_(env, nullptr, iterator);
+        }
+        if (current_key != nullptr) {
+            env->DeleteLocalRef(current_key);
+        }
+    }
+
+    jint count = 0;
+    while (!env->ExceptionCheck() && count < max_entries
+            && iterator_is_valid_(env, nullptr, iterator)) {
+        jbyteArray key = iterator_key_(env, nullptr, iterator);
+        if (key == nullptr || env->ExceptionCheck()
+                || !Matches(env, key, prefix_bytes, compare_offset)) {
+            if (key != nullptr) {
+                env->DeleteLocalRef(key);
+            }
+            break;
+        }
+        jbyteArray value = iterator_value_(env, nullptr, iterator);
+        if (value == nullptr || env->ExceptionCheck()) {
+            env->DeleteLocalRef(key);
+            if (value != nullptr) {
+                env->DeleteLocalRef(value);
+            }
+            break;
+        }
+        env->SetObjectArrayElement(output, count * 2, key);
+        env->SetObjectArrayElement(output, count * 2 + 1, value);
+        env->DeleteLocalRef(key);
+        env->DeleteLocalRef(value);
+        ++count;
+        iterator_next_(env, nullptr, iterator);
+    }
+
+    bool has_more = false;
+    if (!env->ExceptionCheck() && iterator_is_valid_(env, nullptr, iterator)) {
+        jbyteArray next_key = iterator_key_(env, nullptr, iterator);
+        if (next_key != nullptr && !env->ExceptionCheck()) {
+            has_more = Matches(env, next_key, prefix_bytes, compare_offset);
+            env->DeleteLocalRef(next_key);
+        }
+    }
+    if (!env->ExceptionCheck()) {
+        iterator_status_(env, nullptr, iterator);
+    }
+    iterator_dispose_(env, nullptr, iterator);
+    if (env->ExceptionCheck()) {
+        env->DeleteLocalRef(output);
+        return nullptr;
+    }
+    env->SetObjectArrayElement(output, count * 2, has_more ? more_sentinel : end_sentinel);
+    return output;
 }
 
 }  // namespace cachekit

@@ -181,6 +181,31 @@ public:
         return result.single_key;
     }
 
+    jobjectArray ReadPrefixBatch(
+            JNIEnv* env,
+            jlong db_handle,
+            jlong column_family_handle,
+            jlong read_options_handle,
+            jbyteArray prefix,
+            jint compare_offset,
+            jbyteArray start_after,
+            jint max_entries) const {
+        if (rocks_bridge_ == nullptr) {
+            throw std::runtime_error("Native snapshot classifier is disabled");
+        }
+        return rocks_bridge_->ReadPrefixBatch(
+                env,
+                db_handle,
+                column_family_handle,
+                read_options_handle,
+                prefix,
+                compare_offset,
+                start_after,
+                max_entries,
+                empty_sentinel_,
+                multi_sentinel_);
+    }
+
     const char* bridge_description() const {
         return rocks_bridge_ == nullptr ? "disabled" : rocks_bridge_->description().c_str();
     }
@@ -551,6 +576,44 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
                 read_options_handle,
                 prefix,
                 compare_offset);
+    } catch (const std::exception& error) {
+        if (!env->ExceptionCheck()) {
+            ThrowIllegalState(env, error.what());
+        }
+        return nullptr;
+    }
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeReadPrefixBatch(
+        JNIEnv* env,
+        jclass,
+        jlong handle,
+        jlong db_handle,
+        jlong column_family_handle,
+        jlong read_options_handle,
+        jbyteArray prefix,
+        jint compare_offset,
+        jbyteArray start_after,
+        jint max_entries) {
+    const jsize prefix_size = prefix == nullptr ? 0 : env->GetArrayLength(prefix);
+    if (handle == 0 || db_handle == 0 || column_family_handle == 0
+            || read_options_handle == 0 || prefix == nullptr || prefix_size <= 0
+            || compare_offset < 0 || compare_offset >= prefix_size || max_entries <= 0
+            || max_entries > 128) {
+        ThrowIllegalArgument(env, "invalid Native snapshot prefix-batch arguments");
+        return nullptr;
+    }
+    try {
+        return ByteCache(handle)->ReadPrefixBatch(
+                env,
+                db_handle,
+                column_family_handle,
+                read_options_handle,
+                prefix,
+                compare_offset,
+                start_after,
+                max_entries);
     } catch (const std::exception& error) {
         if (!env->ExceptionCheck()) {
             ThrowIllegalState(env, error.what());
