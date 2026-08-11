@@ -661,6 +661,66 @@ Tbatch/item = Tpack + Tjni / N + Tnative-table + Tresult + Tstale-check
 不修改 Flink runtime。集成只会再增加 result ring、generation 和调度成本，不可能反转
 底层 lookup 已经更慢的事实。
 
+#### 2026-08-11 P4-1 实测结果：硬门槛未通过，停止 P4
+
+已在独立工作树 `/home/wutb/code/cachekit-kunpeng-native-batch-spike` 和分支
+`cachekit/dev_wutb_kunpeng_native_batch_spike` 完成 bench-only 原型。基线严格保持在
+`019d57cda5`；没有给生产 `NativeMapSnapshotCache` 增加 Java API，也没有修改
+`CachedInternalMapState` 或 Flink runtime。新增 JNI 符号只绑定测试类，但内部复用生产
+`JniByteSnapshotCache` 和 `ByteSnapshotTable`。
+
+测试机为 `aarch64/HiSilicon`，CPU flags 包含 ASIMD 和 SVE。P4-1 按决策顺序先测 scalar，
+因为必须先证明完整 batch 数据通路成立，才有资格比较 NEON/SVE。输入使用 q4 形状的单
+long、16-byte、单段 on-heap `BinaryRowData + VoidNamespace`；cache 容量 2000，查询数
+65536，命中率 87.5%，命中项中每 16 项有 1 项 EMPTY，其余为 SINGLE。Java 基线直接
+使用生产 `LruCachePolicy`，并复刻生产私有 `KeyNamespace` 的 equals/hash 和
+`MapSnapshot` 解包；Native batch 的计时包含 heap row 拷入复用 direct arena、offset/
+length 写入、一次 JNI、逐项 `SetObjectArrayElement` 和 Java 结果消费，不包含未来生产
+接入还必须增加的 generation/stale 检查，因此它是偏有利于 Native 的下界。
+
+3 轮预热后取 7 轮 `ns/lookup` 中位数：
+
+| 路径 | batch | ns/lookup | 相对 Java |
+|---|---:|---:|---:|
+| Java snapshot | 1 | 93.074 | 基线 |
+| Native scalar single JNI | 1 | 222.683 | +139.3% |
+| Native scalar batch | 8 | 147.868 | +58.9% |
+| Native scalar batch | 32 | 129.035 | +38.6% |
+| Native scalar batch | 64 | 125.499 | +34.8% |
+
+随机 differential test 共执行 12000 次操作，并显式覆盖 MISS、EMPTY、SINGLE、Native
+hash bucket collision、重复 key 更新、容量淘汰、remove、clear、batch 顺序和 destroy
+后的 Java 强引用生命周期；与 microbenchmark 合计 2 个测试，均通过。C++ 的
+`cachekit_snapshot_test` 和 `cachekit_byte_snapshot_test` 也均通过。
+
+第一性原理分解如下：batch64 相比 single JNI 从 `222.683` 降到 `125.499 ns`，说明摊薄
+JNI 确实节省了 `97.184 ns/item`；但打包、Native table、`Object[]` 写屏障和结果消费后，
+仍比 Java 多 `32.425 ns/item`。batch32 扩到 batch64 只再降低 `3.536 ns/item`，已经出现
+明显边际递减；生产接入只会增加 result ring、generation/stale 校验和 TwoInput 调度成本。
+P1 又已证明当前表在本机上 NEON/SVE 不快于 scalar，因此向量 probe 没有足够的可归因
+空间填平 30 ns 缺口。
+
+判定为 `P4_BYTE_GATE best_pass=false`。按照硬停止条件，不实施 P4-2、P4-3，也不为这条
+路线跑 q4/q9/q20；默认 Java snapshot 路径保持不变。保留原型和负结果，供后续复现实验，
+但不把 Native batch 接入生产热路径。
+
+验证命令：
+
+```bash
+cmake -S flink-state-backends/flink-statebackend-cachekit/src/native/snapshot-cache \
+  -B /tmp/cachekit-p4-build -DCMAKE_BUILD_TYPE=Release \
+  -DJAVA_HOME=/home/wutb/opt/jdk-11.0.31+11
+cmake --build /tmp/cachekit-p4-build -j2
+ctest --test-dir /tmp/cachekit-p4-build --output-on-failure
+
+JAVA_HOME=/home/wutb/opt/jdk-11.0.31+11 mvn \
+  -pl flink-state-backends/flink-statebackend-cachekit -am \
+  -DskipITs -Dfast -Dcheckstyle.skip -Drat.skip -Dspotless.check.skip \
+  -Dcachekit.native.snapshot.library=/tmp/cachekit-p4-build/libcachekit_snapshot_jni.so \
+  -Dtest=NativeByteSnapshotBatchBenchmark \
+  -Dsurefire.failIfNoSpecifiedTests=false test
+```
+
 #### P4-2：TwoInput lookahead 能力 spike
 
 仅当 P4-1 通过，才研究 q4 的 future key 来源。该阶段仍不接 Native cache：
