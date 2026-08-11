@@ -788,3 +788,85 @@ P5 不预设必然提升。H 在 EMPTY/SINGLE miss 上可能省掉 Java iterator
 做 Native 两步分类、随后再走原 iterator，形成重复扫描。q4 若不能在成对中位数上至少不
 回退，就停止 P5，不跑 q9/q20；q4 不回退后才以相同 `A -> H -> H -> A` 顺序测试 q9、
 q20。只以 Nexmark events/s 作性能结论，内部指标仅用于证明实验开关生效，不能代替吞吐。
+
+### 2026-08-11 P5 q4 结果与停止判定
+
+P5 实现提交为 `891cfdb09ba62d04bb41dcfd978975f433ecabf0`。定向测试及构建命令为：
+
+```bash
+JAVA_HOME=/home/wutb/opt/jdk-11.0.31+11 /home/wutb/.local/bin/mvn \
+  -pl flink-state-backends/flink-statebackend-cachekit -am \
+  -DskipITs -Dfast -Dcheckstyle.skip -Drat.skip -Dspotless.check.skip \
+  -Dcachekit.native.snapshot.library=/tmp/cachekit-p3-build/libcachekit_snapshot_jni.so \
+  -Dtest=NativeMapSnapshotCacheTest,CachedInternalMapStateTest \
+  -Dsurefire.failIfNoSpecifiedTests=false test
+```
+
+结果为 25/25 通过。q4 campaign 位于：
+
+```text
+/home/wutb/nexmark-bench-v2/runtime/kunpeng-native-p5-hybrid-q4-20260811/
+```
+
+四次 20M 运行均通过，Nexmark 吞吐如下：
+
+| 位置 | 组 | q4 events/s |
+|---:|---|---:|
+| 1 | A：Java hit + Java miss | 500880 |
+| 2 | H：Java hit + Native miss | 500000 |
+| 3 | H：Java hit + Native miss | 506250 |
+| 4 | A：Java hit + Java miss | 512780 |
+
+A 两次中位数为 `506830 events/s`，H 两次中位数为 `503125 events/s`，H 相对 A 为
+`-0.73%`。这个差值不支持“明显回退”，但同样不能证明 Native miss 有提升或严格不回退；
+按预先写明的 q4 硬门槛，P5 到此停止，没有继续 q9/q20。
+
+实验有效性已经确认：四次输入快照的 CacheKit JAR SHA-256 均为
+`1b843a95c56e5adc3f422b51495c3e3d0ed4379301d2c44a26241040ccac3cde`；两次 A 运行各自的
+8 个 TaskManager 日志均没有 Native JNI 初始化记录，两次 H 也各有 8 个，并都打印
+rocksdbjni Build ID `b4d1b52ddf0f5a33b41010a1dc981eefd834af74`。两组
+`native.enabled` 都为 false，说明被比较的确实是同一个 Java LRU，仅 miss 路径不同。
+四份完整结果为：
+
+```text
+/home/wutb/nexmark-bench-v2/results/
+  20260811T232925+0800_kunpeng-p5-hybrid-q4-1-a-20m-20260811/
+  20260811T233114+0800_kunpeng-p5-hybrid-q4-2-h-20m-20260811/
+  20260811T233304+0800_kunpeng-p5-hybrid-q4-3-h-20m-20260811/
+  20260811T233454+0800_kunpeng-p5-hybrid-q4-4-a-20m-20260811/
+```
+
+### P6 边界：若继续 Native snapshot，必须下沉一次完整 miss traversal
+
+P5 已经证明“Java table hit、Native miss classify”能够保住 q4 的大部分性能，但单独
+下沉 cardinality 判断没有可测收益。原因不是 C++ 代码还不够快，而是一次 cache miss
+仍然存在两个权威读取链：
+
+```text
+SINGLE: Native iterator Seek/Valid/Next -> 返回 userKey -> Java RocksDB point-get value
+MULTI:  Native iterator Seek/Valid/Next -> 返回 MULTI   -> Java iterator 再 Seek/遍历
+```
+
+也就是说，P5 消除了部分 JNI 控制往返，却没有消除第二次 RocksDB 访问；MULTI 甚至重复
+前缀扫描。继续调 NEON/SVE 或拆掉未使用的 Native table 内存，都不能改变这个每次 miss
+必付成本。
+
+若仍继续 snapshot Native 化，下一条值得实现的边界不是 Native LRU，而是一次 JNI 内的
+`probePrefix`，并且一次 miss 只能有一个 RocksDB traversal：
+
+1. Java LRU 的 lookup、回填、失效和淘汰保持不变；
+2. EMPTY 直接返回；
+3. SINGLE 必须同时返回 raw user-key suffix 和 raw value，Java 完成反序列化、回填 Java
+   snapshot，并直接构造本次 singleton entry，禁止再调用 `this.get(userKey)`；
+4. MULTI 不能先 classify 再重新创建 iterator。要么 Native 返回一个已定位的 iterator
+   handle，并把已经读取的前两条记录作为 buffered entries 交给 Java；要么该调用点完全
+   保持原 Java iterator。两者必须二选一，不能双扫；
+5. Native iterator handle 必须在耗尽、异常、state/backend close 时精确释放，且继续使用
+   RocksDB 的 ReadOptions、column family 和 key-group prefix 语义；写回仍须在 Seek 前
+   flush。
+
+P6 的必要正确性测试包括 EMPTY/SINGLE/MULTI、SINGLE value 反序列化、iterator 提前停止、
+异常释放、状态修改后的失效以及 backend close。性能仍先只跑同 JAR 的 q4 20M
+`A -> P6 -> P6 -> A`。只有 P6 中位数不低于 A 才跑 q9/q20；若仍无收益，则 snapshot
+Native 路线应正式关闭，因为再往下就等价于重写 RocksDB Java iterator，而不是优化
+snapshot cache。
