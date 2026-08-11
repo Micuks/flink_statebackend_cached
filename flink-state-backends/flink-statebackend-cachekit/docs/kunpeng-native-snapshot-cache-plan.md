@@ -987,3 +987,39 @@ A 中位数为 `496740 events/s`，P6.1 中位数为 `492890 events/s`，相对 
 测量 EMPTY/SINGLE/MULTI miss 占比与每类耗时，再决定是否值得改变批协议；不能继续凭局部对象
 数量猜测优化点。由于本轮目标只看 Nexmark 吞吐，不以辅助指标作为通过证据，当前结论仍是：
 P6 功能实现完成、吞吐近似持平但严格门槛未过，q9/q20 暂停。
+
+### 最终 commit 精确产物复测（2026-08-12）
+
+语义审查随后修复了 SINGLE 的合法 null value 被误判为 stale 的问题。该修复去掉了生产路径
+中的 null 分支，因此最终 commit `0338d1df46` 的 Java 字节码与首轮 P6 benchmark JAR 不再
+完全相同。为保证性能结论与交付代码一一对应，使用最终 JAR SHA-256
+`d15a8a06896e5cf754ad6a0da0903d4cbd7311feb7b7221436a0d9ab32c0d7cc` 重新执行完整
+`A -> P6 -> P6 -> A`：
+
+| 位置 | 组 | q4 events/s |
+|---:|---|---:|
+| 1 | A：Java hit + Java miss | 506340 |
+| 2 | P6：Java hit + Native prefix batch miss | 492220 |
+| 3 | P6：Java hit + Native prefix batch miss | 501040 |
+| 4 | A：Java hit + Java miss | 506150 |
+
+A 中位数为 `506245 events/s`，P6 中位数为 `496630 events/s`，P6 相对 A 为 `-1.90%`。
+四份输入 JAR 哈希一致；两轮 A 的 Native 初始化日志数均为 0，两轮 P6 均为 8；未发现 JNI
+链接、SIGSEGV 或 fatal error。该组是最终交付代码的权威性能结果，并取代前述首轮 P6 的
+`-0.25%` 作为是否过门槛的依据。
+
+完整结果位于：
+
+```text
+/home/wutb/nexmark-bench-v2/runtime/kunpeng-native-p6-final-q4-20260812/
+/home/wutb/nexmark-bench-v2/results/
+  20260812T005638+0800_kunpeng-p6-final-q4-1-a-20m-20260812/
+  20260812T005828+0800_kunpeng-p6-final-q4-2-p6-20m-20260812/
+  20260812T010017+0800_kunpeng-p6-final-q4-3-p6-20m-20260812/
+  20260812T010205+0800_kunpeng-p6-final-q4-4-a-20m-20260812/
+```
+
+最终判定：Native 层已经实现 snapshot miss 的单一权威 traversal，SINGLE 不再 point-get，
+MULTI 不再从 prefix 起点重复扫描，功能目标完成；但 Nexmark q4 回退 `1.90%`，性能目标未
+完成。按照硬门槛停止 q9/q20。继续开发前必须先定位这 `1.90%` 来自 iterator/JNI 物化还是
+workload 中 MULTI 比例，不能宣称鲲鹏亲和收益。
