@@ -158,6 +158,10 @@ public final class MapSnapshotCacheMetrics {
         return storesSingle.get();
     }
 
+    long multiEntrySkips() {
+        return multiEntrySkips.get();
+    }
+
     long invalidations() {
         return invalidations.get();
     }

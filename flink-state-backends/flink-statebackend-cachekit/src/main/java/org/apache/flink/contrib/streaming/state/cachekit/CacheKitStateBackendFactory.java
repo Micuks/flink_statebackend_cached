@@ -161,6 +161,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         "Store MapState EMPTY/SINGLE snapshots in the JNI Native cache. "
                                                         + "The Java snapshot cache remains the default.");
 
+        public static final ConfigOption<Boolean> MAP_SNAPSHOT_CACHE_NATIVE_CLASSIFIER_ENABLED = ConfigOptions
+                        .key("state.backend.cachekit.map.snapshot.cache.native.classifier.enabled")
+                        .booleanType()
+                        .defaultValue(false)
+                        .withDescription(
+                                        "Classify RocksDB MapState prefixes as EMPTY/SINGLE/MULTI inside "
+                                                        + "the CacheKit JNI library. Requires Native snapshot cache.");
+
         public static final ConfigOption<String> MAP_SNAPSHOT_CACHE_NATIVE_KERNEL = ConfigOptions
                         .key("state.backend.cachekit.map.snapshot.cache.native.kernel")
                         .stringType()
@@ -247,6 +255,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final boolean mapIterationCacheFillEnabled = config.get(MAP_ITERATION_CACHE_FILL_ENABLED);
                 final int mapSnapshotMaxEntries = Math.max(0, config.get(MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
 		final boolean mapSnapshotNativeEnabled = config.get(MAP_SNAPSHOT_CACHE_NATIVE_ENABLED);
+		final boolean mapSnapshotNativeClassifierEnabled =
+				config.get(MAP_SNAPSHOT_CACHE_NATIVE_CLASSIFIER_ENABLED);
 		final String mapSnapshotNativeKernel = config.get(MAP_SNAPSHOT_CACHE_NATIVE_KERNEL);
 		final String mapSnapshotNativeLibraryPath = config.get(MAP_SNAPSHOT_CACHE_NATIVE_LIBRARY_PATH);
 		final boolean diagnosticsEnabled = config.get(DIAGNOSTICS_ENABLED);
@@ -258,7 +268,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 			final boolean priorityQueueOptEnabled = config.get(PRIORITY_QUEUE_OPT_ENABLED);
 
 			System.out.printf(
-				"CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, mapSnapshotNative=%s, mapSnapshotKernel=%s, diagnostics=%s, delegate=%s, listStateCow=%s, listStateRyw=%s, clearedKeysCap=%d, priorityQueueOpt=%s%n",
+				"CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, mapSnapshotNative=%s, mapSnapshotClassifier=%s, mapSnapshotKernel=%s, diagnostics=%s, delegate=%s, listStateCow=%s, listStateRyw=%s, clearedKeysCap=%d, priorityQueueOpt=%s%n",
                                 maxEntries,
                                 policyType,
                                 lruOverflow,
@@ -278,6 +288,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 							mapIterationCacheFillEnabled,
 							mapSnapshotMaxEntries,
 							mapSnapshotNativeEnabled,
+							mapSnapshotNativeClassifierEnabled,
 							mapSnapshotNativeKernel,
 							diagnosticsEnabled,
 							delegateClass,
@@ -325,6 +336,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 								mapIterationCacheFillEnabled,
 								mapSnapshotMaxEntries,
 								mapSnapshotNativeEnabled,
+								mapSnapshotNativeClassifierEnabled,
 								mapSnapshotNativeKernel,
 								mapSnapshotNativeLibraryPath,
 								listStateCowEnabled,

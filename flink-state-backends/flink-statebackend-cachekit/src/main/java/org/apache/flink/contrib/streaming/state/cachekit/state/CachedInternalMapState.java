@@ -17,6 +17,7 @@ package org.apache.flink.contrib.streaming.state.cachekit.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
+import org.apache.flink.contrib.streaming.state.RocksDBMapStateNativeSnapshotAccess;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePolicy;
@@ -81,6 +82,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final NativeMapSnapshotCache<K, N, UK> nativeMapSnapshotCache;
     private final boolean mapSnapshotCacheEnabled;
     private final boolean nativeMapSnapshotCacheEnabled;
+    private final boolean nativeSnapshotClassifierEnabled;
+    private final RocksDBMapStateNativeSnapshotAccess nativeSnapshotAccess;
     private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
     /** Reusable probe key for snapshot cache lookups (avoids allocation per lookup). */
     private final KeyNamespace<K, N> snapshotProbe = new KeyNamespace<>(null, null);
@@ -179,6 +182,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 mapSnapshotCacheMaxEntries,
                 mapSnapshotCacheMetrics,
                 false,
+                false,
                 "AUTO",
                 "");
     }
@@ -201,6 +205,50 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             int mapSnapshotCacheMaxEntries,
             MapSnapshotCacheMetrics mapSnapshotCacheMetrics,
             boolean nativeMapSnapshotCacheEnabled,
+            String nativeMapSnapshotKernel,
+            String nativeMapSnapshotLibraryPath) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                presenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicyType,
+                mapCacheLruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                iterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheMetrics,
+                nativeMapSnapshotCacheEnabled,
+                false,
+                nativeMapSnapshotKernel,
+                nativeMapSnapshotLibraryPath);
+    }
+
+    public CachedInternalMapState(
+            InternalMapState<K, N, UK, UV> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            PresenceCacheImplementation presenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicyType,
+            int mapCacheLruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean iterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            MapSnapshotCacheMetrics mapSnapshotCacheMetrics,
+            boolean nativeMapSnapshotCacheEnabled,
+            boolean nativeSnapshotClassifierEnabled,
             String nativeMapSnapshotKernel,
             String nativeMapSnapshotLibraryPath) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
@@ -280,6 +328,20 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         this.mapSnapshotCacheEnabled = mapSnapshotCacheMaxEntries > 0;
         this.nativeMapSnapshotCacheEnabled =
                 this.mapSnapshotCacheEnabled && nativeMapSnapshotCacheEnabled;
+        if (nativeSnapshotClassifierEnabled && !this.nativeMapSnapshotCacheEnabled) {
+            throw new IllegalArgumentException(
+                    "Native snapshot classifier requires Native snapshot cache");
+        }
+        if (nativeSnapshotClassifierEnabled
+                && !(delegate instanceof RocksDBMapStateNativeSnapshotAccess)) {
+            throw new IllegalArgumentException(
+                    "Native snapshot classifier requires RocksDBMapState, got "
+                            + delegate.getClass().getName());
+        }
+        this.nativeSnapshotClassifierEnabled = nativeSnapshotClassifierEnabled;
+        this.nativeSnapshotAccess = nativeSnapshotClassifierEnabled
+                ? (RocksDBMapStateNativeSnapshotAccess) delegate
+                : null;
         if (mapSnapshotCacheEnabled) {
             if (this.nativeMapSnapshotCacheEnabled) {
                 this.mapSnapshotCache = new NoOpCachePolicy<>();
@@ -288,6 +350,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                                 mapSnapshotCacheMaxEntries,
                                 nativeMapSnapshotKernel,
                                 nativeMapSnapshotLibraryPath,
+                                nativeSnapshotClassifierEnabled,
                                 Objects.requireNonNull(
                                         keySerializer,
                                         "Native snapshot cache requires a key serializer"),
@@ -591,6 +654,12 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
         if (mapSnapshotCacheEnabled) {
             MapSnapshot<UK> snapshot = lookupSnapshot(currentKey);
+            if (snapshot == null
+                    && nativeSnapshotClassifierEnabled
+                    && currentKey != null
+                    && currentNamespace != null) {
+                snapshot = classifyAndStoreSnapshot(currentKey);
+            }
             if (snapshot != null) {
                 if (snapshot.isEmpty()) {
                     mapSnapshotCacheMetrics.recordEmptyShortCircuit();
@@ -1271,6 +1340,12 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
     private Iterable<Map.Entry<UK, UV>> trySnapshotShortCircuit(K currentKey) throws Exception {
         MapSnapshot<UK> snapshot = lookupSnapshot(currentKey);
+        if (snapshot == null
+                && nativeSnapshotClassifierEnabled
+                && currentKey != null
+                && currentNamespace != null) {
+            snapshot = classifyAndStoreSnapshot(currentKey);
+        }
         if (snapshot == null) {
             return null; // UNKNOWN → fallthrough to delegate
         }
@@ -1289,6 +1364,33 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         removeSnapshot(snapshotProbe);
         mapSnapshotCacheMetrics.recordStaleInvalidation();
         return null;
+    }
+
+    /**
+     * Classifies a snapshot-cache miss directly against RocksDB. Dirty write-back must be visible
+     * before the native iterator seeks the current key/namespace prefix.
+     *
+     * <p>EMPTY and SINGLE become cache entries. MULTI deliberately remains uncached so the caller
+     * continues through the original Flink iterator path.
+     */
+    private MapSnapshot<UK> classifyAndStoreSnapshot(K currentKey) throws Exception {
+        flushCurrentKey(currentKey);
+        NativeMapSnapshotCache.Classification<UK> classification =
+                nativeMapSnapshotCache.classify(nativeSnapshotAccess);
+        if (!classification.isEmpty() && !classification.isSingle()) {
+            mapSnapshotCacheMetrics.recordMultiEntrySkip();
+            return null;
+        }
+
+        MapSnapshot<UK> snapshot;
+        if (classification.isEmpty()) {
+            snapshot = MapSnapshot.empty();
+        } else {
+            UK copiedUserKey = userKeySerializer.copy(classification.userKey());
+            snapshot = new MapSnapshot<>(copiedUserKey);
+        }
+        storeSnapshot(newStoredKeyNamespace(currentKey, currentNamespace), snapshot);
+        return snapshot;
     }
 
     private MapSnapshot<UK> lookupSnapshot(K currentKey) {
@@ -1494,7 +1596,10 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         @Override
         public boolean hasNext() {
             boolean has = delegateIterator.hasNext();
-            if (!has && !backfilled && mapSnapshotCacheEnabled) {
+            if (!has
+                    && !backfilled
+                    && mapSnapshotCacheEnabled
+                    && !nativeSnapshotClassifierEnabled) {
                 backfilled = true;
                 backfillSnapshotCache();
             }

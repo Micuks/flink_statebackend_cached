@@ -231,9 +231,10 @@ JNI 深度接入的真实维护成本还包括线程上下文、ClassLoader、�
 
 ### 当前实现算到哪一层
 
-当前版本已经把 **snapshot cache 的索引表、查找、更新、淘汰及 GlobalRef 生命周期**
-下沉到 C++，因此不是纯 Java cache；但 cache miss 后的 snapshot 构造仍依赖 Java 侧
-MapState/RocksIterator 语义，再把 EMPTY/SINGLE 结果 backfill 给 Native cache。
+P2 已经把 **snapshot cache 的索引表、查找、更新、淘汰及 GlobalRef 生命周期**下沉到
+C++；当时 cache miss 后的 snapshot 构造仍依赖 Java 侧 MapState/RocksIterator。P3 已于
+2026-08-11 接通下述一次 JNI 内的 prefix 分类，当前实现不再依赖 Java iterator backfill
+来构造 EMPTY/SINGLE snapshot。
 
 按本项目的最终目标，只有下面这段也在一次 Native 调用内完成，才能称为“完整的
 snapshot native 化”：
@@ -246,8 +247,10 @@ serialized prefix
   -> 返回 EMPTY / SINGLE(first userKey) / MULTI
 ```
 
-因此当前实现应准确称为 **Native snapshot cache table** 或“部分 Native 化”，不能把它
-描述成 snapshot 构造链路已经全部下到 C++。
+因此 P2 应准确称为 **Native snapshot cache table** 或“部分 Native 化”；启用 P3
+classifier 后，snapshot 的缓存表与 miss 分类链路都位于 Native，可称为完整 Native
+snapshot 判定。SINGLE 后读取 value 仍复用 Flink point-get，MULTI 仍复用原 Flink iterator；
+这两部分不是 snapshot 分类本身，不能混称为“整个 MapState 已 Native 化”。
 
 ### 范围语义是否必须大改 JNI
 
@@ -301,9 +304,10 @@ SIGSEGV/资源泄漏测试。
 3. **实现窄接口**：在同一 rocksdbjni 构建内增加 `classifyPrefix`，C++ 中 Seek 后最多
    读取两条；不回调 Java Serializer，不返回完整 iterator，不持有超出调用期的 RocksDB
    Slice 指针。
-4. **接入 CacheKit**：miss 时优先调用 Native classifier，结果写入现有 Native cache
-   table；异常、库缺失或不支持类型时显式回退现有 Java 路径。hit 路径继续复用当前
-   Native table，保持 `native.enabled=false` 的默认止损策略。
+4. **接入 CacheKit**：miss 时优先调用 Native classifier，EMPTY/SINGLE 写入现有 Native
+   cache table；MULTI 继续原 Flink iterator。classifier 是显式实验开关，开启后若库、
+   ABI 或 delegate 不兼容则启动失败，不做会污染 A/B 归因的静默回退。hit 路径继续复用
+   当前 Native table，保持 `native.enabled=false` 的默认止损策略。
 5. **正确性与失效测试**：覆盖 key-group prefix、namespace、变长 BinaryRowData、CF
    隔离、remove/clear、checkpoint read view、backend close、Task cancellation 和重复
    load/unload；运行 ASan/UBSan 或等价 Native 检查，并增加错误 handle 的拒绝测试。
@@ -314,6 +318,129 @@ SIGSEGV/资源泄漏测试。
 这条路线与后述 batch lookup 是两种不同优化：batch 试图摊薄“访问 CacheKit Native
 table”的 JNI；`classifyPrefix` 试图消除 cache miss 时 Java 与 RocksIterator 之间的多次
 JNI/对象往返。实验中必须分别开关，不能把两者合并后声称收益来自 snapshot native 化。
+
+### 2026-08-11 P3 实现记录：一次 JNI 内完成 snapshot miss 分类
+
+P3 已实现到可构建、可测试状态。没有修改 `/home/wutb/opt/frocksdb-6.20.3`，也没有替换
+Flink 的 `com.ververica:frocksdbjni:6.20.3-ververica-1.0`。选择的是更窄的私有 ABI 适配：
+CacheKit `.so` 只解析**当前进程已经加载**的 `librocksdbjni`，校验唯一实例和 ELF Build
+ID，再解析该库已经导出的七个 RocksJava JNI iterator 入口。CacheKit 不链接另一份
+RocksDB，也不解引用 `rocksdb::DB*`、`ColumnFamilyHandle*` 或 `ReadOptions*` 的 C++ 布局。
+
+当前锁定的 aarch64 二进制身份如下：
+
+```text
+frocksdbjni JAR SHA-256:
+cac69829b440e814775b25c31b25e557cd4c43688d27d848b05ec5901b7991d3
+
+librocksdbjni-linux-aarch64.so SHA-256:
+4c02c0828eb4ef8bfc1698755122068a4056403321d85b769ee591717a738e9b
+
+ELF Build ID:
+b4d1b52ddf0f5a33b41010a1dc981eefd834af74
+```
+
+Build ID、库数量或所需符号不匹配时，classifier 初始化直接失败。这个约束把“可能拿错
+handle 后随机 SIGSEGV”前移成确定的启动错误；升级 FRocksDB 时必须重新审计符号签名并
+更新 Build ID，不能只改常量绕过测试。
+
+Java/Flink 侧新增 `RocksDBMapStateNativeSnapshotAccess`，只暴露当前 prefix、DB/CF/
+ReadOptions native handle 和 key-group prefix 长度。真实 miss 数据流为：
+
+```text
+entries()/iterator()/keys()/values()/isEmpty()
+  -> Native snapshot table miss
+  -> flush 当前 (key, namespace) 的 CacheKit 脏写回
+  -> 单次 CacheKit JNI classifyPrefix
+     -> 使用同一 librocksdbjni 创建 iterator
+     -> seek(prefix)
+     -> 最多检查第一、第二条 key
+     -> status + dispose
+  -> EMPTY：回填 Native EMPTY，并直接短路
+  -> SINGLE：反序列化第一条 key 的 user-key 后缀，回填 Native SINGLE；读取 value 时走 point-get
+  -> MULTI：不回填，回到原 Flink iterator
+```
+
+prefix 匹配从 `keyGroupPrefixBytes` 之后开始，保持现有
+`RocksDBMapState.startWithKeyPrefix()` 语义。Native 不持有 iterator、prefix byte[] 或
+RocksDB Slice 超出本次调用；CacheKit close 释放 snapshot GlobalRef、classifier bridge
+以及通过 `RTLD_NOLOAD` 获得的动态库引用。classifier 模式关闭 Java iterator backfill，
+避免一份 miss 同时由两套分类器产生结果。
+
+配置保持两级显式开关，默认均为 `false`：
+
+```yaml
+state.backend.cachekit.map.snapshot.cache.max-entries: 2000
+state.backend.cachekit.map.snapshot.cache.native.enabled: true
+state.backend.cachekit.map.snapshot.cache.native.classifier.enabled: true
+state.backend.cachekit.map.snapshot.cache.native.kernel: SCALAR
+state.backend.cachekit.map.snapshot.cache.native.library-path: /absolute/path/libcachekit_snapshot_jni.so
+```
+
+classifier 要求 Native snapshot cache 已开启且 delegate 是 `RocksDBMapState`，否则构造期
+拒绝。`native.classifier.enabled=false` 时完整保留 P2 行为，旧构造器也继续默认传 `false`。
+
+第一性原理上，P3 只优化 **snapshot cache miss**，不改变 Native table hit 的成本：
+
+- EMPTY 把 Java iterator 创建、seek、valid/key/status/dispose 往返收敛为一次 JNI；
+- SINGLE 收敛分类往返，但仍必须 point-get value；
+- MULTI 为了判定会先读两条，随后仍需原 iterator，因此若 MULTI 比例高可能回退；
+- q4 已测得约 87.88% snapshot hit，所以 P3 对 q4 的理论作用域最多是剩余约 12.12%，
+  不能期待它自动偿还 P2 高频 hit 路径已有的 JNI 成本。
+
+因此正确性通过不等于性能提升。必须用后述 A/B/C Nexmark 结果决定是否保留实验开关，
+尤其要观察 EMPTY/SINGLE miss 占比能否覆盖 MULTI 的重复 iterator 成本。
+
+已完成的验证：
+
+- CMake Release 构建成功，long/bytes 两个 CTest 为 2/2；
+- 使用真实 aarch64 `frocksdbjni`、真实 RocksDB/CF/ReadOptions handle 验证
+  EMPTY -> SINGLE -> MULTI；
+- `CachedInternalMapState` 数据流测试验证 SINGLE 首次 miss 即短路、后续命中 Native table，
+  MULTI 连续两次都保留 delegate iterator 且不会被 Java backfill；
+- Maven clean 定向测试共 24 项，全部通过；JDK 11 reactor package 成功；
+- ASan+UBSan 构建下两个 Native CTest 通过，预加载 sanitizer runtime 后，使用真实 RocksDB
+  handle 的 4 项 JNI 测试也通过。宿主环境处于 ptrace 下，LeakSanitizer 无法启动，因此
+  这轮使用 `ASAN_OPTIONS=detect_leaks=0`；这不是“已完成 Native 泄漏证明”。
+
+提交前最终制品 SHA-256：
+
+```text
+flink-statebackend-cachekit-1.16-SNAPSHOT.jar
+d0b491241f9d1f67d56c201ee99832157a6681f386fb301c58458dce404c4cb7
+
+libcachekit_snapshot_jni.so
+7ece0c76ed6f363f00793843a68834dea8b130be822d19a262dc24b40578abef
+```
+
+验证命令：
+
+```bash
+cmake -S flink-state-backends/flink-statebackend-cachekit/src/native/snapshot-cache \
+  -B /tmp/cachekit-p3-build -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/cachekit-p3-build -j
+ctest --test-dir /tmp/cachekit-p3-build --output-on-failure
+
+JAVA_HOME=/home/wutb/opt/jdk-11.0.31+11 mvn \
+  -pl flink-state-backends/flink-statebackend-cachekit -am \
+  -DskipITs -Dfast -Dcheckstyle.skip -Dspotless.check.skip=true \
+  -Dcachekit.native.snapshot.library=/tmp/cachekit-p3-build/libcachekit_snapshot_jni.so \
+  -Dtest=NativeMapSnapshotCacheTest,CachedInternalMapStateTest \
+  -Dsurefire.failIfNoSpecifiedTests=false clean test
+```
+
+尚未完成的是 P3 的 q4/q9/q20 A/B/C 吞吐实验，以及不受 ptrace 限制的 LeakSanitizer/
+长期资源泄漏测试。性能实验必须保持同 JAR、同输入、同 CPU 集合，并只改变下面两个开关：
+
+| 组 | native.enabled | native.classifier.enabled | 含义 |
+|---|---:|---:|---|
+| A | false | false | Java snapshot 基线 |
+| B | true | false | P2 Native table |
+| C | true | true | P3 完整 Native snapshot 分类 |
+
+每个 query 至少交错运行 `A -> B -> C -> C -> B -> A`，报告中位数和每轮值；C 相对 B
+回答 classifier 是否有效，C 相对 A 回答完整 Native 方案是否值得继续。不得用 B/C 不同
+JAR，也不得把 microbenchmark、辅助指标或单轮烟测当成 Nexmark 吞吐结论。
 
 ## 2026-08-10 q4/q9/q20 成对结果
 
@@ -413,8 +540,8 @@ snapshot cache，不会因实验 Native 路径回退。不能把“打开 Native
 
 对当前“独立 Native cache table”实现，下一阶段只有批处理值得继续投入。原因不是经验
 猜测，而是现有 microbenchmark 已给出下界：single JNI scalar 为 `40.31 ns/op`，batch
-32/64 可降到 `21.79/20.53 ns/op`。如果接受修改同一份 rocksdbjni，则上一节 P3 的
-`classifyPrefix` 是另一条独立路线，不受“只有批处理”结论限制。批处理路线实施顺序如下：
+32/64 可降到 `21.79/20.53 ns/op`。上一节 P3 的 `classifyPrefix` 已通过锁定 Build ID 的
+私有 ABI bridge 成为另一条独立路线，不受“只有批处理”结论限制。批处理路线实施顺序如下：
 
 1. 给 bytes table 增加 `lookupBatch`，输入使用连续 direct buffer，输出使用 kind +
    GlobalRef token/entry slot；随机 differential test 必须覆盖 batch 内 hit/miss/collision。
