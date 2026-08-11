@@ -506,6 +506,224 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
     return static_cast<jint>(ByteCache(handle)->size());
 }
 
+// Benchmark-only bridge for P4 production-shape byte-key batch feasibility. These symbols are
+// intentionally attached to a test class and do not extend NativeMapSnapshotCache's production API.
+extern "C" JNIEXPORT jlong JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeByteSnapshotBatchBenchmark_byteCreate(
+        JNIEnv* env,
+        jclass,
+        jint max_entries,
+        jint kernel,
+        jobject miss_sentinel,
+        jobject empty_sentinel,
+        jobject multi_sentinel) {
+    try {
+        if (max_entries <= 0 || miss_sentinel == nullptr || empty_sentinel == nullptr
+                || multi_sentinel == nullptr) {
+            throw std::invalid_argument("invalid byte benchmark creation arguments");
+        }
+        return ByteHandle(new JniByteSnapshotCache(
+                env,
+                static_cast<std::size_t>(max_entries),
+                Kernel(kernel),
+                miss_sentinel,
+                empty_sentinel,
+                multi_sentinel,
+                false));
+    } catch (const std::exception& error) {
+        if (!env->ExceptionCheck()) {
+            ThrowIllegalArgument(env, error.what());
+        }
+        return 0;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeByteSnapshotBatchBenchmark_byteDestroy(
+        JNIEnv* env, jclass, jlong handle) {
+    if (handle != 0) {
+        ByteCache(handle)->Destroy(env);
+        delete ByteCache(handle);
+    }
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeByteSnapshotBatchBenchmark_bytePut(
+        JNIEnv* env,
+        jclass,
+        jlong handle,
+        jbyteArray key,
+        jint key_offset,
+        jint key_size,
+        jint kind,
+        jobject user_key) {
+    const jsize key_capacity = key == nullptr ? 0 : env->GetArrayLength(key);
+    if (handle == 0 || key == nullptr || key_offset < 0 || key_size <= 0
+            || key_offset > key_capacity || key_size > key_capacity - key_offset
+            || (kind != 1 && kind != 2) || (kind == 2 && user_key == nullptr)) {
+        ThrowIllegalArgument(env, "invalid byte benchmark put arguments");
+        return 0;
+    }
+    jbyte* key_bytes = env->GetByteArrayElements(key, nullptr);
+    if (key_bytes == nullptr) {
+        return 0;
+    }
+    cachekit::PutResult result = cachekit::PutResult::kRejected;
+    try {
+        result = ByteCache(handle)->Put(
+                env,
+                reinterpret_cast<const std::uint8_t*>(key_bytes + key_offset),
+                static_cast<std::size_t>(key_size),
+                kind == 1 ? SnapshotKind::kEmpty : SnapshotKind::kSingle,
+                user_key);
+    } catch (const std::exception& error) {
+        env->ReleaseByteArrayElements(key, key_bytes, JNI_ABORT);
+        if (!env->ExceptionCheck()) {
+            ThrowIllegalState(env, error.what());
+        }
+        return 0;
+    }
+    env->ReleaseByteArrayElements(key, key_bytes, JNI_ABORT);
+    return static_cast<jint>(result);
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeByteSnapshotBatchBenchmark_byteLookup(
+        JNIEnv* env,
+        jclass,
+        jlong handle,
+        jbyteArray key,
+        jint key_offset,
+        jint key_size) {
+    const jsize key_capacity = key == nullptr ? 0 : env->GetArrayLength(key);
+    if (handle == 0 || key == nullptr || key_offset < 0 || key_size <= 0
+            || key_offset > key_capacity || key_size > key_capacity - key_offset) {
+        ThrowIllegalArgument(env, "invalid byte benchmark lookup arguments");
+        return nullptr;
+    }
+    jbyte* key_bytes = static_cast<jbyte*>(env->GetPrimitiveArrayCritical(key, nullptr));
+    if (key_bytes == nullptr) {
+        return nullptr;
+    }
+    jobject result = nullptr;
+    try {
+        result = ByteCache(handle)->Lookup(
+                reinterpret_cast<const std::uint8_t*>(key_bytes + key_offset),
+                static_cast<std::size_t>(key_size));
+    } catch (const std::exception& error) {
+        env->ReleasePrimitiveArrayCritical(key, key_bytes, JNI_ABORT);
+        if (!env->ExceptionCheck()) {
+            ThrowIllegalState(env, error.what());
+        }
+        return nullptr;
+    }
+    env->ReleasePrimitiveArrayCritical(key, key_bytes, JNI_ABORT);
+    return env->NewLocalRef(result);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeByteSnapshotBatchBenchmark_byteLookupBatch(
+        JNIEnv* env,
+        jclass,
+        jlong handle,
+        jobject key_arena,
+        jobject ranges_buffer,
+        jobjectArray output,
+        jint count) {
+    auto* key_bytes = static_cast<std::uint8_t*>(env->GetDirectBufferAddress(key_arena));
+    auto* ranges = static_cast<std::int32_t*>(env->GetDirectBufferAddress(ranges_buffer));
+    const jlong key_capacity = env->GetDirectBufferCapacity(key_arena);
+    const jlong ranges_capacity = env->GetDirectBufferCapacity(ranges_buffer);
+    const jsize output_capacity = output == nullptr ? 0 : env->GetArrayLength(output);
+    if (handle == 0 || key_bytes == nullptr || ranges == nullptr || output == nullptr || count < 0
+            || key_capacity < 0 || ranges_capacity < static_cast<jlong>(count) * 8
+            || output_capacity < count) {
+        ThrowIllegalArgument(env, "invalid byte benchmark batch arguments");
+        return;
+    }
+    try {
+        for (jint index = 0; index < count; ++index) {
+            const std::int32_t offset = ranges[index * 2];
+            const std::int32_t length = ranges[index * 2 + 1];
+            if (offset < 0 || length <= 0 || static_cast<jlong>(offset) > key_capacity
+                    || static_cast<jlong>(length) > key_capacity - offset) {
+                ThrowIllegalArgument(env, "invalid byte benchmark batch key range");
+                return;
+            }
+            jobject result = ByteCache(handle)->Lookup(
+                    key_bytes + offset, static_cast<std::size_t>(length));
+            env->SetObjectArrayElement(output, index, result);
+            if (env->ExceptionCheck()) {
+                return;
+            }
+        }
+    } catch (const std::exception& error) {
+        if (!env->ExceptionCheck()) {
+            ThrowIllegalState(env, error.what());
+        }
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeByteSnapshotBatchBenchmark_byteRemove(
+        JNIEnv* env,
+        jclass,
+        jlong handle,
+        jbyteArray key,
+        jint key_offset,
+        jint key_size) {
+    const jsize key_capacity = key == nullptr ? 0 : env->GetArrayLength(key);
+    if (handle == 0 || key == nullptr || key_offset < 0 || key_size <= 0
+            || key_offset > key_capacity || key_size > key_capacity - key_offset) {
+        ThrowIllegalArgument(env, "invalid byte benchmark remove arguments");
+        return JNI_FALSE;
+    }
+    jbyte* key_bytes = env->GetByteArrayElements(key, nullptr);
+    if (key_bytes == nullptr) {
+        return JNI_FALSE;
+    }
+    try {
+        const bool removed = ByteCache(handle)->Remove(
+                env,
+                reinterpret_cast<const std::uint8_t*>(key_bytes + key_offset),
+                static_cast<std::size_t>(key_size));
+        env->ReleaseByteArrayElements(key, key_bytes, JNI_ABORT);
+        return removed ? JNI_TRUE : JNI_FALSE;
+    } catch (const std::exception& error) {
+        env->ReleaseByteArrayElements(key, key_bytes, JNI_ABORT);
+        if (!env->ExceptionCheck()) {
+            ThrowIllegalState(env, error.what());
+        }
+        return JNI_FALSE;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeByteSnapshotBatchBenchmark_byteClear(
+        JNIEnv* env, jclass, jlong handle) {
+    if (handle == 0) {
+        ThrowIllegalState(env, "byte benchmark cache is closed");
+        return;
+    }
+    try {
+        ByteCache(handle)->Clear(env);
+    } catch (const std::exception& error) {
+        if (!env->ExceptionCheck()) {
+            ThrowIllegalState(env, error.what());
+        }
+    }
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeByteSnapshotBatchBenchmark_byteSize(
+        JNIEnv* env, jclass, jlong handle) {
+    if (handle == 0) {
+        ThrowIllegalState(env, "byte benchmark cache is closed");
+        return 0;
+    }
+    return static_cast<jint>(ByteCache(handle)->size());
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeKernelName(
         JNIEnv* env, jclass, jlong handle) {
