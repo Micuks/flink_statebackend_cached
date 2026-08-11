@@ -442,6 +442,45 @@ JAVA_HOME=/home/wutb/opt/jdk-11.0.31+11 mvn \
 回答 classifier 是否有效，C 相对 A 回答完整 Native 方案是否值得继续。不得用 B/C 不同
 JAR，也不得把 microbenchmark、辅助指标或单轮烟测当成 Nexmark 吞吐结论。
 
+### 2026-08-11 P3 A/B/C 实验已启动
+
+实际部署必须同时替换同一次 reactor 构建产生的两个 JAR：
+
+- `flink-statebackend-cachekit-1.16-SNAPSHOT.jar`，SHA-256
+  `d0b491241f9d1f67d56c201ee99832157a6681f386fb301c58458dce404c4cb7`；
+- `flink-statebackend-rocksdb-1.16-SNAPSHOT.jar`，SHA-256
+  `0c8916b3667f843133e6178fe92107c95e035529bf65aee41aee8f4e13d1ea4b`。
+
+原因是 `RocksDBMapStateNativeSnapshotAccess` 和对应 `RocksDBMapState` 实现位于 RocksDB
+backend 模块。第一次只替换 CacheKit JAR 的 1M smoke 因
+`ClassNotFoundException: RocksDBMapStateNativeSnapshotAccess` 失败；补齐 RocksDB backend
+JAR 后，q4 20M smoke 通过，吞吐 `407600 events/s`。TaskManager 明确记录 classifier
+加载目标 rocksdbjni Build ID
+`b4d1b52ddf0f5a33b41010a1dc981eefd834af74`。该单点只证明接入有效，不作为性能结论。
+
+完整 20M 预筛已经在后台启动。每个 query 按 `A -> B -> C -> C -> B -> A` 运行；三组
+使用同一镜像、同一组 JAR/SO 和同一 CPU 集合，差异严格只有表中的两个开关。实验 JM
+固定 CPU `240-247`，两个 TM 分别固定 `248-255`、`256-263`；与当时观测到的 `wuql`
+CPU `278-310` 不重叠。Compose project、端口、runtime 和结果目录也完全独立。运行入口
+和进度文件位于：
+
+```text
+/home/wutb/nexmark-bench-v2/runtime/kunpeng-native-p3-abc-20260811/
+  run-campaign.sh
+  campaign.log
+  runs.csv
+```
+
+smoke 结果位于：
+
+```text
+/home/wutb/nexmark-bench-v2/results/
+  20260811T141751+0800_kunpeng-p3-classifier-smoke-q4-20m-20260811/
+```
+
+campaign 完成后再汇总每个 query 的 A/B/C 两次观测值、中位数、C 相对 B 和 C 相对 A；
+在完整结果产生前不声明性能提升。
+
 ## 2026-08-10 q4/q9/q20 成对结果
 
 在共享机器存在明显资源竞争的情况下，最初的 100M Java 运行中 q4 成功完成，吞吐为
