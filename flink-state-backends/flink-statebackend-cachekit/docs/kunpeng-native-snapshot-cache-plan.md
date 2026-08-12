@@ -1023,3 +1023,49 @@ A 中位数为 `506245 events/s`，P6 中位数为 `496630 events/s`，P6 相对
 MULTI 不再从 prefix 起点重复扫描，功能目标完成；但 Nexmark q4 回退 `1.90%`，性能目标未
 完成。按照硬门槛停止 q9/q20。继续开发前必须先定位这 `1.90%` 来自 iterator/JNI 物化还是
 workload 中 MULTI 比例，不能宣称鲲鹏亲和收益。
+
+### 最终 q9/q20 补充实验（2026-08-12）
+
+为确认 q4 之外是否存在 query 特异性收益，随后仍使用 commit `0338d1df46` 的精确 JAR，按
+`A -> P6 -> P6 -> A` 补跑 q9、q20，每轮 20M events。结果如下：
+
+| 查询 | Java A 中位数 | Native P6 中位数 | 相对变化 |
+|---|---:|---:|---:|
+| q9 | 248355 | 244090 | -1.72% |
+| q20 | 371555 | 364620 | -1.87% |
+
+三项最终结果方向一致：q4 `-1.90%`、q9 `-1.72%`、q20 `-1.87%`。因此当前 P6 的价值是
+把完整 miss traversal 正确地下沉到 Native、并将回退约束在 2% 内，而不是已经产生吞吐收益。
+完整 campaign 位于：
+
+```text
+/home/wutb/nexmark-bench-v2/runtime/kunpeng-native-p6-final-q9-q20-20260812/
+```
+
+### 跨架构可用性：鲲鹏优化优先，x86_64 标量兼容（2026-08-12）
+
+目标没有改成“做 x86 亲和”：AArch64/鲲鹏仍是优化目标，继续使用 scalar、NEON、SVE
+运行时分派；x86_64 只提供功能等价的 scalar Native snapshot，使同一套 Java 代码可以部署，
+不实现 SSE/AVX 专用优化。
+
+为此完成以下改造：
+
+- 将 scalar probe 从包含 `arm_neon.h` 的源文件拆出，任何架构都编译 scalar；
+- 仅在 CMake 识别到 `aarch64/arm64` 时编译 NEON/SVE 对象及鲲鹏 `tsv110` 编译参数；
+- 非 ARM 构建的 `AUTO` kernel 必然选择 scalar，显式请求 NEON/SVE 仍 fail-fast；
+- JNI bridge 继续对 FRocksDB 二进制做精确 Build ID 校验，没有为兼容 x86 放宽 ABI 安全边界；
+- 当前 `frocksdbjni-6.20.3-ververica-1.0.jar` 的允许值分别是 AArch64
+  `b4d1b52ddf0f5a33b41010a1dc981eefd834af74` 和 glibc x86_64
+  `8c4b38a727cfd1af305092d0b35a4cf736bbe297`。
+
+验证分三层：
+
+1. 鲲鹏本机构建通过，C++ `ctest` 2/2、Java/JNI 25/25 通过，证明现有 NEON/SVE 路径未回退；
+2. scalar-only 源码选择构建通过，C++ `ctest` 2/2 通过；
+3. 使用 x86_64 glibc 交叉工具链成功产出真正的 x86-64 `libcachekit_snapshot_jni.so`、
+   两个测试 ELF 和 benchmark ELF；JAR 内 x86 FRocksDB 的 Build ID 与 8 个依赖 JNI 符号也已核对。
+
+当前机器没有 x86_64 执行器或 QEMU/binfmt，因此第 3 层只证明 **x86 可编译、可链接、ABI
+前置条件满足**，尚未证明 x86 JVM 运行和 Nexmark 性能。后续在真实 x86_64 Linux/glibc 主机上
+执行 C++ 2/2、Java/JNI 25/25 和一次短 Nexmark smoke 即可闭环。musl x86_64 也不在当前精确
+Build ID 白名单内；更换 FRocksDB 版本时必须重新核对符号与 Build ID，不能沿用现值。
