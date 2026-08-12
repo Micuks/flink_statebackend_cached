@@ -6,16 +6,21 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(cachekit_snapshot_core STATIC
-    src/byte_probe_neon.cc
+    src/byte_probe_scalar.cc
     src/byte_snapshot_table.cc
+    src/probe_scalar.cc
     src/snapshot_table.cc
-    src/probe_neon.cc)
+)
 set_target_properties(cachekit_snapshot_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(cachekit_snapshot_core PUBLIC include PRIVATE src)
 target_compile_options(cachekit_snapshot_core PRIVATE -O3 -Wall -Wextra -Werror)
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
     target_compile_options(cachekit_snapshot_core PRIVATE -march=armv8.2-a -mtune=tsv110)
+    target_sources(cachekit_snapshot_core PRIVATE
+        src/byte_probe_neon.cc
+        src/probe_neon.cc)
+    target_compile_definitions(cachekit_snapshot_core PRIVATE CACHEKIT_HAS_NEON_OBJECT=1)
 
     include(CheckCXXCompilerFlag)
     check_cxx_compiler_flag("-march=armv8.2-a+sve" CACHEKIT_COMPILER_HAS_SVE)

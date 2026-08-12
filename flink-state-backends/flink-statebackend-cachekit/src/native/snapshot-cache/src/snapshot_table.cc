@@ -43,6 +43,21 @@ std::uint8_t Fingerprint(std::uint64_t hash) {
 
 }  // namespace
 
+#if !defined(CACHEKIT_HAS_NEON_OBJECT)
+int FindSlotNeon(
+        const std::uint8_t*,
+        const std::uint64_t*,
+        const std::uint64_t*,
+        const std::uint64_t*,
+        std::size_t,
+        std::uint64_t,
+        std::uint8_t,
+        std::uint64_t,
+        std::uint64_t) {
+    return -1;
+}
+#endif
+
 #if !defined(CACHEKIT_HAS_SVE_OBJECT)
 int FindSlotSve(
         const std::uint8_t*,
@@ -59,7 +74,7 @@ int FindSlotSve(
 #endif
 
 bool NeonAvailable() {
-#if defined(__linux__) && defined(__aarch64__)
+#if defined(CACHEKIT_HAS_NEON_OBJECT) && defined(__linux__) && defined(__aarch64__)
     return (getauxval(AT_HWCAP) & HWCAP_ASIMD) != 0;
 #else
     return false;

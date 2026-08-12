@@ -17,7 +17,13 @@
 namespace cachekit {
 namespace {
 
+#if defined(__aarch64__)
 constexpr const char* kExpectedBuildId = "b4d1b52ddf0f5a33b41010a1dc981eefd834af74";
+#elif defined(__x86_64__)
+constexpr const char* kExpectedBuildId = "8c4b38a727cfd1af305092d0b35a4cf736bbe297";
+#else
+#error "Native snapshot classifier supports only Linux aarch64 and x86_64"
+#endif
 
 std::size_t Align4(std::size_t value) {
     return (value + 3U) & ~std::size_t{3U};

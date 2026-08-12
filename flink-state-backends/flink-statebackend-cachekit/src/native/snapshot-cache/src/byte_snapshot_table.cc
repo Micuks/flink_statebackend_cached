@@ -92,6 +92,20 @@ const char* KernelName(ProbeKernel kernel) {
 
 }  // namespace
 
+#if !defined(CACHEKIT_HAS_NEON_OBJECT)
+int FindByteSlotNeon(
+        const std::uint8_t*,
+        const std::uint64_t*,
+        const std::vector<std::uint8_t>*,
+        std::size_t,
+        std::uint64_t,
+        std::uint8_t,
+        const std::uint8_t*,
+        std::size_t) {
+    return -1;
+}
+#endif
+
 #if !defined(CACHEKIT_HAS_SVE_OBJECT)
 int FindByteSlotSve(
         const std::uint8_t*,

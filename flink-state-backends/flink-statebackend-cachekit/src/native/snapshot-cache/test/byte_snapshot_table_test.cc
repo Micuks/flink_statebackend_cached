@@ -101,7 +101,8 @@ void RunKernel(cachekit::ProbeKernel kernel) {
 }  // namespace
 
 int main() {
-    std::vector<cachekit::ProbeKernel> kernels = {cachekit::ProbeKernel::kScalar};
+    std::vector<cachekit::ProbeKernel> kernels = {
+            cachekit::ProbeKernel::kAuto, cachekit::ProbeKernel::kScalar};
     if (cachekit::NeonAvailable()) {
         kernels.push_back(cachekit::ProbeKernel::kNeon);
     }
