@@ -658,7 +658,7 @@ class NativePreparedValueStateTest {
 
     private static NativeRequestPlaneOptions testOptions() {
         return new NativeRequestPlaneOptions(
-                true, "", "auto", 128, 4096, 4096, 16, 4096, 4096, 1, 2);
+                true, "", "auto", 128, 4096, 4096, 16, 4096, 4096, 1, 2, false);
     }
 
     private static final class FakeNativeRequestPlane implements NativeRequestPlane {

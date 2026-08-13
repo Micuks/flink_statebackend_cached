@@ -235,6 +235,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         .withDescription(
                                                         "Bounded direct batch slots; exhaustion falls back to Java.");
 
+        public static final ConfigOption<Boolean> NATIVE_REQUEST_PLANE_AARCH64_ONLY =
+                        ConfigOptions.key("state.backend.cachekit.native.request-plane.aarch64-only")
+                                        .booleanType()
+                                        .defaultValue(true)
+                                        .withDescription(
+                                                        "Fail closed when the native request plane is enabled on a non-AArch64 host. "
+                                                                        + "Set false only for an explicit portable x86 comparison.");
+
 	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
 			.noDefaultValue()
@@ -395,7 +403,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_REQUEST_PLANE_BATCH_KEY_ARENA_BYTES),
                                 config.get(NATIVE_REQUEST_PLANE_BATCH_VALUE_ARENA_BYTES),
                                 config.get(NATIVE_REQUEST_PLANE_MIN_BATCH_SIZE),
-                                config.get(NATIVE_REQUEST_PLANE_BATCH_SLOTS));
+                                config.get(NATIVE_REQUEST_PLANE_BATCH_SLOTS),
+                                config.get(NATIVE_REQUEST_PLANE_AARCH64_ONLY));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {
