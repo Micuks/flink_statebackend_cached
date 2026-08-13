@@ -252,6 +252,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Also serialize and publish every authoritative ValueState mutation to the native plane. "
                                                                         + "Disabled by default: exact-generation probes invalidate older native entries without duplicate JNI writes.");
 
+        public static final ConfigOption<Boolean> NATIVE_MAP_CACHE_ENABLED =
+                        ConfigOptions.key("state.backend.cachekit.native.map-cache.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Enable the independently attributable native MapState point-cache path. "
+                                                                        + "Range and iterator operations remain on the authoritative Java/RocksDB path.");
+
 	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
 			.noDefaultValue()
@@ -414,7 +422,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_REQUEST_PLANE_MIN_BATCH_SIZE),
                                 config.get(NATIVE_REQUEST_PLANE_BATCH_SLOTS),
                                 config.get(NATIVE_REQUEST_PLANE_AARCH64_ONLY),
-                                config.get(NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS));
+                                config.get(NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS),
+                                config.get(NATIVE_MAP_CACHE_ENABLED));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {
