@@ -260,6 +260,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Enable the independently attributable native MapState point-cache path. "
                                                                         + "Range and iterator operations remain on the authoritative Java/RocksDB path.");
 
+        public static final ConfigOption<Boolean> NATIVE_MAP_SNAPSHOT_ENABLED =
+                        ConfigOptions.key("state.backend.cachekit.native.map-snapshot.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Store EMPTY/SINGLE MapState snapshot metadata in the native request plane. "
+                                                                        + "Java retains snapshot ownership, mutation generation, and iterator semantics.");
+
 	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
 			.noDefaultValue()
@@ -423,7 +431,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_REQUEST_PLANE_BATCH_SLOTS),
                                 config.get(NATIVE_REQUEST_PLANE_AARCH64_ONLY),
                                 config.get(NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS),
-                                config.get(NATIVE_MAP_CACHE_ENABLED));
+                                config.get(NATIVE_MAP_CACHE_ENABLED),
+                                config.get(NATIVE_MAP_SNAPSHOT_ENABLED));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

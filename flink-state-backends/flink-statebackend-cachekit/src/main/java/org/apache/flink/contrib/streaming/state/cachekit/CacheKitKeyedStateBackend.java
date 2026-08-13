@@ -272,8 +272,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         Preconditions.checkArgument(
                 !nativeRequestPlaneOptions.enabled()
                         || valueCacheMaxEntries > 0
-                        || nativeRequestPlaneOptions.mapCacheEnabled(),
-                "CacheKit native request plane requires a positive ValueState or enabled MapState cache capacity.");
+                        || nativeRequestPlaneOptions.mapCacheEnabled()
+                        || nativeRequestPlaneOptions.mapSnapshotEnabled(),
+                "CacheKit native request plane requires a positive ValueState cache or an enabled MapState native feature.");
 
         // fullOpt: initialize shared flush executors (daemon threads)
         ExecutorService initializedListExecutor = null;
@@ -399,7 +400,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         || mapCacheMaxEntries > 0
                         || mapSnapshotCacheMaxEntries > 0
                         || (nativeRequestPlaneCoordinator != null
-                                && nativeRequestPlaneCoordinator.options().mapCacheEnabled()))) {
+                                && (nativeRequestPlaneCoordinator.options().mapCacheEnabled()
+                                        || nativeRequestPlaneCoordinator
+                                                .options()
+                                                .mapSnapshotEnabled())))) {
             Object existing = wrappersByDelegateIdentity.get(internal);
             if (existing != null) {
                 return (S) existing;
@@ -428,7 +432,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                             ? allocateNativeStateId()
                             : 0,
                     nativeRequestPlaneCoordinator != null
-                            && nativeRequestPlaneCoordinator.options().mapCacheEnabled());
+                            && nativeRequestPlaneCoordinator.options().mapCacheEnabled(),
+                    nativeRequestPlaneCoordinator != null
+                                    && nativeRequestPlaneCoordinator.options().mapSnapshotEnabled()
+                            ? allocateNativeStateId()
+                            : 0,
+                    nativeRequestPlaneCoordinator != null
+                            && nativeRequestPlaneCoordinator.options().mapSnapshotEnabled());
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -547,7 +557,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         || mapCacheMaxEntries > 0
                         || mapSnapshotCacheMaxEntries > 0
                         || (nativeRequestPlaneCoordinator != null
-                                && nativeRequestPlaneCoordinator.options().mapCacheEnabled()))) {
+                                && (nativeRequestPlaneCoordinator.options().mapCacheEnabled()
+                                        || nativeRequestPlaneCoordinator
+                                                .options()
+                                                .mapSnapshotEnabled())))) {
             Object existing = wrappersByDelegateIdentity.get(internal);
             if (existing != null) {
                 return (IS) existing;
@@ -576,7 +589,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                             ? allocateNativeStateId()
                             : 0,
                     nativeRequestPlaneCoordinator != null
-                            && nativeRequestPlaneCoordinator.options().mapCacheEnabled());
+                            && nativeRequestPlaneCoordinator.options().mapCacheEnabled(),
+                    nativeRequestPlaneCoordinator != null
+                                    && nativeRequestPlaneCoordinator.options().mapSnapshotEnabled()
+                            ? allocateNativeStateId()
+                            : 0,
+                    nativeRequestPlaneCoordinator != null
+                            && nativeRequestPlaneCoordinator.options().mapSnapshotEnabled());
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }

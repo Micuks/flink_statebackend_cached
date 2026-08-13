@@ -50,6 +50,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final boolean aarch64Only;
     private final boolean writeThroughMutations;
     private final boolean mapCacheEnabled;
+    private final boolean mapSnapshotEnabled;
 
     public NativeRequestPlaneOptions(
             boolean enabled,
@@ -156,6 +157,40 @@ public final class NativeRequestPlaneOptions implements Serializable {
             boolean aarch64Only,
             boolean writeThroughMutations,
             boolean mapCacheEnabled) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                aarch64Only,
+                writeThroughMutations,
+                mapCacheEnabled,
+                false);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only,
+            boolean writeThroughMutations,
+            boolean mapCacheEnabled,
+            boolean mapSnapshotEnabled) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
         this.kernel = normalizeKernel(kernel);
@@ -194,6 +229,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
                     "Native MapState cache requires the native request plane to be enabled.");
         }
         this.mapCacheEnabled = mapCacheEnabled;
+        if (mapSnapshotEnabled && !enabled) {
+            throw new IllegalArgumentException(
+                    "Native MapState snapshot requires the native request plane to be enabled.");
+        }
+        this.mapSnapshotEnabled = mapSnapshotEnabled;
     }
 
     public static NativeRequestPlaneOptions disabled() {
@@ -281,6 +321,10 @@ public final class NativeRequestPlaneOptions implements Serializable {
     /** Whether the separately gated native MapState point-cache path is enabled. */
     public boolean mapCacheEnabled() {
         return mapCacheEnabled;
+    }
+
+    public boolean mapSnapshotEnabled() {
+        return mapSnapshotEnabled;
     }
 
     private static String normalizeKernel(String kernel) {
