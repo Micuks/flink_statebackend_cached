@@ -243,6 +243,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Fail closed when the native request plane is enabled on a non-AArch64 host. "
                                                                         + "Set false only for an explicit portable x86 comparison.");
 
+        public static final ConfigOption<Boolean> NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.request-plane.write-through-mutations")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Also serialize and publish every authoritative ValueState mutation to the native plane. "
+                                                                        + "Disabled by default: exact-generation probes invalidate older native entries without duplicate JNI writes.");
+
 	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
 			.noDefaultValue()
@@ -404,7 +413,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_REQUEST_PLANE_BATCH_VALUE_ARENA_BYTES),
                                 config.get(NATIVE_REQUEST_PLANE_MIN_BATCH_SIZE),
                                 config.get(NATIVE_REQUEST_PLANE_BATCH_SLOTS),
-                                config.get(NATIVE_REQUEST_PLANE_AARCH64_ONLY));
+                                config.get(NATIVE_REQUEST_PLANE_AARCH64_ONLY),
+                                config.get(NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

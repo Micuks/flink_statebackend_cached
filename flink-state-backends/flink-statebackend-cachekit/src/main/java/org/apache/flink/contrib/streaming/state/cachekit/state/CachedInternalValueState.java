@@ -175,6 +175,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeRuntimeFailures;
     private volatile long nativeGenerationAdvances;
     private volatile long nativeMutationAttempts;
+    private volatile long nativeMutationWriteThroughSkipped;
     private volatile long nativeMutationApplied;
     private volatile long nativeMutationSuperseded;
     private volatile long nativeMutationFailures;
@@ -1011,6 +1012,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "nativeFillRejected={} nativeFallbackBatches={} "
                             + "nativeRuntimeFailures={} nativeGenerationAdvances={} "
                             + "nativeMutationAttempts={} nativeMutationApplied={} "
+                            + "nativeMutationWriteThroughSkipped={} "
                             + "nativeMutationSuperseded={} nativeMutationFailures={} "
                             + "nativeMutationTombstonesApplied={} nativeActive={} "
                             + "nativeKernel={} nativeFeatureBits={} nativeFeatures={} "
@@ -1064,6 +1066,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeGenerationAdvances,
                     nativeMutationAttempts,
                     nativeMutationApplied,
+                    nativeMutationWriteThroughSkipped,
                     nativeMutationSuperseded,
                     nativeMutationFailures,
                     nativeMutationTombstonesApplied,
@@ -1203,6 +1206,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getNativeMutationAppliedForTesting() {
         return nativeMutationApplied;
+    }
+
+    long getNativeMutationWriteThroughSkippedForTesting() {
+        return nativeMutationWriteThroughSkipped;
     }
 
     long getNativeMutationSupersededForTesting() {
@@ -2429,6 +2436,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return;
         }
         nativeMutationAttempts++;
+        if (!nativeRequestPlaneCoordinator.options().writeThroughMutations()) {
+            nativeMutationWriteThroughSkipped++;
+            return;
+        }
         RocksDBBatchValueReader<K, N, V> batchReader =
                 (RocksDBBatchValueReader<K, N, V>) delegate;
         try {

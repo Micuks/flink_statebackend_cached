@@ -469,9 +469,12 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                                 + preparedKeys.maxEntries()
                                 + ".");
             }
+            long probeGeneration =
+                    owner.options.writeThroughMutations()
+                            ? NativeRequestPlaneBridge.PROBE_LATEST_GENERATION
+                            : fillGeneration;
             for (byte[] key : preparedRocksDBKeys) {
-                preparedKeys.appendSerialized(
-                        stateId, NativeRequestPlaneBridge.PROBE_LATEST_GENERATION, key);
+                preparedKeys.appendSerialized(stateId, probeGeneration, key);
             }
         }
 
