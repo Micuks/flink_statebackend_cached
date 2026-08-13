@@ -165,6 +165,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeProbeKeys;
     private volatile long nativeHits;
     private volatile long nativeHitBytesCopied;
+    private volatile long nativeHitBytesDirect;
     private volatile long nativeNegativeHits;
     private volatile long nativeMisses;
     private volatile long nativeFillBatches;
@@ -1004,6 +1005,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "stickySameKeyAttempts={} stickyInPlaceReuses={} "
                             + "nativeEnabled={} nativeStateId={} nativeActivated={} "
                             + "nativeProbeKeys={} nativeHits={} nativeHitBytesCopied={} "
+                            + "nativeHitBytesDirect={} "
                             + "nativeNegativeHits={} "
                             + "nativeMisses={} nativeFillBatches={} nativeFillKeys={} "
                             + "nativeFillRejected={} nativeFallbackBatches={} "
@@ -1051,6 +1053,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeProbeKeys,
                     nativeHits,
                     nativeHitBytesCopied,
+                    nativeHitBytesDirect,
                     nativeNegativeHits,
                     nativeMisses,
                     nativeFillBatches,
@@ -1156,6 +1159,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getNativeHitBytesCopiedForTesting() {
         return nativeHitBytesCopied;
+    }
+
+    long getNativeHitBytesDirectForTesting() {
+        return nativeHitBytesDirect;
     }
 
     long getNativeNegativeHitsForTesting() {
@@ -1697,12 +1704,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return true;
         }
 
-        byte[][] valuesByOriginalIndex = new byte[processed][];
+        Object[] valuesByOriginalIndex = new Object[processed];
         java.util.ArrayList<byte[]> missKeys = new java.util.ArrayList<>(processed);
         int[] missOriginalIndices = new int[processed];
         int missCount = 0;
         int batchHits = 0;
-        long batchHitBytesCopied = 0;
+        long batchHitBytesDirect = 0;
         int batchNegativeHits = 0;
         int batchMisses = 0;
         try {
@@ -1723,12 +1730,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                     + ".");
                 }
                 if (status == NativeRequestPlaneBridge.PROBE_HIT) {
-                    // V1 intentionally materializes each positive native hit into a byte[] for the
-                    // existing serializer/staging APIs. Count those copied bytes explicitly so
-                    // allocation profiles can quantify a future zero-copy boundary.
-                    byte[] copiedValue = slot.copyProbeValue(i);
-                    valuesByOriginalIndex[i] = copiedValue;
-                    batchHitBytesCopied += copiedValue.length;
+                    // Deserialize from the slot-owned direct value arena while the slot is leased.
+                    // The materialized value can safely outlive the slot; no per-hit byte[] is
+                    // allocated and lazy staging never retains mutable native memory.
+                    valuesByOriginalIndex[i] =
+                            deserializeNativeProbeValue(slot, i, immediate);
+                    batchHitBytesDirect += slot.probeValueLength(i);
                     batchHits++;
                 } else if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
                     batchNegativeHits++;
@@ -1738,8 +1745,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     missOriginalIndices[missCount++] = i;
                 }
             }
-        } catch (RuntimeException protocolFailure) {
-            nativeHitBytesCopied += batchHitBytesCopied;
+        } catch (IOException | RuntimeException protocolFailure) {
             nativeRequestPlaneCoordinator.disable(protocolFailure);
             nativeRuntimeFailures++;
             nativeFallbackBatches++;
@@ -1748,7 +1754,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         nativeBatchesActivated++;
         nativeProbeKeys += processed;
         nativeHits += batchHits;
-        nativeHitBytesCopied += batchHitBytesCopied;
+        nativeHitBytesDirect += batchHitBytesDirect;
         nativeNegativeHits += batchNegativeHits;
         nativeMisses += batchMisses;
 
@@ -1831,9 +1837,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 prefetchStaleAborts++;
                 return true;
             }
-            byte[] serializedValue = valuesByOriginalIndex[i];
             boolean published;
-            if (immediate) {
+            if (slot.probeStatus(i) == NativeRequestPlaneBridge.PROBE_HIT) {
+                @SuppressWarnings("unchecked")
+                V value = (V) valuesByOriginalIndex[i];
+                published =
+                        publishStagedValue(
+                                StagedValue.materialized(storageKeys.get(i), value, gen), false);
+            } else if (immediate) {
+                byte[] serializedValue = (byte[]) valuesByOriginalIndex[i];
                 V value =
                         deserializeImmediateValueOrCopyDefault(serializedValue, defaultValue);
                 published =
@@ -1841,6 +1853,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 StagedValue.materialized(storageKeys.get(i), value, gen),
                                 serializedValue == null);
             } else {
+                byte[] serializedValue = (byte[]) valuesByOriginalIndex[i];
                 published =
                         stagePreparedValue(
                                 storageKeys.get(i), serializedValue, defaultValue, gen);
@@ -1850,6 +1863,20 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
         }
         return true;
+    }
+
+    private V deserializeNativeProbeValue(
+            NativeRequestPlaneCoordinator.BatchSlot slot, int index, boolean immediate)
+            throws IOException {
+        if (immediate) {
+            if (immediateValueSerializer == null) {
+                immediateValueSerializer = delegate.getValueSerializer().duplicate();
+                immediateValueInput = new org.apache.flink.core.memory.DataInputDeserializer();
+            }
+            return immediateValueSerializer.deserialize(slot.probeValueInput(index));
+        }
+        prepareWorkerValueState();
+        return workerValueSerializer.deserialize(slot.probeValueInput(index));
     }
 
     private static boolean isNonFatalNativeFillRejection(int status, int error) {

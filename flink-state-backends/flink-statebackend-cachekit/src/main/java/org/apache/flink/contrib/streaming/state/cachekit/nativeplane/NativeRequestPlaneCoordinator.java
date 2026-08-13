@@ -368,6 +368,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         private final SerializedKeyBatch<byte[], byte[]> preparedKeys;
         private final SerializedKeyBatch<byte[], byte[]> missKeys;
         private final ByteBuffer probeValueOutput;
+        private final DirectBufferDataInputView probeValueInput;
         private final ByteBuffer probeResults;
         private final ByteBuffer valueArena;
         private final ByteBuffer valueMetadata;
@@ -422,6 +423,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                     SerializedKeyBatch.forSerializedBytes(preparedArena, preparedMetadata);
             this.missKeys = SerializedKeyBatch.forSerializedBytes(missArena, missMetadata);
             this.probeValueOutput = ByteBuffer.allocateDirect(probeValueBytes);
+            this.probeValueInput = new DirectBufferDataInputView(probeValueOutput);
             this.probeResults =
                     ByteBuffer.allocateDirect(probeResultBytes)
                             .order(ByteOrder.nativeOrder());
@@ -563,6 +565,32 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             source.position(offset);
             source.get(copy);
             return copy;
+        }
+
+        /**
+         * Returns a reusable zero-copy input view over one positive probe value.
+         *
+         * <p>The view belongs to this slot and is invalidated by the next call or slot reuse. The
+         * caller must deserialize it before releasing the slot.
+         */
+        public DirectBufferDataInputView probeValueInput(int index) {
+            checkPreparedIndex(index);
+            int base = index * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES;
+            int offset =
+                    probeResults.getInt(base + NativeRequestPlaneBridge.PROBE_RESULT_ARENA_OFFSET);
+            int length =
+                    probeResults.getInt(base + NativeRequestPlaneBridge.PROBE_RESULT_LENGTH_OFFSET);
+            if (offset < 0 || length < 0 || offset > probeValueOutput.capacity() - length) {
+                throw new IllegalStateException("Native probe returned an invalid value slice.");
+            }
+            probeValueInput.reset(offset, length);
+            return probeValueInput;
+        }
+
+        public int probeValueLength(int index) {
+            checkPreparedIndex(index);
+            int base = index * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES;
+            return probeResults.getInt(base + NativeRequestPlaneBridge.PROBE_RESULT_LENGTH_OFFSET);
         }
 
         public int fillStatus(int index) {
