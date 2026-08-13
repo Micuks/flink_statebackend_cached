@@ -48,6 +48,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final int minBatchSize;
     private final int batchSlots;
     private final boolean aarch64Only;
+    private final boolean writeThroughMutations;
 
     public NativeRequestPlaneOptions(
             boolean enabled,
@@ -73,7 +74,8 @@ public final class NativeRequestPlaneOptions implements Serializable {
                 batchValueArenaBytes,
                 minBatchSize,
                 batchSlots,
-                true);
+                true,
+                false);
     }
 
     public NativeRequestPlaneOptions(
@@ -89,6 +91,36 @@ public final class NativeRequestPlaneOptions implements Serializable {
             int minBatchSize,
             int batchSlots,
             boolean aarch64Only) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                aarch64Only,
+                false);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only,
+            boolean writeThroughMutations) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
         this.kernel = normalizeKernel(kernel);
@@ -121,6 +153,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
         this.minBatchSize = minBatchSize;
         this.batchSlots = batchSlots;
         this.aarch64Only = aarch64Only;
+        this.writeThroughMutations = writeThroughMutations;
     }
 
     public static NativeRequestPlaneOptions disabled() {
@@ -192,6 +225,17 @@ public final class NativeRequestPlaneOptions implements Serializable {
      */
     public boolean aarch64Only() {
         return aarch64Only;
+    }
+
+    /**
+     * Whether authoritative RocksDB mutations are also serialized and written through JNI.
+     *
+     * <p>The default is false. Every mutation already advances the ValueState generation; exact
+     * generation probes therefore reject all older native entries without duplicating value
+     * serialization and JNI work on the write path.
+     */
+    public boolean writeThroughMutations() {
+        return writeThroughMutations;
     }
 
     private static String normalizeKernel(String kernel) {

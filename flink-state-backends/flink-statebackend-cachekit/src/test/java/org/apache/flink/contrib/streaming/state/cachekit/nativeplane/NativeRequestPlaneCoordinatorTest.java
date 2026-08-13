@@ -106,7 +106,7 @@ class NativeRequestPlaneCoordinatorTest {
     }
 
     @Test
-    void testLatestProbeSentinelDoesNotLeakIntoConditionalFillGeneration() throws Exception {
+    void testExactProbeGenerationMatchesConditionalFillGeneration() throws Exception {
         FakePlane plane = new FakePlane();
         NativeRequestPlaneCoordinator coordinator =
                 NativeRequestPlaneCoordinator.forTesting(options(1), plane);
@@ -118,7 +118,7 @@ class NativeRequestPlaneCoordinatorTest {
             slot.prepareLatest(3, 17L, Collections.singletonList(new byte[] {1, 2, 3}));
             assertEquals(17L, slot.preparedGeneration());
             assertEquals(1, coordinator.probe(slot));
-            assertEquals(NativeRequestPlaneBridge.PROBE_LATEST_GENERATION, plane.probeGeneration);
+            assertEquals(17L, plane.probeGeneration);
         }
         coordinator.close();
     }

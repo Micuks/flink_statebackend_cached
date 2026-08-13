@@ -328,7 +328,7 @@ class NativePreparedValueStateTest {
 
         FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
         NativeRequestPlaneCoordinator coordinator =
-                NativeRequestPlaneCoordinator.forTesting(testOptions(), fakePlane);
+                NativeRequestPlaneCoordinator.forTesting(testOptions(true), fakePlane);
         CachedInternalValueState<String, String, Integer> writer =
                 new CachedInternalValueState<>(
                         delegate,
@@ -654,8 +654,24 @@ class NativePreparedValueStateTest {
     }
 
     private static NativeRequestPlaneOptions testOptions() {
+        return testOptions(false);
+    }
+
+    private static NativeRequestPlaneOptions testOptions(boolean writeThroughMutations) {
         return new NativeRequestPlaneOptions(
-                true, "", "auto", 128, 4096, 4096, 16, 4096, 4096, 1, 2, false);
+                true,
+                "",
+                "auto",
+                128,
+                4096,
+                4096,
+                16,
+                4096,
+                4096,
+                1,
+                2,
+                false,
+                writeThroughMutations);
     }
 
     private static final class FakeNativeRequestPlane implements NativeRequestPlane {
