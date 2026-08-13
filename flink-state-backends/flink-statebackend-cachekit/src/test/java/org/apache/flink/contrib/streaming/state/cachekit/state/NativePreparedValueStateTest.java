@@ -134,16 +134,19 @@ class NativePreparedValueStateTest {
         assertEquals(3, state.getNativeBatchesActivatedForTesting());
         assertEquals(6, state.getNativeProbeKeysForTesting());
         assertEquals(2, state.getNativeHitsForTesting());
+        assertEquals(0, state.getNativeHitBytesCopiedForTesting());
         assertEquals(
                 2L
                         * KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE)
                                 .length,
-                state.getNativeHitBytesCopiedForTesting());
+                state.getNativeHitBytesDirectForTesting());
         assertEquals(1, state.getNativeNegativeHitsForTesting());
         assertEquals(3, state.getNativeMissesForTesting());
         assertEquals(1, state.getNativeFillBatchesForTesting());
         assertEquals(3, state.getNativeFillKeysForTesting());
-        assertEquals(3, state.getPrefetchLazyValuesMaterializedForTesting());
+        // Two native hits are deserialized directly from the leased arena. Only the two
+        // RocksDB-miss values remain lazy-staged and are materialized on promotion.
+        assertEquals(2, state.getPrefetchLazyValuesMaterializedForTesting());
         assertFalse(state.supportsRecordKeyPrefetch());
 
         state.close();
