@@ -76,6 +76,10 @@ public final class StatePrefetcher {
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             NATIVE_MAILBOX_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Cache of optional native LocalPreagg stable-group planners per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            NATIVE_PREAGG_GROUP_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
     /** Sentinel field used to mark "no stateKeySelector1 available" in the field cache. */
     private static final Field NO_FIELD;
 
@@ -236,6 +240,55 @@ public final class StatePrefetcher {
             return true;
         } catch (Throwable t) {
             return false;
+        }
+    }
+
+    /** Returns {@code [groupCount, groupId0, ...]} or null for the Java grouping fallback. */
+    public static int[] groupKeysNatively(Input<?> headOperator, java.util.List<?> keys) {
+        if (headOperator == null
+                || keys == null
+                || keys.isEmpty()
+                || !(headOperator instanceof AbstractStreamOperator)) {
+            return null;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            return groupKeysNatively(backend, keys);
+        } catch (Throwable failure) {
+            return null;
+        }
+    }
+
+    static int[] groupKeysNatively(KeyedStateBackend<?> backend, java.util.List<?> keys) {
+        if (backend == null || keys == null || keys.isEmpty()) {
+            return null;
+        }
+        try {
+            Method method =
+                    NATIVE_PREAGG_GROUP_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(), StatePrefetcher::lookupNativePreaggGroupMethod);
+            if (method == NO_METHOD) {
+                return null;
+            }
+            Object result = method.invoke(backend, keys);
+            if (!(result instanceof int[])) {
+                return null;
+            }
+            int[] plan = (int[]) result;
+            return plan.length == keys.size() + 1 ? plan : null;
+        } catch (Throwable failure) {
+            return null;
+        }
+    }
+
+    private static Method lookupNativePreaggGroupMethod(Class<?> backendClass) {
+        try {
+            Method method = backendClass.getMethod("nativePreaggGroupIds", java.util.List.class);
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
         }
     }
 

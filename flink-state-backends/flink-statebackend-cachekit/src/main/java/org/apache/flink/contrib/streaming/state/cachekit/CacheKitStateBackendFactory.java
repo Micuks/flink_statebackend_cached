@@ -284,6 +284,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Enable native prepared-key probe, miss compaction, direct-hit deserialization, "
                                                                         + "and fill around the authoritative RocksDB MultiGet path.");
 
+        public static final ConfigOption<Boolean> NATIVE_LOCAL_PREAGG_ENABLED =
+                        ConfigOptions.key("state.backend.cachekit.native.local-preagg.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Group serialized keyed records in the native runtime using stable first-seen "
+                                                                        + "group ids; Java retains accumulator, emission, and ordering semantics.");
+
 	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
 			.noDefaultValue()
@@ -450,7 +458,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_MAP_CACHE_ENABLED),
                                 config.get(NATIVE_MAP_SNAPSHOT_ENABLED),
                                 config.get(NATIVE_PREFETCH_ENABLED),
-                                config.get(NATIVE_MAILBOX_BATCH_ENABLED));
+                                config.get(NATIVE_MAILBOX_BATCH_ENABLED),
+                                config.get(NATIVE_LOCAL_PREAGG_ENABLED));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

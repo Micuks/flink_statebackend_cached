@@ -142,6 +142,31 @@ class NativeRequestPlaneBridgeTest {
 
   @Test
   @EnabledIfSystemProperty(named = NativeRequestPlaneBridge.LIBRARY_PATH_PROPERTY, matches = ".+")
+  void testJniGrouperMapsEverySourceToStableFirstSeenGroup() throws Exception {
+    try (NativeRequestPlaneBridge bridge = openScalarBridge()) {
+      SerializedKeyBatch<Integer, String> keys = newBatch(5);
+      keys.append(7, 11L, 10, "same");
+      keys.append(7, 11L, 20, "other");
+      keys.append(7, 11L, 10, "same");
+      keys.append(8, 11L, 10, "same");
+      keys.append(7, 11L, 20, "other");
+
+      ByteBuffer uniques = directNative(5 * Integer.BYTES);
+      ByteBuffer groups = directNative(5 * Integer.BYTES);
+      assertEquals(3, bridge.groupBatch(keys, uniques, groups));
+      assertEquals(0, uniques.getInt(0));
+      assertEquals(1, uniques.getInt(Integer.BYTES));
+      assertEquals(3, uniques.getInt(2 * Integer.BYTES));
+      assertEquals(0, groups.getInt(0));
+      assertEquals(1, groups.getInt(Integer.BYTES));
+      assertEquals(0, groups.getInt(2 * Integer.BYTES));
+      assertEquals(2, groups.getInt(3 * Integer.BYTES));
+      assertEquals(1, groups.getInt(4 * Integer.BYTES));
+    }
+  }
+
+  @Test
+  @EnabledIfSystemProperty(named = NativeRequestPlaneBridge.LIBRARY_PATH_PROPERTY, matches = ".+")
   void testStateGenerationWatermarkRejectsStaleFillAfterEviction() throws Exception {
     try (NativeRequestPlaneBridge bridge =
         NativeRequestPlaneBridge.open(

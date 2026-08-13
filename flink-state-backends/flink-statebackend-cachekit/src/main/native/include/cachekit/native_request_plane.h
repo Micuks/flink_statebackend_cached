@@ -148,6 +148,13 @@ public:
             std::uint32_t* unique_source_indexes,
             std::size_t count,
             std::size_t* unique_count) const noexcept;
+    // Additionally maps every source entry to its stable, first-seen group id.
+    ErrorCode GroupBatch(
+            const KeyView* keys,
+            std::uint32_t* unique_source_indexes,
+            std::uint32_t* source_group_indexes,
+            std::size_t count,
+            std::size_t* unique_count) const noexcept;
 
     void Clear() noexcept;
 

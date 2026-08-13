@@ -853,6 +853,15 @@ ErrorCode RequestPlane::CompactBatch(
         std::uint32_t* unique_source_indexes,
         std::size_t count,
         std::size_t* unique_count) const noexcept {
+    return GroupBatch(keys, unique_source_indexes, nullptr, count, unique_count);
+}
+
+ErrorCode RequestPlane::GroupBatch(
+        const KeyView* keys,
+        std::uint32_t* unique_source_indexes,
+        std::uint32_t* source_group_indexes,
+        std::size_t count,
+        std::size_t* unique_count) const noexcept {
     if (unique_count == nullptr ||
         (count != 0 && (keys == nullptr || unique_source_indexes == nullptr)) ||
         count > std::numeric_limits<std::uint32_t>::max()) {
@@ -883,12 +892,18 @@ ErrorCode RequestPlane::CompactBatch(
                  impl_->kernel.equal_bytes(
                          candidate.data, existing.data, candidate.size))) {
                 duplicate = true;
+                if (source_group_indexes != nullptr) {
+                    source_group_indexes[index] = static_cast<std::uint32_t>(prior);
+                }
                 break;
             }
         }
         if (!duplicate) {
             unique_source_indexes[written++] =
                     static_cast<std::uint32_t>(index);
+            if (source_group_indexes != nullptr) {
+                source_group_indexes[index] = static_cast<std::uint32_t>(written - 1U);
+            }
         }
     }
     *unique_count = written;

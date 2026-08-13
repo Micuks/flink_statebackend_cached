@@ -52,6 +52,49 @@ public interface NativeRequestPlane extends AutoCloseable {
         return keys.entryCount();
     }
 
+    /** Returns stable first-seen groups and writes one group id for every source key. */
+    default int groupBatch(
+            SerializedKeyBatch<?, ?> keys,
+            ByteBuffer uniqueSourceIndexes,
+            ByteBuffer sourceGroupIndexes) {
+        ByteBuffer groups = sourceGroupIndexes.duplicate().order(ByteOrder.nativeOrder());
+        ByteBuffer uniques = uniqueSourceIndexes.duplicate().order(ByteOrder.nativeOrder());
+        ByteBuffer arena = keys.arenaSlice();
+        int unique = 0;
+        for (int source = 0; source < keys.entryCount(); source++) {
+            int group = -1;
+            for (int candidate = 0; candidate < unique; candidate++) {
+                int prior = uniques.getInt(candidate * Integer.BYTES);
+                if (keys.stateId(prior) == keys.stateId(source)
+                        && keys.generation(prior) == keys.generation(source)
+                        && keys.serializedLength(prior) == keys.serializedLength(source)
+                        && equalSerializedBytes(arena, keys, prior, source)) {
+                    group = candidate;
+                    break;
+                }
+            }
+            if (group < 0) {
+                group = unique++;
+                uniques.putInt(group * Integer.BYTES, source);
+            }
+            groups.putInt(source * Integer.BYTES, group);
+        }
+        return unique;
+    }
+
+    static boolean equalSerializedBytes(
+            ByteBuffer arena, SerializedKeyBatch<?, ?> keys, int left, int right) {
+        int length = keys.serializedLength(left);
+        int leftOffset = keys.arenaOffset(left);
+        int rightOffset = keys.arenaOffset(right);
+        for (int index = 0; index < length; index++) {
+            if (arena.get(leftOffset + index) != arena.get(rightOffset + index)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     String selectedKernel();
 
     long detectedFeatureBits();

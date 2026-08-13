@@ -34,7 +34,7 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -156,8 +156,11 @@ public final class LocalPreagg {
         }
 
         try {
-            // Group by key, preserving first-seen order for deterministic emit order.
-            final LinkedHashMap<Object, List<Object>> groups = new LinkedHashMap<>();
+            // Extract one aligned key/value vector. CacheKit may return stable first-seen group
+            // ids from its native runtime; every unsupported/error case retains the existing Java
+            // LinkedHashMap grouping path below.
+            final ArrayList<Object> recordKeys = new ArrayList<>(n);
+            final ArrayList<Object> recordValues = new ArrayList<>(n);
             StreamRecord<?> lastRec = null;
             for (int i = 0; i < n; i++) {
                 StreamRecord<?> rec = buf[i];
@@ -167,20 +170,18 @@ public final class LocalPreagg {
                 lastRec = rec;
                 Object value = rec.getValue();
                 Object key = selector.getKey(value);
-                List<Object> list = groups.get(key);
-                if (list == null) {
-                    list = new ArrayList<>();
-                    groups.put(key, list);
-                }
-                list.add(value);
+                recordKeys.add(key);
+                recordValues.add(value);
             }
-            if (groups.isEmpty()) {
+            if (recordKeys.isEmpty()) {
                 return false;
             }
+            final GroupedInputs groups =
+                    groupInputs(recordKeys, recordValues, StatePrefetcher.groupKeysNatively(headOperator, recordKeys));
             // The exact set of state keys is now known and deduplicated. CacheKit can issue one
             // synchronous MultiGet so processBatchForKey observes warm ValueState, without the
             // wasted per-record speculation that used to run before grouping.
-            StatePrefetcher.prefetchKeysImmediately(headOperator, groups.keySet());
+            StatePrefetcher.prefetchKeysImmediately(headOperator, groups.keys);
             // Preserve the batch's timestamp context for emitted rows (agg results are not
             // event-time keyed downstream, but keep parity with the per-record path).
             if (lastRec != null && lastRec.hasTimestamp()) {
@@ -188,16 +189,17 @@ public final class LocalPreagg {
             } else {
                 collector.eraseTimestamp();
             }
-            for (Map.Entry<Object, List<Object>> e : groups.entrySet()) {
-                op.setCurrentKey(e.getKey());
-                batchable.processBatchForKey(e.getKey(), e.getValue(), collector);
+            for (int group = 0; group < groups.keys.size(); group++) {
+                Object key = groups.keys.get(group);
+                op.setCurrentKey(key);
+                batchable.processBatchForKey(key, groups.values.get(group), collector);
             }
             if (numRecordsIn != null) {
                 numRecordsIn.inc(n);
             }
             long c = DISPATCH_COUNT.incrementAndGet();
             long recs = RECORDS_BUNDLED.addAndGet(n);
-            long grps = GROUPS_EMITTED.addAndGet(groups.size());
+            long grps = GROUPS_EMITTED.addAndGet(groups.keys.size());
             if (c % 5000L == 1L) {
                 double collapse = grps == 0 ? 0 : (double) recs / grps;
                 System.err.println(
@@ -210,6 +212,66 @@ public final class LocalPreagg {
             // A mid-batch failure cannot be safely replayed (some keys already processed). Surface
             // it rather than silently double-processing.
             throw new RuntimeException("local-preagg dispatch failed", t);
+        }
+    }
+
+    static GroupedInputs groupInputs(
+            List<Object> recordKeys, List<Object> recordValues, int[] nativePlan) {
+        if (nativePlan != null && nativePlan.length == recordKeys.size() + 1) {
+            int groupCount = nativePlan[0];
+            if (groupCount > 0 && groupCount <= recordKeys.size()) {
+                ArrayList<Object> keys = new ArrayList<>(groupCount);
+                ArrayList<List<Object>> values = new ArrayList<>(groupCount);
+                boolean[] assigned = new boolean[groupCount];
+                for (int group = 0; group < groupCount; group++) {
+                    keys.add(null);
+                    values.add(new ArrayList<>());
+                }
+                boolean valid = true;
+                for (int source = 0; source < recordKeys.size(); source++) {
+                    int group = nativePlan[source + 1];
+                    if (group < 0 || group >= groupCount) {
+                        valid = false;
+                        break;
+                    }
+                    if (!assigned[group]) {
+                        keys.set(group, recordKeys.get(source));
+                        assigned[group] = true;
+                    } else if (!Objects.equals(keys.get(group), recordKeys.get(source))) {
+                        valid = false;
+                        break;
+                    }
+                    values.get(group).add(recordValues.get(source));
+                }
+                for (int group = 0; group < groupCount; group++) {
+                    valid &= assigned[group] && !values.get(group).isEmpty();
+                }
+                if (valid) {
+                    return new GroupedInputs(keys, values, true);
+                }
+            }
+        }
+        LinkedHashMap<Object, List<Object>> javaGroups = new LinkedHashMap<>();
+        for (int source = 0; source < recordKeys.size(); source++) {
+            javaGroups.computeIfAbsent(recordKeys.get(source), ignored -> new ArrayList<>())
+                    .add(recordValues.get(source));
+        }
+        return new GroupedInputs(
+                new ArrayList<>(javaGroups.keySet()),
+                new ArrayList<>(javaGroups.values()),
+                false);
+    }
+
+    static final class GroupedInputs {
+        final List<Object> keys;
+        final List<List<Object>> values;
+        final boolean nativeGrouped;
+
+        private GroupedInputs(
+                List<Object> keys, List<List<Object>> values, boolean nativeGrouped) {
+            this.keys = keys;
+            this.values = values;
+            this.nativeGrouped = nativeGrouped;
         }
     }
 

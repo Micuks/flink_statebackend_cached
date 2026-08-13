@@ -53,6 +53,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final boolean mapSnapshotEnabled;
     private final boolean prefetchEnabled;
     private final boolean mailboxBatchEnabled;
+    private final boolean preaggEnabled;
 
     public NativeRequestPlaneOptions(
             boolean enabled,
@@ -210,6 +211,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
                 mapCacheEnabled,
                 mapSnapshotEnabled,
                 enabled,
+                false,
                 false);
     }
 
@@ -247,7 +249,8 @@ public final class NativeRequestPlaneOptions implements Serializable {
                 mapCacheEnabled,
                 mapSnapshotEnabled,
                 enabled,
-                mailboxBatchEnabled);
+                mailboxBatchEnabled,
+                false);
     }
 
     public NativeRequestPlaneOptions(
@@ -268,6 +271,46 @@ public final class NativeRequestPlaneOptions implements Serializable {
             boolean mapSnapshotEnabled,
             boolean prefetchEnabled,
             boolean mailboxBatchEnabled) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                aarch64Only,
+                writeThroughMutations,
+                mapCacheEnabled,
+                mapSnapshotEnabled,
+                prefetchEnabled,
+                mailboxBatchEnabled,
+                false);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only,
+            boolean writeThroughMutations,
+            boolean mapCacheEnabled,
+            boolean mapSnapshotEnabled,
+            boolean prefetchEnabled,
+            boolean mailboxBatchEnabled,
+            boolean preaggEnabled) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
         this.kernel = normalizeKernel(kernel);
@@ -321,6 +364,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
                     "Native mailbox batch compaction requires the native request plane to be enabled.");
         }
         this.mailboxBatchEnabled = mailboxBatchEnabled;
+        if (preaggEnabled && !enabled) {
+            throw new IllegalArgumentException(
+                    "Native LocalPreAgg grouping requires the native request plane to be enabled.");
+        }
+        this.preaggEnabled = preaggEnabled;
     }
 
     public static NativeRequestPlaneOptions disabled() {
@@ -420,6 +468,10 @@ public final class NativeRequestPlaneOptions implements Serializable {
 
     public boolean mailboxBatchEnabled() {
         return mailboxBatchEnabled;
+    }
+
+    public boolean preaggEnabled() {
+        return preaggEnabled;
     }
 
     private static String normalizeKernel(String kernel) {

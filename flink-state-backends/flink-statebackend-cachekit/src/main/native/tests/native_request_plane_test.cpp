@@ -770,6 +770,27 @@ void TestCompactBatchPreservesFirstOccurrenceAndIdentity() {
     CHECK(indexes[3] == 4);
 }
 
+void TestGroupBatchMapsEverySourceToStableGroup() {
+    Options options;
+    options.capacity_entries = 16;
+    options.key_arena_bytes = 1024;
+    options.value_arena_bytes = 1024;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+    const std::string a = "alpha";
+    const std::string b = "beta";
+    const KeyView keys[] = {
+            Key(7, 3, a), Key(7, 3, b), Key(7, 3, a), Key(8, 3, a), Key(7, 3, b)};
+    std::uint32_t uniques[5] = {};
+    std::uint32_t groups[5] = {};
+    std::size_t unique_count = 0;
+    CHECK(plane->GroupBatch(keys, uniques, groups, 5, &unique_count) == ErrorCode::kOk);
+    CHECK(unique_count == 3);
+    CHECK(uniques[0] == 0 && uniques[1] == 1 && uniques[2] == 3);
+    CHECK(groups[0] == 0 && groups[1] == 1 && groups[2] == 0);
+    CHECK(groups[3] == 2 && groups[4] == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -786,6 +807,7 @@ int main() {
     TestCapacityAndOverflowRejection();
     TestRandomDifferentialAgainstReference();
     TestCompactBatchPreservesFirstOccurrenceAndIdentity();
+    TestGroupBatchMapsEverySourceToStableGroup();
     TestCAbiBatchSmoke();
     std::cout << "all native request-plane tests passed" << std::endl;
     return 0;

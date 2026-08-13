@@ -54,6 +54,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private long probeCalls;
     private long fillCalls;
     private long compactCalls;
+    private long groupCalls;
 
     public static NativeRequestPlaneCoordinator open(NativeRequestPlaneOptions options) {
         Objects.requireNonNull(options, "options");
@@ -201,6 +202,26 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         }
     }
 
+    public int group(BatchSlot slot) {
+        requireOwnedSlot(slot);
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                int unique =
+                        plane.groupBatch(
+                                slot.preparedKeys,
+                                slot.uniqueSourceIndexes(),
+                                slot.sourceGroupIndexes());
+                groupCalls++;
+                slot.compactedEntryCount = unique;
+                return unique;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
     /**
      * Writes through one exact prepared key after its authoritative RocksDB mutation.
      *
@@ -328,6 +349,10 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         return compactCalls;
     }
 
+    public long groupCalls() {
+        return groupCalls;
+    }
+
     long mutationSlotDirectBytesForTesting() {
         return mutationSlot.allocatedDirectBytes;
     }
@@ -406,6 +431,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         private final ByteBuffer valueMetadata;
         private final ByteBuffer fillResults;
         private final ByteBuffer uniqueSourceIndexes;
+        private final ByteBuffer sourceGroupIndexes;
         private final long allocatedDirectBytes;
 
         private boolean leased;
@@ -449,6 +475,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                             entries, NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES);
             int uniqueIndexBytes =
                     mutationOnly ? 0 : Math.multiplyExact(entries, Integer.BYTES);
+            int groupIndexBytes = uniqueIndexBytes;
 
             ByteBuffer preparedArena = ByteBuffer.allocateDirect(preparedArenaBytes);
             ByteBuffer preparedMetadata =
@@ -473,6 +500,9 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             this.uniqueSourceIndexes =
                     ByteBuffer.allocateDirect(uniqueIndexBytes)
                             .order(ByteOrder.nativeOrder());
+            this.sourceGroupIndexes =
+                    ByteBuffer.allocateDirect(groupIndexBytes)
+                            .order(ByteOrder.nativeOrder());
             this.allocatedDirectBytes =
                     (long) preparedArenaBytes
                             + preparedMetadataBytes
@@ -483,7 +513,8 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                             + valueArenaBytes
                             + valueMetadataBytes
                             + fillResultBytes
-                            + uniqueIndexBytes;
+                            + uniqueIndexBytes
+                            + groupIndexBytes;
         }
 
         public void prepareLatest(
@@ -573,6 +604,19 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                                 + ").");
             }
             return uniqueSourceIndexes.getInt(compactedIndex * Integer.BYTES);
+        }
+
+        public int sourceGroupIndex(int sourceIndex) {
+            requireLeased();
+            if (sourceIndex < 0 || sourceIndex >= preparedKeys.entryCount()) {
+                throw new IndexOutOfBoundsException(
+                        "Source index "
+                                + sourceIndex
+                                + " outside [0, "
+                                + preparedKeys.entryCount()
+                                + ").");
+            }
+            return sourceGroupIndexes.getInt(sourceIndex * Integer.BYTES);
         }
 
         public int missEntryCount() {
@@ -697,6 +741,11 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             requireLeased();
             uniqueSourceIndexes.clear();
             return uniqueSourceIndexes;
+        }
+
+        private ByteBuffer sourceGroupIndexes() {
+            sourceGroupIndexes.clear();
+            return sourceGroupIndexes;
         }
 
         private ByteBuffer fillValueArena() {

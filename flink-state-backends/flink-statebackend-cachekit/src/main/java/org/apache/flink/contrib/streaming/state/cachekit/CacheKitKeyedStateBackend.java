@@ -31,6 +31,7 @@ import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeReque
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.SavepointResources;
@@ -110,6 +111,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
     private final NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator;
     private int nextNativeStateId = 1;
+    private long nativePreaggGroupBatches;
+    private long nativePreaggInputKeys;
+    private long nativePreaggGroups;
+    private long nativePreaggFallbacks;
 
     // --- fullOpt: shared flush executors (N wrappers share one thread each) ---
     private final ExecutorService listStateFlushExecutor;
@@ -840,6 +845,85 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         return nativeRequestPlaneCoordinator != null
                 && nativeRequestPlaneCoordinator.isActive()
                 && nativeRequestPlaneCoordinator.options().mailboxBatchEnabled();
+    }
+
+    /**
+     * Reflection seam used by LocalPreagg to obtain stable first-seen group ids from the native
+     * runtime. A null result means the caller must use its existing Java LinkedHashMap path.
+     */
+    @SuppressWarnings("unchecked")
+    public int[] nativePreaggGroupIds(List<?> keys) {
+        synchronized (lifecycleLock) {
+            if (closed
+                    || disposed
+                    || keys == null
+                    || keys.isEmpty()
+                    || nativeRequestPlaneCoordinator == null
+                    || !nativeRequestPlaneCoordinator.isActive()
+                    || !nativeRequestPlaneCoordinator.options().preaggEnabled()
+                    || keys.size() > nativeRequestPlaneCoordinator.options().batchEntries()) {
+                nativePreaggFallbacks++;
+                return null;
+            }
+            NativeRequestPlaneCoordinator.BatchSlot slot =
+                    nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
+            if (slot == null) {
+                nativePreaggFallbacks++;
+                return null;
+            }
+            try {
+                TypeSerializer<K> serializer = getKeySerializer().duplicate();
+                DataOutputSerializer output = new DataOutputSerializer(64);
+                ArrayList<byte[]> serialized = new ArrayList<>(keys.size());
+                for (Object key : keys) {
+                    output.clear();
+                    serializer.serialize((K) key, output);
+                    serialized.add(output.getCopyOfBuffer());
+                }
+                slot.prepareLatest(Integer.MAX_VALUE, 0L, serialized);
+                int groupCount = nativeRequestPlaneCoordinator.group(slot);
+                int[] plan = new int[keys.size() + 1];
+                plan[0] = groupCount;
+                for (int source = 0; source < keys.size(); source++) {
+                    plan[source + 1] = slot.sourceGroupIndex(source);
+                }
+                nativePreaggGroupBatches++;
+                nativePreaggInputKeys += keys.size();
+                nativePreaggGroups += groupCount;
+                if (nativePreaggGroupBatches % 5000L == 1L) {
+                    LOG.info(
+                            "[CACHEKIT NATIVE PREAGG] batches={} inputKeys={} groups={} "
+                                    + "fallbacks={} kernel={}",
+                            nativePreaggGroupBatches,
+                            nativePreaggInputKeys,
+                            nativePreaggGroups,
+                            nativePreaggFallbacks,
+                            nativeRequestPlaneCoordinator.selectedKernel());
+                }
+                return plan;
+            } catch (Throwable failure) {
+                nativePreaggFallbacks++;
+                return null;
+            } finally {
+                slot.close();
+            }
+        }
+    }
+
+    long getNativePreaggGroupBatchesForTesting() {
+        return nativePreaggGroupBatches;
+    }
+
+    long getNativePreaggInputKeysForTesting() {
+        return nativePreaggInputKeys;
+    }
+
+    long getNativePreaggGroupsForTesting() {
+        return nativePreaggGroups;
+    }
+
+    long getNativePreaggFallbacksForTesting() {
+        return nativePreaggFallbacks;
     }
 
     @SuppressWarnings({ "unchecked", "rawtypes" })

@@ -29,6 +29,7 @@ import org.apache.flink.util.Collector;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -41,6 +42,48 @@ class LocalPreaggTest {
     void testDetectsDirectBatchableOperator() {
         assertTrue(LocalPreagg.hasBatchableTarget(new BatchableInputOperator()));
         assertFalse(LocalPreagg.hasBatchableTarget(mock(Input.class)));
+    }
+
+    @Test
+    void testNativeGroupPlanPreservesFirstSeenOrderAndInputOrder() {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "a", "c", "b"),
+                        Arrays.asList(1, 2, 3, 4, 5),
+                        new int[] {3, 0, 1, 0, 2, 1});
+
+        assertTrue(groups.nativeGrouped);
+        org.junit.jupiter.api.Assertions.assertEquals(Arrays.asList("a", "b", "c"), groups.keys);
+        org.junit.jupiter.api.Assertions.assertEquals(Arrays.asList(1, 3), groups.values.get(0));
+        org.junit.jupiter.api.Assertions.assertEquals(Arrays.asList(2, 5), groups.values.get(1));
+        org.junit.jupiter.api.Assertions.assertEquals(Arrays.asList(4), groups.values.get(2));
+    }
+
+    @Test
+    void testInvalidNativeGroupPlanFallsBackToJavaGrouping() {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "a"),
+                        Arrays.asList(1, 2, 3),
+                        new int[] {2, 0, 9, 0});
+
+        assertFalse(groups.nativeGrouped);
+        org.junit.jupiter.api.Assertions.assertEquals(Arrays.asList("a", "b"), groups.keys);
+        org.junit.jupiter.api.Assertions.assertEquals(Arrays.asList(1, 3), groups.values.get(0));
+    }
+
+    @Test
+    void testNativeGroupCollisionFallsBackToJavaGrouping() {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "a"),
+                        Arrays.asList(1, 2, 3),
+                        new int[] {1, 0, 0, 0});
+
+        assertFalse(groups.nativeGrouped);
+        org.junit.jupiter.api.Assertions.assertEquals(Arrays.asList("a", "b"), groups.keys);
+        org.junit.jupiter.api.Assertions.assertEquals(Arrays.asList(1, 3), groups.values.get(0));
+        org.junit.jupiter.api.Assertions.assertEquals(Arrays.asList(2), groups.values.get(1));
     }
 
     private static final class BatchableInputOperator extends AbstractStreamOperator<Object>

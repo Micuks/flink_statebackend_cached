@@ -130,6 +130,7 @@ void BatchScratch::ReserveEntries(std::size_t count) {
     fill_results_.reserve(count);
     probe_results_.reserve(count);
     unique_source_indexes_.reserve(count);
+    source_group_indexes_.reserve(count);
     reserved_entries_ = count;
     ++growth_count_;
 }
@@ -173,6 +174,65 @@ BatchBridgeCode CompactDirectBatch(
             WriteNative<std::uint32_t>(
                     unique_source_indexes.data + index * sizeof(std::uint32_t),
                     scratch->unique_source_indexes_[index]);
+        }
+        *unique_count = written;
+        return BatchBridgeCode::kOk;
+    } catch (const std::bad_alloc&) {
+        return BatchBridgeCode::kAllocationFailed;
+    } catch (const std::length_error&) {
+        return BatchBridgeCode::kOverflow;
+    } catch (...) {
+        return BatchBridgeCode::kNativeError;
+    }
+}
+
+BatchBridgeCode GroupDirectBatch(
+        RequestPlane* plane,
+        BatchScratch* scratch,
+        ConstBuffer key_arena,
+        ConstBuffer key_metadata,
+        std::size_t count,
+        MutableBuffer unique_source_indexes,
+        MutableBuffer source_group_indexes,
+        std::size_t* unique_count) noexcept {
+    if (plane == nullptr || scratch == nullptr || unique_count == nullptr ||
+        !IsValid(unique_source_indexes) || !IsValid(source_group_indexes)) {
+        return BatchBridgeCode::kInvalidArgument;
+    }
+    std::size_t required_output = 0;
+    if (!RequiredBytes(count, sizeof(std::uint32_t), &required_output)) {
+        return BatchBridgeCode::kOverflow;
+    }
+    if (unique_source_indexes.size < required_output ||
+        source_group_indexes.size < required_output) {
+        return BatchBridgeCode::kOutputTooSmall;
+    }
+    try {
+        scratch->ReserveEntries(count);
+        BatchBridgeCode code = DecodeKeys(key_arena, key_metadata, count, &scratch->keys_);
+        if (code != BatchBridgeCode::kOk) {
+            return code;
+        }
+        scratch->unique_source_indexes_.resize(count);
+        scratch->source_group_indexes_.resize(count);
+        std::size_t written = 0;
+        if (plane->GroupBatch(
+                    scratch->keys_.data(),
+                    scratch->unique_source_indexes_.data(),
+                    scratch->source_group_indexes_.data(),
+                    count,
+                    &written) != ErrorCode::kOk) {
+            return BatchBridgeCode::kNativeError;
+        }
+        for (std::size_t index = 0; index < written; ++index) {
+            WriteNative<std::uint32_t>(
+                    unique_source_indexes.data + index * sizeof(std::uint32_t),
+                    scratch->unique_source_indexes_[index]);
+        }
+        for (std::size_t index = 0; index < count; ++index) {
+            WriteNative<std::uint32_t>(
+                    source_group_indexes.data + index * sizeof(std::uint32_t),
+                    scratch->source_group_indexes_[index]);
         }
         *unique_count = written;
         return BatchBridgeCode::kOk;

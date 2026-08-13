@@ -25,7 +25,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashSet;
+import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -103,11 +105,30 @@ class StatePrefetcherTest {
         assertEquals(Arrays.asList(1, 2, 1), keys);
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void testNativePreaggInvokesOptionalBackendHook() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(NativePreaggHook.class));
+        List<Integer> keys = Arrays.asList(7, 8, 7);
+        org.mockito.Mockito.when(((NativePreaggHook) backend).nativePreaggGroupIds(keys))
+                .thenReturn(new int[] {2, 0, 1, 0});
+
+        assertArrayEquals(
+                new int[] {2, 0, 1, 0}, StatePrefetcher.groupKeysNatively(backend, keys));
+    }
+
     public interface ImmediatePrefetchHook {
         void prefetchForImmediateUse(Collection<?> keys);
     }
 
     public interface NativeMailboxHook {
         boolean nativeMailboxBatchEnabled();
+    }
+
+    public interface NativePreaggHook {
+        int[] nativePreaggGroupIds(List<?> keys);
     }
 }

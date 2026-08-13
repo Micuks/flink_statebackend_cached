@@ -229,6 +229,25 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
         nativeIndexes);
   }
 
+  @Override
+  public int groupBatch(
+      SerializedKeyBatch<?, ?> keys,
+      ByteBuffer uniqueSourceIndexes,
+      ByteBuffer sourceGroupIndexes) {
+    Objects.requireNonNull(keys, "keys");
+    ByteBuffer nativeUniques = directOutputSlice(uniqueSourceIndexes, "uniqueSourceIndexes");
+    ByteBuffer nativeGroups = directOutputSlice(sourceGroupIndexes, "sourceGroupIndexes");
+    requireCapacity(nativeUniques, keys.entryCount(), Integer.BYTES, "uniqueSourceIndexes");
+    requireCapacity(nativeGroups, keys.entryCount(), Integer.BYTES, "sourceGroupIndexes");
+    return nativeGroup(
+        requireOpenHandle(),
+        keys.arenaSlice(),
+        keys.metadataSlice(),
+        keys.entryCount(),
+        nativeUniques,
+        nativeGroups);
+  }
+
   public String selectedKernel() {
     return nativeKernelName(requireOpenHandle());
   }
@@ -341,6 +360,14 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
       ByteBuffer keyMetadata,
       int count,
       ByteBuffer uniqueSourceIndexes);
+
+  private static native int nativeGroup(
+      long handle,
+      ByteBuffer keyArena,
+      ByteBuffer keyMetadata,
+      int count,
+      ByteBuffer uniqueSourceIndexes,
+      ByteBuffer sourceGroupIndexes);
 
   private static native String nativeKernelName(long handle);
 
