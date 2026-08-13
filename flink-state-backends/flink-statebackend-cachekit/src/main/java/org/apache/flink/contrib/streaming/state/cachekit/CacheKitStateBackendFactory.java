@@ -276,6 +276,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Use the runtime-selected native kernel to compact exact duplicate keys "
                                                                         + "from Mailbox lookahead batches before reservation and MultiGet.");
 
+        public static final ConfigOption<Boolean> NATIVE_PREFETCH_ENABLED =
+                        ConfigOptions.key("state.backend.cachekit.native.prefetch.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Enable native prepared-key probe, miss compaction, direct-hit deserialization, "
+                                                                        + "and fill around the authoritative RocksDB MultiGet path.");
+
 	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
 			.noDefaultValue()
@@ -441,6 +449,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS),
                                 config.get(NATIVE_MAP_CACHE_ENABLED),
                                 config.get(NATIVE_MAP_SNAPSHOT_ENABLED),
+                                config.get(NATIVE_PREFETCH_ENABLED),
                                 config.get(NATIVE_MAILBOX_BATCH_ENABLED));
         }
 

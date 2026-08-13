@@ -619,11 +619,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         this.bypassEnabled = bypassEnabled;
         this.hitRateThreshold = hitRateThreshold;
         this.hitRateWindow = hitRateWindow;
-        // The native request plane is defined around prepared RocksDB keys and compacted
-        // MultiGet misses. Explicit native enable therefore also enables this wrapper's prepared
-        // MultiGet capability even when the older bp-prefetch flag was omitted.
+        // Native feature flags are independently attributable. Map-only native modes must not
+        // silently enable ValueState MultiGet. Prefetch and mailbox compaction both require the
+        // prepared-key path; all other modes retain the explicit Java bp-prefetch setting.
         this.multiGetPrefetchEnabled =
-                multiGetPrefetchEnabled || nativeRequestPlaneCoordinator != null;
+                multiGetPrefetchEnabled
+                        || (nativeRequestPlaneCoordinator != null
+                                && (nativeRequestPlaneCoordinator.options().prefetchEnabled()
+                                        || nativeRequestPlaneCoordinator
+                                                .options()
+                                                .mailboxBatchEnabled()));
         this.multiGetChunkSize = Math.max(2, multiGetChunkSize);
         this.multiGetMinBatchSize =
                 Math.max(2, Math.min(this.multiGetChunkSize, multiGetMinBatchSize));
@@ -1385,13 +1390,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 return null;
             }
             if (nativeBatchSlot != null) {
-                try {
-                    nativeBatchSlot.prepareLatest(
-                            nativeStateId, nativeWriteEpoch.get(), rocksDBKeys);
-                } catch (IOException | RuntimeException failure) {
+                if (!nativeRequestPlaneCoordinator.options().prefetchEnabled()) {
                     nativeBatchSlot.close();
                     nativeBatchSlot = null;
-                    nativeFallbackBatches++;
+                } else {
+                    try {
+                        nativeBatchSlot.prepareLatest(
+                                nativeStateId, nativeWriteEpoch.get(), rocksDBKeys);
+                    } catch (IOException | RuntimeException failure) {
+                        nativeBatchSlot.close();
+                        nativeBatchSlot = null;
+                        nativeFallbackBatches++;
+                    }
                 }
             }
         }
@@ -1758,6 +1768,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.List<byte[]> rocksDBKeys) {
         if (nativeRequestPlaneCoordinator == null
                 || !nativeRequestPlaneCoordinator.isActive()
+                || !nativeRequestPlaneCoordinator.options().prefetchEnabled()
                 || rocksDBKeys.size()
                         < nativeRequestPlaneCoordinator.options().minBatchSize()) {
             if (nativeRequestPlaneCoordinator != null) {

@@ -51,6 +51,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final boolean writeThroughMutations;
     private final boolean mapCacheEnabled;
     private final boolean mapSnapshotEnabled;
+    private final boolean prefetchEnabled;
     private final boolean mailboxBatchEnabled;
 
     public NativeRequestPlaneOptions(
@@ -208,6 +209,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
                 writeThroughMutations,
                 mapCacheEnabled,
                 mapSnapshotEnabled,
+                enabled,
                 false);
     }
 
@@ -227,6 +229,44 @@ public final class NativeRequestPlaneOptions implements Serializable {
             boolean writeThroughMutations,
             boolean mapCacheEnabled,
             boolean mapSnapshotEnabled,
+            boolean mailboxBatchEnabled) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                aarch64Only,
+                writeThroughMutations,
+                mapCacheEnabled,
+                mapSnapshotEnabled,
+                enabled,
+                mailboxBatchEnabled);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only,
+            boolean writeThroughMutations,
+            boolean mapCacheEnabled,
+            boolean mapSnapshotEnabled,
+            boolean prefetchEnabled,
             boolean mailboxBatchEnabled) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
@@ -271,6 +311,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
                     "Native MapState snapshot requires the native request plane to be enabled.");
         }
         this.mapSnapshotEnabled = mapSnapshotEnabled;
+        if (prefetchEnabled && !enabled) {
+            throw new IllegalArgumentException(
+                    "Native prepared-key prefetch requires the native request plane to be enabled.");
+        }
+        this.prefetchEnabled = prefetchEnabled;
         if (mailboxBatchEnabled && !enabled) {
             throw new IllegalArgumentException(
                     "Native mailbox batch compaction requires the native request plane to be enabled.");
@@ -367,6 +412,10 @@ public final class NativeRequestPlaneOptions implements Serializable {
 
     public boolean mapSnapshotEnabled() {
         return mapSnapshotEnabled;
+    }
+
+    public boolean prefetchEnabled() {
+        return prefetchEnabled;
     }
 
     public boolean mailboxBatchEnabled() {
