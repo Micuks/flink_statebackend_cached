@@ -23,9 +23,14 @@ import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePoli
 import org.apache.flink.contrib.streaming.state.cachekit.cache.LruCachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PrimitivePresenceCache;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneCoordinator;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneBridge;
 import org.apache.flink.contrib.streaming.state.cachekit.util.MurmurHash3;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.runtime.state.internal.InternalMapState;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nonnull;
 
@@ -48,6 +53,8 @@ import java.util.Set;
  * Keying: (currentKey, namespace, userKey).
  */
 public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapState<K, N, UK, UV> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(CachedInternalMapState.class);
 
     private final InternalMapState<K, N, UK, UV> delegate;
     private final CurrentKeyProvider<K> currentKeyProvider;
@@ -75,6 +82,19 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final TypeSerializer<UK> userKeySerializer;
     private final TypeSerializer<UV> userValueSerializer;
     private final ThreadLocal<DataOutputSerializer> serializerView;
+    private final NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator;
+    private final boolean nativeMapCacheEnabled;
+    private final int nativeStateId;
+    private final DataOutputSerializer nativeKeyOutput;
+    private final DataOutputSerializer nativeValueOutput;
+    private long nativeGeneration;
+    private long nativeProbeAttempts;
+    private long nativeHits;
+    private long nativeNegativeHits;
+    private long nativeMisses;
+    private long nativeFills;
+    private long nativeFallbacks;
+    private long nativeFailures;
 
     // --- MapSnapshot cache (entries() fast path) ---
     private final CachePolicy<KeyNamespace<K, N>, MapSnapshot<UK>> mapSnapshotCache;
@@ -159,6 +179,48 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             boolean iterationCacheFillEnabled,
             int mapSnapshotCacheMaxEntries,
             MapSnapshotCacheMetrics mapSnapshotCacheMetrics) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                presenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicyType,
+                mapCacheLruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                iterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheMetrics,
+                null,
+                0,
+                false);
+    }
+
+    public CachedInternalMapState(
+            InternalMapState<K, N, UK, UV> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            PresenceCacheImplementation presenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicyType,
+            int mapCacheLruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean iterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            MapSnapshotCacheMetrics mapSnapshotCacheMetrics,
+            NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator,
+            int nativeStateId,
+            boolean nativeMapCacheEnabled) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -187,6 +249,18 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         this.userKeySerializer = resolvedUserKeySerializer;
         this.userValueSerializer = resolvedUserValueSerializer;
+        if (nativeMapCacheEnabled
+                && (nativeRequestPlaneCoordinator == null
+                        || resolvedUserKeySerializer == null
+                        || resolvedUserValueSerializer == null)) {
+            throw new IllegalArgumentException(
+                    "Native MapState cache requires an active coordinator and MapSerializer key/value serializers.");
+        }
+        this.nativeRequestPlaneCoordinator = nativeRequestPlaneCoordinator;
+        this.nativeMapCacheEnabled = nativeMapCacheEnabled;
+        this.nativeStateId = nativeStateId;
+        this.nativeKeyOutput = nativeMapCacheEnabled ? new DataOutputSerializer(128) : null;
+        this.nativeValueOutput = nativeMapCacheEnabled ? new DataOutputSerializer(128) : null;
         this.usePrimitivePresenceCache = presenceCacheImplementation == PresenceCacheImplementation.PRIMITIVE
                 && keySerializer != null
                 && namespaceSerializer != null
@@ -265,7 +339,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         setLookupKey(currentKey, currentNamespace, userKey);
 
         if (bypassEnabled && isBypassing && shouldBypassRead()) {
-            UV value = delegate.get(userKey);
+            NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
+            UV value = nativeRead == null ? delegate.get(userKey) : nativeRead.value;
             if (mapCacheEnabled) {
                 updateValueCache(currentKey, userKey, value, false);
             }
@@ -289,8 +364,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 return null;
             }
         }
-        UV value = delegate.get(userKey);
-        recordAccess(false);
+        NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
+        UV value = nativeRead == null ? delegate.get(userKey) : nativeRead.value;
+        recordAccess(nativeRead != null && nativeRead.cacheHit);
         if (mapCacheEnabled) {
             updateValueCache(currentKey, userKey, value, false);
         }
@@ -312,6 +388,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             remove(userKey);
             return;
         }
+        advanceNativeGeneration();
         boolean writeThrough = !mapCacheEnabled || (bypassEnabled && isBypassing);
         if (writeThrough) {
             delegate.put(userKey, userValue);
@@ -333,6 +410,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
+        advanceNativeGeneration();
 
         boolean writeThrough = !mapCacheEnabled || (bypassEnabled && isBypassing);
         if (writeThrough) {
@@ -360,6 +438,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
+        advanceNativeGeneration();
 
         boolean writeThrough = !mapCacheEnabled || (bypassEnabled && isBypassing);
         if (writeThrough) {
@@ -386,7 +465,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         setLookupKey(currentKey, currentNamespace, userKey);
 
         if (bypassEnabled && isBypassing && shouldBypassRead()) {
-            boolean exists = delegate.contains(userKey);
+            NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
+            boolean exists =
+                    nativeRead == null ? delegate.contains(userKey) : nativeRead.value != null;
             if (mapCacheEnabled && !exists) {
                 updateValueCache(currentKey, userKey, null, false);
             }
@@ -410,8 +491,10 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 return present;
             }
         }
-        boolean exists = delegate.contains(userKey);
-        recordAccess(false);
+        NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
+        boolean exists =
+                nativeRead == null ? delegate.contains(userKey) : nativeRead.value != null;
+        recordAccess(nativeRead != null && nativeRead.cacheHit);
         if (mapCacheEnabled && !exists) {
             updateValueCache(currentKey, userKey, null, false);
         }
@@ -545,6 +628,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
         delegate.clear();
+        advanceNativeGeneration();
         clearPresenceCaches();
         clearValueCaches();
         resetBypassState();
@@ -604,6 +688,96 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private void ensureDelegateNamespace(K currentKey) {
         if (currentNamespace != null) {
             delegate.setCurrentNamespace(currentNamespace);
+        }
+    }
+
+    private NativeMapRead<UV> readThroughNative(K currentKey, UK userKey) throws Exception {
+        if (!nativeMapCacheEnabled
+                || currentKey == null
+                || currentNamespace == null
+                || !nativeRequestPlaneCoordinator.isActive()) {
+            return null;
+        }
+        final byte[] nativeKey;
+        try {
+            nativeKey = serializeNativeMapKey(currentKey, currentNamespace, userKey);
+        } catch (Exception serializationFailure) {
+            nativeFallbacks++;
+            return null;
+        }
+
+        NativeRequestPlaneCoordinator.BatchSlot slot =
+                nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
+        if (slot == null) {
+            nativeFallbacks++;
+            return null;
+        }
+        try (NativeRequestPlaneCoordinator.BatchSlot ignored = slot) {
+            slot.prepareLatest(
+                    nativeStateId, nativeGeneration, Collections.singletonList(nativeKey));
+            nativeProbeAttempts++;
+            int processed = nativeRequestPlaneCoordinator.probe(slot);
+            if (processed != 1 || slot.probeError(0) != NativeRequestPlaneBridge.ERROR_OK) {
+                throw new IllegalStateException("Native MapState probe returned an invalid result.");
+            }
+            int status = slot.probeStatus(0);
+            if (status == NativeRequestPlaneBridge.PROBE_HIT) {
+                nativeHits++;
+                return new NativeMapRead<>(
+                        userValueSerializer.deserialize(slot.probeValueInput(0)), true);
+            }
+            if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
+                nativeNegativeHits++;
+                return new NativeMapRead<>(null, true);
+            }
+            if (status != NativeRequestPlaneBridge.PROBE_MISS) {
+                throw new IllegalStateException(
+                        "Native MapState probe returned status=" + status + ".");
+            }
+            nativeMisses++;
+        } catch (Exception | LinkageError failure) {
+            nativeFailures++;
+            nativeFallbacks++;
+            nativeRequestPlaneCoordinator.disable(failure);
+            return null;
+        }
+
+        UV value = delegate.get(userKey);
+        try {
+            byte[] serializedValue = serializeNativeMapValue(value);
+            nativeRequestPlaneCoordinator.updateExactKey(
+                    nativeStateId, nativeGeneration, nativeKey, serializedValue);
+            nativeFills++;
+        } catch (Exception | LinkageError fillFailure) {
+            nativeFailures++;
+            // The delegate result is authoritative. Native fill failure must not re-read or alter
+            // the MapState result; the coordinator already fails closed where appropriate.
+        }
+        return new NativeMapRead<>(value, false);
+    }
+
+    private byte[] serializeNativeMapKey(K key, N namespace, UK userKey) throws Exception {
+        nativeKeyOutput.clear();
+        keySerializer.serialize(key, nativeKeyOutput);
+        nativeKeyOutput.writeByte(42);
+        namespaceSerializer.serialize(namespace, nativeKeyOutput);
+        nativeKeyOutput.writeByte(43);
+        userKeySerializer.serialize(userKey, nativeKeyOutput);
+        return nativeKeyOutput.getCopyOfBuffer();
+    }
+
+    private byte[] serializeNativeMapValue(UV value) throws Exception {
+        if (value == null) {
+            return null;
+        }
+        nativeValueOutput.clear();
+        userValueSerializer.serialize(value, nativeValueOutput);
+        return nativeValueOutput.getCopyOfBuffer();
+    }
+
+    private void advanceNativeGeneration() {
+        if (nativeMapCacheEnabled) {
+            nativeGeneration++;
         }
     }
 
@@ -1096,6 +1270,53 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             closed = true;
         } finally {
             lifecycleLock.writeLock().unlock();
+        }
+        if (nativeMapCacheEnabled) {
+            LOG.info(
+                    "[CACHEKIT NATIVE MAP CACHE] stateId={} generation={} probes={} hits={} "
+                            + "negativeHits={} misses={} fills={} fallbacks={} failures={} "
+                            + "nativeActive={} kernel={}",
+                    nativeStateId,
+                    nativeGeneration,
+                    nativeProbeAttempts,
+                    nativeHits,
+                    nativeNegativeHits,
+                    nativeMisses,
+                    nativeFills,
+                    nativeFallbacks,
+                    nativeFailures,
+                    nativeRequestPlaneCoordinator.isActive(),
+                    nativeRequestPlaneCoordinator.selectedKernel());
+        }
+    }
+
+    long getNativeProbeAttemptsForTesting() {
+        return nativeProbeAttempts;
+    }
+
+    long getNativeHitsForTesting() {
+        return nativeHits;
+    }
+
+    long getNativeNegativeHitsForTesting() {
+        return nativeNegativeHits;
+    }
+
+    long getNativeMissesForTesting() {
+        return nativeMisses;
+    }
+
+    long getNativeFillsForTesting() {
+        return nativeFills;
+    }
+
+    private static final class NativeMapRead<V> {
+        private final V value;
+        private final boolean cacheHit;
+
+        private NativeMapRead(V value, boolean cacheHit) {
+            this.value = value;
+            this.cacheHit = cacheHit;
         }
     }
 
