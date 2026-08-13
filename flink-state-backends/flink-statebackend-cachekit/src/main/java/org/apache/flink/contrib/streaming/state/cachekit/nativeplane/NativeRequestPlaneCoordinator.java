@@ -114,6 +114,15 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         this.selectedKernel =
                 Objects.requireNonNull(plane.selectedKernel(), "plane.selectedKernel()");
         this.detectedFeatureBits = plane.detectedFeatureBits();
+        if (options.aarch64Only()
+                && (detectedFeatureBits & NativeRequestPlaneBridge.FEATURE_AARCH64) == 0) {
+            throw new IllegalStateException(
+                    "Native request plane is AArch64-only by policy, but the loaded JNI library "
+                            + "reported host features "
+                            + detectedFeatureBitsHex()
+                            + ". Set state.backend.cachekit.native.request-plane.aarch64-only=false "
+                            + "only for an explicit portable x86 comparison.");
+        }
     }
 
     public NativeRequestPlaneOptions options() {

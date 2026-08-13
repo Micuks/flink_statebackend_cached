@@ -44,6 +44,32 @@ class NativeRequestPlaneCoordinatorTest {
     }
 
     @Test
+    void testAarch64OnlyPolicyRejectsPortableScalarPlaneAndClosesIt() {
+        FakePlane plane = new FakePlane();
+
+        assertThrows(
+                IllegalStateException.class,
+                () ->
+                        NativeRequestPlaneCoordinator.forTesting(
+                                new NativeRequestPlaneOptions(
+                                        true,
+                                        "",
+                                        "auto",
+                                        16,
+                                        1024,
+                                        1024,
+                                        4,
+                                        1024,
+                                        1024,
+                                        1,
+                                        1,
+                                        true),
+                                plane));
+
+        assertEquals(1, plane.closeCalls);
+    }
+
+    @Test
     void testBatchSlotsAreBoundedReusableAndCloseIsIdempotent() {
         FakePlane plane = new FakePlane();
         plane.featureBits =
@@ -99,7 +125,7 @@ class NativeRequestPlaneCoordinatorTest {
 
     private static NativeRequestPlaneOptions options(int slots) {
         return new NativeRequestPlaneOptions(
-                true, "", "auto", 16, 1024, 1024, 4, 1024, 1024, 1, slots);
+                true, "", "auto", 16, 1024, 1024, 4, 1024, 1024, 1, slots, false);
     }
 
     private static final class FakePlane implements NativeRequestPlane {

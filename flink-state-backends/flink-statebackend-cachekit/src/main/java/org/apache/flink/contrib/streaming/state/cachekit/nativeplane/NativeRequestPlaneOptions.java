@@ -47,6 +47,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final int batchValueArenaBytes;
     private final int minBatchSize;
     private final int batchSlots;
+    private final boolean aarch64Only;
 
     public NativeRequestPlaneOptions(
             boolean enabled,
@@ -60,6 +61,34 @@ public final class NativeRequestPlaneOptions implements Serializable {
             int batchValueArenaBytes,
             int minBatchSize,
             int batchSlots) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                true);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
         this.kernel = normalizeKernel(kernel);
@@ -91,6 +120,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
         this.batchValueArenaBytes = batchValueArenaBytes;
         this.minBatchSize = minBatchSize;
         this.batchSlots = batchSlots;
+        this.aarch64Only = aarch64Only;
     }
 
     public static NativeRequestPlaneOptions disabled() {
@@ -152,6 +182,16 @@ public final class NativeRequestPlaneOptions implements Serializable {
 
     public int batchSlots() {
         return batchSlots;
+    }
+
+    /**
+     * Whether an explicitly enabled request plane must fail closed on a non-AArch64 host.
+     *
+     * <p>This defaults to true so the production ARM-native path cannot silently turn into the
+     * portable scalar kernel on x86. Cross-platform experiments may set it to false explicitly.
+     */
+    public boolean aarch64Only() {
+        return aarch64Only;
     }
 
     private static String normalizeKernel(String kernel) {

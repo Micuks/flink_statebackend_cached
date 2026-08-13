@@ -51,7 +51,8 @@ std::uint16_t ScalarMatchTags(const Bucket& bucket, std::uint32_t tag) noexcept 
     std::uint16_t mask = 0;
     for (std::size_t index = 0; index < kSlotsPerBucket; ++index) {
         if (bucket.tags[index] == tag) {
-            mask |= static_cast<std::uint16_t>(1U << index);
+            mask = static_cast<std::uint16_t>(
+                    mask | static_cast<std::uint16_t>(1U << index));
         }
     }
     return mask;
