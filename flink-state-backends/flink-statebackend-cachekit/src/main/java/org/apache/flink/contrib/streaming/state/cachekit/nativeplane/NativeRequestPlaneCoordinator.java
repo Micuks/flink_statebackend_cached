@@ -53,6 +53,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private long leaseMisses;
     private long probeCalls;
     private long fillCalls;
+    private long compactCalls;
 
     public static NativeRequestPlaneCoordinator open(NativeRequestPlaneOptions options) {
         Objects.requireNonNull(options, "options");
@@ -175,6 +176,24 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                                 slot.fillResults());
                 fillCalls++;
                 return processed;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
+    public int compact(BatchSlot slot) {
+        requireOwnedSlot(slot);
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                int unique =
+                        plane.compactBatch(
+                                slot.preparedKeys, slot.uniqueSourceIndexes());
+                compactCalls++;
+                slot.compactedEntryCount = unique;
+                return unique;
             } catch (RuntimeException | LinkageError failure) {
                 disableLocked(failure);
                 throw failure;
@@ -305,6 +324,10 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         return fillCalls;
     }
 
+    public long compactCalls() {
+        return compactCalls;
+    }
+
     long mutationSlotDirectBytesForTesting() {
         return mutationSlot.allocatedDirectBytes;
     }
@@ -382,11 +405,13 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         private final ByteBuffer valueArena;
         private final ByteBuffer valueMetadata;
         private final ByteBuffer fillResults;
+        private final ByteBuffer uniqueSourceIndexes;
         private final long allocatedDirectBytes;
 
         private boolean leased;
         private int fillValueBytes;
         private long preparedFillGeneration;
+        private int compactedEntryCount;
 
         private BatchSlot(
                 NativeRequestPlaneCoordinator owner, NativeRequestPlaneOptions options) {
@@ -422,6 +447,8 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             int fillResultBytes =
                     Math.multiplyExact(
                             entries, NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES);
+            int uniqueIndexBytes =
+                    mutationOnly ? 0 : Math.multiplyExact(entries, Integer.BYTES);
 
             ByteBuffer preparedArena = ByteBuffer.allocateDirect(preparedArenaBytes);
             ByteBuffer preparedMetadata =
@@ -443,6 +470,9 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             this.fillResults =
                     ByteBuffer.allocateDirect(fillResultBytes)
                             .order(ByteOrder.nativeOrder());
+            this.uniqueSourceIndexes =
+                    ByteBuffer.allocateDirect(uniqueIndexBytes)
+                            .order(ByteOrder.nativeOrder());
             this.allocatedDirectBytes =
                     (long) preparedArenaBytes
                             + preparedMetadataBytes
@@ -452,7 +482,8 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                             + probeResultBytes
                             + valueArenaBytes
                             + valueMetadataBytes
-                            + fillResultBytes;
+                            + fillResultBytes
+                            + uniqueIndexBytes;
         }
 
         public void prepareLatest(
@@ -460,6 +491,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 throws IOException {
             requireLeased();
             preparedKeys.clear();
+            compactedEntryCount = 0;
             preparedFillGeneration = fillGeneration;
             if (preparedRocksDBKeys.size() > preparedKeys.maxEntries()) {
                 throw new IOException(
@@ -528,6 +560,19 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
 
         public int preparedEntryCount() {
             return preparedKeys.entryCount();
+        }
+
+        public int compactedSourceIndex(int compactedIndex) {
+            requireLeased();
+            if (compactedIndex < 0 || compactedIndex >= compactedEntryCount) {
+                throw new IndexOutOfBoundsException(
+                        "Compacted index "
+                                + compactedIndex
+                                + " outside [0, "
+                                + compactedEntryCount
+                                + ").");
+            }
+            return uniqueSourceIndexes.getInt(compactedIndex * Integer.BYTES);
         }
 
         public int missEntryCount() {
@@ -646,6 +691,12 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                     preparedKeys.entryCount()
                             * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
             return results.slice().order(ByteOrder.nativeOrder());
+        }
+
+        private ByteBuffer uniqueSourceIndexes() {
+            requireLeased();
+            uniqueSourceIndexes.clear();
+            return uniqueSourceIndexes;
         }
 
         private ByteBuffer fillValueArena() {

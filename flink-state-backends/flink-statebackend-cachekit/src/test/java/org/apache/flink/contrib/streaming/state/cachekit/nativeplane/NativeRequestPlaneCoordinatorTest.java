@@ -84,7 +84,7 @@ class NativeRequestPlaneCoordinatorTest {
         assertEquals(0x1fL, coordinator.detectedFeatureBits());
         assertEquals("0x000000000000001f", coordinator.detectedFeatureBitsHex());
         assertEquals("aarch64|neon|crc32|sve|vl256", coordinator.detectedFeatures());
-        assertEquals(4_448, coordinator.regularSlotDirectBytesForTesting());
+        assertEquals(4_464, coordinator.regularSlotDirectBytesForTesting());
         assertEquals(2_096, coordinator.mutationSlotDirectBytesForTesting());
         NativeRequestPlaneCoordinator.BatchSlot first = coordinator.tryAcquireBatchSlot();
         assertNotNull(first);
@@ -123,6 +123,47 @@ class NativeRequestPlaneCoordinatorTest {
         coordinator.close();
     }
 
+    @Test
+    void testDefaultCompactorRetainsArrivalOrder() throws Exception {
+        FakePlane plane = new FakePlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(1), plane);
+
+        try (NativeRequestPlaneCoordinator.BatchSlot slot =
+                coordinator.tryAcquireBatchSlot()) {
+            slot.prepareLatest(
+                    3,
+                    17L,
+                    java.util.Arrays.asList(new byte[] {1}, new byte[] {2}, new byte[] {1}));
+            assertEquals(3, coordinator.compact(slot));
+            assertEquals(0, slot.compactedSourceIndex(0));
+            assertEquals(1, slot.compactedSourceIndex(1));
+            assertEquals(2, slot.compactedSourceIndex(2));
+        }
+        coordinator.close();
+    }
+
+    @Test
+    void testCompactorPublishesUniqueIndexesAndCounters() throws Exception {
+        FakePlane plane = new FakePlane();
+        plane.compactIndexes = new int[] {0, 2};
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(1), plane);
+
+        try (NativeRequestPlaneCoordinator.BatchSlot slot =
+                coordinator.tryAcquireBatchSlot()) {
+            slot.prepareLatest(
+                    3,
+                    17L,
+                    java.util.Arrays.asList(new byte[] {1}, new byte[] {1}, new byte[] {2}));
+            assertEquals(2, coordinator.compact(slot));
+            assertEquals(0, slot.compactedSourceIndex(0));
+            assertEquals(2, slot.compactedSourceIndex(1));
+            assertEquals(1, coordinator.compactCalls());
+        }
+        coordinator.close();
+    }
+
     private static NativeRequestPlaneOptions options(int slots) {
         return new NativeRequestPlaneOptions(
                 true, "", "auto", 16, 1024, 1024, 4, 1024, 1024, 1, slots, false);
@@ -133,6 +174,7 @@ class NativeRequestPlaneCoordinatorTest {
         private int closeCalls;
         private long probeGeneration;
         private long featureBits;
+        private int[] compactIndexes;
 
         @Override
         public int fillBatch(
@@ -152,6 +194,19 @@ class NativeRequestPlaneCoordinatorTest {
                 probeGeneration = keys.generation(0);
             }
             return keys.entryCount();
+        }
+
+        @Override
+        public int compactBatch(
+                SerializedKeyBatch<?, ?> keys, ByteBuffer uniqueSourceIndexes) {
+            if (compactIndexes == null) {
+                return NativeRequestPlane.super.compactBatch(keys, uniqueSourceIndexes);
+            }
+            ByteBuffer output = uniqueSourceIndexes.duplicate().order(java.nio.ByteOrder.nativeOrder());
+            for (int index = 0; index < compactIndexes.length; index++) {
+                output.putInt(index * Integer.BYTES, compactIndexes[index]);
+            }
+            return compactIndexes.length;
         }
 
         @Override

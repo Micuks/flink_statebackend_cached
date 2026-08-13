@@ -215,6 +215,20 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
         nativeProbeResults);
   }
 
+  @Override
+  public int compactBatch(
+      SerializedKeyBatch<?, ?> keys, ByteBuffer uniqueSourceIndexes) {
+    Objects.requireNonNull(keys, "keys");
+    ByteBuffer nativeIndexes = directOutputSlice(uniqueSourceIndexes, "uniqueSourceIndexes");
+    requireCapacity(nativeIndexes, keys.entryCount(), Integer.BYTES, "uniqueSourceIndexes");
+    return nativeCompact(
+        requireOpenHandle(),
+        keys.arenaSlice(),
+        keys.metadataSlice(),
+        keys.entryCount(),
+        nativeIndexes);
+  }
+
   public String selectedKernel() {
     return nativeKernelName(requireOpenHandle());
   }
@@ -320,6 +334,13 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
       int count,
       ByteBuffer valueOutput,
       ByteBuffer probeResults);
+
+  private static native int nativeCompact(
+      long handle,
+      ByteBuffer keyArena,
+      ByteBuffer keyMetadata,
+      int count,
+      ByteBuffer uniqueSourceIndexes);
 
   private static native String nativeKernelName(long handle);
 

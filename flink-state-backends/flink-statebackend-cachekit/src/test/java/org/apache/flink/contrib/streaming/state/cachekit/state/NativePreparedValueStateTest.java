@@ -156,6 +156,78 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testNativeMailboxCompactsDuplicatesBeforeReservationAndMultiGet() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(null);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+        when(reader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
+                .thenAnswer(
+                        invocation -> {
+                            assertEquals(0, ((Integer) invocation.getArgument(1)).intValue());
+                            assertEquals(2, ((Integer) invocation.getArgument(2)).intValue());
+                            return Arrays.asList(
+                                    KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE),
+                                    KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE));
+                        });
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(mailboxOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        128,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true,
+                        1,
+                        1 << 20,
+                        coordinator,
+                        17);
+        state.setCurrentNamespace("window-mailbox");
+
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2", "k1")).run();
+
+        assertEquals(1, state.getNativeMailboxCompactBatchesForTesting());
+        assertEquals(3, state.getNativeMailboxCompactInputKeysForTesting());
+        assertEquals(2, state.getNativeMailboxCompactUniqueKeysForTesting());
+        assertEquals(0, state.getNativeMailboxCompactFallbacksForTesting());
+        assertEquals(1, state.getPrefetchKeysDeduplicatedForTesting());
+        verify(reader, times(1)).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+
+        state.close();
+        coordinator.close();
+        assertEquals(1, fakePlane.closeCalls);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testProbeFailureDisablesNativeAndFallsBackToAuthoritativeMultiGet() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
@@ -677,6 +749,26 @@ class NativePreparedValueStateTest {
                 writeThroughMutations);
     }
 
+    private static NativeRequestPlaneOptions mailboxOptions() {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                128,
+                4096,
+                4096,
+                16,
+                4096,
+                4096,
+                1,
+                2,
+                false,
+                false,
+                false,
+                false,
+                true);
+    }
+
     private static final class FakeNativeRequestPlane implements NativeRequestPlane {
 
         private final Map<NativeKey, StoredValue> values = new LinkedHashMap<>();
@@ -823,6 +915,28 @@ class NativePreparedValueStateTest {
                 valueOffset += length;
             }
             return keys.entryCount();
+        }
+
+        @Override
+        public int compactBatch(
+                SerializedKeyBatch<?, ?> keys, ByteBuffer uniqueSourceIndexes) {
+            ByteBuffer indexes = uniqueSourceIndexes.duplicate().order(ByteOrder.nativeOrder());
+            int written = 0;
+            for (int candidate = 0; candidate < keys.entryCount(); candidate++) {
+                NativeKey candidateKey = nativeKey(keys, candidate);
+                boolean duplicate = false;
+                for (int unique = 0; unique < written; unique++) {
+                    if (candidateKey.equals(nativeKey(keys, indexes.getInt(unique * Integer.BYTES)))) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate) {
+                    indexes.putInt(written * Integer.BYTES, candidate);
+                    written++;
+                }
+            }
+            return written;
         }
 
         @Override

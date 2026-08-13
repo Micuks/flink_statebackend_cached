@@ -268,6 +268,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Store EMPTY/SINGLE MapState snapshot metadata in the native request plane. "
                                                                         + "Java retains snapshot ownership, mutation generation, and iterator semantics.");
 
+        public static final ConfigOption<Boolean> NATIVE_MAILBOX_BATCH_ENABLED =
+                        ConfigOptions.key("state.backend.cachekit.native.mailbox-batch.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Use the runtime-selected native kernel to compact exact duplicate keys "
+                                                                        + "from Mailbox lookahead batches before reservation and MultiGet.");
+
 	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
 			.noDefaultValue()
@@ -432,7 +440,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_REQUEST_PLANE_AARCH64_ONLY),
                                 config.get(NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS),
                                 config.get(NATIVE_MAP_CACHE_ENABLED),
-                                config.get(NATIVE_MAP_SNAPSHOT_ENABLED));
+                                config.get(NATIVE_MAP_SNAPSHOT_ENABLED),
+                                config.get(NATIVE_MAILBOX_BATCH_ENABLED));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

@@ -44,6 +44,7 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(options.writeThroughMutations());
         assertFalse(options.mapCacheEnabled());
         assertFalse(options.mapSnapshotEnabled());
+        assertFalse(options.mailboxBatchEnabled());
     }
 
     @Test
@@ -61,6 +62,7 @@ class NativeRequestPlaneConfigurationTest {
                 CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_CACHE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_MAILBOX_BATCH_ENABLED, true);
 
         NativeRequestPlaneOptions options =
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(config);
@@ -77,6 +79,7 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(options.writeThroughMutations());
         assertTrue(options.mapCacheEnabled());
         assertTrue(options.mapSnapshotEnabled());
+        assertTrue(options.mailboxBatchEnabled());
     }
 
     @Test

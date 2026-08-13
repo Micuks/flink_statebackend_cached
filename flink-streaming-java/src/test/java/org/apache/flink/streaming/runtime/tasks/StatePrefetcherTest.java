@@ -21,6 +21,7 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashSet;
@@ -83,7 +84,30 @@ class StatePrefetcherTest {
         verify((ImmediatePrefetchHook) backend).prefetchForImmediateUse(keys);
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void testNativeMailboxPreservesDuplicateArrivalKeysForJniCompaction() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(NativeMailboxHook.class));
+        org.mockito.Mockito.when(((NativeMailboxHook) backend).nativeMailboxBatchEnabled())
+                .thenReturn(true);
+
+        Collection<Integer> keys = StatePrefetcher.newKeyCollection(backend, 4);
+        keys.add(1);
+        keys.add(2);
+        keys.add(1);
+
+        assertTrue(keys instanceof ArrayList);
+        assertEquals(Arrays.asList(1, 2, 1), keys);
+    }
+
     public interface ImmediatePrefetchHook {
         void prefetchForImmediateUse(Collection<?> keys);
+    }
+
+    public interface NativeMailboxHook {
+        boolean nativeMailboxBatchEnabled();
     }
 }

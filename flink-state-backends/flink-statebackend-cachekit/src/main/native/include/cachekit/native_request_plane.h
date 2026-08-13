@@ -141,6 +141,13 @@ public:
             const KeyView* keys, ProbeResult* results, std::size_t count) noexcept;
     ErrorCode FillBatch(
             const FillView* fills, FillResult* results, std::size_t count) noexcept;
+    // Keeps first occurrence order and writes source indexes for exact duplicate keys.
+    // Fingerprint and equality use the runtime-selected scalar/NEON/SVE kernel.
+    ErrorCode CompactBatch(
+            const KeyView* keys,
+            std::uint32_t* unique_source_indexes,
+            std::size_t count,
+            std::size_t* unique_count) const noexcept;
 
     void Clear() noexcept;
 

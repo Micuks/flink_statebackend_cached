@@ -72,6 +72,10 @@ public final class StatePrefetcher {
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             HAS_PREFETCHABLE_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Cache of optional native mailbox-batch capability probes per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            NATIVE_MAILBOX_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
     /** Sentinel field used to mark "no stateKeySelector1 available" in the field cache. */
     private static final Field NO_FIELD;
 
@@ -153,10 +157,11 @@ public final class StatePrefetcher {
                 return;
             }
 
-            // LinkedHashSet: dedup same-key records (arrival order preserved) so the backend
-            // never pays a lookup twice for one lookahead window.
+            // Native mailbox mode preserves the raw arrival-order key vector so the selected
+            // AArch64 kernel can compact exact duplicates after serialization. Other backends keep
+            // the original LinkedHashSet behavior.
             java.util.Collection keys =
-                    new java.util.LinkedHashSet(Math.max(2, toIndex - fromIndex));
+                    newKeyCollection(ksb, Math.max(2, toIndex - fromIndex));
             if (extractKeys(selector, buf, fromIndex, toIndex, keys) && !keys.isEmpty()) {
                 prefetchMethod.invoke(ksb, keys);
             }
@@ -273,6 +278,39 @@ public final class StatePrefetcher {
             }
         }
         return NO_METHOD;
+    }
+
+    private static boolean usesNativeMailboxBatch(KeyedStateBackend<?> backend) {
+        try {
+            Method method =
+                    NATIVE_MAILBOX_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(), StatePrefetcher::lookupNativeMailboxMethod);
+            if (method == NO_METHOD) {
+                return false;
+            }
+            Object result = method.invoke(backend);
+            return result instanceof Boolean && (Boolean) result;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    static java.util.Collection newKeyCollection(
+            KeyedStateBackend<?> backend, int expectedEntries) {
+        return usesNativeMailboxBatch(backend)
+                ? new java.util.ArrayList(expectedEntries)
+                : new java.util.LinkedHashSet(expectedEntries);
+    }
+
+    private static Method lookupNativeMailboxMethod(Class<?> backendClass) {
+        try {
+            Method method = backendClass.getMethod("nativeMailboxBatchEnabled");
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
     }
 
     private static Method findPrefetchMethod(KeyedStateBackend<?> backend) {

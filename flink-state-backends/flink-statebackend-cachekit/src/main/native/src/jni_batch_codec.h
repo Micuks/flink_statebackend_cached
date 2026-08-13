@@ -115,10 +115,20 @@ private:
             MutableBuffer value_output,
             MutableBuffer probe_results) noexcept;
 
+    friend BatchBridgeCode CompactDirectBatch(
+            RequestPlane* plane,
+            BatchScratch* scratch,
+            ConstBuffer key_arena,
+            ConstBuffer key_metadata,
+            std::size_t count,
+            MutableBuffer unique_source_indexes,
+            std::size_t* unique_count) noexcept;
+
     std::vector<KeyView> keys_;
     std::vector<FillView> fills_;
     std::vector<FillResult> fill_results_;
     std::vector<ProbeResult> probe_results_;
+    std::vector<std::uint32_t> unique_source_indexes_;
     std::size_t reserved_entries_ = 0;
     std::uint64_t growth_count_ = 0;
 };
@@ -150,6 +160,15 @@ BatchBridgeCode ProbeDirectBatch(
         std::size_t count,
         MutableBuffer value_output,
         MutableBuffer probe_results) noexcept;
+
+BatchBridgeCode CompactDirectBatch(
+        RequestPlane* plane,
+        BatchScratch* scratch,
+        ConstBuffer key_arena,
+        ConstBuffer key_metadata,
+        std::size_t count,
+        MutableBuffer unique_source_indexes,
+        std::size_t* unique_count) noexcept;
 
 BatchBridgeCode ProbeDirectBatch(
         RequestPlane* plane,

@@ -273,7 +273,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 !nativeRequestPlaneOptions.enabled()
                         || valueCacheMaxEntries > 0
                         || nativeRequestPlaneOptions.mapCacheEnabled()
-                        || nativeRequestPlaneOptions.mapSnapshotEnabled(),
+                        || nativeRequestPlaneOptions.mapSnapshotEnabled()
+                        || nativeRequestPlaneOptions.mailboxBatchEnabled(),
                 "CacheKit native request plane requires a positive ValueState cache or an enabled MapState native feature.");
 
         // fullOpt: initialize shared flush executors (daemon threads)
@@ -832,6 +833,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             }
             return false;
         }
+    }
+
+    /** Reflection seam used by the streaming mailbox to defer exact-key deduplication to JNI. */
+    public boolean nativeMailboxBatchEnabled() {
+        return nativeRequestPlaneCoordinator != null
+                && nativeRequestPlaneCoordinator.isActive()
+                && nativeRequestPlaneCoordinator.options().mailboxBatchEnabled();
     }
 
     @SuppressWarnings({ "unchecked", "rawtypes" })

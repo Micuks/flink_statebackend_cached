@@ -172,6 +172,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeFillKeys;
     private volatile long nativeFillRejected;
     private volatile long nativeFallbackBatches;
+    private volatile long nativeMailboxCompactBatches;
+    private volatile long nativeMailboxCompactInputKeys;
+    private volatile long nativeMailboxCompactUniqueKeys;
+    private volatile long nativeMailboxCompactFallbacks;
     private volatile long nativeRuntimeFailures;
     private volatile long nativeGenerationAdvances;
     private volatile long nativeMutationAttempts;
@@ -1010,6 +1014,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "nativeNegativeHits={} "
                             + "nativeMisses={} nativeFillBatches={} nativeFillKeys={} "
                             + "nativeFillRejected={} nativeFallbackBatches={} "
+                            + "nativeMailboxCompactBatches={} "
+                            + "nativeMailboxCompactInputKeys={} "
+                            + "nativeMailboxCompactUniqueKeys={} "
+                            + "nativeMailboxCompactFallbacks={} "
                             + "nativeRuntimeFailures={} nativeGenerationAdvances={} "
                             + "nativeMutationAttempts={} nativeMutationApplied={} "
                             + "nativeMutationWriteThroughSkipped={} "
@@ -1062,6 +1070,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeFillKeys,
                     nativeFillRejected,
                     nativeFallbackBatches,
+                    nativeMailboxCompactBatches,
+                    nativeMailboxCompactInputKeys,
+                    nativeMailboxCompactUniqueKeys,
+                    nativeMailboxCompactFallbacks,
                     nativeRuntimeFailures,
                     nativeGenerationAdvances,
                     nativeMutationAttempts,
@@ -1192,6 +1204,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return nativeFallbackBatches;
     }
 
+    long getNativeMailboxCompactBatchesForTesting() {
+        return nativeMailboxCompactBatches;
+    }
+
+    long getNativeMailboxCompactInputKeysForTesting() {
+        return nativeMailboxCompactInputKeys;
+    }
+
+    long getNativeMailboxCompactUniqueKeysForTesting() {
+        return nativeMailboxCompactUniqueKeys;
+    }
+
+    long getNativeMailboxCompactFallbacksForTesting() {
+        return nativeMailboxCompactFallbacks;
+    }
+
     long getNativeRuntimeFailuresForTesting() {
         return nativeRuntimeFailures;
     }
@@ -1305,6 +1333,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         java.util.ArrayList<byte[]> rocksDBKeys = new java.util.ArrayList<>();
         java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys = new java.util.ArrayList<>();
         final long gen = writeGen;
+        final boolean nativeMailboxBatch =
+                nativeRequestPlaneCoordinator != null
+                        && nativeRequestPlaneCoordinator.isActive()
+                        && nativeRequestPlaneCoordinator.options().mailboxBatchEnabled();
         RocksDBBatchValueReader<K, N, V> batchReader =
                 (RocksDBBatchValueReader<K, N, V>) delegate;
         try {
@@ -1318,9 +1350,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 KeyNamespaceKey<K, N> storageKey =
                         new KeyNamespaceKey<>(
                                 key, namespace, keySerializer, namespaceSerializer);
-                if (inFlight.putIfAbsent(storageKey, gen) != null) {
-                    prefetchKeysDeduplicated++;
-                    continue;
+                if (!nativeMailboxBatch) {
+                    if (inFlight.putIfAbsent(storageKey, gen) != null) {
+                        prefetchKeysDeduplicated++;
+                        continue;
+                    }
                 }
                 storageKeys.add(storageKey);
                 rocksDBKeys.add(
@@ -1332,11 +1366,34 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
         } catch (Throwable t) {
             prefetchBuildFailures++;
-            releaseReservations(storageKeys, gen);
+            if (!nativeMailboxBatch) {
+                releaseReservations(storageKeys, gen);
+            }
             return null; // Best-effort: an unserializable key aborts this batch only.
         }
         if (rocksDBKeys.isEmpty()) {
             return null;
+        }
+        NativeRequestPlaneCoordinator.BatchSlot nativeBatchSlot = null;
+        if (nativeMailboxBatch) {
+            nativeBatchSlot = compactNativeMailboxBatch(rocksDBKeys, storageKeys);
+            reservePreparedKeys(rocksDBKeys, storageKeys, gen);
+            if (rocksDBKeys.isEmpty()) {
+                if (nativeBatchSlot != null) {
+                    nativeBatchSlot.close();
+                }
+                return null;
+            }
+            if (nativeBatchSlot != null) {
+                try {
+                    nativeBatchSlot.prepareLatest(
+                            nativeStateId, nativeWriteEpoch.get(), rocksDBKeys);
+                } catch (IOException | RuntimeException failure) {
+                    nativeBatchSlot.close();
+                    nativeBatchSlot = null;
+                    nativeFallbackBatches++;
+                }
+            }
         }
         final V defaultValue;
         try {
@@ -1348,8 +1405,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         prefetchTasksBuilt++;
         prefetchKeysPrepared += rocksDBKeys.size();
-        final NativeRequestPlaneCoordinator.BatchSlot nativeBatchSlot =
-                prepareNativeBatchSlot(rocksDBKeys);
+        if (nativeBatchSlot == null) {
+            nativeBatchSlot = prepareNativeBatchSlot(rocksDBKeys);
+        }
+        final NativeRequestPlaneCoordinator.BatchSlot preparedNativeBatchSlot = nativeBatchSlot;
         return trackedTask(
                 storageKeys,
                 gen,
@@ -1359,8 +1418,67 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 storageKeys,
                                 defaultValue,
                                 gen,
-                                nativeBatchSlot),
-                nativeBatchSlot == null ? null : nativeBatchSlot::close);
+                                preparedNativeBatchSlot),
+                preparedNativeBatchSlot == null ? null : preparedNativeBatchSlot::close);
+    }
+
+    private NativeRequestPlaneCoordinator.BatchSlot compactNativeMailboxBatch(
+            java.util.ArrayList<byte[]> rocksDBKeys,
+            java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys) {
+        nativeMailboxCompactInputKeys += rocksDBKeys.size();
+        NativeRequestPlaneCoordinator.BatchSlot slot =
+                nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
+        if (slot == null) {
+            nativeFallbackBatches++;
+            nativeMailboxCompactFallbacks++;
+            return null;
+        }
+        try {
+            slot.prepareLatest(nativeStateId, nativeWriteEpoch.get(), rocksDBKeys);
+            int uniqueCount = nativeRequestPlaneCoordinator.compact(slot);
+            nativeMailboxCompactBatches++;
+            nativeMailboxCompactUniqueKeys += uniqueCount;
+            for (int target = 0; target < uniqueCount; target++) {
+                int source = slot.compactedSourceIndex(target);
+                rocksDBKeys.set(target, rocksDBKeys.get(source));
+                storageKeys.set(target, storageKeys.get(source));
+            }
+            int duplicates = rocksDBKeys.size() - uniqueCount;
+            if (duplicates > 0) {
+                prefetchKeysDeduplicated += duplicates;
+                rocksDBKeys.subList(uniqueCount, rocksDBKeys.size()).clear();
+                storageKeys.subList(uniqueCount, storageKeys.size()).clear();
+            }
+            return slot;
+        } catch (IOException | RuntimeException | LinkageError failure) {
+            nativeFallbackBatches++;
+            nativeMailboxCompactFallbacks++;
+            slot.close();
+            return null;
+        }
+    }
+
+    private void reservePreparedKeys(
+            java.util.ArrayList<byte[]> rocksDBKeys,
+            java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys,
+            long generation) {
+        int writeIndex = 0;
+        for (int readIndex = 0; readIndex < storageKeys.size(); readIndex++) {
+            KeyNamespaceKey<K, N> storageKey = storageKeys.get(readIndex);
+            if (inFlight.putIfAbsent(storageKey, generation) != null) {
+                prefetchKeysDeduplicated++;
+                continue;
+            }
+            if (writeIndex != readIndex) {
+                storageKeys.set(writeIndex, storageKey);
+                rocksDBKeys.set(writeIndex, rocksDBKeys.get(readIndex));
+            }
+            writeIndex++;
+        }
+        if (writeIndex < storageKeys.size()) {
+            storageKeys.subList(writeIndex, storageKeys.size()).clear();
+            rocksDBKeys.subList(writeIndex, rocksDBKeys.size()).clear();
+        }
     }
 
     /**

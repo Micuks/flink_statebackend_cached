@@ -21,6 +21,7 @@ package org.apache.flink.contrib.streaming.state.cachekit.nativeplane;
 import org.apache.flink.annotation.Internal;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 /** Narrow request-plane contract used by the ValueState integration and its differential tests. */
 @Internal
@@ -34,6 +35,22 @@ public interface NativeRequestPlane extends AutoCloseable {
 
     int probeBatch(
             SerializedKeyBatch<?, ?> keys, ByteBuffer valueOutput, ByteBuffer probeResults);
+
+    /**
+     * Writes source indexes for the first occurrence of each exact key in arrival order.
+     * Implementations without a native compactor retain every entry.
+     */
+    default int compactBatch(
+            SerializedKeyBatch<?, ?> keys, ByteBuffer uniqueSourceIndexes) {
+        ByteBuffer output = uniqueSourceIndexes.duplicate().order(ByteOrder.nativeOrder());
+        if (output.remaining() < keys.entryCount() * Integer.BYTES) {
+            throw new IllegalArgumentException("Unique-index output is too small.");
+        }
+        for (int index = 0; index < keys.entryCount(); index++) {
+            output.putInt(index * Integer.BYTES, index);
+        }
+        return keys.entryCount();
+    }
 
     String selectedKernel();
 

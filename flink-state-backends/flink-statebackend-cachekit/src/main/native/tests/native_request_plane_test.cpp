@@ -744,6 +744,32 @@ void TestCAbiBatchSmoke() {
     cachekit_native_plane_destroy(plane);
 }
 
+void TestCompactBatchPreservesFirstOccurrenceAndIdentity() {
+    Options options;
+    options.capacity_entries = 16;
+    options.key_arena_bytes = 1024;
+    options.value_arena_bytes = 1024;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+    const std::string a = "alpha";
+    const std::string b = "beta";
+    const KeyView keys[] = {
+            Key(7, 3, a),
+            Key(7, 3, b),
+            Key(7, 3, a),
+            Key(8, 3, a),
+            Key(7, 4, a),
+            Key(7, 3, b)};
+    std::uint32_t indexes[6] = {};
+    std::size_t unique_count = 0;
+    CHECK(plane->CompactBatch(keys, indexes, 6, &unique_count) == ErrorCode::kOk);
+    CHECK(unique_count == 4);
+    CHECK(indexes[0] == 0);
+    CHECK(indexes[1] == 1);
+    CHECK(indexes[2] == 3);
+    CHECK(indexes[3] == 4);
+}
+
 }  // namespace
 
 int main() {
@@ -759,6 +785,7 @@ int main() {
     TestUpdateCanReclaimFragmentedArena();
     TestCapacityAndOverflowRejection();
     TestRandomDifferentialAgainstReference();
+    TestCompactBatchPreservesFirstOccurrenceAndIdentity();
     TestCAbiBatchSmoke();
     std::cout << "all native request-plane tests passed" << std::endl;
     return 0;

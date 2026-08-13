@@ -848,6 +848,53 @@ ErrorCode RequestPlane::FillBatch(
     return ErrorCode::kOk;
 }
 
+ErrorCode RequestPlane::CompactBatch(
+        const KeyView* keys,
+        std::uint32_t* unique_source_indexes,
+        std::size_t count,
+        std::size_t* unique_count) const noexcept {
+    if (unique_count == nullptr ||
+        (count != 0 && (keys == nullptr || unique_source_indexes == nullptr)) ||
+        count > std::numeric_limits<std::uint32_t>::max()) {
+        return ErrorCode::kInvalidArgument;
+    }
+    std::size_t written = 0;
+    for (std::size_t index = 0; index < count; ++index) {
+        const KeyView& candidate = keys[index];
+        if (!IsValidBytes(candidate.data, candidate.size)) {
+            return ErrorCode::kInvalidArgument;
+        }
+        const std::uint32_t candidate_fingerprint =
+                impl_->kernel.fingerprint(
+                        candidate.state_id, candidate.data, candidate.size);
+        bool duplicate = false;
+        for (std::size_t prior = 0; prior < written; ++prior) {
+            const KeyView& existing = keys[unique_source_indexes[prior]];
+            if (existing.state_id != candidate.state_id ||
+                existing.generation != candidate.generation ||
+                existing.size != candidate.size) {
+                continue;
+            }
+            const std::uint32_t existing_fingerprint =
+                    impl_->kernel.fingerprint(
+                            existing.state_id, existing.data, existing.size);
+            if (candidate_fingerprint == existing_fingerprint &&
+                (candidate.size == 0 ||
+                 impl_->kernel.equal_bytes(
+                         candidate.data, existing.data, candidate.size))) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            unique_source_indexes[written++] =
+                    static_cast<std::uint32_t>(index);
+        }
+    }
+    *unique_count = written;
+    return ErrorCode::kOk;
+}
+
 void RequestPlane::Clear() noexcept {
     impl_->Clear();
 }

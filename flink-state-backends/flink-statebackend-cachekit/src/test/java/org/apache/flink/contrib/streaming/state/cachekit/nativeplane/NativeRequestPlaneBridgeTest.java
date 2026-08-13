@@ -121,6 +121,27 @@ class NativeRequestPlaneBridgeTest {
 
   @Test
   @EnabledIfSystemProperty(named = NativeRequestPlaneBridge.LIBRARY_PATH_PROPERTY, matches = ".+")
+  void testJniCompactorKeepsFirstExactOccurrence() throws Exception {
+    try (NativeRequestPlaneBridge bridge = openScalarBridge()) {
+      SerializedKeyBatch<Integer, String> keys = newBatch(6);
+      keys.append(7, 11L, 10, "same");
+      keys.append(7, 11L, 20, "other");
+      keys.append(7, 11L, 10, "same");
+      keys.append(8, 11L, 10, "same");
+      keys.append(7, 12L, 10, "same");
+      keys.append(7, 11L, 20, "other");
+
+      ByteBuffer indexes = directNative(6 * Integer.BYTES);
+      assertEquals(4, bridge.compactBatch(keys, indexes));
+      assertEquals(0, indexes.getInt(0));
+      assertEquals(1, indexes.getInt(Integer.BYTES));
+      assertEquals(3, indexes.getInt(2 * Integer.BYTES));
+      assertEquals(4, indexes.getInt(3 * Integer.BYTES));
+    }
+  }
+
+  @Test
+  @EnabledIfSystemProperty(named = NativeRequestPlaneBridge.LIBRARY_PATH_PROPERTY, matches = ".+")
   void testStateGenerationWatermarkRejectsStaleFillAfterEviction() throws Exception {
     try (NativeRequestPlaneBridge bridge =
         NativeRequestPlaneBridge.open(
