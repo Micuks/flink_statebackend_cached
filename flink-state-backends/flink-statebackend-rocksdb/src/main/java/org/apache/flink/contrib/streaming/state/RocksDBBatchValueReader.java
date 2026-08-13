@@ -27,9 +27,9 @@ import java.util.List;
  * Internal capability exposed by RocksDB {@code ValueState} for ordered batch reads.
  *
  * <p>Each result is the raw serialized value for the key and namespace at the same index. Missing
- * entries are represented by {@code null}. Implementations must preserve input order and list
- * size. Each non-null returned byte array is a caller-owned immutable snapshot: the implementation
- * must not reuse or mutate it after return, and callers that retain it must not mutate it.
+ * entries are represented by {@code null}. Implementations must preserve input order and list size.
+ * Each non-null returned byte array is a caller-owned immutable snapshot: the implementation must
+ * not reuse or mutate it after return, and callers that retain it must not mutate it.
  */
 @Internal
 public interface RocksDBBatchValueReader<K, N, V> {
