@@ -40,6 +40,7 @@ class NativeRequestPlaneConfigurationTest {
         assertEquals("auto", options.kernel());
         assertEquals(NativeRequestPlaneBridge.KERNEL_AUTO, options.kernelPreference());
         assertEquals(64, options.minBatchSize());
+        assertTrue(options.aarch64Only());
     }
 
     @Test
@@ -52,6 +53,7 @@ class NativeRequestPlaneConfigurationTest {
         config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_BATCH_ENTRIES, 17);
         config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_MIN_BATCH_SIZE, 5);
         config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_BATCH_SLOTS, 3);
+        config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_AARCH64_ONLY, false);
 
         NativeRequestPlaneOptions options =
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(config);
@@ -64,6 +66,7 @@ class NativeRequestPlaneConfigurationTest {
         assertEquals(17, options.batchEntries());
         assertEquals(5, options.minBatchSize());
         assertEquals(3, options.batchSlots());
+        assertFalse(options.aarch64Only());
     }
 
     @Test
