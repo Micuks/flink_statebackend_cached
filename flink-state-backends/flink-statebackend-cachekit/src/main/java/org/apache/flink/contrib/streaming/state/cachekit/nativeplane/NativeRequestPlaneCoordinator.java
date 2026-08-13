@@ -106,7 +106,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         for (int i = 0; i < options.batchSlots(); i++) {
             availableSlots.addLast(new BatchSlot(this, options));
         }
-        this.mutationSlot = new BatchSlot(this, options);
+        this.mutationSlot = new BatchSlot(this, options, true);
         this.mutationSlot.markLeased();
         // Capture audit metadata during construction. If either JNI query fails, open() closes the
         // bridge before ownership can escape. These getters are thereafter non-JNI and cannot make
@@ -296,6 +296,20 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         return fillCalls;
     }
 
+    long mutationSlotDirectBytesForTesting() {
+        return mutationSlot.allocatedDirectBytes;
+    }
+
+    long regularSlotDirectBytesForTesting() {
+        synchronized (availableSlots) {
+            BatchSlot slot = availableSlots.peekFirst();
+            if (slot == null) {
+                throw new IllegalStateException("No regular native batch slot is available.");
+            }
+            return slot.allocatedDirectBytes;
+        }
+    }
+
     public void disable(Throwable cause) {
         synchronized (planeLock) {
             disableLocked(Objects.requireNonNull(cause, "cause"));
@@ -354,10 +368,12 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         private final SerializedKeyBatch<byte[], byte[]> preparedKeys;
         private final SerializedKeyBatch<byte[], byte[]> missKeys;
         private final ByteBuffer probeValueOutput;
+        private final DirectBufferDataInputView probeValueInput;
         private final ByteBuffer probeResults;
         private final ByteBuffer valueArena;
         private final ByteBuffer valueMetadata;
         private final ByteBuffer fillResults;
+        private final long allocatedDirectBytes;
 
         private boolean leased;
         private int fillValueBytes;
@@ -365,42 +381,69 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
 
         private BatchSlot(
                 NativeRequestPlaneCoordinator owner, NativeRequestPlaneOptions options) {
+            this(owner, options, false);
+        }
+
+        private BatchSlot(
+                NativeRequestPlaneCoordinator owner,
+                NativeRequestPlaneOptions options,
+                boolean mutationOnly) {
             this.owner = owner;
-            ByteBuffer preparedArena = ByteBuffer.allocateDirect(options.batchKeyArenaBytes());
+            int entries = mutationOnly ? 1 : options.batchEntries();
+            int preparedArenaBytes = mutationOnly ? 0 : options.batchKeyArenaBytes();
+            int preparedMetadataBytes =
+                    mutationOnly
+                            ? 0
+                            : Math.multiplyExact(
+                                    entries, SerializedKeyBatch.METADATA_RECORD_BYTES);
+            int missArenaBytes = options.batchKeyArenaBytes();
+            int missMetadataBytes =
+                    Math.multiplyExact(entries, SerializedKeyBatch.METADATA_RECORD_BYTES);
+            int probeValueBytes = mutationOnly ? 0 : options.batchValueArenaBytes();
+            int probeResultBytes =
+                    mutationOnly
+                            ? 0
+                            : Math.multiplyExact(
+                                    entries,
+                                    NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
+            int valueArenaBytes = options.batchValueArenaBytes();
+            int valueMetadataBytes =
+                    Math.multiplyExact(
+                            entries, NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES);
+            int fillResultBytes =
+                    Math.multiplyExact(
+                            entries, NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES);
+
+            ByteBuffer preparedArena = ByteBuffer.allocateDirect(preparedArenaBytes);
             ByteBuffer preparedMetadata =
-                    ByteBuffer.allocateDirect(
-                            Math.multiplyExact(
-                                    options.batchEntries(),
-                                    SerializedKeyBatch.METADATA_RECORD_BYTES));
-            ByteBuffer missArena = ByteBuffer.allocateDirect(options.batchKeyArenaBytes());
-            ByteBuffer missMetadata =
-                    ByteBuffer.allocateDirect(
-                            Math.multiplyExact(
-                                    options.batchEntries(),
-                                    SerializedKeyBatch.METADATA_RECORD_BYTES));
+                    ByteBuffer.allocateDirect(preparedMetadataBytes);
+            ByteBuffer missArena = ByteBuffer.allocateDirect(missArenaBytes);
+            ByteBuffer missMetadata = ByteBuffer.allocateDirect(missMetadataBytes);
             this.preparedKeys =
                     SerializedKeyBatch.forSerializedBytes(preparedArena, preparedMetadata);
             this.missKeys = SerializedKeyBatch.forSerializedBytes(missArena, missMetadata);
-            this.probeValueOutput = ByteBuffer.allocateDirect(options.batchValueArenaBytes());
+            this.probeValueOutput = ByteBuffer.allocateDirect(probeValueBytes);
+            this.probeValueInput = new DirectBufferDataInputView(probeValueOutput);
             this.probeResults =
-                    ByteBuffer.allocateDirect(
-                                    Math.multiplyExact(
-                                            options.batchEntries(),
-                                            NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES))
+                    ByteBuffer.allocateDirect(probeResultBytes)
                             .order(ByteOrder.nativeOrder());
-            this.valueArena = ByteBuffer.allocateDirect(options.batchValueArenaBytes());
+            this.valueArena = ByteBuffer.allocateDirect(valueArenaBytes);
             this.valueMetadata =
-                    ByteBuffer.allocateDirect(
-                                    Math.multiplyExact(
-                                            options.batchEntries(),
-                                            NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES))
+                    ByteBuffer.allocateDirect(valueMetadataBytes)
                             .order(ByteOrder.nativeOrder());
             this.fillResults =
-                    ByteBuffer.allocateDirect(
-                                    Math.multiplyExact(
-                                            options.batchEntries(),
-                                            NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES))
+                    ByteBuffer.allocateDirect(fillResultBytes)
                             .order(ByteOrder.nativeOrder());
+            this.allocatedDirectBytes =
+                    (long) preparedArenaBytes
+                            + preparedMetadataBytes
+                            + missArenaBytes
+                            + missMetadataBytes
+                            + probeValueBytes
+                            + probeResultBytes
+                            + valueArenaBytes
+                            + valueMetadataBytes
+                            + fillResultBytes;
         }
 
         public void prepareLatest(
@@ -522,6 +565,32 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             source.position(offset);
             source.get(copy);
             return copy;
+        }
+
+        /**
+         * Returns a reusable zero-copy input view over one positive probe value.
+         *
+         * <p>The view belongs to this slot and is invalidated by the next call or slot reuse. The
+         * caller must deserialize it before releasing the slot.
+         */
+        public DirectBufferDataInputView probeValueInput(int index) {
+            checkPreparedIndex(index);
+            int base = index * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES;
+            int offset =
+                    probeResults.getInt(base + NativeRequestPlaneBridge.PROBE_RESULT_ARENA_OFFSET);
+            int length =
+                    probeResults.getInt(base + NativeRequestPlaneBridge.PROBE_RESULT_LENGTH_OFFSET);
+            if (offset < 0 || length < 0 || offset > probeValueOutput.capacity() - length) {
+                throw new IllegalStateException("Native probe returned an invalid value slice.");
+            }
+            probeValueInput.reset(offset, length);
+            return probeValueInput;
+        }
+
+        public int probeValueLength(int index) {
+            checkPreparedIndex(index);
+            int base = index * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES;
+            return probeResults.getInt(base + NativeRequestPlaneBridge.PROBE_RESULT_LENGTH_OFFSET);
         }
 
         public int fillStatus(int index) {

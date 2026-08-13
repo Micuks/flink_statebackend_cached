@@ -36,7 +36,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
@@ -134,11 +134,19 @@ class NativePreparedValueStateTest {
         assertEquals(3, state.getNativeBatchesActivatedForTesting());
         assertEquals(6, state.getNativeProbeKeysForTesting());
         assertEquals(2, state.getNativeHitsForTesting());
+        assertEquals(0, state.getNativeHitBytesCopiedForTesting());
+        assertEquals(
+                2L
+                        * KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE)
+                                .length,
+                state.getNativeHitBytesDirectForTesting());
         assertEquals(1, state.getNativeNegativeHitsForTesting());
         assertEquals(3, state.getNativeMissesForTesting());
         assertEquals(1, state.getNativeFillBatchesForTesting());
         assertEquals(3, state.getNativeFillKeysForTesting());
-        assertEquals(3, state.getPrefetchLazyValuesMaterializedForTesting());
+        // Two native hits are deserialized directly from the leased arena. Only the two
+        // RocksDB-miss values remain lazy-staged and are materialized on promotion.
+        assertEquals(2, state.getPrefetchLazyValuesMaterializedForTesting());
         assertFalse(state.supportsRecordKeyPrefetch());
 
         state.close();
@@ -460,6 +468,47 @@ class NativePreparedValueStateTest {
     }
 
     @Test
+    void testDelayedWorkerFillCannotRacePastPeerMutationAndEviction() throws Exception {
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane(1);
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(testOptions(), fakePlane);
+        byte[] key = new byte[] {1};
+        byte[] other = new byte[] {2};
+
+        assertEquals(
+                NativeRequestPlaneBridge.FILL_INSERTED,
+                coordinator.updateExactKey(37, 10, key, new byte[] {10}));
+        assertEquals(
+                NativeRequestPlaneBridge.FILL_INSERTED,
+                coordinator.updateExactKey(37, 11, other, new byte[] {11}));
+
+        try (NativeRequestPlaneCoordinator.BatchSlot delayed =
+                coordinator.tryAcquireBatchSlot()) {
+            assertNotNull(delayed);
+            delayed.prepareFill(
+                    37,
+                    5,
+                    java.util.Collections.singletonList(key),
+                    java.util.Collections.singletonList(new byte[] {5}));
+            assertEquals(1, coordinator.fill(delayed));
+            assertEquals(
+                    NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION,
+                    delayed.fillStatus(0));
+            assertEquals(NativeRequestPlaneBridge.ERROR_OK, delayed.fillError(0));
+        }
+
+        try (NativeRequestPlaneCoordinator.BatchSlot probe =
+                coordinator.tryAcquireBatchSlot()) {
+            assertNotNull(probe);
+            probe.prepareLatest(
+                    37, 11, java.util.Collections.singletonList(key));
+            assertEquals(1, coordinator.probe(probe));
+            assertEquals(NativeRequestPlaneBridge.PROBE_MISS, probe.probeStatus(0));
+        }
+        coordinator.close();
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void testMalformedProbeSliceDisablesNativeAndFallsBackBeforePublishing() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
@@ -614,11 +663,21 @@ class NativePreparedValueStateTest {
 
     private static final class FakeNativeRequestPlane implements NativeRequestPlane {
 
-        private final Map<NativeKey, StoredValue> values = new HashMap<>();
+        private final Map<NativeKey, StoredValue> values = new LinkedHashMap<>();
+        private final Map<Integer, Long> stateGenerationWatermarks = new LinkedHashMap<>();
+        private final int maxEntries;
         private boolean failNextProbe;
         private boolean corruptNextProbeSlice;
         private boolean internalErrorNextFill;
         private int closeCalls;
+
+        private FakeNativeRequestPlane() {
+            this(Integer.MAX_VALUE);
+        }
+
+        private FakeNativeRequestPlane(int maxEntries) {
+            this.maxEntries = maxEntries;
+        }
 
         @Override
         public int fillBatch(
@@ -657,6 +716,7 @@ class NativePreparedValueStateTest {
                 } else {
                     NativeKey key = nativeKey(keys, i);
                     StoredValue existing = values.get(key);
+                    Long stateWatermark = stateGenerationWatermarks.get(key.stateId);
                     if (key.generation == NativeRequestPlaneBridge.PROBE_LATEST_GENERATION) {
                         results.putInt(
                                 resultBase + NativeRequestPlaneBridge.FILL_RESULT_STATUS_OFFSET,
@@ -664,7 +724,8 @@ class NativePreparedValueStateTest {
                         results.putInt(
                                 resultBase + NativeRequestPlaneBridge.FILL_RESULT_ERROR_OFFSET,
                                 NativeRequestPlaneBridge.ERROR_INVALID_ARGUMENT);
-                    } else if (existing != null && key.generation < existing.generation) {
+                    } else if (stateWatermark != null
+                            && key.generation < stateWatermark) {
                         results.putInt(
                                 resultBase + NativeRequestPlaneBridge.FILL_RESULT_STATUS_OFFSET,
                                 NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION);
@@ -672,6 +733,13 @@ class NativePreparedValueStateTest {
                                 resultBase + NativeRequestPlaneBridge.FILL_RESULT_ERROR_OFFSET,
                                 NativeRequestPlaneBridge.ERROR_OK);
                     } else {
+                        if (stateWatermark == null || key.generation > stateWatermark) {
+                            stateGenerationWatermarks.put(key.stateId, key.generation);
+                        }
+                        if (existing == null && values.size() >= maxEntries) {
+                            NativeKey oldest = values.keySet().iterator().next();
+                            values.remove(oldest);
+                        }
                         values.put(
                                 key,
                                 new StoredValue(key.generation, negative, value));
@@ -758,6 +826,11 @@ class NativePreparedValueStateTest {
         }
 
         private void preload(int stateId, long generation, byte[] key, byte[] value) {
+            stateGenerationWatermarks.merge(stateId, generation, Math::max);
+            if (values.size() >= maxEntries) {
+                NativeKey oldest = values.keySet().iterator().next();
+                values.remove(oldest);
+            }
             values.put(
                     new NativeKey(stateId, generation, Arrays.copyOf(key, key.length)),
                     new StoredValue(
