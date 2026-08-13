@@ -527,6 +527,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
         return preaggEnabled;
     }
 
+    /** Whether this treatment consumes the bounded Java ValueState cache. */
+    public boolean requiresValueCache() {
+        return valueCacheEnabled || prefetchEnabled;
+    }
+
     private static String normalizeKernel(String kernel) {
         String normalized =
                 Objects.requireNonNull(kernel, "kernel").trim().toLowerCase(Locale.ROOT);

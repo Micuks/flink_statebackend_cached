@@ -48,6 +48,7 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(options.mailboxBatchEnabled());
         assertFalse(options.prefetchEnabled());
         assertFalse(options.preaggEnabled());
+        assertFalse(options.requiresValueCache());
     }
 
     @Test
@@ -89,6 +90,7 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(options.mailboxBatchEnabled());
         assertTrue(options.prefetchEnabled());
         assertTrue(options.preaggEnabled());
+        assertTrue(options.requiresValueCache());
     }
 
     @Test
@@ -162,5 +164,29 @@ class NativeRequestPlaneConfigurationTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(config));
+    }
+
+    @Test
+    void testOnlyValueCacheAndPrefetchRequireJavaValueCache() {
+        Configuration mailbox = new Configuration();
+        mailbox.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        mailbox.set(CacheKitStateBackendFactory.NATIVE_MAILBOX_BATCH_ENABLED, true);
+        assertFalse(
+                CacheKitStateBackendFactory.nativeRequestPlaneOptions(mailbox)
+                        .requiresValueCache());
+
+        Configuration preagg = new Configuration();
+        preagg.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        preagg.set(CacheKitStateBackendFactory.NATIVE_LOCAL_PREAGG_ENABLED, true);
+        assertFalse(
+                CacheKitStateBackendFactory.nativeRequestPlaneOptions(preagg)
+                        .requiresValueCache());
+
+        Configuration prefetch = new Configuration();
+        prefetch.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        prefetch.set(CacheKitStateBackendFactory.NATIVE_PREFETCH_ENABLED, true);
+        assertTrue(
+                CacheKitStateBackendFactory.nativeRequestPlaneOptions(prefetch)
+                        .requiresValueCache());
     }
 }

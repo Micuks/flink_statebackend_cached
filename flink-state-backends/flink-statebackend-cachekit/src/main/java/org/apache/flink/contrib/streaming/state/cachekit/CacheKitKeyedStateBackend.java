@@ -276,11 +276,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         Preconditions.checkNotNull(nativeRequestPlaneOptions, "nativeRequestPlaneOptions");
         Preconditions.checkArgument(
                 !nativeRequestPlaneOptions.enabled()
-                        || valueCacheMaxEntries > 0
-                        || nativeRequestPlaneOptions.mapCacheEnabled()
-                        || nativeRequestPlaneOptions.mapSnapshotEnabled(),
-                "CacheKit ValueState native features require a positive ValueState cache; "
-                        + "only isolated MapState native features may run without it.");
+                        || !nativeRequestPlaneOptions.requiresValueCache()
+                        || valueCacheMaxEntries > 0,
+                "Native ValueState cache and prefetch require a positive ValueState cache; "
+                        + "mailbox, pre-aggregation, and MapState native features may run "
+                        + "without it.");
 
         // fullOpt: initialize shared flush executors (daemon threads)
         ExecutorService initializedListExecutor = null;
