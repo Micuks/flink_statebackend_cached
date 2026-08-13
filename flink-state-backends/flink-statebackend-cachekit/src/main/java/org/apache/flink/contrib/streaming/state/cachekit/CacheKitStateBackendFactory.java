@@ -252,6 +252,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Also serialize and publish every authoritative ValueState mutation to the native plane. "
                                                                         + "Disabled by default: exact-generation probes invalidate older native entries without duplicate JNI writes.");
 
+        public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_ENABLED =
+                        ConfigOptions.key("state.backend.cachekit.native.value-cache.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Enable the independently attributable native ValueState point-cache path. "
+                                                                        + "Disabled by default so Mailbox, Prefetch, and LocalPreAgg treatments do not implicitly enable VCache.");
+
         public static final ConfigOption<Boolean> NATIVE_MAP_CACHE_ENABLED =
                         ConfigOptions.key("state.backend.cachekit.native.map-cache.enabled")
                                         .booleanType()
@@ -455,6 +463,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_REQUEST_PLANE_BATCH_SLOTS),
                                 config.get(NATIVE_REQUEST_PLANE_AARCH64_ONLY),
                                 config.get(NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS),
+                                config.get(NATIVE_VALUE_CACHE_ENABLED),
                                 config.get(NATIVE_MAP_CACHE_ENABLED),
                                 config.get(NATIVE_MAP_SNAPSHOT_ENABLED),
                                 config.get(NATIVE_PREFETCH_ENABLED),

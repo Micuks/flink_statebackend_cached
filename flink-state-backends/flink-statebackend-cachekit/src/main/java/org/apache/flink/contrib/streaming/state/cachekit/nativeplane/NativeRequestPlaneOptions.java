@@ -49,6 +49,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final int batchSlots;
     private final boolean aarch64Only;
     private final boolean writeThroughMutations;
+    private final boolean valueCacheEnabled;
     private final boolean mapCacheEnabled;
     private final boolean mapSnapshotEnabled;
     private final boolean prefetchEnabled;
@@ -311,6 +312,48 @@ public final class NativeRequestPlaneOptions implements Serializable {
             boolean prefetchEnabled,
             boolean mailboxBatchEnabled,
             boolean preaggEnabled) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                aarch64Only,
+                writeThroughMutations,
+                enabled,
+                mapCacheEnabled,
+                mapSnapshotEnabled,
+                prefetchEnabled,
+                mailboxBatchEnabled,
+                preaggEnabled);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only,
+            boolean writeThroughMutations,
+            boolean valueCacheEnabled,
+            boolean mapCacheEnabled,
+            boolean mapSnapshotEnabled,
+            boolean prefetchEnabled,
+            boolean mailboxBatchEnabled,
+            boolean preaggEnabled) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
         this.kernel = normalizeKernel(kernel);
@@ -344,6 +387,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
         this.batchSlots = batchSlots;
         this.aarch64Only = aarch64Only;
         this.writeThroughMutations = writeThroughMutations;
+        if (valueCacheEnabled && !enabled) {
+            throw new IllegalArgumentException(
+                    "Native ValueState cache requires the native request plane to be enabled.");
+        }
+        this.valueCacheEnabled = valueCacheEnabled;
         if (mapCacheEnabled && !enabled) {
             throw new IllegalArgumentException(
                     "Native MapState cache requires the native request plane to be enabled.");
@@ -451,6 +499,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
      */
     public boolean writeThroughMutations() {
         return writeThroughMutations;
+    }
+
+    /** Whether the separately gated native ValueState point-cache path is enabled. */
+    public boolean valueCacheEnabled() {
+        return valueCacheEnabled;
     }
 
     /** Whether the separately gated native MapState point-cache path is enabled. */

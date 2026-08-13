@@ -751,9 +751,26 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
         }
 
+        // 4c. Independently gated native ValueState point cache. This is deliberately separate
+        // from native Prefetch/MultiGet so Mailbox, Prefetch, and PreAgg treatments can be
+        // measured without implicitly enabling VCache.
+        NativePointCacheResult<V> nativePoint =
+                probeNativeValueCache(currentKey, currentNamespace);
+        if (nativePoint.hit) {
+            KeyNamespaceKey<K, N> storageKey =
+                    new KeyNamespaceKey<>(
+                            currentKey, currentNamespace, keySerializer, namespaceSerializer);
+            CachedValue<V> newValue = CachedValue.of(storageKey, nativePoint.value, false);
+            l1Cache.put(storageKey, newValue);
+            updateSticky(storageKey, newValue);
+            recordAccess(true);
+            return newValue.valueOrNull();
+        }
+
         // 5. Miss -> Load from Delegate
         V loaded = delegate.value();
         recordAccess(false); // Miss
+        fillNativeValueCache(currentKey, currentNamespace, loaded);
 
         // 6. Update L1 (Clean)
         // Even if bypassing (sampled), we populate L1 to allow hit rate recovery
@@ -764,6 +781,113 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         updateSticky(storageKey, newValue);
         return loaded;
+    }
+
+    @SuppressWarnings("unchecked")
+    private NativePointCacheResult<V> probeNativeValueCache(K key, N namespace) {
+        if (nativeRequestPlaneCoordinator == null
+                || !nativeRequestPlaneCoordinator.isActive()
+                || !nativeRequestPlaneCoordinator.options().valueCacheEnabled()
+                || key == null
+                || namespace == null
+                || !(delegate instanceof RocksDBBatchValueReader<?, ?, ?>)) {
+            return NativePointCacheResult.miss();
+        }
+        NativeRequestPlaneCoordinator.BatchSlot slot =
+                nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
+        if (slot == null) {
+            nativeFallbackBatches++;
+            return NativePointCacheResult.miss();
+        }
+        try (NativeRequestPlaneCoordinator.BatchSlot ignored = slot) {
+            RocksDBBatchValueReader<K, N, V> batchReader =
+                    (RocksDBBatchValueReader<K, N, V>) delegate;
+            byte[] preparedKey =
+                    batchReader.serializeBatchKeyAndNamespace(
+                            key,
+                            namespace,
+                            nativeMutationKeySerializer,
+                            nativeMutationNamespaceSerializer);
+            slot.prepareLatest(
+                    nativeStateId,
+                    nativeWriteEpoch.get(),
+                    java.util.Collections.singletonList(preparedKey));
+            int processed = nativeRequestPlaneCoordinator.probe(slot);
+            if (processed != 1 || slot.probeError(0) != NativeRequestPlaneBridge.ERROR_OK) {
+                throw new IllegalStateException(
+                        "Native ValueState point probe returned an invalid result.");
+            }
+            nativeBatchesActivated++;
+            nativeProbeKeys++;
+            int status = slot.probeStatus(0);
+            if (status == NativeRequestPlaneBridge.PROBE_HIT) {
+                V value = deserializeNativeProbeValue(slot, 0, true);
+                nativeHits++;
+                nativeHitBytesDirect += slot.probeValueLength(0);
+                return NativePointCacheResult.hit(value);
+            }
+            if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
+                nativeNegativeHits++;
+                V defaultValue = batchReader.getBatchDefaultValue();
+                return NativePointCacheResult.hit(
+                        deserializeImmediateValueOrCopyDefault(null, defaultValue));
+            }
+            if (status == NativeRequestPlaneBridge.PROBE_MISS) {
+                nativeMisses++;
+                return NativePointCacheResult.miss();
+            }
+            throw new IllegalStateException(
+                    "Native ValueState point probe returned status=" + status + ".");
+        } catch (Exception | LinkageError failure) {
+            nativeRuntimeFailures++;
+            nativeFallbackBatches++;
+            nativeRequestPlaneCoordinator.disable(failure);
+            return NativePointCacheResult.miss();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void fillNativeValueCache(K key, N namespace, V loaded) {
+        if (nativeRequestPlaneCoordinator == null
+                || !nativeRequestPlaneCoordinator.isActive()
+                || !nativeRequestPlaneCoordinator.options().valueCacheEnabled()
+                || key == null
+                || namespace == null
+                || !(delegate instanceof RocksDBBatchValueReader<?, ?, ?>)) {
+            return;
+        }
+        try {
+            RocksDBBatchValueReader<K, N, V> batchReader =
+                    (RocksDBBatchValueReader<K, N, V>) delegate;
+            byte[] preparedKey =
+                    batchReader.serializeBatchKeyAndNamespace(
+                            key,
+                            namespace,
+                            nativeMutationKeySerializer,
+                            nativeMutationNamespaceSerializer);
+            byte[] serializedValue =
+                    loaded == null
+                            ? null
+                            : KvStateSerializer.serializeValue(
+                                    loaded, nativeMutationValueSerializer);
+            int status =
+                    nativeRequestPlaneCoordinator.updateExactKey(
+                            nativeStateId,
+                            nativeWriteEpoch.get(),
+                            preparedKey,
+                            serializedValue);
+            if (status == NativeRequestPlaneBridge.FILL_INSERTED
+                    || status == NativeRequestPlaneBridge.FILL_UPDATED) {
+                nativeFillBatches++;
+                nativeFillKeys++;
+            } else {
+                nativeFillRejected++;
+            }
+        } catch (Exception | LinkageError failure) {
+            nativeRuntimeFailures++;
+            nativeFillRejected++;
+            nativeRequestPlaneCoordinator.disable(failure);
+        }
     }
 
     @Override
@@ -2561,6 +2685,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             K key, N namespace, V value, long nativeEpoch) {
         if (nativeRequestPlaneCoordinator == null
                 || !nativeRequestPlaneCoordinator.isActive()
+                || !nativeRequestPlaneCoordinator.options().valueCacheEnabled()
                 || !(delegate instanceof RocksDBBatchValueReader<?, ?, ?>)) {
             return;
         }
@@ -2606,6 +2731,28 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         Throwable cause = nativeRequestPlaneCoordinator.disableCause();
         return cause.getClass().getSimpleName() + ":" + String.valueOf(cause.getMessage());
+    }
+
+    private static final class NativePointCacheResult<V> {
+        private static final NativePointCacheResult<?> MISS =
+                new NativePointCacheResult<>(false, null);
+
+        private final boolean hit;
+        private final V value;
+
+        private NativePointCacheResult(boolean hit, V value) {
+            this.hit = hit;
+            this.value = value;
+        }
+
+        @SuppressWarnings("unchecked")
+        private static <V> NativePointCacheResult<V> miss() {
+            return (NativePointCacheResult<V>) MISS;
+        }
+
+        private static <V> NativePointCacheResult<V> hit(V value) {
+            return new NativePointCacheResult<>(true, value);
+        }
     }
 
     private static final class KeyNamespaceKey<K, N> {

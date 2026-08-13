@@ -42,6 +42,7 @@ class NativeRequestPlaneConfigurationTest {
         assertEquals(64, options.minBatchSize());
         assertTrue(options.aarch64Only());
         assertFalse(options.writeThroughMutations());
+        assertFalse(options.valueCacheEnabled());
         assertFalse(options.mapCacheEnabled());
         assertFalse(options.mapSnapshotEnabled());
         assertFalse(options.mailboxBatchEnabled());
@@ -62,6 +63,7 @@ class NativeRequestPlaneConfigurationTest {
         config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_AARCH64_ONLY, false);
         config.set(
                 CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_CACHE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_PREFETCH_ENABLED, true);
@@ -81,6 +83,7 @@ class NativeRequestPlaneConfigurationTest {
         assertEquals(3, options.batchSlots());
         assertFalse(options.aarch64Only());
         assertTrue(options.writeThroughMutations());
+        assertTrue(options.valueCacheEnabled());
         assertTrue(options.mapCacheEnabled());
         assertTrue(options.mapSnapshotEnabled());
         assertTrue(options.mailboxBatchEnabled());
@@ -135,6 +138,16 @@ class NativeRequestPlaneConfigurationTest {
     void testNativeMapCacheFailsClosedWithoutNativeRuntime() {
         Configuration config = new Configuration();
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_CACHE_ENABLED, true);
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(config));
+    }
+
+    @Test
+    void testNativeValueCacheFailsClosedWithoutNativeRuntime() {
+        Configuration config = new Configuration();
+        config.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ENABLED, true);
 
         assertThrows(
                 IllegalArgumentException.class,

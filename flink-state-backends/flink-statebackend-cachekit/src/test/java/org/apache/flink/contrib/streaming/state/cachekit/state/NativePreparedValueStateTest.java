@@ -60,6 +60,123 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testIndependentNativeValueCacheServesPreparedPointHit() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("point-key");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(7);
+
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        byte[] preparedKey =
+                KvStateSerializer.serializeKeyAndNamespace(
+                        "point-key",
+                        StringSerializer.INSTANCE,
+                        "point-ns",
+                        StringSerializer.INSTANCE);
+        fakePlane.preload(
+                41,
+                0,
+                preparedKey,
+                KvStateSerializer.serializeValue(42, IntSerializer.INSTANCE));
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(valueCacheOptions(true), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        128,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true,
+                        1,
+                        1 << 20,
+                        coordinator,
+                        41);
+        state.setCurrentNamespace("point-ns");
+
+        assertEquals(42, state.value());
+        verify(delegate, never()).value();
+        assertEquals(1, state.getNativeProbeKeysForTesting());
+        assertEquals(1, state.getNativeHitsForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testDisabledNativeValueCacheFallsThroughToDelegate() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("point-key");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(7);
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(valueCacheOptions(false), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        128,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true,
+                        1,
+                        1 << 20,
+                        coordinator,
+                        42);
+        state.setCurrentNamespace("point-ns");
+
+        assertEquals(7, state.value());
+        verify(delegate, times(1)).value();
+        assertEquals(0, state.getNativeProbeKeysForTesting());
+        assertEquals(0, state.getNativeFillKeysForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testProbeCompactsMissesAndReusesPositiveAndNegativeHitsWithNamespace()
             throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
@@ -806,6 +923,29 @@ class NativePreparedValueStateTest {
                 2,
                 false,
                 writeThroughMutations);
+    }
+
+    private static NativeRequestPlaneOptions valueCacheOptions(boolean valueCacheEnabled) {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                128,
+                4096,
+                4096,
+                16,
+                4096,
+                4096,
+                1,
+                2,
+                false,
+                false,
+                valueCacheEnabled,
+                false,
+                false,
+                false,
+                false,
+                false);
     }
 
     private static NativeRequestPlaneOptions mailboxOptions() {
