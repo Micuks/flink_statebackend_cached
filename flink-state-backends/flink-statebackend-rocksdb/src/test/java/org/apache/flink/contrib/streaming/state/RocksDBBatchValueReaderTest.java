@@ -118,7 +118,7 @@ public class RocksDBBatchValueReaderTest {
                                 VoidNamespace.INSTANCE,
                                 IntSerializer.INSTANCE,
                                 VoidNamespaceSerializer.INSTANCE);
-                DataOutputSerializer direct = new DataOutputSerializer(32);
+                PositionedSerializer direct = new PositionedSerializer(32);
                 reader.serializeBatchKeyAndNamespace(
                         key,
                         VoidNamespace.INSTANCE,
@@ -143,6 +143,19 @@ public class RocksDBBatchValueReaderTest {
                 IntSerializer.INSTANCE,
                 VoidNamespace.INSTANCE,
                 VoidNamespaceSerializer.INSTANCE);
+    }
+
+    private static final class PositionedSerializer extends DataOutputSerializer
+            implements PositionedDataOutputView {
+
+        private PositionedSerializer(int startSize) {
+            super(startSize);
+        }
+
+        @Override
+        public int position() {
+            return length();
+        }
     }
 
     private static String deserializeValue(byte[] value) throws Exception {

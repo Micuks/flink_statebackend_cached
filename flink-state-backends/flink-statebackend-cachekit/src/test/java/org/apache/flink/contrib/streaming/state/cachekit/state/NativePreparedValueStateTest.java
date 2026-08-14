@@ -21,6 +21,7 @@ package org.apache.flink.contrib.streaming.state.cachekit.state;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.contrib.streaming.state.PositionedDataOutputView;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlane;
@@ -48,6 +49,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -82,7 +84,6 @@ class NativePreparedValueStateTest {
                                         StringSerializer.INSTANCE,
                                         invocation.getArgument(1),
                                         StringSerializer.INSTANCE));
-
         FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
         byte[] preparedKey =
                 KvStateSerializer.serializeKeyAndNamespace(
@@ -303,6 +304,20 @@ class NativePreparedValueStateTest {
                                     KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE),
                                     KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE));
                         });
+        doAnswer(
+                        invocation -> {
+                            byte[] serialized =
+                                    KvStateSerializer.serializeKeyAndNamespace(
+                                            invocation.getArgument(0),
+                                            StringSerializer.INSTANCE,
+                                            invocation.getArgument(1),
+                                            StringSerializer.INSTANCE);
+                            ((PositionedDataOutputView) invocation.getArgument(4))
+                                    .write(serialized);
+                            return null;
+                        })
+                .when(reader)
+                .serializeBatchKeyAndNamespace(any(), any(), any(), any(), any());
 
         FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
         NativeRequestPlaneCoordinator coordinator =

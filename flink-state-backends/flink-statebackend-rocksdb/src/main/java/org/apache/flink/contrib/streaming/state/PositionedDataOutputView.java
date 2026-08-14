@@ -1,11 +1,11 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information regarding
- * copyright ownership.  The ASF licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may not use
- * this file except in compliance with the License.  You may obtain
- * a copy of the License at
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -16,14 +16,14 @@
  * limitations under the License.
  */
 
-package org.apache.flink.core.memory;
+package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.core.memory.DataOutputView;
 
-/** A transient output view that exposes its current relative write position. */
+/** A reusable output view that exposes the current byte position. */
 @Internal
 public interface PositionedDataOutputView extends DataOutputView {
 
-    /** Returns the number of bytes written in the current logical region. */
     int position();
 }

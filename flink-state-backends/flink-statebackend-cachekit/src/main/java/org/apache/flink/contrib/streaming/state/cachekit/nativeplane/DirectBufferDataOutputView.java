@@ -19,9 +19,9 @@
 package org.apache.flink.contrib.streaming.state.cachekit.nativeplane;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.contrib.streaming.state.PositionedDataOutputView;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
-import org.apache.flink.core.memory.PositionedDataOutputView;
 
 import java.io.EOFException;
 import java.io.IOException;
