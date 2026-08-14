@@ -97,6 +97,55 @@ class SerializedKeyBatchTest {
     }
 
     @Test
+    void testDirectWriterAppendsExactBytesWithoutHeapIntermediate() throws Exception {
+        SerializedKeyBatch<byte[], byte[]> batch =
+                SerializedKeyBatch.forSerializedBytes(
+                        ByteBuffer.allocateDirect(64),
+                        ByteBuffer.allocateDirect(SerializedKeyBatch.METADATA_RECORD_BYTES));
+
+        batch.appendSerialized(
+                41,
+                123L,
+                output -> {
+                    output.writeInt(0x01020304);
+                    output.writeByte(44);
+                    output.writeLong(0x1112131415161718L);
+                });
+
+        ByteBuffer expected = ByteBuffer.allocate(13).order(ByteOrder.BIG_ENDIAN);
+        expected.putInt(0x01020304).put((byte) 44).putLong(0x1112131415161718L);
+        assertArrayEquals(expected.array(), copyBytes(batch.arenaSlice()));
+        assertEquals(41, batch.stateId(0));
+        assertEquals(123L, batch.generation(0));
+        assertEquals(13, batch.serializedLength(0));
+    }
+
+    @Test
+    void testDirectWriterFailureRollsBackAndRemainsReusable() throws Exception {
+        SerializedKeyBatch<byte[], byte[]> batch =
+                SerializedKeyBatch.forSerializedBytes(
+                        ByteBuffer.allocateDirect(8),
+                        ByteBuffer.allocateDirect(SerializedKeyBatch.METADATA_RECORD_BYTES));
+
+        assertThrows(
+                IOException.class,
+                () ->
+                        batch.appendSerialized(
+                                1,
+                                1L,
+                                output -> {
+                                    output.writeInt(7);
+                                    throw new IOException("expected");
+                                }));
+        assertEquals(0, batch.entryCount());
+        assertEquals(0, batch.arenaBytesWritten());
+
+        batch.appendSerialized(2, 2L, output -> output.writeLong(9L));
+        assertEquals(1, batch.entryCount());
+        assertEquals(8, batch.arenaBytesWritten());
+    }
+
+    @Test
     void testPreparedRocksDbByteOverflowRollsBackAndBatchRemainsReusable() throws Exception {
         SerializedKeyBatch<byte[], byte[]> batch =
                 SerializedKeyBatch.forSerializedBytes(

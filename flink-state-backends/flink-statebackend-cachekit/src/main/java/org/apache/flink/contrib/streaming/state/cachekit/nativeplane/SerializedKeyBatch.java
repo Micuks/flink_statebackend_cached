@@ -41,6 +41,12 @@ import java.util.Objects;
 @Internal
 public final class SerializedKeyBatch<K, N> {
 
+    /** Serializes one exact key directly into the reusable direct arena. */
+    @FunctionalInterface
+    public interface DirectKeyWriter {
+        void write(DirectBufferDataOutputView output) throws IOException;
+    }
+
     public static final int STATE_ID_OFFSET = 0;
     public static final int RESERVED_OFFSET = 4;
     public static final int GENERATION_OFFSET = 8;
@@ -129,6 +135,34 @@ public final class SerializedKeyBatch<K, N> {
             arenaOutput.write(serializedKey);
             return commitMetadata(
                     stateId, generation, arenaCheckpoint, serializedKey.length);
+        } catch (IOException | RuntimeException failure) {
+            arenaOutput.truncateTo(arenaCheckpoint);
+            throw failure;
+        }
+    }
+
+    /**
+     * Appends one exact key without first materializing a heap {@code byte[]}.
+     *
+     * <p>The writer must emit the complete authoritative identity, including any key-group,
+     * namespace, or state-specific separators required by its caller. A failed writer is
+     * transactional: no metadata becomes visible and the arena position is restored.
+     */
+    public int appendSerialized(int stateId, long generation, DirectKeyWriter writer)
+            throws IOException {
+        Objects.requireNonNull(writer, "writer");
+        if (entryCount >= maxEntries) {
+            throw new EOFException(
+                    "Direct metadata capacity is exhausted at " + entryCount + " entries.");
+        }
+        int arenaCheckpoint = arenaOutput.checkpoint();
+        try {
+            writer.write(arenaOutput);
+            return commitMetadata(
+                    stateId,
+                    generation,
+                    arenaCheckpoint,
+                    arenaOutput.position() - arenaCheckpoint);
         } catch (IOException | RuntimeException failure) {
             arenaOutput.truncateTo(arenaCheckpoint);
             throw failure;

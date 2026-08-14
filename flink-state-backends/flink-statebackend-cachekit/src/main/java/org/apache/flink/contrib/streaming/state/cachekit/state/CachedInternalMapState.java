@@ -823,7 +823,6 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             return null;
         }
         try {
-            byte[] nativeKey = serializeNativeSnapshotKey(currentKey, currentNamespace);
             NativeRequestPlaneCoordinator.BatchSlot slot =
                     nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
             if (slot == null) {
@@ -834,7 +833,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 slot.prepareLatest(
                         nativeSnapshotStateId,
                         nativeGeneration,
-                        Collections.singletonList(nativeKey));
+                        output -> {
+                            keySerializer.serialize(currentKey, output);
+                            output.writeByte(44);
+                            namespaceSerializer.serialize(currentNamespace, output);
+                        });
                 nativeSnapshotProbes++;
                 int processed = nativeRequestPlaneCoordinator.probe(slot);
                 if (processed != 1

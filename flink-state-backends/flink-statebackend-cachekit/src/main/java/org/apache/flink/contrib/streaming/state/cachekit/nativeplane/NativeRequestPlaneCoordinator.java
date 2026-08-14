@@ -541,6 +541,23 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             }
         }
 
+        /** Prepares one exact key by serializing directly into this slot's direct arena. */
+        public void prepareLatest(
+                int stateId,
+                long fillGeneration,
+                SerializedKeyBatch.DirectKeyWriter directKeyWriter)
+                throws IOException {
+            requireLeased();
+            preparedKeys.clear();
+            compactedEntryCount = 0;
+            preparedFillGeneration = fillGeneration;
+            long probeGeneration =
+                    owner.options.writeThroughMutations()
+                            ? NativeRequestPlaneBridge.PROBE_LATEST_GENERATION
+                            : fillGeneration;
+            preparedKeys.appendSerialized(stateId, probeGeneration, directKeyWriter);
+        }
+
         public void prepareFill(
                 int stateId,
                 long generation,
