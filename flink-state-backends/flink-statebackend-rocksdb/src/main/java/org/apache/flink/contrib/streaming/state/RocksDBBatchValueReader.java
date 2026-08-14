@@ -20,6 +20,7 @@ package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.core.memory.PositionedDataOutputView;
 
 import java.util.List;
 
@@ -47,6 +48,24 @@ public interface RocksDBBatchValueReader<K, N, V> {
             TypeSerializer<K> safeKeySerializer,
             TypeSerializer<N> safeNamespaceSerializer)
             throws Exception;
+
+    /**
+     * Serializes one exact RocksDB key directly into a caller-owned reusable output region.
+     *
+     * <p>The compatibility fallback copies the existing byte-array result. Implementations should
+     * override this method when they can emit the composite key without an intermediate array.
+     */
+    default void serializeBatchKeyAndNamespace(
+            K key,
+            N namespace,
+            TypeSerializer<K> safeKeySerializer,
+            TypeSerializer<N> safeNamespaceSerializer,
+            PositionedDataOutputView output)
+            throws Exception {
+        output.write(
+                serializeBatchKeyAndNamespace(
+                        key, namespace, safeKeySerializer, safeNamespaceSerializer));
+    }
 
     byte[] getSerializedValueByRocksDBKey(byte[] rocksDBKey) throws Exception;
 

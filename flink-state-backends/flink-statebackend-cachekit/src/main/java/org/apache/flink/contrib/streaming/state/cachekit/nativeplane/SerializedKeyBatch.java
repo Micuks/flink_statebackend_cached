@@ -47,6 +47,12 @@ public final class SerializedKeyBatch<K, N> {
         void write(DirectBufferDataOutputView output) throws IOException;
     }
 
+    /** Serializes one indexed exact key directly into the reusable arena. */
+    @FunctionalInterface
+    public interface IndexedDirectKeyWriter {
+        void write(int index, DirectBufferDataOutputView output) throws IOException;
+    }
+
     public static final int STATE_ID_OFFSET = 0;
     public static final int RESERVED_OFFSET = 4;
     public static final int GENERATION_OFFSET = 8;

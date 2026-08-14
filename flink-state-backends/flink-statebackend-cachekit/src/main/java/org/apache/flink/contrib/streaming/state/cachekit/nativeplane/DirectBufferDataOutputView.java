@@ -21,6 +21,7 @@ package org.apache.flink.contrib.streaming.state.cachekit.nativeplane;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
+import org.apache.flink.core.memory.PositionedDataOutputView;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -40,7 +41,7 @@ import java.util.Objects;
  * Methods that return a {@link ByteBuffer} create a view object but do not copy payload bytes.
  */
 @Internal
-public final class DirectBufferDataOutputView implements DataOutputView {
+public final class DirectBufferDataOutputView implements PositionedDataOutputView {
 
     private final ByteBuffer buffer;
 
@@ -61,6 +62,7 @@ public final class DirectBufferDataOutputView implements DataOutputView {
     }
 
     /** Returns the number of bytes written since construction or the last {@link #reset()}. */
+    @Override
     public int position() {
         return buffer.position();
     }

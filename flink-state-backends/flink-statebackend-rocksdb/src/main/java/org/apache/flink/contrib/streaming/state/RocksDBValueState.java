@@ -23,6 +23,9 @@ import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.core.memory.PositionedDataOutputView;
+import org.apache.flink.runtime.state.CompositeKeySerializationUtils;
+import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.state.RegisteredKeyValueStateBackendMetaInfo;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.util.FlinkRuntimeException;
@@ -108,6 +111,35 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
             TypeSerializer<N> safeNamespaceSerializer)
             throws Exception {
         return serializeKeyAndNamespace(key, namespace, safeKeySerializer, safeNamespaceSerializer);
+    }
+
+    @Override
+    public void serializeBatchKeyAndNamespace(
+            K key,
+            N namespace,
+            TypeSerializer<K> safeKeySerializer,
+            TypeSerializer<N> safeNamespaceSerializer,
+            PositionedDataOutputView output)
+            throws Exception {
+        int keyGroup =
+                KeyGroupRangeAssignment.assignToKeyGroup(key, backend.getNumberOfKeyGroups());
+        CompositeKeySerializationUtils.writeKeyGroup(
+                keyGroup, backend.getKeyGroupPrefixBytes(), output);
+        boolean ambiguous =
+                CompositeKeySerializationUtils.isAmbiguousKeyPossible(
+                        safeKeySerializer, safeNamespaceSerializer);
+        int keyStart = output.position();
+        safeKeySerializer.serialize(key, output);
+        if (ambiguous) {
+            CompositeKeySerializationUtils.writeVariableIntBytes(
+                    output.position() - keyStart, output);
+        }
+        int namespaceStart = output.position();
+        safeNamespaceSerializer.serialize(namespace, output);
+        if (ambiguous) {
+            CompositeKeySerializationUtils.writeVariableIntBytes(
+                    output.position() - namespaceStart, output);
+        }
     }
 
     @Override

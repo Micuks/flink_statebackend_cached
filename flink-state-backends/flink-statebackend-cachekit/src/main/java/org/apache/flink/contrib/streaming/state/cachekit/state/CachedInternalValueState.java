@@ -1488,12 +1488,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     }
                 }
                 storageKeys.add(storageKey);
-                rocksDBKeys.add(
-                        batchReader.serializeBatchKeyAndNamespace(
-                                storageKey.key,
-                                storageKey.namespace,
-                                keySerializer,
-                                namespaceSerializer));
+                if (!nativeMailboxBatch) {
+                    rocksDBKeys.add(
+                            batchReader.serializeBatchKeyAndNamespace(
+                                    storageKey.key,
+                                    storageKey.namespace,
+                                    keySerializer,
+                                    namespaceSerializer));
+                }
             }
         } catch (Throwable t) {
             prefetchBuildFailures++;
@@ -1502,12 +1504,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
             return null; // Best-effort: an unserializable key aborts this batch only.
         }
-        if (rocksDBKeys.isEmpty()) {
+        if (storageKeys.isEmpty()) {
             return null;
         }
         NativeRequestPlaneCoordinator.BatchSlot nativeBatchSlot = null;
         if (nativeMailboxBatch) {
-            nativeBatchSlot = compactNativeMailboxBatch(rocksDBKeys, storageKeys);
+            nativeBatchSlot =
+                    compactNativeMailboxBatch(batchReader, rocksDBKeys, storageKeys);
             reservePreparedKeys(rocksDBKeys, storageKeys, gen);
             if (rocksDBKeys.isEmpty()) {
                 if (nativeBatchSlot != null) {
@@ -1559,38 +1562,94 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     private NativeRequestPlaneCoordinator.BatchSlot compactNativeMailboxBatch(
+            RocksDBBatchValueReader<K, N, V> batchReader,
             java.util.ArrayList<byte[]> rocksDBKeys,
             java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys) {
-        nativeMailboxCompactInputKeys += rocksDBKeys.size();
+        nativeMailboxCompactInputKeys += storageKeys.size();
         NativeRequestPlaneCoordinator.BatchSlot slot =
                 nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
         if (slot == null) {
             nativeFallbackBatches++;
             nativeMailboxCompactFallbacks++;
+            materializeMailboxFallbackKeys(batchReader, storageKeys, rocksDBKeys);
             return null;
         }
         try {
-            slot.prepareLatest(nativeStateId, nativeWriteEpoch.get(), rocksDBKeys);
+            try {
+                slot.prepareLatestDirect(
+                        nativeStateId,
+                        nativeWriteEpoch.get(),
+                        storageKeys.size(),
+                        (index, output) -> {
+                            KeyNamespaceKey<K, N> storageKey = storageKeys.get(index);
+                            try {
+                                batchReader.serializeBatchKeyAndNamespace(
+                                        storageKey.key,
+                                        storageKey.namespace,
+                                        keySerializer,
+                                        namespaceSerializer,
+                                        output);
+                            } catch (IOException failure) {
+                                throw failure;
+                            } catch (Exception failure) {
+                                throw new IOException(
+                                        "Failed to serialize a native mailbox key.", failure);
+                            }
+                        });
+            } catch (IOException directFailure) {
+                rocksDBKeys.clear();
+                for (KeyNamespaceKey<K, N> storageKey : storageKeys) {
+                    rocksDBKeys.add(
+                            batchReader.serializeBatchKeyAndNamespace(
+                                    storageKey.key,
+                                    storageKey.namespace,
+                                    keySerializer,
+                                    namespaceSerializer));
+                }
+                slot.prepareLatest(nativeStateId, nativeWriteEpoch.get(), rocksDBKeys);
+            }
             int uniqueCount = nativeRequestPlaneCoordinator.compact(slot);
             nativeMailboxCompactBatches++;
             nativeMailboxCompactUniqueKeys += uniqueCount;
+            rocksDBKeys.clear();
             for (int target = 0; target < uniqueCount; target++) {
                 int source = slot.compactedSourceIndex(target);
-                rocksDBKeys.set(target, rocksDBKeys.get(source));
                 storageKeys.set(target, storageKeys.get(source));
+                rocksDBKeys.add(slot.copyPreparedKey(source));
             }
-            int duplicates = rocksDBKeys.size() - uniqueCount;
+            int duplicates = storageKeys.size() - uniqueCount;
             if (duplicates > 0) {
                 prefetchKeysDeduplicated += duplicates;
-                rocksDBKeys.subList(uniqueCount, rocksDBKeys.size()).clear();
                 storageKeys.subList(uniqueCount, storageKeys.size()).clear();
             }
             return slot;
-        } catch (IOException | RuntimeException | LinkageError failure) {
+        } catch (Exception | LinkageError failure) {
             nativeFallbackBatches++;
             nativeMailboxCompactFallbacks++;
             slot.close();
+            materializeMailboxFallbackKeys(batchReader, storageKeys, rocksDBKeys);
             return null;
+        }
+    }
+
+    private void materializeMailboxFallbackKeys(
+            RocksDBBatchValueReader<K, N, V> batchReader,
+            java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys,
+            java.util.ArrayList<byte[]> rocksDBKeys) {
+        rocksDBKeys.clear();
+        try {
+            for (KeyNamespaceKey<K, N> storageKey : storageKeys) {
+                rocksDBKeys.add(
+                        batchReader.serializeBatchKeyAndNamespace(
+                                storageKey.key,
+                                storageKey.namespace,
+                                keySerializer,
+                                namespaceSerializer));
+            }
+        } catch (Throwable failure) {
+            rocksDBKeys.clear();
+            storageKeys.clear();
+            prefetchBuildFailures++;
         }
     }
 

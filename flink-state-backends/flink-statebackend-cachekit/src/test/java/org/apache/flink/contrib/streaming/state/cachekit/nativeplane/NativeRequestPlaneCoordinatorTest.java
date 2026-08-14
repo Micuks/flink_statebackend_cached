@@ -167,6 +167,33 @@ class NativeRequestPlaneCoordinatorTest {
     }
 
     @Test
+    void testDirectBatchPreparationRetainsExactBytesAndRejectsEmptyKeys() throws Exception {
+        FakePlane plane = new FakePlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(1), plane);
+
+        try (NativeRequestPlaneCoordinator.BatchSlot slot =
+                coordinator.tryAcquireBatchSlot()) {
+            slot.prepareLatestDirect(
+                    3,
+                    17L,
+                    3,
+                    (index, output) -> {
+                        output.writeByte(index + 1);
+                        output.writeShort(0x1011 + index);
+                    });
+            assertArrayEquals(new byte[] {1, 0x10, 0x11}, slot.copyPreparedKey(0));
+            assertArrayEquals(new byte[] {2, 0x10, 0x12}, slot.copyPreparedKey(1));
+            assertArrayEquals(new byte[] {3, 0x10, 0x13}, slot.copyPreparedKey(2));
+
+            assertThrows(
+                    java.io.IOException.class,
+                    () -> slot.prepareLatestDirect(3, 17L, 1, (index, output) -> {}));
+        }
+        coordinator.close();
+    }
+
+    @Test
     void testGrouperPublishesOneStableGroupPerSource() throws Exception {
         FakePlane plane = new FakePlane();
         NativeRequestPlaneCoordinator coordinator =

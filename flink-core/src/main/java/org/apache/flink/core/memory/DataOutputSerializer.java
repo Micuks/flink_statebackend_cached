@@ -28,7 +28,7 @@ import java.nio.ByteOrder;
 import java.util.Arrays;
 
 /** A simple and efficient serializer for the {@link java.io.DataOutput} interface. */
-public class DataOutputSerializer implements DataOutputView, MemorySegmentWritable {
+public class DataOutputSerializer implements PositionedDataOutputView, MemorySegmentWritable {
 
     private byte[] buffer;
 
@@ -90,6 +90,11 @@ public class DataOutputSerializer implements DataOutputView, MemorySegmentWritab
     }
 
     public int length() {
+        return this.position;
+    }
+
+    @Override
+    public int position() {
         return this.position;
     }
 

@@ -593,6 +593,55 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             preparedKeys.appendSerialized(stateId, probeGeneration, directKeyWriter);
         }
 
+        /** Prepares an indexed exact-key batch without materializing per-key heap arrays. */
+        public void prepareLatestDirect(
+                int stateId,
+                long fillGeneration,
+                int count,
+                SerializedKeyBatch.IndexedDirectKeyWriter directKeyWriter)
+                throws IOException {
+            requireLeased();
+            if (count < 0 || count > preparedKeys.maxEntries()) {
+                throw new IOException(
+                        "Prepared native direct batch has "
+                                + count
+                                + " entries but slot capacity is "
+                                + preparedKeys.maxEntries()
+                                + ".");
+            }
+            preparedKeys.clear();
+            compactedEntryCount = 0;
+            preparedFillGeneration = fillGeneration;
+            long probeGeneration =
+                    owner.options.writeThroughMutations()
+                            ? NativeRequestPlaneBridge.PROBE_LATEST_GENERATION
+                            : fillGeneration;
+            for (int index = 0; index < count; index++) {
+                final int sourceIndex = index;
+                int appended =
+                        preparedKeys.appendSerialized(
+                        stateId,
+                        probeGeneration,
+                        output -> directKeyWriter.write(sourceIndex, output));
+                if (preparedKeys.serializedLength(appended) == 0) {
+                    throw new IOException(
+                            "Prepared native direct key at index " + index + " is empty.");
+                }
+            }
+        }
+
+        /** Copies one prepared exact key for an API that still requires a heap byte array. */
+        public byte[] copyPreparedKey(int index) {
+            requireLeased();
+            int offset = preparedKeys.arenaOffset(index);
+            int length = preparedKeys.serializedLength(index);
+            byte[] copy = new byte[length];
+            ByteBuffer source = preparedKeys.arenaSlice();
+            source.position(offset);
+            source.get(copy);
+            return copy;
+        }
+
         public void prepareFill(
                 int stateId,
                 long generation,
