@@ -655,8 +655,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         ? null
                         : delegate.getValueSerializer().duplicate();
 
-        // L1 Cache: ~20% of maxEntries or at least 128
-        int l1Size = Math.max(128, maxEntries / 5);
+        // L1 Cache: ~20% of maxEntries or at least 128 when caching is enabled. A zero
+        // capacity is used by cacheless native mailbox experiments and must not silently
+        // instantiate a 128-entry Java cache.
+        int l1Size = maxEntries > 0 ? Math.max(128, maxEntries / 5) : 0;
         this.l1Cache = createCachePolicy(l1Size, this::onL1Eviction);
 
         // L2 Cache: Remaining size (or full maxEntries)

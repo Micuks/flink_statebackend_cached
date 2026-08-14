@@ -374,7 +374,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         InternalKvState<K, N, ?> internal = (InternalKvState<K, N, ?>) state;
         if (stateDescriptor.getType() == StateDescriptor.Type.VALUE
                 && internal instanceof InternalValueState
-                && valueCacheMaxEntries > 0) {
+                && shouldWrapValueState()) {
             Object existing = wrappersByDelegateIdentity.get(internal);
             if (existing != null) {
                 return (S) existing;
@@ -485,6 +485,17 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         return state;
     }
 
+    /**
+     * Whether ValueState needs CacheKit's wrapper even when its Java cache has zero capacity.
+     * Native mailbox compaction consumes the wrapper's prepared-key batch hook but is otherwise
+     * intentionally independent of the Java ValueState cache.
+     */
+    private boolean shouldWrapValueState() {
+        return valueCacheMaxEntries > 0
+                || (nativeRequestPlaneCoordinator != null
+                        && nativeRequestPlaneCoordinator.options().mailboxBatchEnabled());
+    }
+
     @Override
     public <N> Stream<K> getKeys(String stateName, N namespace) {
         return delegate.getKeys(stateName, namespace);
@@ -531,7 +542,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         InternalKvState<K, N, ?> internal = (InternalKvState<K, N, ?>) state;
         if (stateDesc.getType() == StateDescriptor.Type.VALUE
                 && internal instanceof InternalValueState
-                && valueCacheMaxEntries > 0) {
+                && shouldWrapValueState()) {
             Object existing = wrappersByDelegateIdentity.get(internal);
             if (existing != null) {
                 return (IS) existing;

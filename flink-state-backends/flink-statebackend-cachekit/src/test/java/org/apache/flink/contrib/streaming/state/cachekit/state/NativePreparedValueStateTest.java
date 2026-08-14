@@ -312,7 +312,7 @@ class NativePreparedValueStateTest {
                         delegate,
                         currentKey::get,
                         currentKey::set,
-                        128,
+                        0,
                         CachePolicyType.LRU,
                         0,
                         false,
