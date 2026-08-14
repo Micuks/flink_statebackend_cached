@@ -21,8 +21,10 @@ package org.apache.flink.contrib.streaming.state.cachekit.nativeplane;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Collections;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -187,6 +189,34 @@ class NativeRequestPlaneCoordinatorTest {
         coordinator.close();
     }
 
+    @Test
+    void testDirectExactUpdatePublishesDirectKeyAndValue() throws Exception {
+        FakePlane plane = new FakePlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(1), plane);
+
+        assertEquals(
+                NativeRequestPlaneBridge.FILL_INSERTED,
+                coordinator.updateExactKey(
+                        9,
+                        23L,
+                        output -> {
+                            output.writeByte(1);
+                            output.writeInt(0x02030405);
+                        },
+                        output -> {
+                            output.writeShort(0x0607);
+                            output.writeByte(8);
+                        }));
+
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5}, plane.fillKey);
+        assertArrayEquals(new byte[] {6, 7, 8}, plane.fillValue);
+        assertFalse(plane.fillNegative);
+        assertEquals(23L, plane.fillGeneration);
+        assertEquals(1, coordinator.fillCalls());
+        coordinator.close();
+    }
+
     private static NativeRequestPlaneOptions options(int slots) {
         return new NativeRequestPlaneOptions(
                 true, "", "auto", 16, 1024, 1024, 4, 1024, 1024, 1, slots, false);
@@ -198,6 +228,10 @@ class NativeRequestPlaneCoordinatorTest {
         private long probeGeneration;
         private long featureBits;
         private int[] compactIndexes;
+        private byte[] fillKey;
+        private byte[] fillValue;
+        private boolean fillNegative;
+        private long fillGeneration;
 
         @Override
         public int fillBatch(
@@ -205,6 +239,32 @@ class NativeRequestPlaneCoordinatorTest {
                 ByteBuffer valueArena,
                 ByteBuffer valueMetadata,
                 ByteBuffer fillResults) {
+            ByteBuffer keyArena = keys.arenaSlice();
+            fillKey = new byte[keys.serializedLength(0)];
+            keyArena.position(keys.arenaOffset(0));
+            keyArena.get(fillKey);
+            fillGeneration = keys.generation(0);
+
+            ByteBuffer metadata = valueMetadata.duplicate().order(ByteOrder.nativeOrder());
+            int flags = metadata.getInt(NativeRequestPlaneBridge.FILL_VALUE_FLAGS_OFFSET);
+            fillNegative =
+                    (flags & NativeRequestPlaneBridge.FILL_VALUE_NEGATIVE_FLAG) != 0;
+            int offset = metadata.getInt(NativeRequestPlaneBridge.FILL_VALUE_ARENA_OFFSET);
+            int length = metadata.getInt(NativeRequestPlaneBridge.FILL_VALUE_LENGTH_OFFSET);
+            fillValue = null;
+            if (!fillNegative) {
+                fillValue = new byte[length];
+                ByteBuffer values = valueArena.duplicate();
+                values.position(offset);
+                values.get(fillValue);
+            }
+            ByteBuffer results = fillResults.duplicate().order(ByteOrder.nativeOrder());
+            results.putInt(
+                    NativeRequestPlaneBridge.FILL_RESULT_STATUS_OFFSET,
+                    NativeRequestPlaneBridge.FILL_INSERTED);
+            results.putInt(
+                    NativeRequestPlaneBridge.FILL_RESULT_ERROR_OFFSET,
+                    NativeRequestPlaneBridge.ERROR_OK);
             return keys.entryCount();
         }
 

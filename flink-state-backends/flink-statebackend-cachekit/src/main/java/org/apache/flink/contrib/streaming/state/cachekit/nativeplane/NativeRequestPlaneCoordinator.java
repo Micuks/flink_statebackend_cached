@@ -38,6 +38,12 @@ import java.util.Objects;
 @Internal
 public final class NativeRequestPlaneCoordinator implements AutoCloseable {
 
+    /** Serializes one non-negative fill value directly into the mutation slot's value arena. */
+    @FunctionalInterface
+    public interface DirectValueWriter {
+        void write(DirectBufferDataOutputView output) throws IOException;
+    }
+
     private final Object planeLock = new Object();
     private final NativeRequestPlaneOptions options;
     private final NativeRequestPlane plane;
@@ -237,37 +243,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             try {
                 mutationSlot.prepareSingleFill(
                         stateId, generation, preparedRocksDBKey, serializedValue);
-                int processed =
-                        plane.fillBatch(
-                                mutationSlot.missKeys,
-                                mutationSlot.fillValueArena(),
-                                mutationSlot.fillValueMetadata(),
-                                mutationSlot.fillResults());
-                fillCalls++;
-                if (processed != 1) {
-                    throw new IllegalStateException(
-                            "Native exact-key update processed " + processed + " of 1 entry.");
-                }
-                int status = mutationSlot.fillStatus(0);
-                int error = mutationSlot.fillError(0);
-                boolean applied =
-                        error == NativeRequestPlaneBridge.ERROR_OK
-                                && (status == NativeRequestPlaneBridge.FILL_INSERTED
-                                        || status == NativeRequestPlaneBridge.FILL_UPDATED);
-                boolean superseded =
-                        error == NativeRequestPlaneBridge.ERROR_OK
-                                && status
-                                        == NativeRequestPlaneBridge
-                                                .FILL_REJECTED_STALE_GENERATION;
-                if (!applied && !superseded) {
-                    throw new IllegalStateException(
-                            "Native exact-key update returned status="
-                                    + status
-                                    + ", error="
-                                    + error
-                                    + ".");
-                }
-                return status;
+                return fillPreparedMutation();
             } catch (IOException failure) {
                 disableLocked(failure);
                 throw failure;
@@ -276,6 +252,63 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 throw failure;
             }
         }
+    }
+
+    /**
+     * Writes one exact key/value pair directly into the reusable mutation slot.
+     *
+     * <p>A {@code null} value writer denotes a negative entry. Both writers are invoked while the
+     * plane lock is held, and a serialization failure publishes no fill to the native plane.
+     */
+    public int updateExactKey(
+            int stateId,
+            long generation,
+            SerializedKeyBatch.DirectKeyWriter directKeyWriter,
+            DirectValueWriter directValueWriter)
+            throws IOException {
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                mutationSlot.prepareSingleFill(
+                        stateId, generation, directKeyWriter, directValueWriter);
+                return fillPreparedMutation();
+            } catch (IOException failure) {
+                disableLocked(failure);
+                throw failure;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
+    private int fillPreparedMutation() {
+        int processed =
+                plane.fillBatch(
+                        mutationSlot.missKeys,
+                        mutationSlot.fillValueArena(),
+                        mutationSlot.fillValueMetadata(),
+                        mutationSlot.fillResults());
+        fillCalls++;
+        if (processed != 1) {
+            throw new IllegalStateException(
+                    "Native exact-key update processed " + processed + " of 1 entry.");
+        }
+        int status = mutationSlot.fillStatus(0);
+        int error = mutationSlot.fillError(0);
+        boolean applied =
+                error == NativeRequestPlaneBridge.ERROR_OK
+                        && (status == NativeRequestPlaneBridge.FILL_INSERTED
+                                || status == NativeRequestPlaneBridge.FILL_UPDATED);
+        boolean superseded =
+                error == NativeRequestPlaneBridge.ERROR_OK
+                        && status
+                                == NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION;
+        if (!applied && !superseded) {
+            throw new IllegalStateException(
+                    "Native exact-key update returned status=" + status + ", error=" + error + ".");
+        }
+        return status;
     }
 
     public boolean isActive() {
@@ -428,6 +461,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         private final DirectBufferDataInputView probeValueInput;
         private final ByteBuffer probeResults;
         private final ByteBuffer valueArena;
+        private final DirectBufferDataOutputView valueArenaOutput;
         private final ByteBuffer valueMetadata;
         private final ByteBuffer fillResults;
         private final ByteBuffer uniqueSourceIndexes;
@@ -491,6 +525,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                     ByteBuffer.allocateDirect(probeResultBytes)
                             .order(ByteOrder.nativeOrder());
             this.valueArena = ByteBuffer.allocateDirect(valueArenaBytes);
+            this.valueArenaOutput = new DirectBufferDataOutputView(this.valueArena);
             this.valueMetadata =
                     ByteBuffer.allocateDirect(valueMetadataBytes)
                             .order(ByteOrder.nativeOrder());
@@ -801,9 +836,25 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             requireLeased();
             missKeys.clear();
             valueArena.clear();
+            valueArenaOutput.reset();
             fillValueBytes = 0;
             missKeys.appendSerialized(stateId, generation, preparedRocksDBKey);
             putFillValueMetadata(0, serializedValue);
+        }
+
+        private void prepareSingleFill(
+                int stateId,
+                long generation,
+                SerializedKeyBatch.DirectKeyWriter directKeyWriter,
+                DirectValueWriter directValueWriter)
+                throws IOException {
+            requireLeased();
+            missKeys.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            fillValueBytes = 0;
+            missKeys.appendSerialized(stateId, generation, directKeyWriter);
+            putFillValueMetadata(0, directValueWriter);
         }
 
         private void putFillValueMetadata(int index, byte[] value) throws IOException {
@@ -831,6 +882,39 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                         metadataBase + NativeRequestPlaneBridge.FILL_VALUE_FLAGS_OFFSET, 0);
                 valueArena.put(value);
                 fillValueBytes += value.length;
+            }
+            valueMetadata.putInt(
+                    metadataBase + NativeRequestPlaneBridge.FILL_VALUE_RESERVED_OFFSET, 0);
+        }
+
+        private void putFillValueMetadata(int index, DirectValueWriter writer)
+                throws IOException {
+            int metadataBase = index * NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES;
+            if (writer == null) {
+                valueMetadata.putInt(
+                        metadataBase + NativeRequestPlaneBridge.FILL_VALUE_ARENA_OFFSET, 0);
+                valueMetadata.putInt(
+                        metadataBase + NativeRequestPlaneBridge.FILL_VALUE_LENGTH_OFFSET, 0);
+                valueMetadata.putInt(
+                        metadataBase + NativeRequestPlaneBridge.FILL_VALUE_FLAGS_OFFSET,
+                        NativeRequestPlaneBridge.FILL_VALUE_NEGATIVE_FLAG);
+            } else {
+                int checkpoint = valueArenaOutput.checkpoint();
+                try {
+                    writer.write(valueArenaOutput);
+                } catch (IOException | RuntimeException failure) {
+                    valueArenaOutput.truncateTo(checkpoint);
+                    throw failure;
+                }
+                int length = valueArenaOutput.position() - checkpoint;
+                valueMetadata.putInt(
+                        metadataBase + NativeRequestPlaneBridge.FILL_VALUE_ARENA_OFFSET,
+                        checkpoint);
+                valueMetadata.putInt(
+                        metadataBase + NativeRequestPlaneBridge.FILL_VALUE_LENGTH_OFFSET, length);
+                valueMetadata.putInt(
+                        metadataBase + NativeRequestPlaneBridge.FILL_VALUE_FLAGS_OFFSET, 0);
+                fillValueBytes = valueArenaOutput.position();
             }
             valueMetadata.putInt(
                     metadataBase + NativeRequestPlaneBridge.FILL_VALUE_RESERVED_OFFSET, 0);

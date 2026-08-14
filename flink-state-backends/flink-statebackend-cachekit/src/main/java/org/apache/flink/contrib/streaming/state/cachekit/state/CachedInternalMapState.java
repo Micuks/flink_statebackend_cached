@@ -801,20 +801,6 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         return nativeValueOutput.getCopyOfBuffer();
     }
 
-    private byte[] serializeNativeSnapshotKey(K key, N namespace) throws Exception {
-        nativeKeyOutput.clear();
-        keySerializer.serialize(key, nativeKeyOutput);
-        nativeKeyOutput.writeByte(44);
-        namespaceSerializer.serialize(namespace, nativeKeyOutput);
-        return nativeKeyOutput.getCopyOfBuffer();
-    }
-
-    private byte[] serializeNativeSnapshotUserKey(UK userKey) throws Exception {
-        nativeValueOutput.clear();
-        userKeySerializer.serialize(userKey, nativeValueOutput);
-        return nativeValueOutput.getCopyOfBuffer();
-    }
-
     private MapSnapshot<UK> lookupNativeSnapshot(K currentKey) {
         if (!nativeMapSnapshotEnabled
                 || currentKey == null
@@ -877,13 +863,19 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             return;
         }
         try {
-            byte[] nativeKey = serializeNativeSnapshotKey(key, namespace);
-            byte[] nativeValue =
+            nativeRequestPlaneCoordinator.updateExactKey(
+                    nativeSnapshotStateId,
+                    nativeGeneration,
+                    output -> {
+                        keySerializer.serialize(key, output);
+                        output.writeByte(44);
+                        namespaceSerializer.serialize(namespace, output);
+                    },
                     snapshot.isEmpty()
                             ? null
-                            : serializeNativeSnapshotUserKey(snapshot.cachedUserKey);
-            nativeRequestPlaneCoordinator.updateExactKey(
-                    nativeSnapshotStateId, nativeGeneration, nativeKey, nativeValue);
+                            : output ->
+                                    userKeySerializer.serialize(
+                                            snapshot.cachedUserKey, output));
             nativeSnapshotFills++;
         } catch (Exception | LinkageError failure) {
             nativeSnapshotFallbacks++;
