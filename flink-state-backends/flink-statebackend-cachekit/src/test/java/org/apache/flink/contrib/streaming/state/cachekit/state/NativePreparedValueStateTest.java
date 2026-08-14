@@ -201,6 +201,20 @@ class NativePreparedValueStateTest {
                                         StringSerializer.INSTANCE,
                                         invocation.getArgument(1),
                                         StringSerializer.INSTANCE));
+        doAnswer(
+                        invocation -> {
+                            byte[] serialized =
+                                    KvStateSerializer.serializeKeyAndNamespace(
+                                            invocation.getArgument(0),
+                                            StringSerializer.INSTANCE,
+                                            invocation.getArgument(1),
+                                            StringSerializer.INSTANCE);
+                            ((PositionedDataOutputView) invocation.getArgument(4))
+                                    .write(serialized);
+                            return null;
+                        })
+                .when(reader)
+                .serializeBatchKeyAndNamespace(any(), any(), any(), any(), any());
         when(reader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
                 .thenReturn(
                         Arrays.asList(
@@ -248,6 +262,7 @@ class NativePreparedValueStateTest {
         assertEquals(22, state.value());
 
         verify(reader, times(1)).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+        verify(reader, never()).serializeBatchKeyAndNamespace(any(), any(), any(), any());
         verify(delegate, never()).value();
         assertEquals(3, state.getNativeBatchesActivatedForTesting());
         assertEquals(6, state.getNativeProbeKeysForTesting());
@@ -262,6 +277,9 @@ class NativePreparedValueStateTest {
         assertEquals(3, state.getNativeMissesForTesting());
         assertEquals(1, state.getNativeFillBatchesForTesting());
         assertEquals(3, state.getNativeFillKeysForTesting());
+        assertEquals(3, state.getNativeDirectPreparedBatchesForTesting());
+        assertEquals(6, state.getNativeDirectPreparedKeysForTesting());
+        assertEquals(0, state.getNativeDirectPreparedFallbacksForTesting());
         // Two native hits are deserialized directly from the leased arena. Only the two
         // RocksDB-miss values remain lazy-staged and are materialized on promotion.
         assertEquals(2, state.getPrefetchLazyValuesMaterializedForTesting());
