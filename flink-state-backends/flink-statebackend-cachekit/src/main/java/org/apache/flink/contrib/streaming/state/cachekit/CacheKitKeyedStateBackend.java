@@ -31,7 +31,6 @@ import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeReque
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.core.fs.CloseableRegistry;
-import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.SavepointResources;
@@ -884,14 +883,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             }
             try {
                 TypeSerializer<K> serializer = getKeySerializer().duplicate();
-                DataOutputSerializer output = new DataOutputSerializer(64);
-                ArrayList<byte[]> serialized = new ArrayList<>(keys.size());
-                for (Object key : keys) {
-                    output.clear();
-                    serializer.serialize((K) key, output);
-                    serialized.add(output.getCopyOfBuffer());
-                }
-                slot.prepareLatest(Integer.MAX_VALUE, 0L, serialized);
+                slot.prepareLatestDirect(
+                        Integer.MAX_VALUE,
+                        0L,
+                        keys.size(),
+                        (index, output) -> serializer.serialize((K) keys.get(index), output));
                 int groupCount = nativeRequestPlaneCoordinator.group(slot);
                 int[] plan = new int[keys.size() + 1];
                 plan[0] = groupCount;
