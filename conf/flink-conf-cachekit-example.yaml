@@ -92,6 +92,14 @@ state.backend.cachekit.value.lazy-staging.enabled: false
 # TaskManager. auto selects SVE-256 on a host that reports SVE VL=256, otherwise
 # NEON+CRC32 on AArch64, otherwise scalar. This is SVE, not an SVE2 requirement.
 state.backend.cachekit.native.request-plane.enabled: false
+# Independent native feature gates. The request-plane switch above is the
+# master gate; every feature remains opt-in and defaults to false.
+state.backend.cachekit.native.value-cache.enabled: false
+state.backend.cachekit.native.map-cache.enabled: false
+state.backend.cachekit.native.map-snapshot.enabled: false
+state.backend.cachekit.native.mailbox-batch.enabled: false
+state.backend.cachekit.native.prefetch.enabled: false
+state.backend.cachekit.native.local-preagg.enabled: false
 # state.backend.cachekit.native.request-plane.library: /absolute/path/libcachekit_native_request_plane_jni.so
 # state.backend.cachekit.native.request-plane.kernel: auto
 # state.backend.cachekit.native.request-plane.min-batch-size: 64
