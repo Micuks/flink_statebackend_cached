@@ -117,3 +117,17 @@ q15 的 Kunpeng wall 加速更高，但 cores 放大为 3.12×，显著高于 x8
 Hash-token 相对 ARM retained `-0.06%`，相对 Java `-2.85%`。16 个 backend 实例累计 789,073 个 native batch、50,424,639 个输入 key、6,181,890 个 group，111 次安全回退，kernel 为 `aarch64-sve256-hybrid-crc32c`，三腿 8 TM/50M/no-checkpoint 审计全部有效。
 
 结论：完整 key 序列化确实是上一版退化的一部分，去除后从 `-3.51%` 回到近中性；但 JNI、native plan→Java 重建、record key/value 抽取以及 accumulator fold 仍覆盖了 kernel 收益。该 generic grouping helper 不扩 15Q。紧凑证据：`dse_results/cachekit-native-preagg-hashtoken-q15-50m-20260819/`；远端：`/home/wuql/flink-cluster/experiments/cachekit-native-preagg-hashtoken-q15-50m-kunpeng-20260819`。
+
+## 2026-08-19 Native LocalPreAgg extraction-buffer reuse 复测
+
+在 4B hash-token 版本上，仅为 `native.local-preagg.enabled=true` 的 treatment 增加线程本地 key/value extraction buffer；每批结束立即 `clear()`，避免长生命周期 task thread 持有 record。Java FullOpt 与 ARM retained 对照不进入复用分支。`LocalPreaggTest` 7/7 通过，模块打包通过；实现提交为 `ad651f0275286c57e6a26405d9f715ef2a52e073`。
+
+| Leg | raw K/s | cores | K/s/core | wall s |
+|---|---:|---:|---:|---:|
+| Java FullOpt | 824.90 | 23.80 | 34.66 | 60.613 |
+| ARM retained | 783.32 | 23.86 | 32.83 | 63.831 |
+| ARM retained + hash-token native preagg + buffer reuse | 766.00 | 23.35 | 32.80 | 65.274 |
+
+Buffer-reuse candidate 相对 ARM retained `-0.09%`，相对 Java FullOpt `-5.37%`。16 个 native summary 实例合计 675,739 batch、43,182,264 input key、5,844,170 group、110 次安全回退，kernel 为 `aarch64-sve256-hybrid-crc32c`；开关确实触发，三腿均通过 8 TM、50M、no-checkpoint、正 cores 与吞吐公式审计。
+
+结论：复用两个 Java 容器仍不能覆盖 JNI、native plan 回传、Java plan 校验和逐 group accumulator fold 的成本。通用 JNI LocalPreAgg 路线连续三次由 `-3.51% → -0.06% → -0.09%` 收敛到中性但未转正，停止扩 15Q；只有能把业务 accumulator 语义一起下沉、显著减少 Java 回调次数的 operator-specific kernel 才值得重新立项。紧凑证据：`dse_results/cachekit-native-preagg-reuse-q15-50m-20260819/`；远端：`/home/wuql/flink-cluster/experiments/cachekit-native-preagg-reuse-q15-50m-kunpeng-20260819`。
