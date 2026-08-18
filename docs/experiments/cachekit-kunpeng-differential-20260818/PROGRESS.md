@@ -72,3 +72,16 @@ ABBA 算术均值：off `85.42`，on `82.25` K/s/core，增量 `(82.25 / 85.42 -
 - 配置：保存最终渲染配置及 SHA-256；明确 checkpoint/bypass/mailbox/Chen 状态。
 - 归因：性能结果和机制计数必须来自同一 binary、同一 leg，不能用旧日志解释新结果。
 - 差异目标：`Kunpeng uplift - x86 uplift >= 10pp`；未达到时如实报告，不以选择性删 query 达标。
+
+## 2026-08-19 q15/q17 双平台 profiling
+
+使用与最新 200M FullOpt 主结果相同的 commit、配置、2×4 TM 拓扑和无 checkpoint 协议，只增加 30 秒 `cycles:u` 采样。四腿在两平台均完成且 lost samples=0。
+
+| 平台 | Query | RDB | FullOpt | K/s/core 提升 | RDB→FullOpt cores | wall 加速 |
+|---|---|---:|---:|---:|---:|---:|
+| x86 | q15 | 5.59 | 25.82 | +361.90% | 11.50→24.74 | 9.94× |
+| Kunpeng | q15 | 10.51 | 36.33 | +245.67% | 7.52→23.48 | 10.80× |
+| x86 | q17 | 36.89 | 85.64 | +132.15% | 27.01→26.01 | 2.24× |
+| Kunpeng | q17 | 49.21 | 89.89 | +82.67% | 27.04→26.27 | 1.77× |
+
+q15 的 Kunpeng wall 加速更高，但 cores 放大为 3.12×，显著高于 x86 的 2.15×；这才是 per-core 提升偏低的直接原因。q17 则是 Kunpeng RDB 基线更强、FullOpt 绝对吞吐与 x86 接近，形成相对提升的分母效应。两平台 q17 FullOpt 后 RocksDB 读热点都基本退场，后续主线改为降低聚合/对象/GC/写侧 CPU，而不是继续只优化 Bloom 或 Get。完整报告见 `Q15_Q17_CROSSHOST_PROFILE_REPORT_ZH.md`。

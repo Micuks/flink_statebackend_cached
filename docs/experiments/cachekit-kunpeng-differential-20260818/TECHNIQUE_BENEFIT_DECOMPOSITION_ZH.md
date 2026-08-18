@@ -21,6 +21,8 @@ FullOpt 的实际开关是：VCache、MapSnapshot、Mailbox、LocalPreAgg、SST/
 
 这两项合计贡献约 `-13.00pp` 的 15Q 平均差距，约占总差距的 89%；其余 13Q 合计只差约 `-1.56pp`。Kunpeng q15 的 FullOpt 绝对吞吐比 x86 高 38.5%，q17 基本持平；相对提升较低主要因为 Kunpeng RocksDB 基线在 q15/q17 分别高约 92%/33%。后续差异化优化必须提高 q15/q17 的 FullOpt 上限，不能人为降低 x86 或污染基线。
 
+同协议 profiling 进一步分开了两种机制。q15 上 Kunpeng 的 wall 加速 `10.80×` 高于 x86 的 `9.94×`，但 RDB→FullOpt cores 放大 `3.12×`，高于 x86 的 `2.15×`，所以 per-core 提升反而低。q17 上两平台 FullOpt 后 RocksDB 读热点都基本退场，Kunpeng 主要受更强 RDB 基线和相近 FullOpt 吞吐上限影响。详见 `Q15_Q17_CROSSHOST_PROFILE_REPORT_ZH.md`。
+
 ## 2. 各技术的当前最好独立证据
 
 不同条目来自不同实验协议，不能相加得到 FullOpt 总提升；表中同时给出证据强度和不能回答的问题。
