@@ -39,3 +39,11 @@ measured events, checkpoints disabled, parallelism 16, eight TaskManagers, and o
 x86 and Kunpeng. Preserve exact rendered configs, runtime hashes, all per-query K/s/core rows, and
 arithmetic means of per-query uplift. The corrected source commit and runtime artifact hashes must be
 recorded in each experiment directory before results are accepted.
+
+## Retest outcome
+
+The one-round 200M retest completed 45/45 valid legs on each host. The retained native trio was
+-4.12% on x86 and -2.79% on Kunpeng; adding Native LocalPreAgg was -1.38% on x86 and -5.51% on
+Kunpeng. These are arithmetic means of per-query K/s/core uplift against the adjacent Java
+FullOpt+mailbox control. See [RETEST_RESULTS_20260818.md](RETEST_RESULTS_20260818.md) for all raw
+per-query values, group summaries, hashes, and interpretation.

@@ -1,5 +1,10 @@
 # CacheKit Native request-plane 200M cross-host progress (2026-08-17)
 
+The corrected hot-path retest is documented in
+[RETEST_RESULTS_20260818.md](RETEST_RESULTS_20260818.md). It supersedes the first-pass performance
+conclusion for commit `be83190c680b598bfeb10ad33331a0aa1c01552e`, while preserving the earlier
+campaign below as pre-fix evidence.
+
 ## Verdict
 
 This checkpoint records one validated 15-query round on x86 (`idmg-monitor`) and
