@@ -1410,7 +1410,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 new java.util.ArrayList<>();
         try {
             for (K key : keys) {
-                if (key == null || findCachedValueFor(key, namespace) != null) {
+                if (key == null
+                        || findCachedValueFor(key, namespace) != null
+                        || hasStagedOrInFlightValue(key, namespace, gen)) {
                     continue;
                 }
                 KeyNamespaceKey<K, N> storageKey =

@@ -89,6 +89,8 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
      * When true, prefetch only fires while backpressured; when false, prefetch fires every flush.
      */
     private final boolean backpressureGated;
+    /** Local-preagg may consume the whole batch, making any early state read dead work. */
+    private final boolean localPreaggCandidate;
 
     // Reusable record buffer. Sized at construction.
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -96,7 +98,6 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
 
     private int count;
     private long firstAppendNanos;
-    private java.util.concurrent.CompletableFuture<Void> asyncPrefetchTail;
     private int asyncPrefetchScheduledUntil;
 
     public StreamRecordBatchOutput(
@@ -157,6 +158,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         this.prefetchMode = prefetchMode;
         this.backpressured = backpressured;
         this.backpressureGated = backpressureGated;
+        this.localPreaggCandidate = LocalPreagg.mayHandle(headOperator);
         @SuppressWarnings({"unchecked", "rawtypes"})
         StreamRecord<T>[] tmp = new StreamRecord[this.batchSize];
         this.buf = tmp;
@@ -166,7 +168,6 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 (this.enabled && headOperator instanceof BatchProcessingOperator)
                         ? (BatchProcessingOperator<T, ?>) headOperator
                         : null;
-        this.asyncPrefetchTail = java.util.concurrent.CompletableFuture.completedFuture(null);
         this.asyncPrefetchScheduledUntil = 0;
     }
 
@@ -311,13 +312,15 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
             }
             count = 0;
             firstAppendNanos = 0L;
-            asyncPrefetchTail = java.util.concurrent.CompletableFuture.completedFuture(null);
             asyncPrefetchScheduledUntil = 0;
         }
     }
 
     private void scheduleAsyncPrefetchChunks(boolean includeRemainder) {
-        if (!enabled || !prefetchMode || !BP_PREFETCH_ASYNC_CHUNKS || count <= 1) {
+        if (!enabled
+                || !prefetchMode
+                || !BP_PREFETCH_ASYNC_CHUNKS
+                || count <= 1) {
             return;
         }
         if (backpressureGated && (backpressured == null || !backpressured.getAsBoolean())) {
@@ -334,13 +337,14 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 asyncPrefetchScheduledUntil = end;
                 return;
             }
-            StreamRecord<?>[] slice = new StreamRecord<?>[end - start];
-            System.arraycopy(buf, start, slice, 0, slice.length);
-            asyncPrefetchTail =
-                    asyncPrefetchTail.thenCompose(
-                            ignored ->
-                                    org.apache.flink.streaming.runtime.tasks.StatePrefetcher
-                                            .prefetchAsync(headOperator, slice, slice.length));
+            // StatePrefetcher only extracts keys and invokes CacheKit's non-blocking submission
+            // hook. Read the live range directly: copying a slice and chaining an already-complete
+            // future added allocation without providing ordering or backpressure semantics.
+            // LocalPreagg candidates are intentionally included: early chunks can overlap their
+            // later grouping/fold work. At flush, immediate prefetch skips staged/in-flight keys,
+            // so the two paths do not issue the same batch read twice.
+            org.apache.flink.streaming.runtime.tasks.StatePrefetcher.prefetch(
+                    headOperator, buf, start, end);
             asyncPrefetchScheduledUntil = end;
         }
     }
