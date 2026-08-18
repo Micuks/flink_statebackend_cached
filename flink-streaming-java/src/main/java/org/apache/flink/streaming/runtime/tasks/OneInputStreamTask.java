@@ -218,6 +218,18 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                                                 "state.backend.cachekit.bp-prefetch.commutative-key-sort")
                                         .booleanType()
                                         .defaultValue(false));
+                boolean asyncPrefetchChunks =
+                        cfg.getBoolean(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.async-chunks.enabled")
+                                        .booleanType()
+                                        .defaultValue(false));
+                int asyncPrefetchChunkSize =
+                        cfg.getInteger(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.async-chunks.size")
+                                        .intType()
+                                        .defaultValue(16));
                 @SuppressWarnings("unchecked")
                 Input<IN> headInput = (Input<IN>) mainOperator;
                 java.util.function.BooleanSupplier bp =
@@ -232,7 +244,9 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                         numRecordsIn,
                         true,
                         bp,
-                        backpressureGated);
+                        backpressureGated,
+                        asyncPrefetchChunks,
+                        asyncPrefetchChunkSize);
             }
 
             boolean enabled =
