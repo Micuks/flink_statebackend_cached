@@ -60,6 +60,15 @@ public final class LocalPreagg {
             GlobalConfiguration.loadConfiguration()
                     .getBoolean("state.backend.cachekit.local-preagg.enabled", false);
 
+    // Only the experimental native treatment reuses the extraction vectors. Keeping the Java
+    // FullOpt/control path unchanged makes the ARM screen attributable and avoids retaining
+    // record references when native grouping is disabled.
+    private static final boolean NATIVE_EXTRACTION_REUSE_ENABLED =
+            GlobalConfiguration.loadConfiguration()
+                    .getBoolean("state.backend.cachekit.native.local-preagg.enabled", false);
+    private static final ThreadLocal<ExtractionBuffers> NATIVE_EXTRACTION_BUFFERS =
+            ThreadLocal.withInitial(ExtractionBuffers::new);
+
     private static final ConcurrentHashMap<Class<?>, Field> KEY_SELECTOR_FIELD_CACHE =
             new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<Class<?>, Field> OUTPUT_FIELD_CACHE =
@@ -157,12 +166,20 @@ public final class LocalPreagg {
             return false;
         }
 
+        final ExtractionBuffers extractionBuffers =
+                NATIVE_EXTRACTION_REUSE_ENABLED
+                        ? NATIVE_EXTRACTION_BUFFERS.get()
+                        : new ExtractionBuffers();
+        final ArrayList<Object> recordKeys = extractionBuffers.keys;
+        final ArrayList<Object> recordValues = extractionBuffers.values;
+        recordKeys.clear();
+        recordValues.clear();
+        recordKeys.ensureCapacity(n);
+        recordValues.ensureCapacity(n);
         try {
             // Extract one aligned key/value vector. CacheKit may return stable first-seen group
             // ids from its native runtime; every unsupported/error case retains the existing Java
             // LinkedHashMap grouping path below.
-            final ArrayList<Object> recordKeys = new ArrayList<>(n);
-            final ArrayList<Object> recordValues = new ArrayList<>(n);
             StreamRecord<?> lastRec = null;
             for (int i = 0; i < n; i++) {
                 StreamRecord<?> rec = buf[i];
@@ -214,7 +231,17 @@ public final class LocalPreagg {
             // A mid-batch failure cannot be safely replayed (some keys already processed). Surface
             // it rather than silently double-processing.
             throw new RuntimeException("local-preagg dispatch failed", t);
+        } finally {
+            // A task thread may live for hours. Clear references after every dispatch so the
+            // reusable arrays do not pin records or their backing byte segments.
+            recordKeys.clear();
+            recordValues.clear();
         }
+    }
+
+    private static final class ExtractionBuffers {
+        private final ArrayList<Object> keys = new ArrayList<>();
+        private final ArrayList<Object> values = new ArrayList<>();
     }
 
     static GroupedInputs groupInputs(
