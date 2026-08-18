@@ -103,3 +103,17 @@ q15 的 Kunpeng wall 加速更高，但 cores 放大为 3.12×，显著高于 x8
 根因是 grouping 前仍为每批复制 serializer、完整序列化 generic RowData key，prefetch 随后又序列化 unique key/namespace；native 只替换 grouping，fold 仍在 Java。flat-slice 只去掉一部分容器分配，未覆盖 JNI 和重复序列化成本，不能扩 15Q。
 
 紧凑证据：`dse_results/cachekit-native-preagg-flat-q15-50m-20260819/`；远端：`/home/wuql/flink-cluster/experiments/cachekit-native-preagg-flat-q15-50m-kunpeng-20260819`。
+
+## 2026-08-19 Native LocalPreAgg 4B hash-token 复测
+
+在 flat-slice 版本上进一步去掉每 batch 的 `TypeSerializer.duplicate()` 和完整 generic key 序列化。Native grouping 只接收 Java `hashCode` 的 4-byte token；equal key 必须有相同 token，碰撞产生的过度分组由现有 Java equals/first-seen 验证检出并安全回退。
+
+| Leg | raw K/s | cores | K/s/core | wall s |
+|---|---:|---:|---:|---:|
+| Java FullOpt | 819.98 | 24.32 | 33.72 | 60.977 |
+| ARM retained | 786.78 | 24.00 | 32.78 | 63.550 |
+| ARM retained + hash-token native preagg | 782.03 | 23.87 | 32.76 | 63.936 |
+
+Hash-token 相对 ARM retained `-0.06%`，相对 Java `-2.85%`。16 个 backend 实例累计 789,073 个 native batch、50,424,639 个输入 key、6,181,890 个 group，111 次安全回退，kernel 为 `aarch64-sve256-hybrid-crc32c`，三腿 8 TM/50M/no-checkpoint 审计全部有效。
+
+结论：完整 key 序列化确实是上一版退化的一部分，去除后从 `-3.51%` 回到近中性；但 JNI、native plan→Java 重建、record key/value 抽取以及 accumulator fold 仍覆盖了 kernel 收益。该 generic grouping helper 不扩 15Q。紧凑证据：`dse_results/cachekit-native-preagg-hashtoken-q15-50m-20260819/`；远端：`/home/wuql/flink-cluster/experiments/cachekit-native-preagg-hashtoken-q15-50m-kunpeng-20260819`。
