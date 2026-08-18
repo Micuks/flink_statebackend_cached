@@ -157,6 +157,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchLazyMaterializationFailures;
     private volatile long prefetchStagingAdmissionDrops;
     private volatile long prefetchStaleAborts;
+    private volatile long prefetchLiveReadRacedInFlight;
+    private volatile long prefetchUnusedStagedOnClose;
     private volatile long prefetchBuildFailures;
     private volatile long prefetchWorkerFailures;
     private volatile long stickyUpdateSameKeyAttempts;
@@ -714,6 +716,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // 4b. Check async-prefetch staging. Sound only when no write/dirty-flush happened on
         // this state since the fetch was submitted (writeGen match); otherwise fall through to
         // the authoritative delegate read.
+        Long reservedGeneration = inFlight.get(lookupKey);
+        if (reservedGeneration != null && reservedGeneration == writeGen) {
+            // The mailbox reached this key before the worker published its speculative result.
+            // The authoritative read below remains correct, but this is duplicate I/O and direct
+            // evidence that the attempted overlap was too short for this key.
+            prefetchLiveReadRacedInFlight++;
+        }
         if (!staging.isEmpty()) {
             StagedValue<V> staged = removeStagedValue(lookupKey);
             if (staged != null && staged.gen == writeGen) {
@@ -739,6 +748,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchValuesPromoted++;
                     return newValue.valueOrNull();
                 }
+            } else if (staged != null) {
+                prefetchStaleAborts++;
             }
         }
 
@@ -985,6 +996,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         lifecycleLock.writeLock().lock();
         try {
             closed = true;
+            prefetchUnusedStagedOnClose += staging.size();
             clearStaging();
             inFlight.clear();
         } finally {
@@ -1002,6 +1014,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "promoted={} lazyStaging={} lazyStaged={} lazyMaterialized={} "
                             + "lazyMaterializationFailures={} stagingEntries={} retainedBytes={} "
                             + "maxRetainedBytes={} admissionDrops={} staleAborts={} "
+                            + "liveReadRacedInFlight={} unusedStagedOnClose={} "
                             + "buildFailures={} workerFailures={} stickyUpdateInPlace={} "
                             + "stickySameKeyAttempts={} stickyInPlaceReuses={} "
                             + "nativeEnabled={} nativeStateId={} nativeActivated={} "
@@ -1044,6 +1057,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     asyncStagingMaxRetainedBytes,
                     prefetchStagingAdmissionDrops,
                     prefetchStaleAborts,
+                    prefetchLiveReadRacedInFlight,
+                    prefetchUnusedStagedOnClose,
                     prefetchBuildFailures,
                     prefetchWorkerFailures,
                     stickyUpdateInPlaceEnabled,
@@ -1134,6 +1149,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getPrefetchStagingAdmissionDropsForTesting() {
         return prefetchStagingAdmissionDrops;
+    }
+
+    long getPrefetchLiveReadRacedInFlightForTesting() {
+        return prefetchLiveReadRacedInFlight;
+    }
+
+    long getPrefetchUnusedStagedOnCloseForTesting() {
+        return prefetchUnusedStagedOnClose;
     }
 
     long getStickyUpdateSameKeyAttemptsForTesting() {

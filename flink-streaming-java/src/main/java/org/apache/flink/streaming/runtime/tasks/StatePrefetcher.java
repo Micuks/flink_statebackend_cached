@@ -45,8 +45,10 @@ import java.lang.reflect.Method;
  * <ul>
  *   <li><b>No reorder</b> — this class only warms the cache; record dispatch order is the caller's
  *       unchanged arrival-order replay.
- *   <li><b>Stale-safe</b> — the backend prefetch hook is best-effort and runs on the mailbox
- *       thread.
+ *   <li><b>Stale-safe</b> — key extraction and task submission run on the mailbox thread; CacheKit
+ *       performs RocksDB reads on its worker and only publishes speculative staging entries.
+ *       The ValueState wrapper checks the captured write generation before promotion and falls
+ *       back to the authoritative read after any intervening mutation.
  *   <li><b>Best-effort</b> — every path is wrapped in try/catch; a failed prefetch never touches
  *       the authoritative read path or the {@code emitRecord} dispatch.
  * </ul>
