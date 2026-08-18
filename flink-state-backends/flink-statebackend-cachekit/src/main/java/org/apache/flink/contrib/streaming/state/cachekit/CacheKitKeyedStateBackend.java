@@ -67,6 +67,7 @@ import java.util.stream.Stream;
 import java.util.Collection;
 import java.util.IdentityHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.RunnableFuture;
 import org.apache.flink.api.java.tuple.Tuple2;
 
@@ -872,7 +873,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
      * Reflection seam used by LocalPreagg to obtain stable first-seen group ids from the native
      * runtime. A null result means the caller must use its existing Java LinkedHashMap path.
      */
-    @SuppressWarnings("unchecked")
     public int[] nativePreaggGroupIds(List<?> keys) {
         synchronized (lifecycleLock) {
             if (closed
@@ -898,12 +898,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 return null;
             }
             try {
-                TypeSerializer<K> serializer = getKeySerializer().duplicate();
                 slot.prepareLatestDirect(
                         Integer.MAX_VALUE,
                         0L,
                         keys.size(),
-                        (index, output) -> serializer.serialize((K) keys.get(index), output));
+                        (index, output) ->
+                                output.writeInt(nativePreaggHashToken(keys.get(index))));
                 int groupCount = nativeRequestPlaneCoordinator.group(slot);
                 int[] plan = new int[keys.size() + 1];
                 plan[0] = groupCount;
@@ -931,6 +931,18 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 slot.close();
             }
         }
+    }
+
+    /**
+     * Produces the compact token consumed by the native preaggregation grouping kernel.
+     *
+     * <p>Equal keys must have equal Java hash codes, so the token preserves every valid grouping.
+     * Hash collisions can only over-group unequal keys; LocalPreagg validates the returned plan
+     * with Java equality and falls back to its LinkedHashMap path whenever that happens. This lets
+     * the native path avoid serializing the complete generic key without weakening correctness.
+     */
+    static int nativePreaggHashToken(Object key) {
+        return Objects.hashCode(key);
     }
 
     long getNativePreaggGroupBatchesForTesting() {
