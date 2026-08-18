@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <defs>
+    <marker id="arrowNavy" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L10,3 L0,6 Z" fill="#17365D"/></marker>
+    <marker id="arrowTeal" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L10,3 L0,6 Z" fill="#00A6A6"/></marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L10,3 L0,6 Z" fill="#F28C18"/></marker>
+    <style>
+      .title{font:700 30px Arial,"Microsoft YaHei",sans-serif;fill:#17365D}.sub{font:16px Arial,"Microsoft YaHei",sans-serif;fill:#557086}
+      .lane{font:700 17px Arial,"Microsoft YaHei",sans-serif;fill:white}.h{font:700 17px Arial,"Microsoft YaHei",sans-serif;fill:#17365D}
+      .b{font:14px Arial,"Microsoft YaHei",sans-serif;fill:#28465F}.s{font:12px Arial,"Microsoft YaHei",sans-serif;fill:#62798C}
+      .tag{font:700 12px Arial,"Microsoft YaHei",sans-serif;fill:white}.metric{font:700 14px Arial,"Microsoft YaHei",sans-serif;fill:#B94434}
+    </style>
+  </defs>
+  <rect width="1600" height="900" fill="#F7F9FC"/>
+  <text x="48" y="52" class="title">第三阶段完整工作流：Mailbox × LocalPreAgg × Cache/Bloom × RocksDB</text>
+  <text x="48" y="79" class="sub">主线保持 Flink 消息所有权与顺序语义；批量化只减少状态访问和重复更新。Prefetch 是独立实验支线。</text>
+
+  <!-- Native Flink comparison -->
+  <rect x="48" y="105" width="1504" height="106" rx="12" fill="#EEF3F8" stroke="#B9CBD9"/>
+  <rect x="48" y="105" width="180" height="106" rx="12" fill="#607D94"/>
+  <text x="138" y="145" text-anchor="middle" class="lane">原生 Flink</text><text x="138" y="171" text-anchor="middle" class="lane">逐条同步关键路径</text>
+  <rect x="260" y="129" width="210" height="58" rx="8" fill="white" stroke="#AFC3D4"/><text x="365" y="153" text-anchor="middle" class="h">每条 record 到达</text><text x="365" y="174" text-anchor="middle" class="s">setCurrentKey</text>
+  <rect x="530" y="129" width="220" height="58" rx="8" fill="white" stroke="#AFC3D4"/><text x="640" y="153" text-anchor="middle" class="h">同步状态读取</text><text x="640" y="174" text-anchor="middle" class="s">MemTable / SST / JNI</text>
+  <rect x="810" y="129" width="220" height="58" rx="8" fill="white" stroke="#AFC3D4"/><text x="920" y="153" text-anchor="middle" class="h">更新状态</text><text x="920" y="174" text-anchor="middle" class="s">serialize + write</text>
+  <rect x="1090" y="129" width="220" height="58" rx="8" fill="white" stroke="#AFC3D4"/><text x="1200" y="153" text-anchor="middle" class="h">发送下游</text><text x="1200" y="174" text-anchor="middle" class="s">背压时整条链停住</text>
+  <path d="M470 158H525 M750 158H805 M1030 158H1085" stroke="#607D94" stroke-width="3" marker-end="url(#arrowNavy)"/>
+  <text x="1365" y="151" class="metric">N 条记录 ≈ N 次读</text><text x="1365" y="176" class="metric">+ N 次写 / emit</text>
+
+  <!-- ownership lane -->
+  <rect x="48" y="238" width="1504" height="130" rx="12" fill="white" stroke="#96B4CA"/>
+  <rect x="48" y="238" width="180" height="130" rx="12" fill="#17365D"/><text x="138" y="285" text-anchor="middle" class="lane">消息所有权主线</text><text x="138" y="312" text-anchor="middle" class="lane">只处理一次</text>
+  <rect x="260" y="264" width="200" height="76" rx="8" fill="#F4F8FC" stroke="#9CB6C9"/><text x="360" y="290" text-anchor="middle" class="h">网络输入</text><text x="360" y="314" text-anchor="middle" class="b">StreamRecord / barrier</text>
+  <rect x="520" y="254" width="260" height="96" rx="8" fill="#E8F7F6" stroke="#00A6A6" stroke-width="2"/><text x="650" y="282" text-anchor="middle" class="h">Mailbox Lookahead Buffer</text><text x="650" y="307" text-anchor="middle" class="b">保序持有引用，不执行业务函数</text><text x="650" y="330" text-anchor="middle" class="s">size / timeout / watermark 触发 flush</text>
+  <rect x="840" y="264" width="220" height="76" rx="8" fill="#F4F8FC" stroke="#9CB6C9"/><text x="950" y="290" text-anchor="middle" class="h">单次有序派发</text><text x="950" y="314" text-anchor="middle" class="b">业务函数只在 mailbox 执行</text>
+  <rect x="1120" y="264" width="210" height="76" rx="8" fill="#F4F8FC" stroke="#9CB6C9"/><text x="1225" y="290" text-anchor="middle" class="h">更新 / emit</text><text x="1225" y="314" text-anchor="middle" class="b">保持原 Flink 顺序</text>
+  <rect x="1380" y="264" width="140" height="76" rx="8" fill="#17365D"/><text x="1450" y="294" text-anchor="middle" class="lane">下游</text><text x="1450" y="318" text-anchor="middle" class="lane">/ 背压</text>
+  <path d="M460 302H515 M780 302H835 M1060 302H1115 M1330 302H1375" stroke="#17365D" stroke-width="3" marker-end="url(#arrowNavy)"/>
+
+  <!-- optimized read/write lane -->
+  <rect x="48" y="394" width="1504" height="286" rx="12" fill="white" stroke="#59BDBA"/>
+  <rect x="48" y="394" width="180" height="286" rx="12" fill="#008F8C"/><text x="138" y="447" text-anchor="middle" class="lane">已验证主线</text><text x="138" y="474" text-anchor="middle" class="lane">状态访问批量化</text><text x="138" y="514" text-anchor="middle" class="tag">收益：少读 / 少写</text>
+  <rect x="260" y="420" width="250" height="106" rx="9" fill="#E8F7F6" stroke="#00A6A6" stroke-width="2"/><text x="385" y="449" text-anchor="middle" class="h">① LocalPreAgg 分组</text><text x="385" y="474" text-anchor="middle" class="b">提取 key，按首次出现顺序分组</text><text x="385" y="497" text-anchor="middle" class="s">同 key 的 N 条记录形成一个 fold</text>
+  <rect x="570" y="420" width="250" height="106" rx="9" fill="#E8F7F6" stroke="#00A6A6" stroke-width="2"/><text x="695" y="449" text-anchor="middle" class="h">② 精确 key 批读</text><text x="695" y="474" text-anchor="middle" class="b">VCache / MSnapshot 先命中</text><text x="695" y="497" text-anchor="middle" class="s">剩余 miss 再进入 RocksDB</text>
+  <rect x="880" y="420" width="250" height="106" rx="9" fill="#FFF4E8" stroke="#F28C18" stroke-width="2"/><text x="1005" y="449" text-anchor="middle" class="h">③ Mem / SST Bloom</text><text x="1005" y="474" text-anchor="middle" class="b">负点查在 SkipList / block 前拒绝</text><text x="1005" y="497" text-anchor="middle" class="s">q5: SkipList probe cycles -77.9%</text>
+  <rect x="1190" y="420" width="300" height="106" rx="9" fill="#F4F8FC" stroke="#9CB6C9"/><text x="1340" y="449" text-anchor="middle" class="h">④ RocksDB 权威状态</text><text x="1340" y="474" text-anchor="middle" class="b">必要时 point/MultiGet，结果进入 staging</text><text x="1340" y="497" text-anchor="middle" class="s">任何失败都回退权威读取</text>
+  <path d="M510 473H565 M820 473H875 M1130 473H1185" stroke="#00A6A6" stroke-width="3" marker-end="url(#arrowTeal)"/>
+  <rect x="260" y="558" width="360" height="92" rx="9" fill="#F4F8FC" stroke="#9CB6C9"/><text x="440" y="586" text-anchor="middle" class="h">⑤ 每 key 一次 fold</text><text x="440" y="611" text-anchor="middle" class="b">读取一次 accumulator → fold N 条 → 写一次</text><text x="440" y="632" text-anchor="middle" class="s">保持首见 key 顺序与业务语义</text>
+  <rect x="700" y="558" width="360" height="92" rx="9" fill="#F4F8FC" stroke="#9CB6C9"/><text x="880" y="586" text-anchor="middle" class="h">⑥ Collapse update / emit</text><text x="880" y="611" text-anchor="middle" class="b">N 次状态更新与输出折叠为 1 次</text><text x="880" y="632" text-anchor="middle" class="s">q15/q17 是双平台差距的主要攻坚点</text>
+  <rect x="1140" y="558" width="350" height="92" rx="9" fill="#17365D"/><text x="1315" y="588" text-anchor="middle" class="lane">收益来源</text><text x="1315" y="613" text-anchor="middle" class="lane">少 JNI · 少 comparator · 少写放大</text><text x="1315" y="636" text-anchor="middle" class="lane">把 I/O 从 per-record 改为 per-key</text>
+  <path d="M1340 526V542H440V553" stroke="#17365D" stroke-width="3" fill="none" marker-end="url(#arrowNavy)"/><path d="M620 604H695 M1060 604H1135" stroke="#17365D" stroke-width="3" marker-end="url(#arrowNavy)"/>
+
+  <!-- speculative lane -->
+  <rect x="48" y="706" width="1504" height="142" rx="12" fill="#FFF8F1" stroke="#F28C18" stroke-dasharray="8 6"/>
+  <rect x="48" y="706" width="180" height="142" rx="12" fill="#F28C18"/><text x="138" y="751" text-anchor="middle" class="lane">实验支线</text><text x="138" y="778" text-anchor="middle" class="lane">Speculative Prefetch</text><text x="138" y="811" text-anchor="middle" class="tag">当前不计收益</text>
+  <rect x="260" y="730" width="230" height="88" rx="8" fill="white" stroke="#F28C18"/><text x="375" y="758" text-anchor="middle" class="h">未来 key 快照</text><text x="375" y="783" text-anchor="middle" class="b">只读 key，不处理消息</text><text x="375" y="804" text-anchor="middle" class="s">worker 不 emit / 不推进 watermark</text>
+  <rect x="550" y="730" width="230" height="88" rx="8" fill="white" stroke="#F28C18"/><text x="665" y="758" text-anchor="middle" class="h">异步 worker</text><text x="665" y="783" text-anchor="middle" class="b">批读并发布 staging</text><text x="665" y="804" text-anchor="middle" class="s">generation 不匹配即丢弃</text>
+  <rect x="840" y="730" width="270" height="88" rx="8" fill="white" stroke="#F28C18"/><text x="975" y="758" text-anchor="middle" class="h">Mailbox 权威消费</text><text x="975" y="783" text-anchor="middle" class="b">完成则 promote；未完成则同步读</text><text x="975" y="804" text-anchor="middle" class="s">同一消息仍只处理一次</text>
+  <rect x="1170" y="730" width="320" height="88" rx="8" fill="#FDE9E5" stroke="#C94A3D"/><text x="1330" y="758" text-anchor="middle" class="h">当前实测：-3.71%</text><text x="1330" y="783" text-anchor="middle" class="b">约 103 万任务仅 104 次 promotion</text><text x="1330" y="804" text-anchor="middle" class="s">主因：lead 不足 + live read race</text>
+  <path d="M490 774H545 M780 774H835 M1110 774H1165" stroke="#F28C18" stroke-width="3" marker-end="url(#arrowOrange)"/>
+  <path d="M650 350V392" stroke="#F28C18" stroke-width="2" stroke-dasharray="6 5"/><text x="665" y="383" class="s">flush 时分流</text>
+  <text x="48" y="880" class="s">正确性边界：barrier/watermark 前先 flush；worker 不拥有 StreamRecord；write generation 防止陈旧结果；失败、队列丢弃和 race 都回退 RocksDB 权威路径。</text>
+</svg>

@@ -25,19 +25,18 @@
 
 1. 最新可复用的 Kunpeng 端到端结果是 200M R1 `+47.15%`，不是旧 100M 的 `+42.79%`。
 2. x86 的匹配 200M 结果已补齐为 `+61.71%`。当前平台差值为 `47.15% - 61.71% = -14.56pp`，与“Kunpeng 至少高 10pp”的目标相差 24.56pp，目标未达。
-3. Memtable Bloom 的收益具有强 query 依赖。旧 15q clean ablation 为 `-1.36%`；本次同 binary 50M ABBA 短筛中，q5 `+5.24%`、q15 `-0.17%`、q17 `+1.65%`，三查询算术平均 `+2.24%`。q5 同腿 ticker 显示约 1425 万次 memtable hit 和 6612 万次 miss，说明它有大量可被 Bloom 提前拒绝的 memtable 负查；但仍需 CPU profile 证明 comparator/skiplist 工作确实下降。
-4. 本次选择 q5/q15/q17 做 Prefetch 单变量是无效归因：三者 `tasksBuilt=0`。q5 是窗口 namespace，被 `VoidNamespace` 正确性门控排除；q15/q17 被 LocalPreagg 整批消费，设计上优先走分组后即时批读，不进入 speculative worker。表面 `+1.66%` 只能记作漂移，不能记作 Prefetch 收益。下一轮改用历史同 runtime 日志已证明 `tasksBuilt>0` 的 q9，并强制要求 submitted/executed/promoted 均大于零。
+3. Memtable Bloom 的收益具有强 query 依赖。旧 15q clean ablation 为 `-1.36%`；本次同 binary 50M ABBA 短筛中，q5 `+5.24%`、q15 `-0.17%`、q17 `+1.65%`，三查询算术平均 `+2.24%`。q5 的独立四腿 profile 已证明收益来源：`InlineSkipList::FindGreaterOrEqual` cycles 从平均 `1.675%` 降至 `0.370%`（-77.91%），KeyComparator 从 `1.625%` 降至 `0.825%`（-49.23%），`memcmp` 从 `1.165%` 降至 `0.810%`（-30.47%）；新增 Bloom 检查内联在 `MemTable::Get`，约占 1.06%，读侧 self-cycle 集合净减少约 1.40 个采样百分点。即负点查在进入 SkipList 前被早拒绝，写侧成本不变。
+4. 早期 q5/q15/q17 Prefetch 单变量因 `tasksBuilt=0` 无法归因。进一步审计发现 `async-chunks` 曾从静态全局配置读取，而不是 TaskManager 实际配置；修复后以 q17、VCache=64 做了真实触发 ABBA。off 均值 85.42、on 均值 82.25 K/s/core，Prefetch 增量为 `-3.71%`。两条 on 腿各构建约 103 万个任务、执行约 88--90 万个任务并产生约 131 万次 point get，但最终各只有 104 次 staging promotion，约 132 万次 live read 与 in-flight 预取竞争。结论是当前 overlap 实现虽能安全回退，但任务太细、领先时间不足，不能保留为有效性能项。
 5. 已实现的 native request plane 在两平台均退化，Kunpeng 少退化 1.33pp，但离 10pp 不足。下一版必须以自适应门槛和 ARM-only kernel 为前提，不能默认全量过 JNI。
 6. 已有 tsv110/LSE、BiSheng 和 indexed-skiplist 证据表明，“只换编译器/指令开关”不足以形成 10pp。后续 ARM-only 路径必须同时减少 Java 对象/JNI 边界次数，并用 runtime counter 证明命中率和摊销条件。
 7. 代码审计发现 `native.request-plane.min-batch-size` 原先只约束 prepared-key prefetch，native mailbox compact 和 native LocalPreAgg 仍会对小批次跨 JNI。当前修复将三条 batch 路径统一 fail-open 到 Java，并分别记录 threshold fallback，避免把门槛回退混进异常/slot 耗尽计数。
 
 ## 待完成实验（按证据缺口排序）
 
-1. q9 做 Prefetch off/on ABBA；必须 `tasksBuilt/tasksExecuted/promoted > 0`，否则该腿无效。
-2. q5 做 Mem Bloom off/on ABBA，并对两腿各采 30 秒 ARM cycles 调用栈，验证 `KeyComparator/InlineSkipList` 或 RocksDB memtable 查找热点是否下降。
-3. 基于 profile 和机制计数决定保留项；不把 q15/q17 的 Prefetch 空转差值写成技术收益。
-4. 双平台做一轮短筛：Java request plane vs 自适应 native；x86 必须 runtime fallback，Kunpeng 仅在门槛满足时走 ARM 路径。
-5. 候选在 Kunpeng 上有正增量且双平台差值方向正确后，跑 15q 100M R1；达到目标再扩 R3。
+1. Prefetch 仅在完成“窗口级批次、足够 lead、限制每窗口 in-flight、promotion/admission 自适应”后再复测；当前实现不计入有效技术收益。
+2. 修复 native request-plane 的 O(n²) 去重/重复 CRC、MapSnapshot 组合 key 歧义、first-seen 顺序和 generation 粒度，并加入 ARM/x86 runtime counter。
+3. 双平台做一轮短筛：Java request plane vs 自适应 native；x86 必须 runtime fallback，Kunpeng 仅在门槛满足时走 ARM 路径。
+4. 候选在 Kunpeng 上有正增量且双平台差值方向正确后，跑 15q 100M R1；达到目标再扩 R3。
 
 ## 2026-08-19 归因短筛原始结果
 
@@ -51,6 +50,21 @@
 | q17 | 68.98 | 70.00 | 69.62 | 70.23 | 70.12 | +1.65% | +0.71% | Prefetch 未触发；Bloom 小正 |
 
 上述 K/s/core 均来自完成的 50M measured job；8 TM、16 slots、正 cores、无 checkpoint，且通过 `raw throughput / cores` 公式复核。三查询 Mem Bloom 提升百分比算术平均 `+2.24%`。Prefetch 表面差值的算术平均 `+1.66%`，但因 `tasksBuilt=0` 明确作废。
+
+## 2026-08-19 Prefetch 真实触发 ABBA
+
+协议：Kunpeng q17、100M、8 TM/16 slots、无 checkpoint；为强制制造真实 miss，将 VCache 容量从规范 FullOpt 的 8000 临时缩小到 64。该实验只回答机制和增量，不替代 15q FullOpt 主结果。
+
+| Leg | Prefetch | K/s/core | tasks built | tasks executed | point gets | staging promoted | live-read raced in-flight |
+|---|---|---:|---:|---:|---:|---:|---:|
+| on-a | on | 81.18 | 1,029,313 | 897,717 | 1,337,269 | 104 | 1,314,886 |
+| off-a | off | 87.95 | 0 | 0 | 0 | 0 | 0 |
+| off-b | off | 82.89 | 0 | 0 | 0 | 0 | 0 |
+| on-b | on | 83.32 | 1,027,380 | 880,185 | 1,310,383 | 104 | 1,328,480 |
+
+ABBA 算术均值：off `85.42`，on `82.25` K/s/core，增量 `(82.25 / 85.42 - 1) = -3.71%`。worker failure 为 0，结果正确完成；退化来自过晚预取和每 8 records 的任务风暴，而非 job failure。约百万级任务和百万级 point get 只换来 104 次真正消费，说明当前时间重叠窗口不足。
+
+紧凑证据：`dse_results/cachekit-prefetch-overlap-q17-100m-20260819/final/PREFETCH_OVERLAP_RESULTS.json`；归档 SHA-256 `0c8f31838050320d046230a5128d7574e90a71353a74b8ef737ccd48f0e73d19`。
 
 ## 证据门槛
 

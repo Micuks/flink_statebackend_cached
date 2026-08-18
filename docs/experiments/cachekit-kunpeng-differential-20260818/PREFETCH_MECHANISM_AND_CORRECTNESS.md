@@ -72,3 +72,14 @@ worker :                  MultiGet(k1..kN) ----> publish staging
 - q9 的历史同类日志有 `tasksBuilt≈6万/TM`、`tasksExecuted≈6万/TM`，是下一轮正确的 Prefetch 机制查询。新实验把 `tasksBuilt/tasksExecuted/promoted > 0` 写成硬 gate。
 
 边界结论：lookahead 只持有引用；业务函数和下游 emit 仍只由 mailbox 执行一次。可能重复的是“worker 预读”与“mailbox 权威 point get”这两个状态 I/O，不是消息处理。`writeGen` 阻止过期 staging 被提升；watermark/status/latency 到达前先 flush；失败或迟到一律回退权威路径。
+
+随后发现 `async-chunks` 最初通过静态 `GlobalConfiguration` 读取，未绑定到 TaskManager 的实际配置。修复为由 `OneInputStreamTask` 读取并作为实例参数传入 `StreamRecordBatchOutput` 后，q17/VCache=64 的真实触发 ABBA 得到：off `85.42`、on `82.25` K/s/core，即 `-3.71%`。
+
+两条 on 腿分别构建 1,029,313/1,027,380 个任务，执行 897,717/880,185 个任务，产生 1,337,269/1,310,383 次 point get，却都只有 104 次 staging promotion；同时记录 1,314,886/1,328,480 次 `live_read_raced_inflight`。这证明：
+
+1. 消息没有被重复处理，worker failure 为 0，generation/fallback 边界有效；
+2. 状态 I/O 大量重复，mailbox 在 worker 完成前已经进入权威读取；
+3. 每 8 records 建任务造成调度和 JNI/读取开销，promotion 覆盖率约万分之一；
+4. 规范 FullOpt 的 VCache=8000 下命中更高，Prefetch 更容易完全不触发或没有消费价值。
+
+因此当前 speculative Prefetch 不作为已验证收益项。下一版需要以一个 mailbox 窗口为单位合并任务、限制单窗口 in-flight、按历史 promotion/lead time 自适应准入，并在 promotion 比率不足时自动关闭；只有真实 promotion 与 profiler-free 吞吐同时转正才可恢复到主线。
