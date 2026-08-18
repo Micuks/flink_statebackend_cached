@@ -85,3 +85,21 @@ ABBA 算术均值：off `85.42`，on `82.25` K/s/core，增量 `(82.25 / 85.42 -
 | Kunpeng | q17 | 49.21 | 89.89 | +82.67% | 27.04→26.27 | 1.77× |
 
 q15 的 Kunpeng wall 加速更高，但 cores 放大为 3.12×，显著高于 x86 的 2.15×；这才是 per-core 提升偏低的直接原因。q17 则是 Kunpeng RDB 基线更强、FullOpt 绝对吞吐与 x86 接近，形成相对提升的分母效应。两平台 q17 FullOpt 后 RocksDB 读热点都基本退场，后续主线改为降低聚合/对象/GC/写侧 CPU，而不是继续只优化 Bloom 或 Get。完整报告见 `Q15_Q17_CROSSHOST_PROFILE_REPORT_ZH.md`。
+
+## 2026-08-19 Native LocalPreAgg flat-slice 快筛
+
+为了验证 review 指出的 per-group `ArrayList` 分配，native 分组结果改成一次计数、一个扁平 `Object[]` 和每组零拷贝 slice。单测通过后在 Kunpeng q15 做 50M 三腿短筛；8 TM、16 slots、无 checkpoint，三腿均由 `raw throughput / cores` 复核。
+
+| Leg | 实现 | raw K/s | cores | K/s/core | wall s |
+|---|---|---:|---:|---:|---:|
+| off-a | Java FullOpt | 792.40 | 24.50 | 32.34 | 63.099 |
+| on-a | ARM retained native，不开 native preagg | 776.52 | 23.32 | 33.29 | 64.390 |
+| on-b | ARM retained + flat-slice native preagg | 765.64 | 23.83 | 32.12 | 65.305 |
+
+增量：ARM retained 相对 Java `+2.94%`；flat-slice 相对 Java `-0.68%`，相对 ARM retained `-3.51%`。on-b 日志中 16 个 backend 实例累计 715,889 个 native grouping batch、45,743,398 个输入 key、6,089,584 个 group、106 次安全回退，选择的 kernel 为 `aarch64-sve256-hybrid-crc32c`；因此退化不是开关未生效。
+
+该轮还发现 runner 元数据写 50M、实际配置为 200M 的协议错误；公式门槛立即拒绝该结果，原始无效证据隔离在 `results/invalid-protocol-200m-metadata/`。纠正 `events.num=50M` 后从零重跑，上表只采用纠正后的完整结果。
+
+根因是 grouping 前仍为每批复制 serializer、完整序列化 generic RowData key，prefetch 随后又序列化 unique key/namespace；native 只替换 grouping，fold 仍在 Java。flat-slice 只去掉一部分容器分配，未覆盖 JNI 和重复序列化成本，不能扩 15Q。
+
+紧凑证据：`dse_results/cachekit-native-preagg-flat-q15-50m-20260819/`；远端：`/home/wuql/flink-cluster/experiments/cachekit-native-preagg-flat-q15-50m-kunpeng-20260819`。

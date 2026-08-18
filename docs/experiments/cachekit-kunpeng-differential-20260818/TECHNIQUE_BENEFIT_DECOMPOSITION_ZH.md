@@ -37,7 +37,7 @@ FullOpt 的实际开关是：VCache、MapSnapshot、Mailbox、LocalPreAgg、SST/
 | SST + Mem Bloom | Kunpeng 100M R1 15Q +8.59%；叠加 FullOpt 三轮增量 +11.08% | 同时减少 mutable/immutable MemTable 与 SST 无效访问 | 两个结果的 control 不同，不能相加 |
 | Speculative Prefetch | 真实触发 q17 100M ABBA -3.71% | 理论上 overlap worker 读与 mailbox 处理；实测过晚 | 约 103 万任务仅 104 次 promotion，当前不计有效收益 |
 | Native request plane | x86 200M 15Q -4.12%；Kunpeng -2.79% | ARM runtime dispatch 存在，但 JNI/序列化/批次编排未摊销 | 正确性通过，性能 gate 失败，默认关闭 |
-| Native LocalPreAgg | x86 -1.38%；Kunpeng -5.51% | 只把 grouping 下沉，fold 仍在 Java | 未减少主要 Java 对象和 accumulator 工作，默认关闭 |
+| Native LocalPreAgg | 旧 200M：x86 -1.38%、Kunpeng -5.51%；新 q15 50M flat-slice 相对 ARM retained -3.51% | 只把 grouping 下沉，fold 仍在 Java；flat-slice 仅减少 per-group backing array | 日志证明约 71.6 万个 native batch 确实执行；重复 generic key 序列化和 JNI 仍未摊销，默认关闭 |
 | tsv110/LSE 编译轴 | Kunpeng 三轮 -0.16% | 编译器/原子指令选择 | 单独换编译参数无稳定收益 |
 
 ## 3. 为什么 MemTable Bloom 在 q5 有收益
@@ -74,6 +74,8 @@ Native C++ 已实现并暴露独立开关，包含：request plane、MapSnapshot
 
 1. 将 LocalPreAgg 从“仅 native grouping”推进到“可批量下沉的 accumulator kernel”，真正减少 Java `List<Object>`、逐组回调和序列化，而不是多付一次 JNI；
 2. 将 Mem/SST Bloom 的 hash/probe 做 AArch64 runtime dispatch，并用 q5 和负查占比高的 query 筛选，但它不是弥合 q15/q17 差距的主手段。
+
+第一项的最近一次中间修复将 native plan 的 per-group `ArrayList` 改为单个 flat array slice，但 q15 相对 ARM retained 仍为 `-3.51%`。下一次短筛进一步把 native grouping 输入从完整 generic key 序列化改为 4-byte Java hash token；equal key 必然产生相同 token，hash collision 由现有 Java equals plan validation 检出并回退，因此不牺牲正确性。只有该短筛转正，才进入 15Q。
 
 ## 6. 证据路径
 
