@@ -18,8 +18,6 @@
 
 package org.apache.flink.streaming.runtime.io;
 
-import org.apache.flink.configuration.ConfigOptions;
-import org.apache.flink.configuration.GlobalConfiguration;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.operators.BatchProcessingOperator;
 import org.apache.flink.streaming.api.operators.Input;
@@ -48,26 +46,6 @@ import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
  */
 public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T> {
 
-    private static final boolean BP_PREFETCH_ASYNC_CHUNKS =
-            GlobalConfiguration.loadConfiguration()
-                    .get(
-                            ConfigOptions.key(
-                                            "state.backend.cachekit.bp-prefetch.async-chunks.enabled")
-                                    .booleanType()
-                                    .defaultValue(false));
-
-    private static final int BP_PREFETCH_ASYNC_CHUNK_SIZE =
-            Math.max(
-                    2,
-                    Math.min(
-                            1024,
-                            GlobalConfiguration.loadConfiguration()
-                                    .get(
-                                            ConfigOptions.key(
-                                                            "state.backend.cachekit.bp-prefetch.async-chunks.size")
-                                                    .intType()
-                                                    .defaultValue(16))));
-
     private final DataOutput<T> wrapped;
     private final Input<T> headOperator;
     private final BatchProcessingOperator<T, ?> batchOperator; // non-null iff head op opts in
@@ -89,8 +67,10 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
      * When true, prefetch only fires while backpressured; when false, prefetch fires every flush.
      */
     private final boolean backpressureGated;
-    /** Local-preagg may consume the whole batch, making any early state read dead work. */
-    private final boolean localPreaggCandidate;
+    /** Whether completed lookahead chunks are submitted before the mailbox batch flushes. */
+    private final boolean asyncPrefetchChunks;
+    /** Records per early prefetch submission. */
+    private final int asyncPrefetchChunkSize;
 
     // Reusable record buffer. Sized at construction.
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -128,7 +108,9 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 numRecordsIn,
                 false,
                 null,
-                true);
+                true,
+                false,
+                16);
     }
 
     /**
@@ -148,6 +130,35 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
             boolean prefetchMode,
             java.util.function.BooleanSupplier backpressured,
             boolean backpressureGated) {
+        this(
+                wrapped,
+                headOperator,
+                enabled,
+                commutativeKeySort,
+                batchSize,
+                batchTimeoutNanos,
+                numRecordsIn,
+                prefetchMode,
+                backpressured,
+                backpressureGated,
+                false,
+                16);
+    }
+
+    /** Full constructor with task-configuration-derived asynchronous lookahead controls. */
+    public StreamRecordBatchOutput(
+            DataOutput<T> wrapped,
+            Input<T> headOperator,
+            boolean enabled,
+            boolean commutativeKeySort,
+            int batchSize,
+            long batchTimeoutNanos,
+            Counter numRecordsIn,
+            boolean prefetchMode,
+            java.util.function.BooleanSupplier backpressured,
+            boolean backpressureGated,
+            boolean asyncPrefetchChunks,
+            int asyncPrefetchChunkSize) {
         this.wrapped = wrapped;
         this.headOperator = headOperator;
         this.enabled = enabled && batchSize > 1;
@@ -158,7 +169,8 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         this.prefetchMode = prefetchMode;
         this.backpressured = backpressured;
         this.backpressureGated = backpressureGated;
-        this.localPreaggCandidate = LocalPreagg.mayHandle(headOperator);
+        this.asyncPrefetchChunks = asyncPrefetchChunks;
+        this.asyncPrefetchChunkSize = Math.max(2, Math.min(1024, asyncPrefetchChunkSize));
         @SuppressWarnings({"unchecked", "rawtypes"})
         StreamRecord<T>[] tmp = new StreamRecord[this.batchSize];
         this.buf = tmp;
@@ -252,7 +264,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         // distinct keys per batch before dispatch; does not change correctness.
         CollapseProbe.observe(headOperator, buf, n);
         try {
-            if (prefetchMode && BP_PREFETCH_ASYNC_CHUNKS) {
+            if (prefetchMode && asyncPrefetchChunks) {
                 // Fire-and-forget: the backend-side prefetch is asynchronous (shared worker
                 // thread + staging cache), so there is nothing to join — blocking the mailbox
                 // here would defeat the purpose of prefetching.
@@ -268,7 +280,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 // window with a single prefetch. By default this emits each record in arrival
                 // order; when enabled, the existing conservative key-sort adapter may amortize
                 // same-key dispatch for known commutative operators and falls back otherwise.
-                if (!BP_PREFETCH_ASYNC_CHUNKS
+                if (!asyncPrefetchChunks
                         && (!backpressureGated
                                 || (backpressured != null && backpressured.getAsBoolean()))) {
                     org.apache.flink.streaming.runtime.tasks.StatePrefetcher.prefetch(
@@ -319,7 +331,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
     private void scheduleAsyncPrefetchChunks(boolean includeRemainder) {
         if (!enabled
                 || !prefetchMode
-                || !BP_PREFETCH_ASYNC_CHUNKS
+                || !asyncPrefetchChunks
                 || count <= 1) {
             return;
         }
@@ -328,11 +340,11 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         }
         while (asyncPrefetchScheduledUntil < count) {
             int remaining = count - asyncPrefetchScheduledUntil;
-            if (remaining < BP_PREFETCH_ASYNC_CHUNK_SIZE && !includeRemainder) {
+            if (remaining < asyncPrefetchChunkSize && !includeRemainder) {
                 return;
             }
             int start = asyncPrefetchScheduledUntil;
-            int end = Math.min(count, start + BP_PREFETCH_ASYNC_CHUNK_SIZE);
+            int end = Math.min(count, start + asyncPrefetchChunkSize);
             if (end - start <= 1) {
                 asyncPrefetchScheduledUntil = end;
                 return;
