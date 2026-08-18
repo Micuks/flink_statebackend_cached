@@ -320,7 +320,6 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         if (!enabled
                 || !prefetchMode
                 || !BP_PREFETCH_ASYNC_CHUNKS
-                || localPreaggCandidate
                 || count <= 1) {
             return;
         }
@@ -341,6 +340,9 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
             // StatePrefetcher only extracts keys and invokes CacheKit's non-blocking submission
             // hook. Read the live range directly: copying a slice and chaining an already-complete
             // future added allocation without providing ordering or backpressure semantics.
+            // LocalPreagg candidates are intentionally included: early chunks can overlap their
+            // later grouping/fold work. At flush, immediate prefetch skips staged/in-flight keys,
+            // so the two paths do not issue the same batch read twice.
             org.apache.flink.streaming.runtime.tasks.StatePrefetcher.prefetch(
                     headOperator, buf, start, end);
             asyncPrefetchScheduledUntil = end;
