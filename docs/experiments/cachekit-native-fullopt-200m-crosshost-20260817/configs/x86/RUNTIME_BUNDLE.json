@@ -1,0 +1,30 @@
+{
+  "artifacts": [
+    {
+      "container_filename": "flink-dist-1.16.3.jar",
+      "covers_modules": [
+        "flink-statebackend-rocksdb",
+        "flink-streaming-java"
+      ],
+      "outer_hash_key": "runtime_flink_dist_sha256",
+      "path": "/mnt/data2/wuql/flink-cluster/experiments/cachekit-native-fullopt-200m-x86-20260817/inputs/runtime/flink-dist-1.16.3.jar",
+      "role": "flink-dist",
+      "sha256": "319ce44a768c36e5232e5748da49545b8c30cbaa6cdf6ed65dfa264547311a7e",
+      "size_bytes": 201519749
+    },
+    {
+      "container_filename": "flink-statebackend-cachekit-1.16-SNAPSHOT.jar",
+      "covers_modules": [
+        "flink-statebackend-cachekit"
+      ],
+      "outer_hash_key": "runtime_cachekit_sha256",
+      "path": "/mnt/data2/wuql/flink-cluster/experiments/cachekit-native-fullopt-200m-x86-20260817/inputs/runtime/flink-statebackend-cachekit-1.16-SNAPSHOT.jar",
+      "role": "cachekit",
+      "sha256": "3727b2d43df6103aae0e094e8d654147737ee04a20733e8dee376ba9801947de",
+      "size_bytes": 172348
+    }
+  ],
+  "schema": "cachekit-golden-runtime-bundle-v1",
+  "source_commit": "a03aedcc156a709b5a4217d3c2504b5e8cc4ba6f",
+  "variant": "candidate"
+}
