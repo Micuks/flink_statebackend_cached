@@ -20,8 +20,11 @@ package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.configuration.Configuration;
 
+import org.rocksdb.TickerType;
 import org.junit.Assert;
 import org.junit.Test;
+
+import java.util.Arrays;
 
 /** Test all native metrics can be set using configuration. */
 public class RocksDBNativeMetricOptionsTest {
@@ -45,5 +48,27 @@ public class RocksDBNativeMetricOptionsTest {
                             property.getConfigKey()),
                     options.getProperties().contains(property.getRocksDBProperty()));
         }
+    }
+
+    @Test
+    public void testBloomAndMemtableStatisticsConfigurable() {
+        Configuration config = new Configuration();
+        config.set(RocksDBNativeMetricOptions.MONITOR_BLOOM_FILTER_USEFUL, true);
+        config.set(RocksDBNativeMetricOptions.MONITOR_BLOOM_FILTER_FULL_POSITIVE, true);
+        config.set(RocksDBNativeMetricOptions.MONITOR_BLOOM_FILTER_FULL_TRUE_POSITIVE, true);
+        config.set(RocksDBNativeMetricOptions.MONITOR_MEMTABLE_HIT, true);
+        config.set(RocksDBNativeMetricOptions.MONITOR_MEMTABLE_MISS, true);
+
+        RocksDBNativeMetricOptions options = RocksDBNativeMetricOptions.fromConfig(config);
+
+        Assert.assertTrue(
+                options.getMonitorTickerTypes()
+                        .containsAll(
+                                Arrays.asList(
+                                        TickerType.BLOOM_FILTER_USEFUL,
+                                        TickerType.BLOOM_FILTER_FULL_POSITIVE,
+                                        TickerType.BLOOM_FILTER_FULL_TRUE_POSITIVE,
+                                        TickerType.MEMTABLE_HIT,
+                                        TickerType.MEMTABLE_MISS)));
     }
 }

@@ -194,6 +194,47 @@ class CachedInternalValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testLiveReadRecordsRaceWithUnfinishedPrefetchWithoutChangingResult() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(17);
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
+        stubPreparedKeySerialization(batchReader);
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Runnable unfinished = state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2"));
+        assertTrue(unfinished != null);
+        assertEquals(17, state.value());
+        assertEquals(1, state.getPrefetchLiveReadRacedInFlightForTesting());
+        verify(delegate, times(1)).value();
+
+        ((PrefetchExecutor.DropAwareTask) unfinished).onDrop();
+        state.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testNewGenerationCanReclaimStalePrefetchReservations() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("activate-bypass");
         InternalValueState<String, VoidNamespace, Integer> delegate =
@@ -396,6 +437,7 @@ class CachedInternalValueStateTest {
         assertEquals(1, state.getStagingSizeForTesting());
         state.close();
         assertEquals(0, state.getStagingSizeForTesting());
+        assertEquals(1, state.getPrefetchUnusedStagedOnCloseForTesting());
         assertEquals(0, state.getStagingRetainedBytesForTesting());
         assertEquals(3, state.getPrefetchLazyValuesMaterializedForTesting());
         assertEquals(0, state.getPrefetchLazyMaterializationFailuresForTesting());

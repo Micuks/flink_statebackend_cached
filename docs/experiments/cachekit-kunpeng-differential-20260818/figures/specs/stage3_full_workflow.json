@@ -1,0 +1,76 @@
+{
+  "title": "CacheKit 第三阶段完整工作流与原生 Flink 对比",
+  "canvas": {"width": 1600, "height": 930},
+  "style": {
+    "font_family": "Noto Sans CJK SC, Source Han Sans SC, sans-serif",
+    "font_size": 15,
+    "bg_color": "#F7F9FC",
+    "palette": ["#EAF2F8", "#E8F8F5", "#FEF5E7", "#F4ECF7"]
+  },
+  "nodes": [
+    {"id": "f_record", "label": "上游记录", "x": 150, "y": 145, "width": 150, "height": 62, "fill": "#FFFFFF", "stroke": "#5D6D7E"},
+    {"id": "f_key", "label": "setCurrentKey", "x": 390, "y": 145, "width": 175, "height": 62, "fill": "#FFFFFF", "stroke": "#5D6D7E"},
+    {"id": "f_get", "label": "同步 RocksDB get\n关键路径等待", "x": 655, "y": 145, "width": 220, "height": 72, "fill": "#FDEDEC", "stroke": "#C0392B"},
+    {"id": "f_fn", "label": "业务函数\n逐条读改写", "x": 925, "y": 145, "width": 190, "height": 72, "fill": "#FFFFFF", "stroke": "#5D6D7E"},
+    {"id": "f_ser", "label": "序列化 / Shuffle", "x": 1180, "y": 145, "width": 190, "height": 62, "fill": "#FFFFFF", "stroke": "#5D6D7E"},
+    {"id": "f_down", "label": "下游", "x": 1440, "y": 145, "width": 130, "height": 62, "fill": "#D6EAF8", "stroke": "#1F4E79"},
+
+    {"id": "c_record", "label": "上游记录", "x": 115, "y": 390, "width": 140, "height": 62, "fill": "#FFFFFF", "stroke": "#1F4E79"},
+    {"id": "c_mailbox", "label": "Mailbox Lookahead\n保序缓冲一段未来访问", "x": 330, "y": 390, "width": 240, "height": 82, "fill": "#D6EAF8", "stroke": "#1F4E79"},
+    {"id": "c_preagg_q", "label": "可安全\nLocalPreAgg?", "x": 595, "y": 390, "width": 150, "height": 100, "shape": "diamond", "fill": "#FEF5E7", "stroke": "#E67E22", "font_size": 14},
+    {"id": "c_fold", "label": "按 key 首见顺序分组\n批内 fold / 减少状态写", "x": 850, "y": 325, "width": 255, "height": 82, "fill": "#FDEBD0", "stroke": "#E67E22"},
+    {"id": "c_replay", "label": "Mailbox 保序重放\n每条消息只处理一次", "x": 850, "y": 465, "width": 245, "height": 82, "fill": "#D6EAF8", "stroke": "#1F4E79"},
+    {"id": "c_state", "label": "CacheKit 状态访问门\nVCache → MSnapshot → staging", "x": 1135, "y": 390, "width": 265, "height": 92, "fill": "#D5F5E3", "stroke": "#148F77"},
+    {"id": "c_fallback", "label": "权威 RocksDB 读写\nSST/Mem Bloom 先拒绝空查", "x": 1420, "y": 390, "width": 260, "height": 92, "fill": "#FCF3CF", "stroke": "#B7950B"},
+
+    {"id": "p_extract", "label": "提取未来 serialized key\n不执行业务、不 emit", "x": 520, "y": 665, "width": 250, "height": 82, "fill": "#E8F8F5", "stroke": "#0E9384"},
+    {"id": "p_gate", "label": "自适应门槛\nbatch / bytes / reuse", "x": 785, "y": 665, "width": 190, "height": 100, "shape": "diamond", "fill": "#F4ECF7", "stroke": "#7D3C98", "font_size": 14},
+    {"id": "p_arm", "label": "Kunpeng Native Worker\nCRC32 + NEON/SVE1 + 128B layout\nx86 走 Java fallback", "x": 1055, "y": 665, "width": 285, "height": 100, "fill": "#E8DAEF", "stroke": "#7D3C98"},
+    {"id": "p_read", "label": "Chunked MultiGet\nBloom / MemTable / SST", "x": 1320, "y": 665, "width": 225, "height": 90, "fill": "#FCF3CF", "stroke": "#B7950B"},
+    {"id": "p_stage", "label": "Staging publish\n{value, writeGen}\nmailbox 校验后消费", "x": 1510, "y": 665, "width": 155, "height": 105, "fill": "#D5F5E3", "stroke": "#148F77", "font_size": 13},
+
+    {"id": "bp", "label": "下游背压 / I/O 等待\n提供 overlap 窗口", "x": 235, "y": 665, "width": 235, "height": 82, "fill": "#FDEDEC", "stroke": "#C0392B"},
+    {"id": "boundary", "label": "Watermark / status / latency\n先 flush batch 再转发", "x": 320, "y": 825, "width": 275, "height": 72, "fill": "#FFFFFF", "stroke": "#5D6D7E"},
+    {"id": "guard", "label": "正确性护栏\narrival order · writeGen · inFlight drop release\n失败/过期一律 fallback，不改变状态语义", "x": 940, "y": 835, "width": 560, "height": 84, "fill": "#FFFFFF", "stroke": "#1F4E79"},
+    {"id": "out", "label": "更少 JNI / RocksDB / 写放大\n同一业务结果与下游顺序", "x": 1410, "y": 835, "width": 310, "height": 84, "fill": "#1F4E79", "stroke": "#1F4E79", "text_color": "#FFFFFF"}
+  ],
+  "edges": [
+    {"from": "f_record", "to": "f_key"},
+    {"from": "f_key", "to": "f_get"},
+    {"from": "f_get", "to": "f_fn", "label": "阻塞"},
+    {"from": "f_fn", "to": "f_ser"},
+    {"from": "f_ser", "to": "f_down"},
+
+    {"from": "c_record", "to": "c_mailbox"},
+    {"from": "c_mailbox", "to": "c_preagg_q"},
+    {"from": "c_preagg_q", "to": "c_fold", "label": "YES", "color": "#E67E22"},
+    {"from": "c_preagg_q", "to": "c_replay", "label": "NO", "color": "#1F4E79"},
+    {"from": "c_fold", "to": "c_state", "label": "每 key 一次状态往返", "color": "#E67E22"},
+    {"from": "c_replay", "to": "c_state", "label": "逐条消费", "color": "#1F4E79"},
+    {"from": "c_state", "to": "c_fallback", "label": "cache/staging miss", "color": "#148F77"},
+    {"from": "c_fallback", "to": "out", "label": "update / emit", "color": "#1F4E79", "curve": true},
+
+    {"from": "c_mailbox", "to": "p_extract", "label": "只读 lookahead", "style": "dashed", "color": "#0E9384", "curve": true},
+    {"from": "bp", "to": "p_extract", "label": "可选 gate", "style": "dashed", "color": "#C0392B"},
+    {"from": "p_extract", "to": "p_gate"},
+    {"from": "p_gate", "to": "p_arm", "label": "ARM 且可摊销", "color": "#7D3C98"},
+    {"from": "p_gate", "to": "c_replay", "label": "否则 Java", "style": "dashed", "color": "#7D3C98", "curve": true},
+    {"from": "p_arm", "to": "p_read"},
+    {"from": "p_read", "to": "p_stage"},
+    {"from": "p_stage", "to": "c_state", "label": "提前完成才隐藏延迟", "color": "#148F77", "curve": true},
+
+    {"from": "boundary", "to": "c_mailbox", "label": "flush boundary", "style": "dashed", "color": "#5D6D7E", "curve": true},
+    {"from": "guard", "to": "c_state", "style": "dashed", "color": "#1F4E79", "curve": true},
+    {"from": "guard", "to": "p_stage", "style": "dashed", "color": "#1F4E79", "curve": true},
+    {"from": "c_state", "to": "out", "label": "hit / fold result", "color": "#148F77", "curve": true}
+  ],
+  "groups": [
+    {"id": "g_flink", "label": "原生 Flink：逐条同步状态访问，I/O 位于关键路径", "node_ids": ["f_record", "f_key", "f_get", "f_fn", "f_ser", "f_down"], "fill": "#F2F4F4", "stroke": "#AAB7B8", "padding": 32},
+    {"id": "g_main", "label": "CacheKit mailbox / operator 主路径", "node_ids": ["c_record", "c_mailbox", "c_preagg_q", "c_fold", "c_replay", "c_state", "c_fallback"], "fill": "#EBF5FB", "stroke": "#85C1E9", "padding": 34},
+    {"id": "g_worker", "label": "异步请求平面：与 mailbox 处理和下游等待重叠", "node_ids": ["bp", "p_extract", "p_gate", "p_arm", "p_read", "p_stage"], "fill": "#EAFBF7", "stroke": "#73C6B6", "padding": 34},
+    {"id": "g_boundary", "label": "边界与输出", "node_ids": ["boundary", "guard", "out"], "fill": "#F8F9F9", "stroke": "#AAB7B8", "padding": 28}
+  ],
+  "labels": [
+    {"text": "第三阶段：Mailbox × Prefetch × LocalPreAgg × Cache/Bloom × Kunpeng Native", "x": 800, "y": 32, "font_size": 25, "color": "#17365D", "anchor": "middle"}
+  ]
+}

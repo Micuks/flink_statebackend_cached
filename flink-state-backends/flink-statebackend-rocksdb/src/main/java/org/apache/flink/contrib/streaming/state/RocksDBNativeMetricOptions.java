@@ -302,6 +302,39 @@ public class RocksDBNativeMetricOptions implements Serializable {
                     .withDescription(
                             "Monitor the duration of writer requiring to wait for compaction or flush to finish in RocksDB.");
 
+    public static final ConfigOption<Boolean> MONITOR_BLOOM_FILTER_USEFUL =
+            ConfigOptions.key("state.backend.rocksdb.metrics.bloom-filter-useful")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Monitor point lookups rejected by a RocksDB Bloom filter before data-block access.");
+
+    public static final ConfigOption<Boolean> MONITOR_BLOOM_FILTER_FULL_POSITIVE =
+            ConfigOptions.key("state.backend.rocksdb.metrics.bloom-filter-full-positive")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Monitor full-filter positive results, including false positives.");
+
+    public static final ConfigOption<Boolean> MONITOR_BLOOM_FILTER_FULL_TRUE_POSITIVE =
+            ConfigOptions.key("state.backend.rocksdb.metrics.bloom-filter-full-true-positive")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription("Monitor full-filter positives whose key was actually present.");
+
+    public static final ConfigOption<Boolean> MONITOR_MEMTABLE_HIT =
+            ConfigOptions.key("state.backend.rocksdb.metrics.memtable-hit")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription("Monitor point lookups resolved by a RocksDB memtable.");
+
+    public static final ConfigOption<Boolean> MONITOR_MEMTABLE_MISS =
+            ConfigOptions.key("state.backend.rocksdb.metrics.memtable-miss")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Monitor point lookups not resolved by a RocksDB memtable and therefore continuing to SST lookup.");
+
     /** Creates a {@link RocksDBNativeMetricOptions} based on an external configuration. */
     public static RocksDBNativeMetricOptions fromConfig(ReadableConfig config) {
         RocksDBNativeMetricOptions options = new RocksDBNativeMetricOptions();
@@ -441,6 +474,15 @@ public class RocksDBNativeMetricOptions implements Serializable {
                     put(MONITOR_COMPACTION_READ_BYTES, TickerType.COMPACT_READ_BYTES);
                     put(MONITOR_COMPACTION_WRITE_BYTES, TickerType.COMPACT_WRITE_BYTES);
                     put(MONITOR_STALL_MICROS, TickerType.STALL_MICROS);
+                    put(MONITOR_BLOOM_FILTER_USEFUL, TickerType.BLOOM_FILTER_USEFUL);
+                    put(
+                            MONITOR_BLOOM_FILTER_FULL_POSITIVE,
+                            TickerType.BLOOM_FILTER_FULL_POSITIVE);
+                    put(
+                            MONITOR_BLOOM_FILTER_FULL_TRUE_POSITIVE,
+                            TickerType.BLOOM_FILTER_FULL_TRUE_POSITIVE);
+                    put(MONITOR_MEMTABLE_HIT, TickerType.MEMTABLE_HIT);
+                    put(MONITOR_MEMTABLE_MISS, TickerType.MEMTABLE_MISS);
                 }
             };
 
