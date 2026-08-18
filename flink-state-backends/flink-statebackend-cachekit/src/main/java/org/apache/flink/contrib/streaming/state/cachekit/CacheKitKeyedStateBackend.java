@@ -114,6 +114,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private long nativePreaggInputKeys;
     private long nativePreaggGroups;
     private long nativePreaggFallbacks;
+    private long nativePreaggThresholdFallbacks;
 
     // --- fullOpt: shared flush executors (N wrappers share one thread each) ---
     private final ExecutorService listStateFlushExecutor;
@@ -782,6 +783,16 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     private void closeNativeRequestPlane() {
         if (nativeRequestPlaneCoordinator != null) {
+            LOG.info(
+                    "[CACHEKIT NATIVE PREAGG SUMMARY] batches={} inputKeys={} groups={} "
+                            + "fallbacks={} thresholdFallbacks={} minBatchSize={} kernel={}",
+                    nativePreaggGroupBatches,
+                    nativePreaggInputKeys,
+                    nativePreaggGroups,
+                    nativePreaggFallbacks,
+                    nativePreaggThresholdFallbacks,
+                    nativeRequestPlaneCoordinator.options().minBatchSize(),
+                    nativeRequestPlaneCoordinator.selectedKernel());
             nativeRequestPlaneCoordinator.close();
         }
     }
@@ -875,6 +886,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 nativePreaggFallbacks++;
                 return null;
             }
+            if (keys.size() < nativeRequestPlaneCoordinator.options().minBatchSize()) {
+                nativePreaggFallbacks++;
+                nativePreaggThresholdFallbacks++;
+                return null;
+            }
             NativeRequestPlaneCoordinator.BatchSlot slot =
                     nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
             if (slot == null) {
@@ -931,6 +947,10 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     long getNativePreaggFallbacksForTesting() {
         return nativePreaggFallbacks;
+    }
+
+    long getNativePreaggThresholdFallbacksForTesting() {
+        return nativePreaggThresholdFallbacks;
     }
 
     @SuppressWarnings({ "unchecked", "rawtypes" })

@@ -18,6 +18,8 @@
 | `cachekit-kunpeng-clean-bloom-full15-20260803/CLEAN_BLOOM_REPORT_ZH.md` | Kunpeng, 100M, R1 | RocksDB vs Bloom-only | SST +9.36%; Mem -1.36%; combined +8.59% | Bloom 组件拆解 | 单轮；说明 combined 的主要收益来自 SST Bloom，不支持“Mem Bloom 单独有收益” |
 | `cachekit-kunpeng-fixed-prefetch-full15-20260803/FIXED_PREFETCH_REPORT.md` | Kunpeng, 100M, R1 | scalar vs MultiGet prefetch | total -0.14% | 旧 prefetch 实现的独立增量 | 旧实现没有证明吞吐收益，需用 overlap/消费指标重新归因 |
 | `cachekit-native-fullopt-200m-crosshost-20260817/RETEST_RESULTS_20260818.md` | x86 + Kunpeng, 200M, 3 variants | Java FullOpt+mailbox vs native request plane | x86 -4.12%; Kunpeng -2.79% | native correctness和真实 runtime dispatch | always-on JNI/重建开销大于 kernel 收益，不能作为 10pp 结论 |
+| `cachekit-kunpeng-compiler-direct-r1-20260805/final/THREE_ROUND_REPORT_ZH.md` | Kunpeng, 100M, R1-R3 | generic vs tsv110/LSE | -0.16% | 编译器/原子指令轴 | 单独换编译参数没有稳定收益；不能作为架构差异化主线 |
+| `cachekit-kunpeng-dstl-p3/refine-logs/KUNPENG_FROCKSDB_BISHENG_RESULTS_20260810.md` | Kunpeng native screening | BiSheng、WholeKeyIndexedSkipList、Direct-PUT | 编译器 micro +1.26%；JDK 三查询 +5.36% 但不稳定；skiplist canary -2.56% | 已筛过的硬件/编译器方向 | 不足 10pp；Direct-PUT 没有有效吞吐结果，不能计入性能结论 |
 
 ## 当前明确结论
 
@@ -26,6 +28,8 @@
 3. Memtable Bloom 目前没有独立正收益证据。旧 clean ablation 为 `-1.36%`；combined 的 `+8.59%` 主要由 SST Bloom 的 `+9.36%` 提供。
 4. 旧 prefetch 独立实验近似中性。下一轮必须同时采集“提交、执行、去重、staging 命中、stale、live-read 重复”计数，才能区分没有 overlap、预取太早/太晚和重复 I/O。
 5. 已实现的 native request plane 在两平台均退化，Kunpeng 少退化 1.33pp，但离 10pp 不足。下一版必须以自适应门槛和 ARM-only kernel 为前提，不能默认全量过 JNI。
+6. 已有 tsv110/LSE、BiSheng 和 indexed-skiplist 证据表明，“只换编译器/指令开关”不足以形成 10pp。后续 ARM-only 路径必须同时减少 Java 对象/JNI 边界次数，并用 runtime counter 证明命中率和摊销条件。
+7. 代码审计发现 `native.request-plane.min-batch-size` 原先只约束 prepared-key prefetch，native mailbox compact 和 native LocalPreAgg 仍会对小批次跨 JNI。当前修复将三条 batch 路径统一 fail-open 到 Java，并分别记录 threshold fallback，避免把门槛回退混进异常/slot 耗尽计数。
 
 ## 待完成实验（按证据缺口排序）
 

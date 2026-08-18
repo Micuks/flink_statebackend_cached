@@ -368,12 +368,79 @@ class NativePreparedValueStateTest {
         assertEquals(3, state.getNativeMailboxCompactInputKeysForTesting());
         assertEquals(2, state.getNativeMailboxCompactUniqueKeysForTesting());
         assertEquals(0, state.getNativeMailboxCompactFallbacksForTesting());
+        assertEquals(0, state.getNativeMailboxCompactThresholdFallbacksForTesting());
         assertEquals(1, state.getPrefetchKeysDeduplicatedForTesting());
         verify(reader, times(1)).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
 
         state.close();
         coordinator.close();
         assertEquals(1, fakePlane.closeCalls);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testNativeMailboxFallsBackBeforeJniBelowConfiguredThreshold() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(null);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+        when(reader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
+                .thenReturn(
+                        Arrays.asList(
+                                KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE),
+                                KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE)));
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(mailboxOptions(4), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true,
+                        1,
+                        1 << 20,
+                        coordinator,
+                        18);
+        state.setCurrentNamespace("window-mailbox-threshold");
+
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
+
+        assertEquals(0, state.getNativeMailboxCompactBatchesForTesting());
+        assertEquals(2, state.getNativeMailboxCompactInputKeysForTesting());
+        assertEquals(1, state.getNativeMailboxCompactFallbacksForTesting());
+        assertEquals(1, state.getNativeMailboxCompactThresholdFallbacksForTesting());
+        assertEquals(0, fakePlane.compactCalls);
+        verify(reader, times(1)).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+
+        state.close();
+        coordinator.close();
     }
 
     @Test
@@ -982,6 +1049,10 @@ class NativePreparedValueStateTest {
     }
 
     private static NativeRequestPlaneOptions mailboxOptions() {
+        return mailboxOptions(1);
+    }
+
+    private static NativeRequestPlaneOptions mailboxOptions(int minBatchSize) {
         return new NativeRequestPlaneOptions(
                 true,
                 "",
@@ -992,7 +1063,7 @@ class NativePreparedValueStateTest {
                 16,
                 4096,
                 4096,
-                1,
+                minBatchSize,
                 2,
                 false,
                 false,
@@ -1030,6 +1101,7 @@ class NativePreparedValueStateTest {
         private boolean failNextProbe;
         private boolean corruptNextProbeSlice;
         private boolean internalErrorNextFill;
+        private int compactCalls;
         private int closeCalls;
 
         private FakeNativeRequestPlane() {
@@ -1173,6 +1245,7 @@ class NativePreparedValueStateTest {
         @Override
         public int compactBatch(
                 SerializedKeyBatch<?, ?> keys, ByteBuffer uniqueSourceIndexes) {
+            compactCalls++;
             ByteBuffer indexes = uniqueSourceIndexes.duplicate().order(ByteOrder.nativeOrder());
             int written = 0;
             for (int candidate = 0; candidate < keys.entryCount(); candidate++) {

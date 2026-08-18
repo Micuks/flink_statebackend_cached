@@ -178,9 +178,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeMailboxCompactInputKeys;
     private volatile long nativeMailboxCompactUniqueKeys;
     private volatile long nativeMailboxCompactFallbacks;
+    private volatile long nativeMailboxCompactThresholdFallbacks;
     private volatile long nativeDirectPreparedBatches;
     private volatile long nativeDirectPreparedKeys;
     private volatile long nativeDirectPreparedFallbacks;
+    private volatile long nativeDirectPreparedThresholdFallbacks;
     private volatile long nativeRuntimeFailures;
     private volatile long nativeGenerationAdvances;
     private volatile long nativeMutationAttempts;
@@ -1165,9 +1167,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "nativeMailboxCompactInputKeys={} "
                             + "nativeMailboxCompactUniqueKeys={} "
                             + "nativeMailboxCompactFallbacks={} "
+                            + "nativeMailboxCompactThresholdFallbacks={} "
                             + "nativeDirectPreparedBatches={} "
                             + "nativeDirectPreparedKeys={} "
                             + "nativeDirectPreparedFallbacks={} "
+                            + "nativeDirectPreparedThresholdFallbacks={} "
                             + "nativeRuntimeFailures={} nativeGenerationAdvances={} "
                             + "nativeMutationAttempts={} nativeMutationApplied={} "
                             + "nativeMutationWriteThroughSkipped={} "
@@ -1226,9 +1230,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeMailboxCompactInputKeys,
                     nativeMailboxCompactUniqueKeys,
                     nativeMailboxCompactFallbacks,
+                    nativeMailboxCompactThresholdFallbacks,
                     nativeDirectPreparedBatches,
                     nativeDirectPreparedKeys,
                     nativeDirectPreparedFallbacks,
+                    nativeDirectPreparedThresholdFallbacks,
                     nativeRuntimeFailures,
                     nativeGenerationAdvances,
                     nativeMutationAttempts,
@@ -1383,6 +1389,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return nativeMailboxCompactFallbacks;
     }
 
+    long getNativeMailboxCompactThresholdFallbacksForTesting() {
+        return nativeMailboxCompactThresholdFallbacks;
+    }
+
     long getNativeDirectPreparedBatchesForTesting() {
         return nativeDirectPreparedBatches;
     }
@@ -1393,6 +1403,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getNativeDirectPreparedFallbacksForTesting() {
         return nativeDirectPreparedFallbacks;
+    }
+
+    long getNativeDirectPreparedThresholdFallbacksForTesting() {
+        return nativeDirectPreparedThresholdFallbacks;
     }
 
     long getNativeRuntimeFailuresForTesting() {
@@ -1648,6 +1662,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.List<KeyNamespaceKey<K, N>> storageKeys) {
         if (storageKeys.size() < nativeRequestPlaneCoordinator.options().minBatchSize()) {
             nativeDirectPreparedFallbacks++;
+            nativeDirectPreparedThresholdFallbacks++;
             return null;
         }
         NativeRequestPlaneCoordinator.BatchSlot slot =
@@ -1707,6 +1722,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.ArrayList<byte[]> rocksDBKeys,
             java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys) {
         nativeMailboxCompactInputKeys += storageKeys.size();
+        if (storageKeys.size() < nativeRequestPlaneCoordinator.options().minBatchSize()) {
+            nativeFallbackBatches++;
+            nativeMailboxCompactFallbacks++;
+            nativeMailboxCompactThresholdFallbacks++;
+            materializeMailboxFallbackKeys(batchReader, storageKeys, rocksDBKeys);
+            return null;
+        }
         NativeRequestPlaneCoordinator.BatchSlot slot =
                 nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
         if (slot == null) {
