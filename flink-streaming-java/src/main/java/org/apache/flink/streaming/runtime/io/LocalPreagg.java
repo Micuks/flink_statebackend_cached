@@ -31,10 +31,12 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.StatePrefetcher;
 
 import java.lang.reflect.Field;
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Objects;
+import java.util.RandomAccess;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -217,15 +219,17 @@ public final class LocalPreagg {
 
     static GroupedInputs groupInputs(
             List<Object> recordKeys, List<Object> recordValues, int[] nativePlan) {
+        if (recordKeys.size() != recordValues.size()) {
+            throw new IllegalArgumentException("record key/value vectors must have equal length");
+        }
         if (nativePlan != null && nativePlan.length == recordKeys.size() + 1) {
             int groupCount = nativePlan[0];
             if (groupCount > 0 && groupCount <= recordKeys.size()) {
                 ArrayList<Object> keys = new ArrayList<>(groupCount);
-                ArrayList<List<Object>> values = new ArrayList<>(groupCount);
                 boolean[] assigned = new boolean[groupCount];
+                int[] counts = new int[groupCount];
                 for (int group = 0; group < groupCount; group++) {
                     keys.add(null);
-                    values.add(new ArrayList<>());
                 }
                 boolean valid = true;
                 int nextGroup = 0;
@@ -250,12 +254,34 @@ public final class LocalPreagg {
                         valid = false;
                         break;
                     }
-                    values.get(group).add(recordValues.get(source));
+                    counts[group]++;
                 }
                 for (int group = 0; group < groupCount; group++) {
-                    valid &= assigned[group] && !values.get(group).isEmpty();
+                    valid &= assigned[group] && counts[group] > 0;
                 }
                 if (valid) {
+                    // Scatter values once into one dense array. The former implementation built
+                    // one independently growing ArrayList per group and copied each record into
+                    // it. On q15 this allocation/copy phase sits directly before the accumulator
+                    // fold and amplified Kunpeng CPU despite the native grouping kernel. Fixed
+                    // array slices retain first-seen group order and per-group arrival order while
+                    // eliminating the nested backing arrays and their growth copies.
+                    int[] offsets = new int[groupCount + 1];
+                    for (int group = 0; group < groupCount; group++) {
+                        offsets[group + 1] = offsets[group] + counts[group];
+                    }
+                    int[] positions = offsets.clone();
+                    Object[] flatValues = new Object[recordValues.size()];
+                    for (int source = 0; source < recordValues.size(); source++) {
+                        int group = nativePlan[source + 1];
+                        flatValues[positions[group]++] = recordValues.get(source);
+                    }
+                    ArrayList<List<Object>> values = new ArrayList<>(groupCount);
+                    for (int group = 0; group < groupCount; group++) {
+                        values.add(
+                                new MutableArraySliceList(
+                                        flatValues, offsets[group], offsets[group + 1]));
+                    }
                     return new GroupedInputs(keys, values, true);
                 }
             }
@@ -269,6 +295,67 @@ public final class LocalPreagg {
                 new ArrayList<>(javaGroups.keySet()),
                 new ArrayList<>(javaGroups.values()),
                 false);
+    }
+
+    /**
+     * Fixed-capacity mutable view over one group's region in the dense value array.
+     *
+     * <p>{@link org.apache.flink.table.runtime.operators.aggregate.GroupAggFunction} removes
+     * leading retract records through {@link java.util.Iterator#remove()}, so the slice cannot be
+     * immutable. Removal shifts only inside this group's non-overlapping region and does not
+     * allocate another backing array.
+     */
+    static final class MutableArraySliceList extends AbstractList<Object>
+            implements RandomAccess {
+        private final Object[] values;
+        private final int start;
+        private int size;
+
+        private MutableArraySliceList(Object[] values, int start, int end) {
+            this.values = values;
+            this.start = start;
+            this.size = end - start;
+        }
+
+        @Override
+        public Object get(int index) {
+            checkElementIndex(index);
+            return values[start + index];
+        }
+
+        @Override
+        public int size() {
+            return size;
+        }
+
+        @Override
+        public Object set(int index, Object element) {
+            checkElementIndex(index);
+            int absoluteIndex = start + index;
+            Object previous = values[absoluteIndex];
+            values[absoluteIndex] = element;
+            return previous;
+        }
+
+        @Override
+        public Object remove(int index) {
+            checkElementIndex(index);
+            int absoluteIndex = start + index;
+            Object previous = values[absoluteIndex];
+            int moved = size - index - 1;
+            if (moved > 0) {
+                System.arraycopy(values, absoluteIndex + 1, values, absoluteIndex, moved);
+            }
+            values[start + --size] = null;
+            modCount++;
+            return previous;
+        }
+
+        private void checkElementIndex(int index) {
+            if (index < 0 || index >= size) {
+                throw new IndexOutOfBoundsException("index=" + index + ", size=" + size);
+            }
+        }
     }
 
     static final class GroupedInputs {
