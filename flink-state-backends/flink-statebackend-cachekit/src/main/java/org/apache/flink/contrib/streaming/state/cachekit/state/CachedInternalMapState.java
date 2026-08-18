@@ -27,6 +27,7 @@ import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeReque
 import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneBridge;
 import org.apache.flink.contrib.streaming.state.cachekit.util.MurmurHash3;
 import org.apache.flink.core.memory.DataOutputSerializer;
+import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 
 import org.slf4j.Logger;
@@ -35,6 +36,7 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nonnull;
 
 import java.util.AbstractMap;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -87,8 +89,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final int nativeStateId;
     private final boolean nativeMapSnapshotEnabled;
     private final int nativeSnapshotStateId;
-    private final DataOutputSerializer nativeKeyOutput;
-    private final DataOutputSerializer nativeValueOutput;
+    private final DataOutputSerializer nativeComponentOutput;
     private long nativeGeneration;
     private long nativeProbeAttempts;
     private long nativeHits;
@@ -279,11 +280,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         this.nativeStateId = nativeStateId;
         this.nativeMapSnapshotEnabled = nativeMapSnapshotEnabled;
         this.nativeSnapshotStateId = nativeSnapshotStateId;
-        this.nativeKeyOutput =
-                nativeMapCacheEnabled || nativeMapSnapshotEnabled
-                        ? new DataOutputSerializer(128)
-                        : null;
-        this.nativeValueOutput =
+        this.nativeComponentOutput =
                 nativeMapCacheEnabled || nativeMapSnapshotEnabled
                         ? new DataOutputSerializer(128)
                         : null;
@@ -724,14 +721,6 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 || !nativeRequestPlaneCoordinator.isActive()) {
             return null;
         }
-        final byte[] nativeKey;
-        try {
-            nativeKey = serializeNativeMapKey(currentKey, currentNamespace, userKey);
-        } catch (Exception serializationFailure) {
-            nativeFallbacks++;
-            return null;
-        }
-
         NativeRequestPlaneCoordinator.BatchSlot slot =
                 nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
         if (slot == null) {
@@ -740,7 +729,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         try (NativeRequestPlaneCoordinator.BatchSlot ignored = slot) {
             slot.prepareLatest(
-                    nativeStateId, nativeGeneration, Collections.singletonList(nativeKey));
+                    nativeStateId,
+                    nativeGeneration,
+                    output -> writeNativeMapKey(currentKey, currentNamespace, userKey, output));
             nativeProbeAttempts++;
             int processed = nativeRequestPlaneCoordinator.probe(slot);
             if (processed != 1 || slot.probeError(0) != NativeRequestPlaneBridge.ERROR_OK) {
@@ -770,9 +761,13 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
         UV value = delegate.get(userKey);
         try {
-            byte[] serializedValue = serializeNativeMapValue(value);
             nativeRequestPlaneCoordinator.updateExactKey(
-                    nativeStateId, nativeGeneration, nativeKey, serializedValue);
+                    nativeStateId,
+                    nativeGeneration,
+                    output -> writeNativeMapKey(currentKey, currentNamespace, userKey, output),
+                    value == null
+                            ? null
+                            : output -> userValueSerializer.serialize(value, output));
             nativeFills++;
         } catch (Exception | LinkageError fillFailure) {
             nativeFailures++;
@@ -782,23 +777,20 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         return new NativeMapRead<>(value, false);
     }
 
-    private byte[] serializeNativeMapKey(K key, N namespace, UK userKey) throws Exception {
-        nativeKeyOutput.clear();
-        keySerializer.serialize(key, nativeKeyOutput);
-        nativeKeyOutput.writeByte(42);
-        namespaceSerializer.serialize(namespace, nativeKeyOutput);
-        nativeKeyOutput.writeByte(43);
-        userKeySerializer.serialize(userKey, nativeKeyOutput);
-        return nativeKeyOutput.getCopyOfBuffer();
+    private void writeNativeMapKey(
+            K key, N namespace, UK userKey, DataOutputView destination) throws IOException {
+        writeLengthPrefixed(keySerializer, key, destination);
+        writeLengthPrefixed(namespaceSerializer, namespace, destination);
+        writeLengthPrefixed(userKeySerializer, userKey, destination);
     }
 
-    private byte[] serializeNativeMapValue(UV value) throws Exception {
-        if (value == null) {
-            return null;
-        }
-        nativeValueOutput.clear();
-        userValueSerializer.serialize(value, nativeValueOutput);
-        return nativeValueOutput.getCopyOfBuffer();
+    private <T> void writeLengthPrefixed(
+            TypeSerializer<T> serializer, T value, DataOutputView destination) throws IOException {
+        nativeComponentOutput.clear();
+        serializer.serialize(value, nativeComponentOutput);
+        int length = nativeComponentOutput.length();
+        destination.writeInt(length);
+        destination.write(nativeComponentOutput.getSharedBuffer(), 0, length);
     }
 
     private MapSnapshot<UK> lookupNativeSnapshot(K currentKey) {
@@ -820,9 +812,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                         nativeSnapshotStateId,
                         nativeGeneration,
                         output -> {
-                            keySerializer.serialize(currentKey, output);
-                            output.writeByte(44);
-                            namespaceSerializer.serialize(currentNamespace, output);
+                            writeLengthPrefixed(keySerializer, currentKey, output);
+                            writeLengthPrefixed(
+                                    namespaceSerializer, currentNamespace, output);
                         });
                 nativeSnapshotProbes++;
                 int processed = nativeRequestPlaneCoordinator.probe(slot);
@@ -867,9 +859,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                     nativeSnapshotStateId,
                     nativeGeneration,
                     output -> {
-                        keySerializer.serialize(key, output);
-                        output.writeByte(44);
-                        namespaceSerializer.serialize(namespace, output);
+                        writeLengthPrefixed(keySerializer, key, output);
+                        writeLengthPrefixed(namespaceSerializer, namespace, output);
                     },
                     snapshot.isEmpty()
                             ? null
@@ -1617,7 +1608,24 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private boolean removeSnapshot(KeyNamespace<K, N> key) {
         boolean removed = mapSnapshotCacheEnabled && mapSnapshotCache.remove(key) != null;
         if (nativeMapSnapshotEnabled) {
-            advanceNativeGeneration();
+            // Publish an exact-key tombstone. A generation bump alone is a
+            // state-wide watermark and cannot make a latest-generation probe
+            // forget a resident snapshot for this key/namespace identity.
+            try {
+                nativeRequestPlaneCoordinator.updateExactKey(
+                        nativeSnapshotStateId,
+                        nativeGeneration,
+                        output -> {
+                            writeLengthPrefixed(keySerializer, key.key, output);
+                            writeLengthPrefixed(
+                                    namespaceSerializer, key.namespace, output);
+                        },
+                        null);
+                nativeSnapshotFills++;
+            } catch (Exception | LinkageError failure) {
+                nativeSnapshotFallbacks++;
+                nativeRequestPlaneCoordinator.disable(failure);
+            }
             removed = true;
         }
         if (removed) {

@@ -114,8 +114,8 @@ std::string ResultValue(const ProbeResult& result) {
 
 void TestBucketLayoutAndForcedScalar() {
     using cachekit::native::internal::Bucket;
-    CHECK(sizeof(Bucket) == 128);
-    CHECK(alignof(Bucket) == 128);
+    CHECK(sizeof(Bucket) == cachekit::native::internal::kCacheLineBytes);
+    CHECK(alignof(Bucket) == cachekit::native::internal::kCacheLineBytes);
 
     Options options;
     options.kernel = KernelPreference::kScalar;
@@ -791,6 +791,39 @@ void TestGroupBatchMapsEverySourceToStableGroup() {
     CHECK(groups[3] == 2 && groups[4] == 1);
 }
 
+void TestGroupBatchLargeCollisionSafePlan() {
+    Options options;
+    options.capacity_entries = 4096;
+    options.key_arena_bytes = 1U << 20U;
+    options.value_arena_bytes = 1U << 20U;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+
+    std::vector<std::string> values;
+    values.reserve(1024);
+    for (std::size_t index = 0; index < 1024; ++index) {
+        values.push_back("key-" + std::to_string(index));
+    }
+    std::vector<KeyView> keys;
+    keys.reserve(4096);
+    for (std::size_t index = 0; index < 4096; ++index) {
+        keys.push_back(Key(17, 9, values[index % values.size()]));
+    }
+    std::vector<std::uint32_t> uniques(keys.size(), 0U);
+    std::vector<std::uint32_t> groups(keys.size(), 0U);
+    std::size_t unique_count = 0;
+    CHECK(plane->GroupBatch(
+                  keys.data(),
+                  uniques.data(),
+                  groups.data(),
+                  keys.size(),
+                  &unique_count) == ErrorCode::kOk);
+    CHECK(unique_count == values.size());
+    for (std::size_t index = 0; index < keys.size(); ++index) {
+        CHECK(groups[index] == index % values.size());
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -808,6 +841,7 @@ int main() {
     TestRandomDifferentialAgainstReference();
     TestCompactBatchPreservesFirstOccurrenceAndIdentity();
     TestGroupBatchMapsEverySourceToStableGroup();
+    TestGroupBatchLargeCollisionSafePlan();
     TestCAbiBatchSmoke();
     std::cout << "all native request-plane tests passed" << std::endl;
     return 0;

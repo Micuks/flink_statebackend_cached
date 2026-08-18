@@ -227,10 +227,11 @@ bool IsValidBytes(const std::uint8_t* data, std::size_t size) noexcept {
 }
 
 std::size_t RequiredBucketCount(std::size_t capacity_entries) {
-    // Keep the metadata table at or below 50% occupancy: eight entries per
-    // sixteen-slot bucket.
-    std::size_t required = capacity_entries / 8U;
-    if ((capacity_entries % 8U) != 0) {
+    // Keep the metadata table at or below 50% occupancy on either the x86
+    // 64-byte/eight-slot or Kunpeng 128-byte/sixteen-slot layout.
+    const std::size_t entries_per_bucket = kSlotsPerBucket / 2U;
+    std::size_t required = capacity_entries / entries_per_bucket;
+    if ((capacity_entries % entries_per_bucket) != 0) {
         ++required;
     }
     required = std::max<std::size_t>(required, 1U);
@@ -243,6 +244,39 @@ std::size_t RequiredBucketCount(std::size_t capacity_entries) {
         result *= 2U;
     }
     return result;
+}
+
+std::size_t RequiredGroupTableCount(std::size_t capacity_entries) {
+    if (capacity_entries > std::numeric_limits<std::size_t>::max() / 2U) {
+        throw std::overflow_error("group table size overflow");
+    }
+    const std::size_t required = std::max<std::size_t>(2U, capacity_entries * 2U);
+    std::size_t result = 1U;
+    while (result < required) {
+        if (result > std::numeric_limits<std::size_t>::max() / 2U) {
+            throw std::overflow_error("group table size overflow");
+        }
+        result *= 2U;
+    }
+    return result;
+}
+
+std::size_t GroupHash(
+        std::uint32_t fingerprint,
+        std::uint32_t state_id,
+        std::uint64_t generation,
+        std::size_t key_size) noexcept {
+    std::uint64_t value =
+            (static_cast<std::uint64_t>(fingerprint) << 32U) | state_id;
+    value ^= generation + 0x9e3779b97f4a7c15ULL + (value << 6U) + (value >> 2U);
+    value ^= static_cast<std::uint64_t>(key_size) + 0x9e3779b97f4a7c15ULL +
+            (value << 6U) + (value >> 2U);
+    value ^= value >> 30U;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27U;
+    value *= 0x94d049bb133111ebULL;
+    value ^= value >> 31U;
+    return static_cast<std::size_t>(value);
 }
 
 std::uint32_t NormalizeTag(
@@ -284,7 +318,9 @@ struct RequestPlane::Impl {
                       options.capacity_entries + 1U),
               value_arena(
                       options.value_arena_bytes,
-                      options.capacity_entries + 1U) {
+                      options.capacity_entries + 1U),
+              group_table(RequiredGroupTableCount(options.capacity_entries), 0U),
+              group_fingerprints(options.capacity_entries, 0U) {
         state_generation_watermarks.reserve(
                 std::min<std::size_t>(options.capacity_entries, 64U));
         free_entry_ids.reserve(options.capacity_entries);
@@ -757,6 +793,10 @@ struct RequestPlane::Impl {
     ByteArena value_arena;
     std::unordered_map<std::uint32_t, std::uint64_t>
             state_generation_watermarks;
+    // GroupBatch is serialized by its single-thread-owned RequestPlane. Reuse
+    // this preallocated scratch so mailbox batches do not allocate in the hot path.
+    mutable std::vector<std::uint32_t> group_table;
+    mutable std::vector<std::uint32_t> group_fingerprints;
     std::size_t entry_count = 0;
     std::size_t tombstone_count = 0;
     std::uint32_t lru_head = 0;
@@ -867,6 +907,11 @@ ErrorCode RequestPlane::GroupBatch(
         count > std::numeric_limits<std::uint32_t>::max()) {
         return ErrorCode::kInvalidArgument;
     }
+    if (count > impl_->options.capacity_entries) {
+        return ErrorCode::kCapacityExceeded;
+    }
+    std::fill(impl_->group_table.begin(), impl_->group_table.end(), 0U);
+    const std::size_t table_mask = impl_->group_table.size() - 1U;
     std::size_t written = 0;
     for (std::size_t index = 0; index < count; ++index) {
         const KeyView& candidate = keys[index];
@@ -876,34 +921,41 @@ ErrorCode RequestPlane::GroupBatch(
         const std::uint32_t candidate_fingerprint =
                 impl_->kernel.fingerprint(
                         candidate.state_id, candidate.data, candidate.size);
-        bool duplicate = false;
-        for (std::size_t prior = 0; prior < written; ++prior) {
-            const KeyView& existing = keys[unique_source_indexes[prior]];
-            if (existing.state_id != candidate.state_id ||
-                existing.generation != candidate.generation ||
-                existing.size != candidate.size) {
-                continue;
-            }
-            const std::uint32_t existing_fingerprint =
-                    impl_->kernel.fingerprint(
-                            existing.state_id, existing.data, existing.size);
-            if (candidate_fingerprint == existing_fingerprint &&
-                (candidate.size == 0 ||
-                 impl_->kernel.equal_bytes(
-                         candidate.data, existing.data, candidate.size))) {
-                duplicate = true;
+        std::size_t slot = GroupHash(
+                                   candidate_fingerprint,
+                                   candidate.state_id,
+                                   candidate.generation,
+                                   candidate.size) &
+                table_mask;
+        for (;;) {
+            const std::uint32_t encoded_group = impl_->group_table[slot];
+            if (encoded_group == 0U) {
+                const std::uint32_t group = static_cast<std::uint32_t>(written);
+                unique_source_indexes[written] = static_cast<std::uint32_t>(index);
+                impl_->group_fingerprints[written] = candidate_fingerprint;
+                impl_->group_table[slot] = group + 1U;
+                ++written;
                 if (source_group_indexes != nullptr) {
-                    source_group_indexes[index] = static_cast<std::uint32_t>(prior);
+                    source_group_indexes[index] = group;
                 }
                 break;
             }
-        }
-        if (!duplicate) {
-            unique_source_indexes[written++] =
-                    static_cast<std::uint32_t>(index);
-            if (source_group_indexes != nullptr) {
-                source_group_indexes[index] = static_cast<std::uint32_t>(written - 1U);
+
+            const std::size_t group = static_cast<std::size_t>(encoded_group - 1U);
+            const KeyView& existing = keys[unique_source_indexes[group]];
+            if (impl_->group_fingerprints[group] == candidate_fingerprint &&
+                existing.state_id == candidate.state_id &&
+                existing.generation == candidate.generation &&
+                existing.size == candidate.size &&
+                (candidate.size == 0 ||
+                 impl_->kernel.equal_bytes(
+                         candidate.data, existing.data, candidate.size))) {
+                if (source_group_indexes != nullptr) {
+                    source_group_indexes[index] = static_cast<std::uint32_t>(group);
+                }
+                break;
             }
+            slot = (slot + 1U) & table_mask;
         }
     }
     *unique_count = written;

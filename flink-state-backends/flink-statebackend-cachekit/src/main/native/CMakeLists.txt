@@ -40,6 +40,11 @@ if(CACHEKIT_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
         src/kernels_aarch64_sve256.cpp
         PROPERTIES COMPILE_OPTIONS "-march=armv8.2-a+sve+crc;-msve-vector-bits=256")
 endif()
+if(CACHEKIT_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
+    list(APPEND CACHEKIT_NATIVE_SOURCES src/kernels_x86_sse42.cpp)
+    set_source_files_properties(
+        src/kernels_x86_sse42.cpp PROPERTIES COMPILE_OPTIONS "-msse4.2")
+endif()
 
 add_library(cachekit_native_request_plane STATIC ${CACHEKIT_NATIVE_SOURCES})
 target_compile_features(cachekit_native_request_plane PUBLIC cxx_std_17)
@@ -58,6 +63,10 @@ endif()
 if(CACHEKIT_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
     target_compile_definitions(
         cachekit_native_request_plane PRIVATE CACHEKIT_NATIVE_AARCH64_KERNELS=1)
+endif()
+if(CACHEKIT_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
+    target_compile_definitions(
+        cachekit_native_request_plane PRIVATE CACHEKIT_NATIVE_X86_KERNELS=1)
 endif()
 
 if(CACHEKIT_NATIVE_ENABLE_SANITIZERS)
@@ -143,6 +152,10 @@ if(CACHEKIT_NATIVE_BUILD_TESTS)
         target_compile_definitions(
             cachekit_native_request_plane_test
             PRIVATE CACHEKIT_NATIVE_AARCH64_KERNELS=1)
+    endif()
+    if(CACHEKIT_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
+        target_compile_definitions(
+            cachekit_native_request_plane_test PRIVATE CACHEKIT_NATIVE_X86_KERNELS=1)
     endif()
     if(CACHEKIT_NATIVE_ENABLE_SANITIZERS AND
        CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

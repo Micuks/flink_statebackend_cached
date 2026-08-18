@@ -47,6 +47,7 @@ enum class KernelKind : std::uint32_t {
     kScalar = 1,
     kNeonCrc = 2,
     kSve256 = 3,
+    kSse42Crc = 4,
 };
 
 enum class ErrorCode : std::uint32_t {
@@ -120,6 +121,8 @@ struct HostFeatures {
     bool crc32 = false;
     bool sve = false;
     bool sve_vector_length_256 = false;
+    bool x86_64 = false;
+    bool sse42 = false;
 };
 
 // A single RequestPlane is owned by one request-processing thread.  Probe

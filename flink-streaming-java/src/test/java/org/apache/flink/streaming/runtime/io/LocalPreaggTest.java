@@ -86,6 +86,20 @@ class LocalPreaggTest {
         org.junit.jupiter.api.Assertions.assertEquals(Arrays.asList(2), groups.values.get(1));
     }
 
+    @Test
+    void testPermutedNativeGroupIdsFallBackToJavaFirstSeenOrder() {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "a"),
+                        Arrays.asList(1, 2, 3),
+                        new int[] {2, 1, 0, 1});
+
+        assertFalse(groups.nativeGrouped);
+        org.junit.jupiter.api.Assertions.assertEquals(Arrays.asList("a", "b"), groups.keys);
+        org.junit.jupiter.api.Assertions.assertEquals(Arrays.asList(1, 3), groups.values.get(0));
+        org.junit.jupiter.api.Assertions.assertEquals(Arrays.asList(2), groups.values.get(1));
+    }
+
     private static final class BatchableInputOperator extends AbstractStreamOperator<Object>
             implements Input<Object>, BatchableKeyedFunction<Object, Object> {
 

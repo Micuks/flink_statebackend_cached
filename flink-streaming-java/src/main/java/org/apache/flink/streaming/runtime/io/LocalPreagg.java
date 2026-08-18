@@ -228,6 +228,7 @@ public final class LocalPreagg {
                     values.add(new ArrayList<>());
                 }
                 boolean valid = true;
+                int nextGroup = 0;
                 for (int source = 0; source < recordKeys.size(); source++) {
                     int group = nativePlan[source + 1];
                     if (group < 0 || group >= groupCount) {
@@ -235,8 +236,16 @@ public final class LocalPreagg {
                         break;
                     }
                     if (!assigned[group]) {
+                        // Native group ids are part of the observable first-seen ordering
+                        // contract. Reject sparse or permuted ids instead of silently
+                        // reordering keys when a corrupt JNI plan is returned.
+                        if (group != nextGroup) {
+                            valid = false;
+                            break;
+                        }
                         keys.set(group, recordKeys.get(source));
                         assigned[group] = true;
+                        nextGroup++;
                     } else if (!Objects.equals(keys.get(group), recordKeys.get(source))) {
                         valid = false;
                         break;
