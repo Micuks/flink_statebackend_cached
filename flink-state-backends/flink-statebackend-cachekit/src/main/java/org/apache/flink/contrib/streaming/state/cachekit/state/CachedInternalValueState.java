@@ -158,6 +158,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchStagingAdmissionDrops;
     private volatile long prefetchStaleAborts;
     private volatile long prefetchLiveReadRacedInFlight;
+    private volatile long prefetchLiveReadCancellations;
+    private volatile long prefetchWorkerCancelledBeforeRead;
+    private volatile long prefetchWorkerDiscardedAfterRead;
     private volatile long prefetchUnusedStagedOnClose;
     private volatile long prefetchBuildFailures;
     private volatile long prefetchWorkerFailures;
@@ -738,6 +741,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             // The authoritative read below remains correct, but this is duplicate I/O and direct
             // evidence that the attempted overlap was too short for this key.
             prefetchLiveReadRacedInFlight++;
+            boolean cancelled;
+            synchronized (staging) {
+                cancelled = inFlight.remove(lookupKey, reservedGeneration);
+            }
+            if (cancelled) {
+                // The mailbox is now the authoritative consumer for this key. Revoking the
+                // generation token lets the worker filter it before I/O or discard it before
+                // staging, without interrupting unrelated keys in the same chunk.
+                prefetchLiveReadCancellations++;
+            }
         }
         if (!staging.isEmpty()) {
             StagedValue<V> staged = removeStagedValue(lookupKey);
@@ -1154,7 +1167,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "promoted={} lazyStaging={} lazyStaged={} lazyMaterialized={} "
                             + "lazyMaterializationFailures={} stagingEntries={} retainedBytes={} "
                             + "maxRetainedBytes={} admissionDrops={} staleAborts={} "
-                            + "liveReadRacedInFlight={} unusedStagedOnClose={} "
+                            + "liveReadRacedInFlight={} liveReadCancellations={} "
+                            + "workerCancelledBeforeRead={} workerDiscardedAfterRead={} "
+                            + "unusedStagedOnClose={} "
                             + "buildFailures={} workerFailures={} stickyUpdateInPlace={} "
                             + "stickySameKeyAttempts={} stickyInPlaceReuses={} "
                             + "nativeEnabled={} nativeStateId={} nativeActivated={} "
@@ -1207,6 +1222,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchStagingAdmissionDrops,
                     prefetchStaleAborts,
                     prefetchLiveReadRacedInFlight,
+                    prefetchLiveReadCancellations,
+                    prefetchWorkerCancelledBeforeRead,
+                    prefetchWorkerDiscardedAfterRead,
                     prefetchUnusedStagedOnClose,
                     prefetchBuildFailures,
                     prefetchWorkerFailures,
@@ -1311,6 +1329,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getPrefetchLiveReadRacedInFlightForTesting() {
         return prefetchLiveReadRacedInFlight;
+    }
+
+    long getPrefetchLiveReadCancellationsForTesting() {
+        return prefetchLiveReadCancellations;
+    }
+
+    long getPrefetchWorkerCancelledBeforeReadForTesting() {
+        return prefetchWorkerCancelledBeforeRead;
+    }
+
+    long getPrefetchWorkerDiscardedAfterReadForTesting() {
+        return prefetchWorkerDiscardedAfterRead;
     }
 
     long getPrefetchUnusedStagedOnCloseForTesting() {
@@ -2431,6 +2461,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             throws Exception {
         RocksDBBatchValueReader<K, N, V> batchReader =
                 (RocksDBBatchValueReader<K, N, V>) delegate;
+        java.util.ArrayList<byte[]> activeRocksDBKeys =
+                new java.util.ArrayList<>(end - start);
+        java.util.ArrayList<KeyNamespaceKey<K, N>> activeStorageKeys =
+                new java.util.ArrayList<>(end - start);
+        for (int i = start; i < end; i++) {
+            KeyNamespaceKey<K, N> storageKey = storageKeys.get(i);
+            if (isPrefetchReservationActive(storageKey, gen)) {
+                activeRocksDBKeys.add(rocksDBKeys.get(i));
+                activeStorageKeys.add(storageKey);
+            } else {
+                prefetchWorkerCancelledBeforeRead++;
+            }
+        }
+        if (activeRocksDBKeys.isEmpty()) {
+            return;
+        }
         java.util.List<byte[]> valueBytes;
         lifecycleLock.readLock().lock();
         try {
@@ -2438,25 +2484,24 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 prefetchStaleAborts++;
                 return;
             }
-            if (end - start < multiGetMinBatchSize) {
-                valueBytes = new java.util.ArrayList<>(end - start);
-                for (int i = start; i < end; i++) {
+            if (activeRocksDBKeys.size() < multiGetMinBatchSize) {
+                valueBytes = new java.util.ArrayList<>(activeRocksDBKeys.size());
+                for (byte[] activeRocksDBKey : activeRocksDBKeys) {
                     prefetchPointGetCalls++;
-                    valueBytes.add(
-                            batchReader.getSerializedValueByRocksDBKey(rocksDBKeys.get(i)));
+                    valueBytes.add(batchReader.getSerializedValueByRocksDBKey(activeRocksDBKey));
                 }
             } else {
                 prefetchMultiGetCalls++;
-                prefetchMultiGetKeys += end - start;
+                prefetchMultiGetKeys += activeRocksDBKeys.size();
                 valueBytes =
                         batchReader.getSerializedValuesByRocksDBKeys(
-                                rocksDBKeys, start, end);
+                                activeRocksDBKeys, 0, activeRocksDBKeys.size());
             }
         } finally {
             lifecycleLock.readLock().unlock();
         }
 
-        if (closed || gen != writeGen || valueBytes.size() != end - start) {
+        if (closed || gen != writeGen || valueBytes.size() != activeStorageKeys.size()) {
             prefetchStaleAborts++;
             return;
         }
@@ -2465,12 +2510,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 prefetchStaleAborts++;
                 return;
             }
+            KeyNamespaceKey<K, N> storageKey = activeStorageKeys.get(i);
             byte[] serializedValue = valueBytes.get(i);
             if (!stagePreparedValue(
-                    storageKeys.get(start + i), serializedValue, defaultValue, gen)) {
+                    storageKey, serializedValue, defaultValue, gen)) {
                 return;
             }
         }
+    }
+
+    private boolean isPrefetchReservationActive(KeyNamespaceKey<K, N> storageKey, long gen) {
+        Long reservedGeneration = inFlight.get(storageKey);
+        return reservedGeneration != null && reservedGeneration == gen;
     }
 
     private boolean stagePreparedValue(
@@ -2483,10 +2534,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             V value = deserializeValueOrCopyDefault(valueBytes, defaultValue);
             staged = StagedValue.materialized(storageKey, value, gen);
         }
-        return publishStagedValue(staged, valueBytes == null);
+        return publishStagedValue(staged, valueBytes == null, true);
     }
 
     private boolean publishStagedValue(StagedValue<V> staged, boolean missing) {
+        return publishStagedValue(staged, missing, false);
+    }
+
+    private boolean publishStagedValue(
+            StagedValue<V> staged, boolean missing, boolean requireActiveReservation) {
         lifecycleLock.readLock().lock();
         try {
             if (closed || staged.gen != writeGen) {
@@ -2494,6 +2550,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 return false;
             }
             synchronized (staging) {
+                if (requireActiveReservation
+                        && !isPrefetchReservationActive(staged.storageKey(), staged.gen)) {
+                    prefetchWorkerDiscardedAfterRead++;
+                    return true;
+                }
                 StagedValue<V> previous = staging.get(staged.storageKey());
                 if (previous == null && staging.size() >= asyncStagingMaxEntries) {
                     prefetchStagingAdmissionDrops++;

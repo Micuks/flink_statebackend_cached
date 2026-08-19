@@ -230,6 +230,12 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                                                 "state.backend.cachekit.bp-prefetch.async-chunks.size")
                                         .intType()
                                         .defaultValue(16));
+                int asyncPrefetchHeadGuardRecords =
+                        cfg.getInteger(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.head-guard-records")
+                                        .intType()
+                                        .defaultValue(0));
                 @SuppressWarnings("unchecked")
                 Input<IN> headInput = (Input<IN>) mainOperator;
                 java.util.function.BooleanSupplier bp =
@@ -246,7 +252,8 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                         bp,
                         backpressureGated,
                         asyncPrefetchChunks,
-                        asyncPrefetchChunkSize);
+                        asyncPrefetchChunkSize,
+                        asyncPrefetchHeadGuardRecords);
             }
 
             boolean enabled =
