@@ -1335,14 +1335,20 @@ class CachedInternalValueStateTest {
         stubPreparedKeySerialization(batchReader);
         when(batchReader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
                 .thenAnswer(
-                        ignored -> {
+                        invocation -> {
                             batchStarted.countDown();
                             if (!releaseBatch.await(5, TimeUnit.SECONDS)) {
                                 throw new AssertionError("Timed out waiting to release batch read");
                             }
-                            return Arrays.asList(
-                                    KvStateSerializer.serializeValue(1, IntSerializer.INSTANCE),
-                                    KvStateSerializer.serializeValue(2, IntSerializer.INSTANCE));
+                            int start = invocation.getArgument(1);
+                            int end = invocation.getArgument(2);
+                            java.util.List<byte[]> values = new java.util.ArrayList<>(end - start);
+                            for (int index = start; index < end; index++) {
+                                values.add(
+                                        KvStateSerializer.serializeValue(
+                                                index, IntSerializer.INSTANCE));
+                            }
+                            return values;
                         });
 
         CachedInternalValueState<String, VoidNamespace, Integer> state =
@@ -1359,9 +1365,13 @@ class CachedInternalValueStateTest {
                         true,
                         8);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        java.util.List<String> keys = new java.util.ArrayList<>();
+        for (int index = 0; index < 16; index++) {
+            keys.add("k" + index);
+        }
         Thread prefetchThread =
                 new Thread(
-                        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")),
+                        state.buildAsyncPrefetchTask(keys),
                         "test-prefetch");
         Thread closeThread =
                 new Thread(
@@ -1388,6 +1398,7 @@ class CachedInternalValueStateTest {
         assertEquals(0, closeReturned.getCount());
         assertEquals(0, state.getStagingSizeForTesting());
         assertEquals(0, state.getStagingRetainedBytesForTesting());
+        verify(batchReader, times(1)).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
     }
 
     private static void stubPreparedKeySerialization(

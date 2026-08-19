@@ -91,8 +91,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      * closeQuietly(db)}) and SIGSEGV in librocksdbjni (a native crash the worker's {@code catch
      * (Throwable)} cannot catch). The worker and dirty-cache flushes take the read lock around each
      * delegate access and bail if {@link #closed}; {@link #close()} takes the write lock as a
-     * barrier and then marks the wrapper closed, guaranteeing no guarded access is in flight before
-     * the backend disposes the RocksDB delegate.
+     * barrier after publishing {@link #closed}, guaranteeing no new guarded access starts and no
+     * existing access remains in flight before the backend disposes the RocksDB delegate.
      */
     private volatile boolean closed = false;
     private final java.util.concurrent.locks.ReadWriteLock lifecycleLock =
@@ -1006,9 +1006,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      * backend to call {@code delegate.dispose()} / {@code close()}.
      */
     public void close() {
+        // Publish cancellation before waiting for the write barrier. A worker processes a large
+        // lookahead as several short read-locked chunks; setting this only after acquiring the
+        // write lock lets that worker repeatedly reacquire the read lock and can starve task
+        // cancellation. Volatile publication makes it stop before its next chunk, while the write
+        // lock below still drains the one native delegate access that may already be in flight.
+        closed = true;
         lifecycleLock.writeLock().lock();
         try {
-            closed = true;
             prefetchUnusedStagedOnClose += staging.size();
             clearStaging();
             inFlight.clear();
