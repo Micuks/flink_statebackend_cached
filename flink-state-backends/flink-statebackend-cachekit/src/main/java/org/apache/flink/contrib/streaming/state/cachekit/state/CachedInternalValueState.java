@@ -107,6 +107,27 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             loadStagingMaxRetainedBytes();
     private static final int MULTIGET_CHUNK_SIZE = loadMultiGetChunkSize();
     private static final int MULTIGET_MIN_BATCH_SIZE = loadMultiGetMinBatchSize();
+    private static final boolean ASYNC_ADAPTIVE_ADMISSION_ENABLED =
+            loadBooleanConfig(
+                    "state.backend.cachekit.bp-prefetch.adaptive-admission.enabled", false);
+    private static final int ASYNC_ADAPTIVE_MIN_SAMPLES =
+            loadIntConfig(
+                    "state.backend.cachekit.bp-prefetch.adaptive-admission.min-samples",
+                    1024,
+                    64,
+                    1_000_000);
+    private static final double ASYNC_ADAPTIVE_MIN_USEFUL_RATE =
+            loadDoubleConfig(
+                    "state.backend.cachekit.bp-prefetch.adaptive-admission.min-useful-rate",
+                    0.02,
+                    0.0,
+                    1.0);
+    private static final int ASYNC_ADAPTIVE_PROBE_EVERY_TASKS =
+            loadIntConfig(
+                    "state.backend.cachekit.bp-prefetch.adaptive-admission.probe-every-tasks",
+                    1024,
+                    1,
+                    1_000_000);
     private final int asyncStagingMaxEntries;
     private final long asyncStagingMaxRetainedBytes;
 
@@ -164,6 +185,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchLiveReadCancellations;
     private volatile long prefetchWorkerCancelledBeforeRead;
     private volatile long prefetchWorkerDiscardedAfterRead;
+    private volatile long prefetchAsyncValuesRead;
+    private volatile long prefetchAsyncUsefulValues;
+    private volatile long prefetchAdaptiveAdmissionSkips;
+    private volatile long prefetchAdaptiveProbeTasks;
+    private long prefetchAdaptiveSkippedSinceProbe;
     private volatile long prefetchUnusedStagedOnClose;
     private volatile long prefetchBuildFailures;
     private volatile long prefetchWorkerFailures;
@@ -290,6 +316,48 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                                     .defaultValue(4))));
         } catch (Throwable t) {
             return Math.min(4, MULTIGET_CHUNK_SIZE);
+        }
+    }
+
+    private static boolean loadBooleanConfig(String key, boolean defaultValue) {
+        try {
+            return org.apache.flink.configuration.GlobalConfiguration.loadConfiguration()
+                    .get(
+                            org.apache.flink.configuration.ConfigOptions.key(key)
+                                    .booleanType()
+                                    .defaultValue(defaultValue));
+        } catch (Throwable ignored) {
+            return defaultValue;
+        }
+    }
+
+    private static int loadIntConfig(
+            String key, int defaultValue, int minimum, int maximum) {
+        try {
+            int configured =
+                    org.apache.flink.configuration.GlobalConfiguration.loadConfiguration()
+                            .get(
+                                    org.apache.flink.configuration.ConfigOptions.key(key)
+                                            .intType()
+                                            .defaultValue(defaultValue));
+            return Math.max(minimum, Math.min(maximum, configured));
+        } catch (Throwable ignored) {
+            return defaultValue;
+        }
+    }
+
+    private static double loadDoubleConfig(
+            String key, double defaultValue, double minimum, double maximum) {
+        try {
+            double configured =
+                    org.apache.flink.configuration.GlobalConfiguration.loadConfiguration()
+                            .get(
+                                    org.apache.flink.configuration.ConfigOptions.key(key)
+                                            .doubleType()
+                                            .defaultValue(defaultValue));
+            return Math.max(minimum, Math.min(maximum, configured));
+        } catch (Throwable ignored) {
+            return defaultValue;
         }
     }
 
@@ -1172,6 +1240,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "maxRetainedBytes={} admissionDrops={} staleAborts={} "
                             + "liveReadRacedInFlight={} liveReadCancellations={} "
                             + "workerCancelledBeforeRead={} workerDiscardedAfterRead={} "
+                            + "asyncValuesRead={} asyncUsefulValues={} "
+                            + "adaptiveAdmissionSkips={} adaptiveProbeTasks={} "
                             + "unusedStagedOnClose={} "
                             + "buildFailures={} workerFailures={} stickyUpdateInPlace={} "
                             + "stickySameKeyAttempts={} stickyInPlaceReuses={} "
@@ -1228,6 +1298,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchLiveReadCancellations,
                     prefetchWorkerCancelledBeforeRead,
                     prefetchWorkerDiscardedAfterRead,
+                    prefetchAsyncValuesRead,
+                    prefetchAsyncUsefulValues,
+                    prefetchAdaptiveAdmissionSkips,
+                    prefetchAdaptiveProbeTasks,
                     prefetchUnusedStagedOnClose,
                     prefetchBuildFailures,
                     prefetchWorkerFailures,
@@ -1565,6 +1639,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      */
     @SuppressWarnings("unchecked")
     private Runnable buildPreparedMultiGetTask(Iterable<? extends K> keys, N namespace) {
+        if (!admitAsyncPrefetchTask()) {
+            return null;
+        }
         java.util.ArrayList<byte[]> rocksDBKeys = new java.util.ArrayList<>();
         java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys = new java.util.ArrayList<>();
         final long gen = writeGen;
@@ -1703,6 +1780,30 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 reservation,
                                 preparedNativeBatchSlot),
                 preparedNativeBatchSlot == null ? null : preparedNativeBatchSlot::close);
+    }
+
+    private boolean admitAsyncPrefetchTask() {
+        if (!ASYNC_ADAPTIVE_ADMISSION_ENABLED
+                || prefetchAsyncValuesRead < ASYNC_ADAPTIVE_MIN_SAMPLES
+                || prefetchAsyncUsefulValues
+                        >= prefetchAsyncValuesRead * ASYNC_ADAPTIVE_MIN_USEFUL_RATE) {
+            return true;
+        }
+        prefetchAdaptiveAdmissionSkips++;
+        prefetchAdaptiveSkippedSinceProbe++;
+        if (prefetchAdaptiveSkippedSinceProbe < ASYNC_ADAPTIVE_PROBE_EVERY_TASKS) {
+            return false;
+        }
+        prefetchAdaptiveSkippedSinceProbe = 0;
+        prefetchAdaptiveProbeTasks++;
+        return true;
+    }
+
+    private void recordAsyncPrefetchOutcome(byte[] serializedValue) {
+        prefetchAsyncValuesRead++;
+        if (serializedValue != null) {
+            prefetchAsyncUsefulValues++;
+        }
     }
 
     private NativeRequestPlaneCoordinator.BatchSlot prepareNativeBatchSlotDirect(
@@ -2546,6 +2647,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
             KeyNamespaceKey<K, N> storageKey = activeStorageKeys.get(i);
             byte[] serializedValue = valueBytes.get(i);
+            recordAsyncPrefetchOutcome(serializedValue);
             if (!stagePreparedValue(
                     storageKey, serializedValue, defaultValue, gen, reservation)) {
                 return;
@@ -2717,6 +2819,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 return;
             }
             byte[] serializedValue = valueBytes.get(i);
+            recordAsyncPrefetchOutcome(serializedValue);
             if (!stageSerializedValue(
                     serializedKeyAndNamespaces.get(i),
                     serializedValue,
@@ -2747,6 +2850,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         } finally {
             lifecycleLock.readLock().unlock();
         }
+        recordAsyncPrefetchOutcome(valueBytes);
         if (valueBytes == null && !(delegate instanceof RocksDBBatchValueReader<?, ?, ?>)) {
             return true;
         }
