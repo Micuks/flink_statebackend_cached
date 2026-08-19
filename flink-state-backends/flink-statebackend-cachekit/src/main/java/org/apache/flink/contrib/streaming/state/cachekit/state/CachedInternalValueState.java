@@ -128,8 +128,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      * waiting behind the shared worker. Values are write generations so stale reservations can be
      * reclaimed without waiting for their old task.
      */
-    private final java.util.concurrent.ConcurrentHashMap<KeyNamespaceKey<K, N>, Long> inFlight =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<
+                    KeyNamespaceKey<K, N>, PrefetchReservation>
+            inFlight = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicLong prefetchReservationSequence =
+            new java.util.concurrent.atomic.AtomicLong();
 
     /**
      * Write generation: bumped on every delegate-visible update/clear and dirty flush-through.
@@ -735,15 +738,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // 4b. Check async-prefetch staging. Sound only when no write/dirty-flush happened on
         // this state since the fetch was submitted (writeGen match); otherwise fall through to
         // the authoritative delegate read.
-        Long reservedGeneration = inFlight.get(lookupKey);
-        if (reservedGeneration != null && reservedGeneration == writeGen) {
+        PrefetchReservation reservation = inFlight.get(lookupKey);
+        if (reservation != null && reservation.generation == writeGen) {
             // The mailbox reached this key before the worker published its speculative result.
             // The authoritative read below remains correct, but this is duplicate I/O and direct
             // evidence that the attempted overlap was too short for this key.
             prefetchLiveReadRacedInFlight++;
             boolean cancelled;
             synchronized (staging) {
-                cancelled = inFlight.remove(lookupKey, reservedGeneration);
+                cancelled = inFlight.remove(lookupKey, reservation);
             }
             if (cancelled) {
                 // The mailbox is now the authoritative consumer for this key. Revoking the
@@ -1343,6 +1346,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return prefetchWorkerDiscardedAfterRead;
     }
 
+    void reReserveForTesting(K key, N namespace) {
+        inFlight.put(
+                new KeyNamespaceKey<>(key, namespace, keySerializer, namespaceSerializer),
+                newPrefetchReservation(writeGen));
+    }
+
+    boolean hasInFlightReservationForTesting(K key, N namespace) {
+        return inFlight.containsKey(new KeyNamespaceKey<>(key, namespace));
+    }
+
     long getPrefetchUnusedStagedOnCloseForTesting() {
         return prefetchUnusedStagedOnClose;
     }
@@ -1494,6 +1507,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         java.util.ArrayList<byte[]> serialized = new java.util.ArrayList<>();
         java.util.ArrayList<KeyNamespaceKey<K, N>> reservations = new java.util.ArrayList<>();
         final long gen = writeGen;
+        final PrefetchReservation reservation = newPrefetchReservation(gen);
         final N namespace = currentNamespace;
         try {
             if (mailboxKeyOutput == null) {
@@ -1508,7 +1522,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 }
                 KeyNamespaceKey<K, N> storageKey =
                         new KeyNamespaceKey<>(key, namespace, keySerializer, namespaceSerializer);
-                if (inFlight.putIfAbsent(storageKey, gen) != null) {
+                if (inFlight.putIfAbsent(storageKey, reservation) != null) {
                     prefetchKeysDeduplicated++;
                     continue;
                 }
@@ -1521,7 +1535,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
         } catch (Throwable t) {
             prefetchBuildFailures++;
-            releaseReservations(reservations, gen);
+            releaseReservations(reservations, reservation);
             return null; // Best-effort: an unserializable key aborts this batch only.
         }
         if (serialized.isEmpty()) {
@@ -1532,13 +1546,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             defaultValue = copyBatchDefaultValueForAsyncTask();
         } catch (Throwable t) {
             prefetchBuildFailures++;
-            releaseReservations(reservations, gen);
+            releaseReservations(reservations, reservation);
             return null;
         }
         prefetchTasksBuilt++;
         prefetchKeysPrepared += serialized.size();
         return trackedTask(
-                reservations, gen, () -> fetchIntoStaging(serialized, defaultValue, gen));
+                reservations,
+                reservation,
+                () -> fetchIntoStaging(serialized, defaultValue, gen));
     }
 
     /**
@@ -1552,6 +1568,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         java.util.ArrayList<byte[]> rocksDBKeys = new java.util.ArrayList<>();
         java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys = new java.util.ArrayList<>();
         final long gen = writeGen;
+        final PrefetchReservation reservation = newPrefetchReservation(gen);
         final boolean nativeMailboxBatch =
                 nativeRequestPlaneCoordinator != null
                         && nativeRequestPlaneCoordinator.isActive()
@@ -1575,7 +1592,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         new KeyNamespaceKey<>(
                                 key, namespace, keySerializer, namespaceSerializer);
                 if (!nativeMailboxBatch) {
-                    if (inFlight.putIfAbsent(storageKey, gen) != null) {
+                    if (inFlight.putIfAbsent(storageKey, reservation) != null) {
                         prefetchKeysDeduplicated++;
                         continue;
                     }
@@ -1593,7 +1610,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         } catch (Throwable t) {
             prefetchBuildFailures++;
             if (!nativeMailboxBatch) {
-                releaseReservations(storageKeys, gen);
+                releaseReservations(storageKeys, reservation);
             }
             return null; // Best-effort: an unserializable key aborts this batch only.
         }
@@ -1604,7 +1621,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (nativeMailboxBatch) {
             nativeBatchSlot =
                     compactNativeMailboxBatch(batchReader, rocksDBKeys, storageKeys);
-            reservePreparedKeys(rocksDBKeys, storageKeys, gen);
+            reservePreparedKeys(rocksDBKeys, storageKeys, reservation);
             if (rocksDBKeys.isEmpty()) {
                 if (nativeBatchSlot != null) {
                     nativeBatchSlot.close();
@@ -1644,7 +1661,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     }
                 } catch (Throwable failure) {
                     prefetchBuildFailures++;
-                    releaseReservations(storageKeys, gen);
+                    releaseReservations(storageKeys, reservation);
                     return null;
                 }
             }
@@ -1653,7 +1670,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (nativeBatchSlot != null) {
                 nativeBatchSlot.close();
             }
-            releaseReservations(storageKeys, gen);
+            releaseReservations(storageKeys, reservation);
             return null;
         }
         final V defaultValue;
@@ -1661,7 +1678,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             defaultValue = copyBatchDefaultValueForAsyncTask();
         } catch (Throwable t) {
             prefetchBuildFailures++;
-            releaseReservations(storageKeys, gen);
+            releaseReservations(storageKeys, reservation);
             if (nativeBatchSlot != null) {
                 nativeBatchSlot.close();
             }
@@ -1676,13 +1693,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         final NativeRequestPlaneCoordinator.BatchSlot preparedNativeBatchSlot = nativeBatchSlot;
         return trackedTask(
                 storageKeys,
-                gen,
+                reservation,
                 () ->
                         fetchPreparedChunksIntoStaging(
                                 taskRocksDBKeys,
                                 storageKeys,
                                 defaultValue,
                                 gen,
+                                reservation,
                                 preparedNativeBatchSlot),
                 preparedNativeBatchSlot == null ? null : preparedNativeBatchSlot::close);
     }
@@ -1849,11 +1867,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private void reservePreparedKeys(
             java.util.ArrayList<byte[]> rocksDBKeys,
             java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys,
-            long generation) {
+            PrefetchReservation reservation) {
         int writeIndex = 0;
         for (int readIndex = 0; readIndex < storageKeys.size(); readIndex++) {
             KeyNamespaceKey<K, N> storageKey = storageKeys.get(readIndex);
-            if (inFlight.putIfAbsent(storageKey, generation) != null) {
+            if (inFlight.putIfAbsent(storageKey, reservation) != null) {
                 prefetchKeysDeduplicated++;
                 continue;
             }
@@ -2010,25 +2028,27 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
             removeStagedValue(lookupKey, staged);
         }
-        Long reservedGen = inFlight.get(lookupKey);
-        if (reservedGen != null) {
-            if (reservedGen == gen) {
+        PrefetchReservation reservation = inFlight.get(lookupKey);
+        if (reservation != null) {
+            if (reservation.generation == gen) {
                 prefetchKeysDeduplicated++;
                 return true;
             }
-            inFlight.remove(lookupKey, reservedGen);
+            inFlight.remove(lookupKey, reservation);
         }
         return false;
     }
 
     private Runnable trackedTask(
-            java.util.List<KeyNamespaceKey<K, N>> reservations, long gen, Runnable task) {
-        return trackedTask(reservations, gen, task, null);
+            java.util.List<KeyNamespaceKey<K, N>> reservations,
+            PrefetchReservation reservation,
+            Runnable task) {
+        return trackedTask(reservations, reservation, task, null);
     }
 
     private Runnable trackedTask(
             java.util.List<KeyNamespaceKey<K, N>> reservations,
-            long gen,
+            PrefetchReservation reservation,
             Runnable task,
             Runnable completion) {
         return new PrefetchExecutor.DropAwareTask() {
@@ -2037,7 +2057,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 try {
                     task.run();
                 } finally {
-                    releaseReservations(reservations, gen);
+                    releaseReservations(reservations, reservation);
                     if (completion != null) {
                         completion.run();
                     }
@@ -2047,7 +2067,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             @Override
             public void onDrop() {
                 prefetchTasksDropped++;
-                releaseReservations(reservations, gen);
+                releaseReservations(reservations, reservation);
                 if (completion != null) {
                     completion.run();
                 }
@@ -2056,10 +2076,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     private void releaseReservations(
-            java.util.List<KeyNamespaceKey<K, N>> reservations, long gen) {
+            java.util.List<KeyNamespaceKey<K, N>> reservations,
+            PrefetchReservation reservation) {
         for (KeyNamespaceKey<K, N> key : reservations) {
-            inFlight.remove(key, gen);
+            inFlight.remove(key, reservation);
         }
+    }
+
+    private PrefetchReservation newPrefetchReservation(long generation) {
+        return new PrefetchReservation(
+                generation, prefetchReservationSequence.incrementAndGet());
     }
 
     /**
@@ -2113,6 +2139,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.List<KeyNamespaceKey<K, N>> storageKeys,
             V defaultValue,
             long gen,
+            PrefetchReservation reservation,
             NativeRequestPlaneCoordinator.BatchSlot nativeBatchSlot) {
         prefetchTasksExecuted++;
         try {
@@ -2136,7 +2163,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 }
                 int end = Math.min(start + multiGetChunkSize, rocksDBKeys.size());
                 fetchPreparedChunkIntoStaging(
-                        rocksDBKeys, storageKeys, start, end, defaultValue, gen);
+                        rocksDBKeys,
+                        storageKeys,
+                        start,
+                        end,
+                        defaultValue,
+                        gen,
+                        reservation);
             }
         } catch (Throwable ignored) {
             prefetchWorkerFailures++;
@@ -2457,7 +2490,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             int start,
             int end,
             V defaultValue,
-            long gen)
+            long gen,
+            PrefetchReservation reservation)
             throws Exception {
         RocksDBBatchValueReader<K, N, V> batchReader =
                 (RocksDBBatchValueReader<K, N, V>) delegate;
@@ -2467,7 +2501,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 new java.util.ArrayList<>(end - start);
         for (int i = start; i < end; i++) {
             KeyNamespaceKey<K, N> storageKey = storageKeys.get(i);
-            if (isPrefetchReservationActive(storageKey, gen)) {
+            if (isPrefetchReservationActive(storageKey, reservation)) {
                 activeRocksDBKeys.add(rocksDBKeys.get(i));
                 activeStorageKeys.add(storageKey);
             } else {
@@ -2513,19 +2547,29 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             KeyNamespaceKey<K, N> storageKey = activeStorageKeys.get(i);
             byte[] serializedValue = valueBytes.get(i);
             if (!stagePreparedValue(
-                    storageKey, serializedValue, defaultValue, gen)) {
+                    storageKey, serializedValue, defaultValue, gen, reservation)) {
                 return;
             }
         }
     }
 
-    private boolean isPrefetchReservationActive(KeyNamespaceKey<K, N> storageKey, long gen) {
-        Long reservedGeneration = inFlight.get(storageKey);
-        return reservedGeneration != null && reservedGeneration == gen;
+    private boolean isPrefetchReservationActive(
+            KeyNamespaceKey<K, N> storageKey, PrefetchReservation reservation) {
+        return inFlight.get(storageKey) == reservation;
     }
 
     private boolean stagePreparedValue(
             KeyNamespaceKey<K, N> storageKey, byte[] valueBytes, V defaultValue, long gen)
+            throws IOException {
+        return stagePreparedValue(storageKey, valueBytes, defaultValue, gen, null);
+    }
+
+    private boolean stagePreparedValue(
+            KeyNamespaceKey<K, N> storageKey,
+            byte[] valueBytes,
+            V defaultValue,
+            long gen,
+            PrefetchReservation reservation)
             throws IOException {
         StagedValue<V> staged;
         if (lazyStagingEnabled) {
@@ -2534,15 +2578,17 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             V value = deserializeValueOrCopyDefault(valueBytes, defaultValue);
             staged = StagedValue.materialized(storageKey, value, gen);
         }
-        return publishStagedValue(staged, valueBytes == null, true);
+        return publishStagedValue(staged, valueBytes == null, reservation);
     }
 
     private boolean publishStagedValue(StagedValue<V> staged, boolean missing) {
-        return publishStagedValue(staged, missing, false);
+        return publishStagedValue(staged, missing, null);
     }
 
     private boolean publishStagedValue(
-            StagedValue<V> staged, boolean missing, boolean requireActiveReservation) {
+            StagedValue<V> staged,
+            boolean missing,
+            PrefetchReservation requiredReservation) {
         lifecycleLock.readLock().lock();
         try {
             if (closed || staged.gen != writeGen) {
@@ -2550,8 +2596,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 return false;
             }
             synchronized (staging) {
-                if (requireActiveReservation
-                        && !isPrefetchReservationActive(staged.storageKey(), staged.gen)) {
+                if (requiredReservation != null
+                        && !isPrefetchReservationActive(
+                                staged.storageKey(), requiredReservation)) {
                     prefetchWorkerDiscardedAfterRead++;
                     return true;
                 }
@@ -3018,6 +3065,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         Throwable cause = nativeRequestPlaneCoordinator.disableCause();
         return cause.getClass().getSimpleName() + ":" + String.valueOf(cause.getMessage());
+    }
+
+    /**
+     * Ownership token for one submitted prefetch task. Generation protects against state writes;
+     * ticket identity prevents a later same-generation reservation from reviving an older,
+     * cancelled worker (the classic ABA case).
+     */
+    private static final class PrefetchReservation {
+        private final long generation;
+        @SuppressWarnings("unused")
+        private final long ticket;
+
+        private PrefetchReservation(long generation, long ticket) {
+            this.generation = generation;
+            this.ticket = ticket;
+        }
     }
 
     private static final class NativePointCacheResult<V> {

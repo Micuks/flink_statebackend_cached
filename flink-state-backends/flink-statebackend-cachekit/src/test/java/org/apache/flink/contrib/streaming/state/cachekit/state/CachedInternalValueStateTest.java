@@ -282,6 +282,52 @@ class CachedInternalValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testLaterSameGenerationReservationCannotReviveCancelledWorker() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(17);
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
+        stubPreparedKeySerialization(batchReader);
+        when(batchReader.getSerializedValueByRocksDBKey(any()))
+                .thenReturn(KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE));
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Runnable first = state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2"));
+        assertEquals(17, state.value());
+        state.reReserveForTesting("k1", VoidNamespace.INSTANCE);
+
+        first.run();
+        assertEquals(1, state.getPrefetchWorkerCancelledBeforeReadForTesting());
+        assertTrue(state.hasInFlightReservationForTesting("k1", VoidNamespace.INSTANCE));
+
+        verify(batchReader, times(1)).getSerializedValueByRocksDBKey(any());
+        verify(batchReader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+        state.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testLiveReadCancellationDiscardsKeyAfterWorkerRocksDBRead() throws Exception {
         CountDownLatch batchStarted = new CountDownLatch(1);
         CountDownLatch releaseBatch = new CountDownLatch(1);
