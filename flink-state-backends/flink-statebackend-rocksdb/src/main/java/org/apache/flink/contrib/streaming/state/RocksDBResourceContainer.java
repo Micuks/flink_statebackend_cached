@@ -306,7 +306,15 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
     /** Create a {@link DBOptions} for RocksDB, including some common settings. */
     DBOptions createBaseCommonDBOptions() {
-        return new DBOptions().setUseFsync(false).setStatsDumpPeriodSec(0);
+        return new DBOptions()
+                .setUseFsync(false)
+                .setStatsDumpPeriodSec(0)
+                // A Flink task backend is disposable state. Its durable copy is a checkpoint;
+                // flushing a canceled task's private memtables while closing the local DB cannot
+                // improve recovery, but it can make RocksDB.closeDatabase() wait indefinitely
+                // after a write-heavy join. Skip that shutdown-only flush. Normal runtime flushes
+                // and checkpoint semantics are unchanged.
+                .setAvoidFlushDuringShutdown(true);
     }
 
     /** Create a {@link ColumnFamilyOptions} for RocksDB, including some common settings. */
