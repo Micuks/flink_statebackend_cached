@@ -459,6 +459,13 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 nativeMetricMonitor.close();
             }
 
+            // A canceled streaming task may still have RocksDB flush/compaction work queued. In
+            // particular, an async CacheKit read can overlap the last write burst and expose a
+            // long closeDatabase() stall while RocksDB drains that background work. No more state
+            // access is possible after rocksDBResourceGuard.close(), so cancel and join the native
+            // workers before closing column families and the DB itself.
+            db.cancelAllBackgroundWork(true);
+
             List<ColumnFamilyOptions> columnFamilyOptions =
                     new ArrayList<>(kvStateInformation.values().size());
 
