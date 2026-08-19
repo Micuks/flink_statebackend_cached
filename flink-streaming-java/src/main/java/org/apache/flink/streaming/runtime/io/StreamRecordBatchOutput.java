@@ -71,6 +71,8 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
     private final boolean asyncPrefetchChunks;
     /** Records per early prefetch submission. */
     private final int asyncPrefetchChunkSize;
+    /** Consumer-facing records that are too close to execution to prefetch profitably. */
+    private final int asyncPrefetchHeadGuardRecords;
 
     // Reusable record buffer. Sized at construction.
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -110,7 +112,8 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 null,
                 true,
                 false,
-                16);
+                16,
+                0);
     }
 
     /**
@@ -142,7 +145,8 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 backpressured,
                 backpressureGated,
                 false,
-                16);
+                16,
+                0);
     }
 
     /** Full constructor with task-configuration-derived asynchronous lookahead controls. */
@@ -159,6 +163,37 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
             boolean backpressureGated,
             boolean asyncPrefetchChunks,
             int asyncPrefetchChunkSize) {
+        this(
+                wrapped,
+                headOperator,
+                enabled,
+                commutativeKeySort,
+                batchSize,
+                batchTimeoutNanos,
+                numRecordsIn,
+                prefetchMode,
+                backpressured,
+                backpressureGated,
+                asyncPrefetchChunks,
+                asyncPrefetchChunkSize,
+                0);
+    }
+
+    /** Full constructor including a sliding consumer-head guard for speculative prefetch. */
+    public StreamRecordBatchOutput(
+            DataOutput<T> wrapped,
+            Input<T> headOperator,
+            boolean enabled,
+            boolean commutativeKeySort,
+            int batchSize,
+            long batchTimeoutNanos,
+            Counter numRecordsIn,
+            boolean prefetchMode,
+            java.util.function.BooleanSupplier backpressured,
+            boolean backpressureGated,
+            boolean asyncPrefetchChunks,
+            int asyncPrefetchChunkSize,
+            int asyncPrefetchHeadGuardRecords) {
         this.wrapped = wrapped;
         this.headOperator = headOperator;
         this.enabled = enabled && batchSize > 1;
@@ -171,6 +206,8 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         this.backpressureGated = backpressureGated;
         this.asyncPrefetchChunks = asyncPrefetchChunks;
         this.asyncPrefetchChunkSize = Math.max(2, Math.min(1024, asyncPrefetchChunkSize));
+        this.asyncPrefetchHeadGuardRecords =
+                Math.max(0, Math.min(this.batchSize - 1, asyncPrefetchHeadGuardRecords));
         @SuppressWarnings({"unchecked", "rawtypes"})
         StreamRecord<T>[] tmp = new StreamRecord[this.batchSize];
         this.buf = tmp;
@@ -338,6 +375,10 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         if (backpressureGated && (backpressured == null || !backpressured.getAsBoolean())) {
             return;
         }
+        // Do not spend I/O on the records nearest to mailbox consumption. The eligible tail grows
+        // as append() advances the lookahead window; each consumed batch resets this boundary.
+        asyncPrefetchScheduledUntil =
+                Math.max(asyncPrefetchScheduledUntil, asyncPrefetchHeadGuardRecords);
         while (asyncPrefetchScheduledUntil < count) {
             int remaining = count - asyncPrefetchScheduledUntil;
             if (remaining < asyncPrefetchChunkSize && !includeRemainder) {
@@ -375,5 +416,9 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
 
     public long batchTimeoutNanos() {
         return batchTimeoutNanos;
+    }
+
+    int asyncPrefetchScheduledUntilForTesting() {
+        return asyncPrefetchScheduledUntil;
     }
 }

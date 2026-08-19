@@ -87,4 +87,36 @@ class StreamRecordBatchOutputTest {
         order.verify(wrapped).emitLatencyMarker(marker);
         assertEquals(0, output.size());
     }
+
+    @Test
+    void testAsyncPrefetchProtectsConsumerFacingHeadAndSlidesIntoTail() {
+        @SuppressWarnings("unchecked")
+        DataOutput<String> wrapped = mock(DataOutput.class);
+        @SuppressWarnings("unchecked")
+        Input<String> input = mock(Input.class);
+        StreamRecordBatchOutput<String> output =
+                new StreamRecordBatchOutput<>(
+                        wrapped,
+                        input,
+                        true,
+                        false,
+                        8,
+                        0,
+                        null,
+                        true,
+                        () -> false,
+                        false,
+                        true,
+                        2,
+                        3);
+
+        output.append(new StreamRecord<>("head-0"));
+        output.append(new StreamRecord<>("head-1"));
+        output.append(new StreamRecord<>("head-2"));
+        output.append(new StreamRecord<>("tail-3"));
+        assertEquals(3, output.asyncPrefetchScheduledUntilForTesting());
+
+        output.append(new StreamRecord<>("tail-4"));
+        assertEquals(5, output.asyncPrefetchScheduledUntilForTesting());
+    }
 }
