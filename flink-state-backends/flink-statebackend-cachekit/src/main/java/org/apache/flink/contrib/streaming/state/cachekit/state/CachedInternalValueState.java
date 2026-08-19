@@ -189,7 +189,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchAsyncUsefulValues;
     private volatile long prefetchAdaptiveAdmissionSkips;
     private volatile long prefetchAdaptiveProbeTasks;
-    private long prefetchAdaptiveSkippedSinceProbe;
+    private final java.util.concurrent.atomic.AtomicLong prefetchAdaptiveSkipSequence =
+            new java.util.concurrent.atomic.AtomicLong();
     private volatile long prefetchUnusedStagedOnClose;
     private volatile long prefetchBuildFailures;
     private volatile long prefetchWorkerFailures;
@@ -1575,6 +1576,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (closed || keys == null || currentNamespace == null) {
             return null;
         }
+        if (!admitAsyncPrefetchWorkerTask()) {
+            return null;
+        }
         if (multiGetPrefetchEnabled && delegate instanceof RocksDBBatchValueReader<?, ?, ?>) {
             return buildPreparedMultiGetTask(keys, currentNamespace);
         }
@@ -1787,11 +1791,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return true;
         }
         prefetchAdaptiveAdmissionSkips++;
-        prefetchAdaptiveSkippedSinceProbe++;
-        if (prefetchAdaptiveSkippedSinceProbe < ASYNC_ADAPTIVE_PROBE_EVERY_TASKS) {
+        long skipOrdinal = prefetchAdaptiveSkipSequence.incrementAndGet();
+        if (skipOrdinal % ASYNC_ADAPTIVE_PROBE_EVERY_TASKS != 0) {
             return false;
         }
-        prefetchAdaptiveSkippedSinceProbe = 0;
         prefetchAdaptiveProbeTasks++;
         return true;
     }
