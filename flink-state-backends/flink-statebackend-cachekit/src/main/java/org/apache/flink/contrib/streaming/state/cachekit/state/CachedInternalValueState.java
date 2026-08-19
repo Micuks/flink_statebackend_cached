@@ -1639,9 +1639,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      */
     @SuppressWarnings("unchecked")
     private Runnable buildPreparedMultiGetTask(Iterable<? extends K> keys, N namespace) {
-        if (!admitAsyncPrefetchTask()) {
-            return null;
-        }
         java.util.ArrayList<byte[]> rocksDBKeys = new java.util.ArrayList<>();
         java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys = new java.util.ArrayList<>();
         final long gen = writeGen;
@@ -1782,7 +1779,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 preparedNativeBatchSlot == null ? null : preparedNativeBatchSlot::close);
     }
 
-    private boolean admitAsyncPrefetchTask() {
+    private boolean admitAsyncPrefetchWorkerTask() {
         if (!ASYNC_ADAPTIVE_ADMISSION_ENABLED
                 || prefetchAsyncValuesRead < ASYNC_ADAPTIVE_MIN_SAMPLES
                 || prefetchAsyncUsefulValues
@@ -2199,6 +2196,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.List<byte[]> serializedKeyAndNamespaces, V defaultValue, long gen) {
         prefetchTasksExecuted++;
         try {
+            if (!admitAsyncPrefetchWorkerTask()) {
+                return;
+            }
             prepareWorkerKeyState();
             prepareWorkerValueState();
             if (multiGetPrefetchEnabled && delegate instanceof RocksDBBatchValueReader<?, ?, ?>) {
@@ -2244,6 +2244,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             NativeRequestPlaneCoordinator.BatchSlot nativeBatchSlot) {
         prefetchTasksExecuted++;
         try {
+            if (!admitAsyncPrefetchWorkerTask()) {
+                return;
+            }
             if (nativeBatchSlot != null
                     && executeNativePreparedBatch(
                             rocksDBKeys,
