@@ -129,6 +129,7 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
     return open(
         enabled,
         capacityEntries,
+        capacityEntries,
         keyArenaBytes,
         valueArenaBytes,
         kernelPreference,
@@ -143,20 +144,48 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
       long valueArenaBytes,
       int kernelPreference,
       String libraryPath) {
+    return open(
+        enabled,
+        capacityEntries,
+        capacityEntries,
+        keyArenaBytes,
+        valueArenaBytes,
+        kernelPreference,
+        libraryPath);
+  }
+
+  /** Opens one native request plane with an independent grouping-batch limit. */
+  public static NativeRequestPlaneBridge open(
+      boolean enabled,
+      int capacityEntries,
+      int maxBatchEntries,
+      long keyArenaBytes,
+      long valueArenaBytes,
+      int kernelPreference,
+      String libraryPath) {
     if (!enabled) {
       throw new IllegalStateException(
           "Native request plane is disabled; explicitly enable " + ENABLED_PROPERTY + ".");
     }
-    if (capacityEntries <= 0 || keyArenaBytes < 0 || valueArenaBytes < 0) {
+    if (capacityEntries <= 0
+        || maxBatchEntries <= 0
+        || keyArenaBytes < 0
+        || valueArenaBytes < 0) {
       throw new IllegalArgumentException(
-          "capacityEntries must be positive and arena sizes must be non-negative.");
+          "capacityEntries and maxBatchEntries must be positive and arena sizes must be "
+              + "non-negative.");
     }
     if (kernelPreference < KERNEL_AUTO || kernelPreference > KERNEL_SVE256) {
       throw new IllegalArgumentException("Unknown native kernel preference.");
     }
     ensureLibraryLoaded(libraryPath);
     return new NativeRequestPlaneBridge(
-        nativeCreate(capacityEntries, keyArenaBytes, valueArenaBytes, kernelPreference));
+        nativeCreate(
+            capacityEntries,
+            maxBatchEntries,
+            keyArenaBytes,
+            valueArenaBytes,
+            kernelPreference));
   }
 
   public static boolean isEnabledByDefault() {
@@ -333,7 +362,11 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
   }
 
   private static native long nativeCreate(
-      int capacityEntries, long keyArenaBytes, long valueArenaBytes, int kernelPreference);
+      int capacityEntries,
+      int maxBatchEntries,
+      long keyArenaBytes,
+      long valueArenaBytes,
+      int kernelPreference);
 
   private static native void nativeDestroy(long handle);
 

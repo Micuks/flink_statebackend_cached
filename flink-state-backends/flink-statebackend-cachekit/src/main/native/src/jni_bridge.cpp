@@ -153,11 +153,13 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
         JNIEnv* environment,
         jclass,
         jint capacity_entries,
+        jint max_batch_entries,
         jlong key_arena_bytes,
         jlong value_arena_bytes,
         jint kernel_preference) {
     try {
-        if (capacity_entries <= 0 || key_arena_bytes < 0 || value_arena_bytes < 0 ||
+        if (capacity_entries <= 0 || max_batch_entries <= 0 || key_arena_bytes < 0 ||
+            value_arena_bytes < 0 ||
             kernel_preference <
                     static_cast<jint>(KernelPreference::kAuto) ||
             kernel_preference >
@@ -174,6 +176,7 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
         }
         Options options;
         options.capacity_entries = static_cast<std::size_t>(capacity_entries);
+        options.max_batch_entries = static_cast<std::size_t>(max_batch_entries);
         options.key_arena_bytes = static_cast<std::size_t>(key_arena_bytes);
         options.value_arena_bytes = static_cast<std::size_t>(value_arena_bytes);
         options.kernel = static_cast<KernelPreference>(kernel_preference);
@@ -193,7 +196,7 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
         }
         std::unique_ptr<BridgeHandle> bridge =
                 std::make_unique<BridgeHandle>(
-                        std::move(plane), options.capacity_entries);
+                        std::move(plane), options.max_batch_entries);
         return ToHandle(bridge.release());
     } catch (const std::bad_alloc&) {
         Throw(environment, kOutOfMemory, "native request-plane creation allocation failed");

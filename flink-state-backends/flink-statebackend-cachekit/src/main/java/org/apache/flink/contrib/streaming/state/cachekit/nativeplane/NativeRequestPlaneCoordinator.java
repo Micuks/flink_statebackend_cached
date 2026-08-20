@@ -71,6 +71,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 NativeRequestPlaneBridge.open(
                         true,
                         options.capacityEntries(),
+                        options.batchEntries(),
                         options.keyArenaBytes(),
                         options.valueArenaBytes(),
                         options.kernelPreference(),

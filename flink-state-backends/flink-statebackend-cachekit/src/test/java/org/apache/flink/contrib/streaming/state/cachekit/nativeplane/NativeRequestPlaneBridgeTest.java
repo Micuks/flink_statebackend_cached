@@ -70,6 +70,36 @@ class NativeRequestPlaneBridgeTest {
 
   @Test
   @EnabledIfSystemProperty(named = NativeRequestPlaneBridge.LIBRARY_PATH_PROPERTY, matches = ".+")
+  void testGroupingBatchLimitIsIndependentFromCacheCapacity() throws Exception {
+    try (NativeRequestPlaneBridge bridge =
+        NativeRequestPlaneBridge.open(
+            true,
+            1,
+            4,
+            1024,
+            1024,
+            NativeRequestPlaneBridge.KERNEL_SCALAR,
+            System.getProperty(NativeRequestPlaneBridge.LIBRARY_PATH_PROPERTY))) {
+      SerializedKeyBatch<Integer, String> keys = newBatch(4);
+      keys.append(1, 1L, 1, "a");
+      keys.append(1, 1L, 2, "b");
+      keys.append(1, 1L, 1, "a");
+      keys.append(1, 1L, 3, "c");
+      ByteBuffer uniques = directNative(4 * Integer.BYTES);
+      ByteBuffer groups = directNative(4 * Integer.BYTES);
+      assertEquals(3, bridge.groupBatch(keys, uniques, groups));
+      assertEquals(0, uniques.getInt(0));
+      assertEquals(1, uniques.getInt(Integer.BYTES));
+      assertEquals(3, uniques.getInt(2 * Integer.BYTES));
+      assertEquals(0, groups.getInt(0));
+      assertEquals(1, groups.getInt(Integer.BYTES));
+      assertEquals(0, groups.getInt(2 * Integer.BYTES));
+      assertEquals(2, groups.getInt(3 * Integer.BYTES));
+    }
+  }
+
+  @Test
+  @EnabledIfSystemProperty(named = NativeRequestPlaneBridge.LIBRARY_PATH_PROPERTY, matches = ".+")
   void testSingleJniFillAndProbeRoundTripIsAuditable() throws Exception {
     try (NativeRequestPlaneBridge bridge = openScalarBridge()) {
       SerializedKeyBatch<Integer, String> keys = newBatch(4);
