@@ -106,6 +106,49 @@ Native hash 构建不同；每轮日志分别确认 `hash=fnv64` 或 `hash=crc32
 和 RocksDB 工作量没有减少。它适合作为鲲鹏硬件亲和的低层优化保留，不应包装成已证实的
 Nexmark 吞吐优化。由于未跨过“q4 稳定收益”门槛，本轮不扩大到 q9/q20。
 
+### 5.1 16 B primitive JNI lookup
+
+为减少 CRC32CX 优化之外的固定开销，常见的 16 B on-heap `BinaryRowData` 不再把 `byte[]`、
+offset 和 length 传给 JNI lookup，而是在 Java 侧直接读取两个 `long`，Native 在栈上恢复完全
+相同的 16 B。表、hash、probe、LRU 和返回对象语义均未改变；其他 key 和诊断采样仍走原路径。
+
+相同 Native 表和查询分布的完整 JNI lookup 微基准：
+
+| 路径 | 平均耗时 | 差异 |
+| --- | ---: | ---: |
+| `byte[]` 16 B lookup | 148.69 ns/op | — |
+| two-`long` 16 B lookup | 88.91 ns/op | **-40.2%** |
+
+严格 q4 采用 `old -> word16 -> word16 -> old`、20 M events，唯一变量是 CacheKit JAR：
+
+| 顺序 | 版本 | throughput (events/s) |
+| ---: | --- | ---: |
+| 1 | old | 820,920 |
+| 2 | word16 | 824,160 |
+| 3 | word16 | 824,130 |
+| 4 | old | 814,070 |
+| 平均 | old / word16 | 817,495 / 824,145（**+0.81%**） |
+
+两个 word16 样本都高于两个 old 样本，且 word16 两次只差 30 events/s，说明有正向信号；但
+样本数仅 2+2，不能据此宣称稳定的生产收益。结果目录位于
+`/home/wutb/nexmark-bench-v2/results/20260821T01*kunpeng-native-word16-q4-*`。
+
+随后把 two-`long` 传输扩展到 16 B `put/remove`，并用
+`lookup-only -> full16 -> full16 -> lookup-only` 做增量 q4 A/B：
+
+| 顺序 | 版本 | throughput (events/s) |
+| ---: | --- | ---: |
+| 1 | lookup-only | 841,720 |
+| 2 | full16 | 824,160 |
+| 3 | full16 | 813,600 |
+| 4 | lookup-only | 803,860 |
+| 平均 | lookup-only / full16 | 822,790 / 818,880（**-0.48%**） |
+
+整组存在明显时间漂移，两个相邻配对方向相反，无法证明 put/remove primitive 化有收益；均值还
+有小幅回退。因此生产代码撤回 `nativePut16/nativeRemove16`，仅保留 lookup 快路径。第一性原因
+是 lookup 是每次 snapshot 查询必经路径，而 put 只发生在 miss 后，remove 又大多被 membership
+hint 跳过；继续优化低频调用只增加接口和维护成本，难以转化为端到端吞吐。
+
 用于严格 A/B 的 CMake 选项为 `CACHEKIT_FORCE_FNV_HASH=ON`，默认 `OFF`，只影响对照构建；
 生产构建仍按 CPU 型号、HWCAP 和 key 长度自动选择。
 

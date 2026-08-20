@@ -463,6 +463,20 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapsho
     return env->NewLocalRef(result);
 }
 
+extern "C" JNIEXPORT jobject JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_lookupWords(
+        JNIEnv* env, jclass, jlong handle, jlong first, jlong second) {
+    if (handle == 0) {
+        return nullptr;
+    }
+    const std::uint64_t words[] = {
+            static_cast<std::uint64_t>(first),
+            static_cast<std::uint64_t>(second)};
+    jobject result = ByteCache(handle)->Lookup(
+            reinterpret_cast<const std::uint8_t*>(words), sizeof(words));
+    return env->NewLocalRef(result);
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_echoBytes(
         JNIEnv* env, jclass, jbyteArray key) {
@@ -694,6 +708,27 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
     }
     env->ReleasePrimitiveArrayCritical(key, key_bytes, JNI_ABORT);
     return env->NewLocalRef(retained_result);
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeLookup16(
+        JNIEnv* env, jclass, jlong handle, jlong first, jlong second) {
+    if (handle == 0) {
+        ThrowIllegalArgument(env, "invalid 16-byte native snapshot lookup handle");
+        return nullptr;
+    }
+    const std::uint64_t words[] = {
+            static_cast<std::uint64_t>(first),
+            static_cast<std::uint64_t>(second)};
+    try {
+        return env->NewLocalRef(ByteCache(handle)->Lookup(
+                reinterpret_cast<const std::uint8_t*>(words), sizeof(words)));
+    } catch (const std::exception& error) {
+        if (!env->ExceptionCheck()) {
+            ThrowIllegalState(env, error.what());
+        }
+        return nullptr;
+    }
 }
 
 extern "C" JNIEXPORT jobject JNICALL

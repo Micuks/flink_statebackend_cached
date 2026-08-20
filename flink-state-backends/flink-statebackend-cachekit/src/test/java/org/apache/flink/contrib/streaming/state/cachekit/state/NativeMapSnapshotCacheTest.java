@@ -22,6 +22,7 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.binary.BinaryRowData;
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
+import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.VarCharType;
 
@@ -287,6 +288,28 @@ class NativeMapSnapshotCacheTest {
             assertEquals("bidder", retained.getString(1).toString());
         } finally {
             cache.close();
+        }
+    }
+
+    @Test
+    void testSixteenByteRowUsesPrimitiveLookup() throws Exception {
+        RowDataSerializer serializer = new RowDataSerializer(new BigIntType());
+        try (NativeMapSnapshotCache<RowData, VoidNamespace, String> cache =
+                new NativeMapSnapshotCache<>(
+                        8,
+                        "SCALAR",
+                        nativeLibrary(),
+                        serializer,
+                        VoidNamespaceSerializer.INSTANCE,
+                        StringSerializer.INSTANCE)) {
+            BinaryRowData key = serializer.toBinaryRow(GenericRowData.of(123456789L));
+            assertEquals(16, key.getSizeInBytes());
+            assertFalse(cache.putSingle(key, VoidNamespace.INSTANCE, "retained"));
+            assertEquals("retained", cache.get(key, VoidNamespace.INSTANCE).userKey());
+            assertNull(
+                    cache.get(
+                            serializer.toBinaryRow(GenericRowData.of(987654321L)),
+                            VoidNamespace.INSTANCE));
         }
     }
 

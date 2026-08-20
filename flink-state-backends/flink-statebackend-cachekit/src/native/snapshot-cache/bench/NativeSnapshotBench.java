@@ -41,6 +41,8 @@ public final class NativeSnapshotBench {
 
     private static native Object lookupBytes(long handle, byte[] key);
 
+    private static native Object lookupWords(long handle, long first, long second);
+
     private static native int echoBytes(byte[] key);
 
     private static native int byteVectorBytes(long handle);
@@ -74,7 +76,8 @@ public final class NativeSnapshotBench {
                 runKernel(kernel, keys, namespaces, input, output);
             }
         }
-        runByteKeyBench();
+        runByteKeyBench(16);
+        runByteKeyBench(32);
     }
 
     private static void runJavaBaseline(long[] keys, long[] namespaces) {
@@ -172,14 +175,15 @@ public final class NativeSnapshotBench {
                 result.checksum);
     }
 
-    private static void runByteKeyBench() {
-        final int keyBytes = 32;
+    private static void runByteKeyBench(int keyBytes) {
         byte[][] stored = new byte[ENTRIES][];
         for (int index = 0; index < stored.length; index++) {
             stored[index] = encodeKey(index, keyBytes);
         }
         byte[][] queries = new byte[QUERY_COUNT][];
         ByteKey[] wrappedQueries = new ByteKey[QUERY_COUNT];
+        long[] firstWords = keyBytes == 16 ? new long[QUERY_COUNT] : null;
+        long[] secondWords = keyBytes == 16 ? new long[QUERY_COUNT] : null;
         long random = 0x243f6a8885a308d3L;
         for (int index = 0; index < queries.length; index++) {
             random ^= random << 13;
@@ -188,6 +192,11 @@ public final class NativeSnapshotBench {
             int key = (index & 3) != 0 ? (int) (random & 2047) : 4096 + (int) (random & 2047);
             queries[index] = key < ENTRIES ? stored[key] : encodeKey(key, keyBytes);
             wrappedQueries[index] = new ByteKey(queries[index]);
+            if (keyBytes == 16) {
+                ByteBuffer words = ByteBuffer.wrap(queries[index]).order(ByteOrder.nativeOrder());
+                firstWords[index] = words.getLong(0);
+                secondWords[index] = words.getLong(8);
+            }
         }
 
         Map<ByteKey, Integer> javaLru =
@@ -221,8 +230,15 @@ public final class NativeSnapshotBench {
                 report(
                         kernel == 0 ? "scalar" : kernel == 1 ? "neon" : "sve",
                         byteVectorBytes(handle),
-                        "byte-full",
+                        "byte-full-" + keyBytes,
                         runNativeBytes(handle, queries, miss, ROUNDS));
+                if (keyBytes == 16) {
+                    report(
+                            kernel == 0 ? "scalar" : kernel == 1 ? "neon" : "sve",
+                            byteVectorBytes(handle),
+                            "word-full-16",
+                            runNativeWords(handle, firstWords, secondWords, miss, ROUNDS));
+                }
             } finally {
                 destroyBytes(handle);
             }
@@ -277,6 +293,19 @@ public final class NativeSnapshotBench {
             }
         }
         return new Measurement(System.nanoTime() - start, (long) queries.length * rounds, checksum);
+    }
+
+    private static Measurement runNativeWords(
+            long handle, long[] firstWords, long[] secondWords, Object miss, int rounds) {
+        long checksum = 0;
+        long start = System.nanoTime();
+        for (int round = 0; round < rounds; round++) {
+            for (int index = 0; index < firstWords.length; index++) {
+                Object value = lookupWords(handle, firstWords[index], secondWords[index]);
+                checksum += value == miss ? 0 : ((Integer) value) + 1;
+            }
+        }
+        return new Measurement(System.nanoTime() - start, (long) firstWords.length * rounds, checksum);
     }
 
     private static byte[] encodeKey(long value, int size) {

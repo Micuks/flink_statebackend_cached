@@ -177,8 +177,9 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
             jniNs = System.nanoTime() - jniStart;
             metrics.recordNativeKeySample(serialized.raw, serialized.length, encodeNs);
         } else {
-            result =
-                    nativeLookup(
+            result = serialized.words
+                    ? nativeLookup16(liveHandle(), serialized.firstWord, serialized.secondWord)
+                    : nativeLookup(
                             liveHandle(),
                             serialized.bytes,
                             serialized.offset,
@@ -462,6 +463,13 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
             BinaryRowData row = (BinaryRowData) key;
             MemorySegment[] segments = row.getSegments();
             if (segments.length == 1 && !segments[0].isOffHeap()) {
+                if (row.getSizeInBytes() == 16) {
+                    return local.keyBytes.resetWords(
+                            segments[0].getArray(),
+                            row.getOffset(),
+                            segments[0].getLong(row.getOffset()),
+                            segments[0].getLong(row.getOffset() + Long.BYTES));
+                }
                 return local.keyBytes.reset(
                         segments[0].getArray(), row.getOffset(), row.getSizeInBytes(), true);
             }
@@ -654,12 +662,28 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
         private int offset;
         private int length;
         private boolean raw;
+        private boolean words;
+        private long firstWord;
+        private long secondWord;
 
         private KeyBytes reset(byte[] bytes, int offset, int length, boolean raw) {
             this.bytes = bytes;
             this.offset = offset;
             this.length = length;
             this.raw = raw;
+            this.words = false;
+            return this;
+        }
+
+        private KeyBytes resetWords(
+                byte[] bytes, int offset, long firstWord, long secondWord) {
+            this.bytes = bytes;
+            this.offset = offset;
+            this.length = 16;
+            this.raw = true;
+            this.words = true;
+            this.firstWord = firstWord;
+            this.secondWord = secondWord;
             return this;
         }
     }
@@ -698,6 +722,8 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
 
     private static native Object nativeLookup(
             long handle, byte[] key, int keyOffset, int keySize);
+
+    private static native Object nativeLookup16(long handle, long firstWord, long secondWord);
 
     private static native Object nativeLookupProfiled(
             long handle, byte[] key, int keyOffset, int keySize, long[] nativeCoreNs);
