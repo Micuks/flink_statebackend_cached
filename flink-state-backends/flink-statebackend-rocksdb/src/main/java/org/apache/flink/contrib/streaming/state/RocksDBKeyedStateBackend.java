@@ -207,6 +207,9 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     /** Whether MapState iterator entries reuse the raw key fetched for the prefix check. */
     private final boolean mapIteratorSingleKeyFetchEnabled;
     private final boolean mapIteratorPrefixUpperBoundEnabled;
+    private final boolean mapIteratorPackedTinyScanEnabled;
+    private final int mapIteratorPackedTinyScanMaxEntries;
+    private final int mapIteratorPackedTinyScanMaxBytes;
 
     private final LongAdder mapIteratorEntriesLoaded = new LongAdder();
     private final LongAdder mapIteratorKeyJniCalls = new LongAdder();
@@ -217,6 +220,14 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final LongAdder mapIteratorNativeIterators = new LongAdder();
     private final LongAdder mapIteratorBoundedIterators = new LongAdder();
     private final LongAdder mapIteratorUpperBoundFallbacks = new LongAdder();
+    private final LongAdder mapIteratorPackedScanAttempts = new LongAdder();
+    private final LongAdder mapIteratorPackedScanCompletes = new LongAdder();
+    private final LongAdder mapIteratorPackedScanOverflows = new LongAdder();
+    private final LongAdder mapIteratorPackedScanErrors = new LongAdder();
+    private final LongAdder mapIteratorPackedScanMalformed = new LongAdder();
+    private final LongAdder mapIteratorPackedScanIteratorFallbacks = new LongAdder();
+    private final LongAdder mapIteratorPackedScanEntries = new LongAdder();
+    private final LongAdder mapIteratorPackedScanBytes = new LongAdder();
 
     /** Map of created k/v states. */
     private final Map<String, State> createdKVStates;
@@ -301,7 +312,10 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             InternalKeyContext<K> keyContext,
             @Nonnegative long writeBatchSize,
             boolean mapIteratorSingleKeyFetchEnabled,
-            boolean mapIteratorPrefixUpperBoundEnabled) {
+            boolean mapIteratorPrefixUpperBoundEnabled,
+            boolean mapIteratorPackedTinyScanEnabled,
+            int mapIteratorPackedTinyScanMaxEntries,
+            int mapIteratorPackedTinyScanMaxBytes) {
 
         super(
                 kvStateRegistry,
@@ -332,6 +346,9 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.writeBatchSize = writeBatchSize;
         this.mapIteratorSingleKeyFetchEnabled = mapIteratorSingleKeyFetchEnabled;
         this.mapIteratorPrefixUpperBoundEnabled = mapIteratorPrefixUpperBoundEnabled;
+        this.mapIteratorPackedTinyScanEnabled = mapIteratorPackedTinyScanEnabled;
+        this.mapIteratorPackedTinyScanMaxEntries = mapIteratorPackedTinyScanMaxEntries;
+        this.mapIteratorPackedTinyScanMaxBytes = mapIteratorPackedTinyScanMaxBytes;
         this.db = db;
         this.rocksDBResourceGuard = rocksDBResourceGuard;
         this.checkpointSnapshotStrategy = checkpointSnapshotStrategy;
@@ -464,11 +481,14 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         // parallel.
         rocksDBResourceGuard.close();
 
-        if (mapIteratorNativeIterators.sum() > 0) {
+        if (mapIteratorNativeIterators.sum() > 0 || mapIteratorPackedScanAttempts.sum() > 0) {
             LOG.info(
                     "[CACHEKIT ROCKSDB MAP ITERATOR] singleKeyFetch={} prefixUpperBound={} entriesLoaded={} "
                             + "keyJniCalls={} duplicateKeyFetchesAvoided={} valueJniCalls={} "
-                            + "pages={} seeks={} nativeIterators={} boundedIterators={} upperBoundFallbacks={}",
+                            + "pages={} seeks={} nativeIterators={} boundedIterators={} upperBoundFallbacks={} "
+                            + "packedTinyScan={} packedMaxEntries={} packedMaxBytes={} packedAttempts={} "
+                            + "packedCompletes={} packedOverflows={} packedErrors={} packedMalformed={} "
+                            + "packedIteratorFallbacks={} packedEntries={} packedBytes={}",
                     mapIteratorSingleKeyFetchEnabled,
                     mapIteratorPrefixUpperBoundEnabled,
                     mapIteratorEntriesLoaded.sum(),
@@ -479,7 +499,18 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapIteratorSeeks.sum(),
                     mapIteratorNativeIterators.sum(),
                     mapIteratorBoundedIterators.sum(),
-                    mapIteratorUpperBoundFallbacks.sum());
+                    mapIteratorUpperBoundFallbacks.sum(),
+                    mapIteratorPackedTinyScanEnabled,
+                    mapIteratorPackedTinyScanMaxEntries,
+                    mapIteratorPackedTinyScanMaxBytes,
+                    mapIteratorPackedScanAttempts.sum(),
+                    mapIteratorPackedScanCompletes.sum(),
+                    mapIteratorPackedScanOverflows.sum(),
+                    mapIteratorPackedScanErrors.sum(),
+                    mapIteratorPackedScanMalformed.sum(),
+                    mapIteratorPackedScanIteratorFallbacks.sum(),
+                    mapIteratorPackedScanEntries.sum(),
+                    mapIteratorPackedScanBytes.sum());
         }
 
         // IMPORTANT: null reference to signal potential async checkpoint workers that the db was
@@ -538,6 +569,44 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     boolean isMapIteratorPrefixUpperBoundEnabled() {
         return mapIteratorPrefixUpperBoundEnabled;
+    }
+
+    boolean isMapIteratorPackedTinyScanEnabled() {
+        return mapIteratorPackedTinyScanEnabled;
+    }
+
+    int getMapIteratorPackedTinyScanMaxEntries() {
+        return mapIteratorPackedTinyScanMaxEntries;
+    }
+
+    int getMapIteratorPackedTinyScanMaxBytes() {
+        return mapIteratorPackedTinyScanMaxBytes;
+    }
+
+    void recordMapIteratorPackedScan(RocksDBPackedTinyMapScan.Result result) {
+        mapIteratorPackedScanAttempts.increment();
+        mapIteratorPackedScanBytes.add(result.encodedBytes);
+        switch (result.outcome) {
+            case COMPLETE:
+                mapIteratorPackedScanCompletes.increment();
+                mapIteratorPackedScanEntries.add(result.entries.size());
+                break;
+            case OVERFLOW:
+                mapIteratorPackedScanOverflows.increment();
+                break;
+            case NATIVE_ERROR:
+                mapIteratorPackedScanErrors.increment();
+                break;
+            case MALFORMED:
+                mapIteratorPackedScanMalformed.increment();
+                break;
+            default:
+                throw new IllegalStateException("Unknown packed scan outcome: " + result.outcome);
+        }
+    }
+
+    void recordMapIteratorPackedScanIteratorFallback() {
+        mapIteratorPackedScanIteratorFallbacks.increment();
     }
 
     void recordMapIteratorPageStats(
@@ -603,6 +672,46 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @VisibleForTesting
     long getMapIteratorUpperBoundFallbacks() {
         return mapIteratorUpperBoundFallbacks.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanAttempts() {
+        return mapIteratorPackedScanAttempts.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanCompletes() {
+        return mapIteratorPackedScanCompletes.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanOverflows() {
+        return mapIteratorPackedScanOverflows.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanErrors() {
+        return mapIteratorPackedScanErrors.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanMalformed() {
+        return mapIteratorPackedScanMalformed.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanIteratorFallbacks() {
+        return mapIteratorPackedScanIteratorFallbacks.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanEntries() {
+        return mapIteratorPackedScanEntries.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanBytes() {
+        return mapIteratorPackedScanBytes.sum();
     }
 
     @Nonnull

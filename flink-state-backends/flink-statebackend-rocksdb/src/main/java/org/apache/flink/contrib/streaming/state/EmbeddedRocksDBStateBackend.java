@@ -153,6 +153,9 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
     /** Avoids the duplicate raw-key JNI fetch in RocksDB MapState iterators. */
     private final boolean mapIteratorSingleKeyFetchEnabled;
     private final boolean mapIteratorPrefixUpperBoundEnabled;
+    private final boolean mapIteratorPackedTinyScanEnabled;
+    private final int mapIteratorPackedTinyScanMaxEntries;
+    private final int mapIteratorPackedTinyScanMaxBytes;
 
     // -- runtime values, set on TaskManager when initializing / using the backend
 
@@ -206,6 +209,11 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
         this.nativeMetricOptions = new RocksDBNativeMetricOptions();
         this.mapIteratorSingleKeyFetchEnabled = false;
         this.mapIteratorPrefixUpperBoundEnabled = false;
+        this.mapIteratorPackedTinyScanEnabled = false;
+        this.mapIteratorPackedTinyScanMaxEntries =
+                RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES.defaultValue();
+        this.mapIteratorPackedTinyScanMaxBytes =
+                RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES.defaultValue();
         this.memoryConfiguration = new RocksDBMemoryConfiguration();
         this.writeBatchSize = UNDEFINED_WRITE_BATCH_SIZE;
         this.overlapFractionThreshold = UNDEFINED_OVERLAP_FRACTION_THRESHOLD;
@@ -274,6 +282,23 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
                 config.get(RocksDBOptions.MAP_ITERATOR_SINGLE_KEY_FETCH_ENABLED);
         this.mapIteratorPrefixUpperBoundEnabled =
                 config.get(RocksDBOptions.MAP_ITERATOR_PREFIX_UPPER_BOUND_ENABLED);
+        this.mapIteratorPackedTinyScanEnabled =
+                config.get(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_ENABLED);
+        this.mapIteratorPackedTinyScanMaxEntries =
+                config.get(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES);
+        this.mapIteratorPackedTinyScanMaxBytes =
+                config.get(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES);
+        if (mapIteratorPackedTinyScanMaxEntries < 1 || mapIteratorPackedTinyScanMaxEntries > 8) {
+            throw new IllegalConfigurationException(
+                    RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES.key()
+                            + " must be between 1 and 8.");
+        }
+        if (mapIteratorPackedTinyScanMaxBytes < RocksDBPackedTinyMapScan.HEADER_BYTES
+                || mapIteratorPackedTinyScanMaxBytes > 64 * 1024) {
+            throw new IllegalConfigurationException(
+                    RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES.key()
+                            + " must be between 16 and 65536.");
+        }
 
         // configure RocksDB predefined options
         this.predefinedOptions =
@@ -513,6 +538,10 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
                         .setMapIteratorSingleKeyFetchEnabled(mapIteratorSingleKeyFetchEnabled)
                         .setMapIteratorPrefixUpperBoundEnabled(
                                 mapIteratorPrefixUpperBoundEnabled)
+                        .setMapIteratorPackedTinyScan(
+                                mapIteratorPackedTinyScanEnabled,
+                                mapIteratorPackedTinyScanMaxEntries,
+                                mapIteratorPackedTinyScanMaxBytes)
                         .setWriteBatchSize(getWriteBatchSize())
                         .setOverlapFractionThreshold(getOverlapFractionThreshold());
         return builder.build();

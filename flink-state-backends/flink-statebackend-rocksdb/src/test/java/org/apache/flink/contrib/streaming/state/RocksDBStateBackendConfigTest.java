@@ -27,6 +27,7 @@ import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.CoreOptions;
+import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.fs.FileSystem;
@@ -107,6 +108,9 @@ public class RocksDBStateBackendConfigTest {
         Configuration configuration = new Configuration();
         configuration.set(RocksDBOptions.MAP_ITERATOR_SINGLE_KEY_FETCH_ENABLED, true);
         configuration.set(RocksDBOptions.MAP_ITERATOR_PREFIX_UPPER_BOUND_ENABLED, true);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_ENABLED, true);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES, 8);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES, 4096);
         EmbeddedRocksDBStateBackend configuredBackend =
                 new EmbeddedRocksDBStateBackend()
                         .configure(configuration, Thread.currentThread().getContextClassLoader());
@@ -116,6 +120,9 @@ public class RocksDBStateBackendConfigTest {
         try {
             assertTrue(keyedBackend.isMapIteratorSingleKeyFetchEnabled());
             assertTrue(keyedBackend.isMapIteratorPrefixUpperBoundEnabled());
+            assertTrue(keyedBackend.isMapIteratorPackedTinyScanEnabled());
+            assertEquals(8, keyedBackend.getMapIteratorPackedTinyScanMaxEntries());
+            assertEquals(4096, keyedBackend.getMapIteratorPackedTinyScanMaxBytes());
             keyedBackend.setCurrentKey(1);
             MapState<Integer, Integer> state =
                     keyedBackend.getPartitionedState(
@@ -172,6 +179,9 @@ public class RocksDBStateBackendConfigTest {
             assertEquals(7, keyedBackend.getMapIteratorNativeIterators());
             assertEquals(7, keyedBackend.getMapIteratorBoundedIterators());
             assertEquals(0, keyedBackend.getMapIteratorUpperBoundFallbacks());
+            assertEquals(3, keyedBackend.getMapIteratorPackedScanAttempts());
+            assertEquals(0, keyedBackend.getMapIteratorPackedScanCompletes());
+            assertEquals(3, keyedBackend.getMapIteratorPackedScanIteratorFallbacks());
 
             MapStateDescriptor<Integer, Integer> namespacedDescriptor =
                     new MapStateDescriptor<>(
@@ -230,6 +240,8 @@ public class RocksDBStateBackendConfigTest {
         try {
             assertFalse(keyedBackend.isMapIteratorSingleKeyFetchEnabled());
             assertFalse(keyedBackend.isMapIteratorPrefixUpperBoundEnabled());
+            assertFalse(keyedBackend.isMapIteratorPackedTinyScanEnabled());
+            assertEquals(0, keyedBackend.getMapIteratorPackedScanAttempts());
             keyedBackend.setCurrentKey(1);
             MapState<Integer, Integer> state =
                     keyedBackend.getPartitionedState(
@@ -260,6 +272,81 @@ public class RocksDBStateBackendConfigTest {
         } finally {
             keyedBackend.dispose();
             environment.close();
+        }
+    }
+
+    @Test
+    public void testPackedTinyMapScanCompleteEmptyAndMutation() throws Exception {
+        Configuration configuration = new Configuration();
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_ENABLED, true);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES, 8);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES, 4096);
+        EmbeddedRocksDBStateBackend configuredBackend =
+                new EmbeddedRocksDBStateBackend()
+                        .configure(configuration, Thread.currentThread().getContextClassLoader());
+        MockEnvironment environment = new MockEnvironmentBuilder().build();
+        RocksDBKeyedStateBackend<Integer> keyedBackend =
+                createKeyedStateBackend(configuredBackend, environment, IntSerializer.INSTANCE);
+        try {
+            keyedBackend.setCurrentKey(77);
+            MapState<Integer, Integer> state =
+                    keyedBackend.getPartitionedState(
+                            VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "packed-tiny-complete", Integer.class, Integer.class));
+
+            assertFalse(state.entries().iterator().hasNext());
+            state.put(1, 10);
+            state.put(2, 20);
+            state.put(3, 30);
+
+            int visited = 0;
+            Iterator<Map.Entry<Integer, Integer>> entries = state.entries().iterator();
+            while (entries.hasNext()) {
+                Map.Entry<Integer, Integer> entry = entries.next();
+                visited++;
+                if (entry.getKey() == 2) {
+                    assertEquals(Integer.valueOf(20), entry.setValue(200));
+                } else if (entry.getKey() == 3) {
+                    entries.remove();
+                }
+            }
+
+            assertEquals(3, visited);
+            assertEquals(Integer.valueOf(10), state.get(1));
+            assertEquals(Integer.valueOf(200), state.get(2));
+            assertFalse(state.contains(3));
+            assertEquals(2, keyedBackend.getMapIteratorPackedScanAttempts());
+            assertEquals(2, keyedBackend.getMapIteratorPackedScanCompletes());
+            assertEquals(0, keyedBackend.getMapIteratorPackedScanIteratorFallbacks());
+            assertEquals(3, keyedBackend.getMapIteratorPackedScanEntries());
+        } finally {
+            keyedBackend.dispose();
+            environment.close();
+        }
+    }
+
+    @Test
+    public void testPackedTinyMapScanRejectsUnsupportedLimits() {
+        Configuration tooManyEntries = new Configuration();
+        tooManyEntries.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES, 9);
+        try {
+            new EmbeddedRocksDBStateBackend()
+                    .configure(tooManyEntries, Thread.currentThread().getContextClassLoader());
+            fail("Expected max-entry validation failure.");
+        } catch (IllegalConfigurationException expected) {
+            assertTrue(expected.getMessage().contains("between 1 and 8"));
+        }
+
+        Configuration tooManyBytes = new Configuration();
+        tooManyBytes.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES, 65537);
+        try {
+            new EmbeddedRocksDBStateBackend()
+                    .configure(tooManyBytes, Thread.currentThread().getContextClassLoader());
+            fail("Expected max-byte validation failure.");
+        } catch (IllegalConfigurationException expected) {
+            assertTrue(expected.getMessage().contains("between 16 and 65536"));
         }
     }
 

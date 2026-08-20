@@ -634,6 +634,14 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                 return;
             }
 
+            // The packed native API is only safe to use for the initial, complete tiny-map scan.
+            // Any non-COMPLETE outcome falls through to the ordinary iterator below.
+            if (currentEntry == null
+                    && backend.isMapIteratorPackedTinyScanEnabled()
+                    && tryLoadPackedTinyMap()) {
+                return;
+            }
+
             // use try-with-resources to ensure RocksIterator can be release even some runtime
             // exception
             // occurred in the below code block.
@@ -747,6 +755,76 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                         boundedIterators,
                         upperBoundFallbacks);
             }
+        }
+
+        private boolean tryLoadPackedTinyMap() {
+            final byte[] prefixUpperBound =
+                    backend.isMapIteratorPrefixUpperBoundEnabled()
+                            ? unsignedBytewisePrefixSuccessor(keyPrefixBytes)
+                            : null;
+            final Slice upperBoundSlice =
+                    prefixUpperBound == null ? null : new Slice(prefixUpperBound);
+            final ReadOptions boundedReadOptions =
+                    upperBoundSlice == null
+                            ? null
+                            : new ReadOptions(backend.getReadOptions())
+                                    .setIterateUpperBound(upperBoundSlice);
+            final long boundedIterator = boundedReadOptions == null ? 0 : 1;
+            final long upperBoundFallback =
+                    backend.isMapIteratorPrefixUpperBoundEnabled() && prefixUpperBound == null
+                            ? 1
+                            : 0;
+            final RocksDBPackedTinyMapScan.Result packedResult;
+            try (Slice ignoredUpperBoundSlice = upperBoundSlice;
+                    ReadOptions ignoredBoundedReadOptions = boundedReadOptions) {
+                try {
+                    packedResult =
+                            RocksDBPackedTinyMapScan.tryScan(
+                                    db,
+                                    columnFamily,
+                                    boundedReadOptions == null
+                                            ? backend.getReadOptions()
+                                            : boundedReadOptions,
+                                    keyPrefixBytes,
+                                    backend.getKeyGroupPrefixBytes(),
+                                    backend.getMapIteratorPackedTinyScanMaxEntries(),
+                                    backend.getMapIteratorPackedTinyScanMaxBytes());
+                } catch (RocksDBException e) {
+                    backend.recordMapIteratorPackedScan(
+                            RocksDBPackedTinyMapScan.Result.fallback(
+                                    RocksDBPackedTinyMapScan.Outcome.NATIVE_ERROR, 0));
+                    throw new FlinkRuntimeException(
+                            "Error while scanning a packed tiny MapState prefix.", e);
+                }
+            }
+            backend.recordMapIteratorPackedScan(packedResult);
+            if (packedResult.outcome == RocksDBPackedTinyMapScan.Outcome.NATIVE_ERROR) {
+                throw new FlinkRuntimeException(
+                        "FrocksDB reported an error while scanning a packed tiny MapState prefix.");
+            }
+            if (packedResult.outcome != RocksDBPackedTinyMapScan.Outcome.COMPLETE) {
+                backend.recordMapIteratorPackedScanIteratorFallback();
+                return false;
+            }
+
+            cacheEntries.clear();
+            cacheIndex = 0;
+            for (RocksDBPackedTinyMapScan.EntryBytes entryBytes : packedResult.entries) {
+                cacheEntries.add(
+                        new RocksDBMapEntry(
+                                db,
+                                keyPrefixBytes.length,
+                                entryBytes.rawKey,
+                                entryBytes.rawValue,
+                                keySerializer,
+                                valueSerializer,
+                                dataInputView));
+            }
+            // COMPLETE is an explicit native proof that the entire prefix scan fit the limits.
+            expired = true;
+            backend.recordMapIteratorPageStats(
+                    cacheEntries.size(), 0, 0, 0, 1, 1, boundedIterator, upperBoundFallback);
+            return true;
         }
     }
 

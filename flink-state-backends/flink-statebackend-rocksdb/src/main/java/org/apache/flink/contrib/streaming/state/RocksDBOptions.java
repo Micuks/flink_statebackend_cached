@@ -59,6 +59,36 @@ public class RocksDBOptions {
                     .withDescription(
                             "Whether RocksDB MapState iterators use the unsigned bytewise successor of the key/namespace prefix as an exclusive iterate_upper_bound. Prefixes without a successor retain the Java prefix-check fallback. Disabled by default while experimentally validated.");
 
+    /** Fetches a complete tiny MapState prefix scan through one packed JNI result. */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Boolean> MAP_ITERATOR_PACKED_TINY_SCAN_ENABLED =
+            ConfigOptions.key(
+                            "state.backend.cachekit.rocksdb.map-iterator.packed-tiny-scan.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether a complete tiny MapState prefix is fetched as one self-describing packed JNI result. Overflow and malformed results fall back to the ordinary RocksIterator; RocksDB errors fail the operation. Disabled by default while experimentally validated.");
+
+    /** Maximum number of entries accepted from one packed tiny MapState scan. */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Integer> MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES =
+            ConfigOptions.key(
+                            "state.backend.cachekit.rocksdb.map-iterator.packed-tiny-scan.max-entries")
+                    .intType()
+                    .defaultValue(8)
+                    .withDescription(
+                            "Maximum entry count for a complete packed tiny MapState scan. Values must be between 1 and 8.");
+
+    /** Maximum encoded byte size accepted from one packed tiny MapState scan. */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Integer> MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES =
+            ConfigOptions.key(
+                            "state.backend.cachekit.rocksdb.map-iterator.packed-tiny-scan.max-bytes")
+                    .intType()
+                    .defaultValue(64 * 1024)
+                    .withDescription(
+                            "Maximum encoded byte size for a complete packed tiny MapState scan. Values must be between 16 and 65536 bytes.");
+
     /** The local directory (on the TaskManager) where RocksDB puts its files. */
     @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
     public static final ConfigOption<String> LOCAL_DIRECTORIES =
