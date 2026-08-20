@@ -524,7 +524,26 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                                     && nativeRequestPlaneCoordinator
                                             .options()
                                             .mapSnapshotEnabled(),
-                            mapSnapshotSmallMaxEntries);
+                            mapSnapshotSmallMaxEntries,
+                            nativeRequestPlaneCoordinator != null
+                                    && nativeRequestPlaneCoordinator
+                                            .options()
+                                            .mapSnapshotAdaptiveBypassEnabled(),
+                            nativeRequestPlaneCoordinator == null
+                                    ? 8192
+                                    : nativeRequestPlaneCoordinator
+                                            .options()
+                                            .mapSnapshotAdaptiveWindowProbes(),
+                            nativeRequestPlaneCoordinator == null
+                                    ? 0.02
+                                    : nativeRequestPlaneCoordinator
+                                            .options()
+                                            .mapSnapshotAdaptiveMinUsefulHitRate(),
+                            nativeRequestPlaneCoordinator == null
+                                    ? 262144
+                                    : nativeRequestPlaneCoordinator
+                                            .options()
+                                            .mapSnapshotAdaptiveResampleIntervalProbes());
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -705,7 +724,26 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                                     && nativeRequestPlaneCoordinator
                                             .options()
                                             .mapSnapshotEnabled(),
-                            mapSnapshotSmallMaxEntries);
+                            mapSnapshotSmallMaxEntries,
+                            nativeRequestPlaneCoordinator != null
+                                    && nativeRequestPlaneCoordinator
+                                            .options()
+                                            .mapSnapshotAdaptiveBypassEnabled(),
+                            nativeRequestPlaneCoordinator == null
+                                    ? 8192
+                                    : nativeRequestPlaneCoordinator
+                                            .options()
+                                            .mapSnapshotAdaptiveWindowProbes(),
+                            nativeRequestPlaneCoordinator == null
+                                    ? 0.02
+                                    : nativeRequestPlaneCoordinator
+                                            .options()
+                                            .mapSnapshotAdaptiveMinUsefulHitRate(),
+                            nativeRequestPlaneCoordinator == null
+                                    ? 262144
+                                    : nativeRequestPlaneCoordinator
+                                            .options()
+                                            .mapSnapshotAdaptiveResampleIntervalProbes());
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }

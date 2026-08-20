@@ -56,6 +56,10 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final boolean mailboxBatchEnabled;
     private final boolean preaggEnabled;
     private final boolean compactSelectedProbeEnabled;
+    private final boolean mapSnapshotAdaptiveBypassEnabled;
+    private final int mapSnapshotAdaptiveWindowProbes;
+    private final double mapSnapshotAdaptiveMinUsefulHitRate;
+    private final int mapSnapshotAdaptiveResampleIntervalProbes;
 
     public NativeRequestPlaneOptions(
             boolean enabled,
@@ -400,6 +404,58 @@ public final class NativeRequestPlaneOptions implements Serializable {
             boolean mailboxBatchEnabled,
             boolean preaggEnabled,
             boolean compactSelectedProbeEnabled) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                aarch64Only,
+                writeThroughMutations,
+                valueCacheEnabled,
+                mapCacheEnabled,
+                mapSnapshotEnabled,
+                prefetchEnabled,
+                mailboxBatchEnabled,
+                preaggEnabled,
+                compactSelectedProbeEnabled,
+                false,
+                8192,
+                0.02,
+                262144);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only,
+            boolean writeThroughMutations,
+            boolean valueCacheEnabled,
+            boolean mapCacheEnabled,
+            boolean mapSnapshotEnabled,
+            boolean prefetchEnabled,
+            boolean mailboxBatchEnabled,
+            boolean preaggEnabled,
+            boolean compactSelectedProbeEnabled,
+            boolean mapSnapshotAdaptiveBypassEnabled,
+            int mapSnapshotAdaptiveWindowProbes,
+            double mapSnapshotAdaptiveMinUsefulHitRate,
+            int mapSnapshotAdaptiveResampleIntervalProbes) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
         this.kernel = normalizeKernel(kernel);
@@ -469,6 +525,24 @@ public final class NativeRequestPlaneOptions implements Serializable {
                     "Compact-selected probe requires native request plane, prefetch, and mailbox batch.");
         }
         this.compactSelectedProbeEnabled = compactSelectedProbeEnabled;
+        if (mapSnapshotAdaptiveBypassEnabled && !mapSnapshotEnabled) {
+            throw new IllegalArgumentException(
+                    "Native MapSnapshot adaptive bypass requires native MapSnapshot to be enabled.");
+        }
+        if (mapSnapshotAdaptiveWindowProbes < 2
+                || Double.isNaN(mapSnapshotAdaptiveMinUsefulHitRate)
+                || Double.isInfinite(mapSnapshotAdaptiveMinUsefulHitRate)
+                || mapSnapshotAdaptiveMinUsefulHitRate < 0.0
+                || mapSnapshotAdaptiveMinUsefulHitRate > 1.0
+                || mapSnapshotAdaptiveResampleIntervalProbes <= 0) {
+            throw new IllegalArgumentException(
+                    "Native MapSnapshot adaptive window must be at least 2, resample must be positive, and useful-hit rate must be in [0, 1].");
+        }
+        this.mapSnapshotAdaptiveBypassEnabled = mapSnapshotAdaptiveBypassEnabled;
+        this.mapSnapshotAdaptiveWindowProbes = mapSnapshotAdaptiveWindowProbes;
+        this.mapSnapshotAdaptiveMinUsefulHitRate = mapSnapshotAdaptiveMinUsefulHitRate;
+        this.mapSnapshotAdaptiveResampleIntervalProbes =
+                mapSnapshotAdaptiveResampleIntervalProbes;
     }
 
     public static NativeRequestPlaneOptions disabled() {
@@ -565,6 +639,22 @@ public final class NativeRequestPlaneOptions implements Serializable {
 
     public boolean mapSnapshotEnabled() {
         return mapSnapshotEnabled;
+    }
+
+    public boolean mapSnapshotAdaptiveBypassEnabled() {
+        return mapSnapshotAdaptiveBypassEnabled;
+    }
+
+    public int mapSnapshotAdaptiveWindowProbes() {
+        return mapSnapshotAdaptiveWindowProbes;
+    }
+
+    public double mapSnapshotAdaptiveMinUsefulHitRate() {
+        return mapSnapshotAdaptiveMinUsefulHitRate;
+    }
+
+    public int mapSnapshotAdaptiveResampleIntervalProbes() {
+        return mapSnapshotAdaptiveResampleIntervalProbes;
     }
 
     public boolean prefetchEnabled() {

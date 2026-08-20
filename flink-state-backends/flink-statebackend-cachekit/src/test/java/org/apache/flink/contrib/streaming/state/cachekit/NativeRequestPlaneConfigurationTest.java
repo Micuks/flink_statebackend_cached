@@ -45,6 +45,10 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(options.valueCacheEnabled());
         assertFalse(options.mapCacheEnabled());
         assertFalse(options.mapSnapshotEnabled());
+        assertFalse(options.mapSnapshotAdaptiveBypassEnabled());
+        assertEquals(8192, options.mapSnapshotAdaptiveWindowProbes());
+        assertEquals(0.02, options.mapSnapshotAdaptiveMinUsefulHitRate());
+        assertEquals(262144, options.mapSnapshotAdaptiveResampleIntervalProbes());
         assertFalse(options.mailboxBatchEnabled());
         assertFalse(options.prefetchEnabled());
         assertFalse(options.preaggEnabled());
@@ -68,6 +72,14 @@ class NativeRequestPlaneConfigurationTest {
         config.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_CACHE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_BYPASS_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_WINDOW_PROBES, 1234);
+        config.set(
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_MIN_USEFUL_HIT_RATE,
+                0.125);
+        config.set(
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_RESAMPLE_INTERVAL_PROBES,
+                5678);
         config.set(CacheKitStateBackendFactory.NATIVE_PREFETCH_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAILBOX_BATCH_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_LOCAL_PREAGG_ENABLED, true);
@@ -89,6 +101,10 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(options.valueCacheEnabled());
         assertTrue(options.mapCacheEnabled());
         assertTrue(options.mapSnapshotEnabled());
+        assertTrue(options.mapSnapshotAdaptiveBypassEnabled());
+        assertEquals(1234, options.mapSnapshotAdaptiveWindowProbes());
+        assertEquals(0.125, options.mapSnapshotAdaptiveMinUsefulHitRate());
+        assertEquals(5678, options.mapSnapshotAdaptiveResampleIntervalProbes());
         assertTrue(options.mailboxBatchEnabled());
         assertTrue(options.prefetchEnabled());
         assertTrue(options.preaggEnabled());
@@ -167,6 +183,55 @@ class NativeRequestPlaneConfigurationTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(config));
+    }
+
+    @Test
+    void testNativeMapSnapshotAdaptiveBypassRequiresSnapshotAndValidBounds() {
+        Configuration missingSnapshot = new Configuration();
+        missingSnapshot.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        missingSnapshot.set(
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_BYPASS_ENABLED, true);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(missingSnapshot));
+
+        Configuration invalidWindow = new Configuration();
+        invalidWindow.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        invalidWindow.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
+        invalidWindow.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_WINDOW_PROBES, 1);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalidWindow));
+
+        Configuration invalidRate = new Configuration();
+        invalidRate.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        invalidRate.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
+        invalidRate.set(
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_MIN_USEFUL_HIT_RATE,
+                1.01);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalidRate));
+
+        Configuration invalidNaNRate = new Configuration();
+        invalidNaNRate.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        invalidNaNRate.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
+        invalidNaNRate.set(
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_MIN_USEFUL_HIT_RATE,
+                Double.NaN);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalidNaNRate));
+
+        Configuration invalidResample = new Configuration();
+        invalidResample.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        invalidResample.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
+        invalidResample.set(
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_RESAMPLE_INTERVAL_PROBES,
+                0);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalidResample));
     }
 
     @Test

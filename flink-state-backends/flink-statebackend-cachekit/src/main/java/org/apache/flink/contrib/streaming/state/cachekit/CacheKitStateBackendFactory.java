@@ -285,6 +285,41 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Store EMPTY/SINGLE MapState snapshot metadata in the native request plane. "
                                                                         + "Java retains snapshot ownership, mutation generation, and iterator semantics.");
 
+        public static final ConfigOption<Boolean> NATIVE_MAP_SNAPSHOT_ADAPTIVE_BYPASS_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.map-snapshot.adaptive-bypass.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Bypass low-useful-hit native MapSnapshot probe/fill per MapState after a bounded observation window. "
+                                                                        + "The authoritative delegate and Java MapSnapshot cache remain unchanged.");
+
+        public static final ConfigOption<Integer> NATIVE_MAP_SNAPSHOT_ADAPTIVE_WINDOW_PROBES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.map-snapshot.adaptive-bypass.window-probes")
+                                        .intType()
+                                        .defaultValue(8192)
+                                        .withDescription(
+                                                        "Native MapSnapshot probes in each observation window before evaluating useful-hit rate.");
+
+        public static final ConfigOption<Double>
+                        NATIVE_MAP_SNAPSHOT_ADAPTIVE_MIN_USEFUL_HIT_RATE =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.map-snapshot.adaptive-bypass.min-useful-hit-rate")
+                                        .doubleType()
+                                        .defaultValue(0.02)
+                                        .withDescription(
+                                                        "Minimum combined EMPTY and SINGLE native MapSnapshot hit rate required to stay active.");
+
+        public static final ConfigOption<Integer>
+                        NATIVE_MAP_SNAPSHOT_ADAPTIVE_RESAMPLE_INTERVAL_PROBES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.map-snapshot.adaptive-bypass.resample-interval-probes")
+                                        .intType()
+                                        .defaultValue(262144)
+                                        .withDescription(
+                                                        "Bypassed lookup opportunities before reopening a full observation window for workload phase changes.");
+
         public static final ConfigOption<Boolean> NATIVE_MAILBOX_BATCH_ENABLED =
                         ConfigOptions.key("state.backend.cachekit.native.mailbox-batch.enabled")
                                         .booleanType()
@@ -543,7 +578,11 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_PREFETCH_ENABLED),
                                 config.get(NATIVE_MAILBOX_BATCH_ENABLED),
                                 config.get(NATIVE_LOCAL_PREAGG_ENABLED),
-                                config.get(NATIVE_COMPACT_SELECTED_PROBE_ENABLED));
+                                config.get(NATIVE_COMPACT_SELECTED_PROBE_ENABLED),
+                                config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_BYPASS_ENABLED),
+                                config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_WINDOW_PROBES),
+                                config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_MIN_USEFUL_HIT_RATE),
+                                config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_RESAMPLE_INTERVAL_PROBES));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

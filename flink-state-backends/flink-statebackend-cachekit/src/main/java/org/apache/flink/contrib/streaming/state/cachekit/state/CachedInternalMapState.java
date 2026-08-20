@@ -57,6 +57,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
     private static final Logger LOG = LoggerFactory.getLogger(CachedInternalMapState.class);
 
+    private enum NativeSnapshotAdaptiveMode {
+        EVALUATE,
+        BYPASS
+    }
+
     private final InternalMapState<K, N, UK, UV> delegate;
     private final CurrentKeyProvider<K> currentKeyProvider;
     private final CachePolicy<KeyNamespaceUserKey<K, N, UK>, CachedMapValue<UV>> l1ValueCache;
@@ -103,6 +108,23 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private long nativeSnapshotMisses;
     private long nativeSnapshotFills;
     private long nativeSnapshotFallbacks;
+    private final boolean nativeSnapshotAdaptiveBypassEnabled;
+    private final int nativeSnapshotAdaptiveWindowProbes;
+    private final double nativeSnapshotAdaptiveMinUsefulHitRate;
+    private final int nativeSnapshotAdaptiveResampleIntervalProbes;
+    private NativeSnapshotAdaptiveMode nativeSnapshotAdaptiveMode =
+            NativeSnapshotAdaptiveMode.EVALUATE;
+    private long nativeSnapshotAdaptiveWindowProbeCount;
+    private long nativeSnapshotAdaptiveWindowPositiveHits;
+    private long nativeSnapshotAdaptiveWindowNegativeHits;
+    private long nativeSnapshotAdaptiveWindowMisses;
+    private long nativeSnapshotAdaptiveWindowFillAttempts;
+    private long nativeSnapshotAdaptiveBypassClock;
+    private long nativeSnapshotAdaptiveEvaluatedWindows;
+    private long nativeSnapshotAdaptiveBypassTransitions;
+    private long nativeSnapshotAdaptiveTrialTransitions;
+    private long nativeSnapshotAdaptiveBypassedProbes;
+    private long nativeSnapshotAdaptiveBypassedFills;
 
     // --- MapSnapshot cache (entries() fast path) ---
     private final CachePolicy<KeyNamespace<K, N>, MapSnapshot<UK>> mapSnapshotCache;
@@ -282,6 +304,62 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             int nativeSnapshotStateId,
             boolean nativeMapSnapshotEnabled,
             int mapSnapshotSmallMaxEntries) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                presenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicyType,
+                mapCacheLruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                iterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheMetrics,
+                nativeRequestPlaneCoordinator,
+                nativeStateId,
+                nativeMapCacheEnabled,
+                nativeSnapshotStateId,
+                nativeMapSnapshotEnabled,
+                mapSnapshotSmallMaxEntries,
+                false,
+                8192,
+                0.02,
+                262144);
+    }
+
+    public CachedInternalMapState(
+            InternalMapState<K, N, UK, UV> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            PresenceCacheImplementation presenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicyType,
+            int mapCacheLruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean iterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            MapSnapshotCacheMetrics mapSnapshotCacheMetrics,
+            NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator,
+            int nativeStateId,
+            boolean nativeMapCacheEnabled,
+            int nativeSnapshotStateId,
+            boolean nativeMapSnapshotEnabled,
+            int mapSnapshotSmallMaxEntries,
+            boolean nativeSnapshotAdaptiveBypassEnabled,
+            int nativeSnapshotAdaptiveWindowProbes,
+            double nativeSnapshotAdaptiveMinUsefulHitRate,
+            int nativeSnapshotAdaptiveResampleIntervalProbes) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -328,6 +406,26 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         this.nativeStateId = nativeStateId;
         this.nativeMapSnapshotEnabled = nativeMapSnapshotEnabled;
         this.nativeSnapshotStateId = nativeSnapshotStateId;
+        if (nativeSnapshotAdaptiveBypassEnabled && !nativeMapSnapshotEnabled) {
+            throw new IllegalArgumentException(
+                    "Native MapSnapshot adaptive bypass requires native MapSnapshot.");
+        }
+        if (nativeSnapshotAdaptiveBypassEnabled
+                && (nativeSnapshotAdaptiveWindowProbes < 2
+                        || Double.isNaN(nativeSnapshotAdaptiveMinUsefulHitRate)
+                        || Double.isInfinite(nativeSnapshotAdaptiveMinUsefulHitRate)
+                        || nativeSnapshotAdaptiveMinUsefulHitRate < 0.0
+                        || nativeSnapshotAdaptiveMinUsefulHitRate > 1.0
+                        || nativeSnapshotAdaptiveResampleIntervalProbes <= 0)) {
+            throw new IllegalArgumentException(
+                    "Native MapSnapshot adaptive window must be at least 2, resample must be positive, and useful-hit rate must be in [0, 1].");
+        }
+        this.nativeSnapshotAdaptiveBypassEnabled = nativeSnapshotAdaptiveBypassEnabled;
+        this.nativeSnapshotAdaptiveWindowProbes = nativeSnapshotAdaptiveWindowProbes;
+        this.nativeSnapshotAdaptiveMinUsefulHitRate =
+                nativeSnapshotAdaptiveMinUsefulHitRate;
+        this.nativeSnapshotAdaptiveResampleIntervalProbes =
+                nativeSnapshotAdaptiveResampleIntervalProbes;
         // The native snapshot codec currently represents only EMPTY/SINGLE. Keep bounded
         // multi-key snapshots on the Java cache until that codec gains an explicit list format.
         this.mapSnapshotSmallMaxEntries =
@@ -841,11 +939,83 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         destination.write(nativeComponentOutput.getSharedBuffer(), 0, length);
     }
 
+    private boolean shouldProbeNativeSnapshot() {
+        if (!nativeSnapshotAdaptiveBypassEnabled) {
+            return true;
+        }
+        if (nativeSnapshotAdaptiveMode == NativeSnapshotAdaptiveMode.BYPASS) {
+            nativeSnapshotAdaptiveBypassClock++;
+            if (nativeSnapshotAdaptiveBypassClock
+                    < nativeSnapshotAdaptiveResampleIntervalProbes) {
+                nativeSnapshotAdaptiveBypassedProbes++;
+                return false;
+            }
+            nativeSnapshotAdaptiveMode = NativeSnapshotAdaptiveMode.EVALUATE;
+            nativeSnapshotAdaptiveTrialTransitions++;
+            resetNativeSnapshotAdaptiveWindow();
+        }
+        if (nativeSnapshotAdaptiveWindowProbeCount >= nativeSnapshotAdaptiveWindowProbes) {
+            nativeSnapshotAdaptiveEvaluatedWindows++;
+            long usefulHits =
+                    nativeSnapshotAdaptiveWindowPositiveHits
+                            + nativeSnapshotAdaptiveWindowNegativeHits;
+            double usefulHitRate =
+                    usefulHits / (double) nativeSnapshotAdaptiveWindowProbeCount;
+            if (usefulHitRate < nativeSnapshotAdaptiveMinUsefulHitRate) {
+                nativeSnapshotAdaptiveMode = NativeSnapshotAdaptiveMode.BYPASS;
+                nativeSnapshotAdaptiveBypassTransitions++;
+                nativeSnapshotAdaptiveBypassClock = 0;
+                nativeSnapshotAdaptiveBypassedProbes++;
+                return false;
+            }
+            resetNativeSnapshotAdaptiveWindow();
+        }
+        return true;
+    }
+
+    private void recordNativeSnapshotAdaptiveProbe(int status) {
+        if (!nativeSnapshotAdaptiveBypassEnabled) {
+            return;
+        }
+        nativeSnapshotAdaptiveWindowProbeCount++;
+        if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
+            nativeSnapshotAdaptiveWindowNegativeHits++;
+        } else if (status == NativeRequestPlaneBridge.PROBE_HIT) {
+            nativeSnapshotAdaptiveWindowPositiveHits++;
+        } else if (status == NativeRequestPlaneBridge.PROBE_MISS) {
+            nativeSnapshotAdaptiveWindowMisses++;
+        }
+    }
+
+    private boolean shouldStoreNativeSnapshot() {
+        if (!nativeSnapshotAdaptiveBypassEnabled) {
+            return true;
+        }
+        if (nativeSnapshotAdaptiveMode == NativeSnapshotAdaptiveMode.BYPASS) {
+            nativeSnapshotAdaptiveBypassedFills++;
+            return false;
+        }
+        nativeSnapshotAdaptiveWindowFillAttempts++;
+        return true;
+    }
+
+    private void resetNativeSnapshotAdaptiveWindow() {
+        nativeSnapshotAdaptiveWindowProbeCount = 0;
+        nativeSnapshotAdaptiveWindowPositiveHits = 0;
+        nativeSnapshotAdaptiveWindowNegativeHits = 0;
+        nativeSnapshotAdaptiveWindowMisses = 0;
+        nativeSnapshotAdaptiveWindowFillAttempts = 0;
+        nativeSnapshotAdaptiveBypassClock = 0;
+    }
+
     private MapSnapshot<UK> lookupNativeSnapshot(K currentKey) {
         if (!nativeMapSnapshotEnabled
                 || currentKey == null
                 || currentNamespace == null
                 || !nativeRequestPlaneCoordinator.isActive()) {
+            return null;
+        }
+        if (!shouldProbeNativeSnapshot()) {
             return null;
         }
         try {
@@ -872,6 +1042,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                             "Native MapState snapshot probe returned an invalid result.");
                 }
                 int status = slot.probeStatus(0);
+                recordNativeSnapshotAdaptiveProbe(status);
                 if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
                     nativeSnapshotNegativeHits++;
                     return MapSnapshot.empty();
@@ -900,6 +1071,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 || key == null
                 || namespace == null
                 || !nativeRequestPlaneCoordinator.isActive()) {
+            return;
+        }
+        if (!shouldStoreNativeSnapshot()) {
             return;
         }
         try {
@@ -1528,6 +1702,28 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                     nativeSnapshotFallbacks,
                     nativeRequestPlaneCoordinator.isActive(),
                     nativeRequestPlaneCoordinator.selectedKernel());
+            LOG.info(
+                    "[CACHEKIT NATIVE MAP SNAPSHOT ADAPTIVE] stateId={} enabled={} mode={} "
+                            + "windowProbes={} windowPositiveHits={} windowNegativeHits={} "
+                            + "windowMisses={} windowFillAttempts={} evaluatedWindows={} "
+                            + "bypassTransitions={} trialTransitions={} bypassedProbes={} "
+                            + "bypassedFills={} windowLimit={} minUsefulHitRate={} resampleInterval={}",
+                    nativeSnapshotStateId,
+                    nativeSnapshotAdaptiveBypassEnabled,
+                    nativeSnapshotAdaptiveMode,
+                    nativeSnapshotAdaptiveWindowProbeCount,
+                    nativeSnapshotAdaptiveWindowPositiveHits,
+                    nativeSnapshotAdaptiveWindowNegativeHits,
+                    nativeSnapshotAdaptiveWindowMisses,
+                    nativeSnapshotAdaptiveWindowFillAttempts,
+                    nativeSnapshotAdaptiveEvaluatedWindows,
+                    nativeSnapshotAdaptiveBypassTransitions,
+                    nativeSnapshotAdaptiveTrialTransitions,
+                    nativeSnapshotAdaptiveBypassedProbes,
+                    nativeSnapshotAdaptiveBypassedFills,
+                    nativeSnapshotAdaptiveWindowProbes,
+                    nativeSnapshotAdaptiveMinUsefulHitRate,
+                    nativeSnapshotAdaptiveResampleIntervalProbes);
         }
     }
 
@@ -1561,6 +1757,34 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
     long getNativeSnapshotFillsForTesting() {
         return nativeSnapshotFills;
+    }
+
+    long getNativeSnapshotProbesForTesting() {
+        return nativeSnapshotProbes;
+    }
+
+    long getNativeSnapshotAdaptiveEvaluatedWindowsForTesting() {
+        return nativeSnapshotAdaptiveEvaluatedWindows;
+    }
+
+    long getNativeSnapshotAdaptiveBypassTransitionsForTesting() {
+        return nativeSnapshotAdaptiveBypassTransitions;
+    }
+
+    long getNativeSnapshotAdaptiveTrialTransitionsForTesting() {
+        return nativeSnapshotAdaptiveTrialTransitions;
+    }
+
+    long getNativeSnapshotAdaptiveBypassedProbesForTesting() {
+        return nativeSnapshotAdaptiveBypassedProbes;
+    }
+
+    long getNativeSnapshotAdaptiveBypassedFillsForTesting() {
+        return nativeSnapshotAdaptiveBypassedFills;
+    }
+
+    boolean isNativeSnapshotAdaptiveBypassingForTesting() {
+        return nativeSnapshotAdaptiveMode == NativeSnapshotAdaptiveMode.BYPASS;
     }
 
     private static final class NativeMapRead<V> {

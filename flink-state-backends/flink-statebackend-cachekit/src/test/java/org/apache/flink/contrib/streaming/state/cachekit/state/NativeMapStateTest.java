@@ -42,7 +42,9 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -226,6 +228,193 @@ class NativeMapStateTest {
         coordinator.close();
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAdaptiveSnapshotBypassStopsHitlessProbeAndFillWithoutChangingDelegateResult()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        configureSerializers(delegate);
+        when(delegate.entries()).thenReturn(Collections.emptyList());
+
+        OneEntryPlane plane = new OneEntryPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(snapshotOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createAdaptiveSnapshotState(delegate, currentKey, coordinator, 2, 0.5, 100);
+
+        assertEquals(0, consume(state.entries()));
+        state.put("mutation-1", 1);
+        assertEquals(0, consume(state.entries()));
+        state.put("mutation-2", 2);
+        assertEquals(0, consume(state.entries()));
+
+        verify(delegate, times(3)).entries();
+        assertEquals(2, state.getNativeSnapshotProbesForTesting());
+        assertEquals(2, state.getNativeSnapshotFillsForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveEvaluatedWindowsForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveBypassTransitionsForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveBypassedProbesForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveBypassedFillsForTesting());
+        assertTrue(state.isNativeSnapshotAdaptiveBypassingForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAdaptiveSnapshotUsefulEmptyHitKeepsNativePathActive() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        configureSerializers(delegate);
+        when(delegate.entries()).thenReturn(Collections.emptyList());
+
+        OneEntryPlane plane = new OneEntryPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(snapshotOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createAdaptiveSnapshotState(delegate, currentKey, coordinator, 2, 0.5, 100);
+
+        assertEquals(0, consume(state.entries()));
+        assertEquals(0, consume(state.entries()));
+        assertEquals(0, consume(state.entries()));
+
+        verify(delegate, times(1)).entries();
+        assertEquals(3, state.getNativeSnapshotProbesForTesting());
+        assertEquals(2, state.getNativeSnapshotNegativeHitsForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveEvaluatedWindowsForTesting());
+        assertEquals(0, state.getNativeSnapshotAdaptiveBypassTransitionsForTesting());
+        assertFalse(state.isNativeSnapshotAdaptiveBypassingForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAdaptiveSnapshotUsefulSingleHitKeepsNativePathActive() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        configureSerializers(delegate);
+        when(delegate.entries())
+                .thenReturn(
+                        Collections.singletonList(
+                                new AbstractMap.SimpleImmutableEntry<>("uk1", 7)));
+        when(delegate.get("uk1")).thenReturn(7);
+
+        OneEntryPlane plane = new OneEntryPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(snapshotOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createAdaptiveSnapshotState(delegate, currentKey, coordinator, 2, 0.5, 100);
+
+        assertEquals(1, consume(state.entries()));
+        assertEquals(1, consume(state.entries()));
+        assertEquals(1, consume(state.entries()));
+
+        verify(delegate, times(1)).entries();
+        verify(delegate, times(2)).get("uk1");
+        assertEquals(3, state.getNativeSnapshotProbesForTesting());
+        assertEquals(2, state.getNativeSnapshotHitsForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveEvaluatedWindowsForTesting());
+        assertEquals(0, state.getNativeSnapshotAdaptiveBypassTransitionsForTesting());
+        assertFalse(state.isNativeSnapshotAdaptiveBypassingForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAdaptiveSnapshotBypassResamplesAndRecoversAfterUsefulHit() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        configureSerializers(delegate);
+        when(delegate.entries()).thenReturn(Collections.emptyList());
+
+        OneEntryPlane plane = new OneEntryPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(snapshotOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createAdaptiveSnapshotState(delegate, currentKey, coordinator, 2, 0.5, 2);
+
+        assertEquals(0, consume(state.entries()));
+        state.put("mutation-1", 1);
+        assertEquals(0, consume(state.entries()));
+        state.put("mutation-2", 2);
+        assertEquals(0, consume(state.entries()));
+        assertEquals(0, consume(state.entries()));
+        assertEquals(0, consume(state.entries()));
+        assertEquals(0, consume(state.entries()));
+        assertEquals(0, consume(state.entries()));
+
+        verify(delegate, times(5)).entries();
+        assertEquals(5, state.getNativeSnapshotProbesForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveBypassTransitionsForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveTrialTransitionsForTesting());
+        assertEquals(2, state.getNativeSnapshotAdaptiveBypassedProbesForTesting());
+        assertEquals(2, state.getNativeSnapshotAdaptiveBypassedFillsForTesting());
+        assertFalse(state.isNativeSnapshotAdaptiveBypassingForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAdaptiveDisabledAcceptsZeroedFieldsFromOlderSerializedOptions() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        configureSerializers(delegate);
+        when(delegate.entries()).thenReturn(Collections.emptyList());
+
+        OneEntryPlane plane = new OneEntryPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(snapshotOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0,
+                        MapSnapshotCacheMetrics.disabled(),
+                        coordinator,
+                        0,
+                        false,
+                        41,
+                        true,
+                        1,
+                        false,
+                        0,
+                        0.0,
+                        0);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        assertEquals(0, consume(state.entries()));
+        assertEquals(0, consume(state.entries()));
+        verify(delegate, times(1)).entries();
+
+        state.close();
+        coordinator.close();
+    }
+
     private static void configureSerializers(
             InternalMapState<String, VoidNamespace, String, Integer> delegate) {
         when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
@@ -301,6 +490,46 @@ class NativeMapStateTest {
                         false,
                         41,
                         true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        return state;
+    }
+
+    private static CachedInternalMapState<String, VoidNamespace, String, Integer>
+            createAdaptiveSnapshotState(
+                    InternalMapState<String, VoidNamespace, String, Integer> delegate,
+                    AtomicReference<String> currentKey,
+                    NativeRequestPlaneCoordinator coordinator,
+                    int windowProbes,
+                    double minUsefulHitRate,
+                    int resampleIntervalProbes) {
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0,
+                        MapSnapshotCacheMetrics.disabled(),
+                        coordinator,
+                        0,
+                        false,
+                        41,
+                        true,
+                        1,
+                        true,
+                        windowProbes,
+                        minUsefulHitRate,
+                        resampleIntervalProbes);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
         return state;
     }
