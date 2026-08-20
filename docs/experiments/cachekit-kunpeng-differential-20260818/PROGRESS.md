@@ -131,3 +131,22 @@ Hash-token 相对 ARM retained `-0.06%`，相对 Java `-2.85%`。16 个 backend 
 Buffer-reuse candidate 相对 ARM retained `-0.09%`，相对 Java FullOpt `-5.37%`。16 个 native summary 实例合计 675,739 batch、43,182,264 input key、5,844,170 group、110 次安全回退，kernel 为 `aarch64-sve256-hybrid-crc32c`；开关确实触发，三腿均通过 8 TM、50M、no-checkpoint、正 cores 与吞吐公式审计。
 
 结论：复用两个 Java 容器仍不能覆盖 JNI、native plan 回传、Java plan 校验和逐 group accumulator fold 的成本。通用 JNI LocalPreAgg 路线连续三次由 `-3.51% → -0.06% → -0.09%` 收敛到中性但未转正，停止扩 15Q；只有能把业务 accumulator 语义一起下沉、显著减少 Java 回调次数的 operator-specific kernel 才值得重新立项。紧凑证据：`dse_results/cachekit-native-preagg-reuse-q15-50m-20260819/`；远端：`/home/wuql/flink-cluster/experiments/cachekit-native-preagg-reuse-q15-50m-kunpeng-20260819`。
+
+## 2026-08-20 Native grouping epoch table 与 Token32 packed plan
+
+先把 native grouping 从每批清 64 KiB table、对已有 group 重算 fingerprint 的路径改为按 batch 上限分配的 epoch table；512-entry 配置下常规批次只递增 epoch，每 255 批才清 1 KiB epoch 区，并保证每个输入只计算一次 fingerprint。q16 50M、no-checkpoint 快筛结果为 `8.48 → 8.47 K/s/core`（`-0.12%`），wall throughput `-1.12%`。这证明 native microkernel 的 table clear/fingerprint 已不是主要瓶颈。紧凑证据：`dse_results/cachekit-native-group-epoch-50m-20260820/`。
+
+随后实现 Token32 Packed Direct Plan V3：caller-owned direct token/plan buffers，packed plan 带 magic/version/sourceCount/groupCount、stable-first-source、offsets 与 source→group；Java 在处理任何 record 前逐 source 做 `Objects.equals` 身份验证，碰撞或畸形 plan 整批回退 Java。实现提交 `219f837010cd60cef77350ac8b418bd51a05098a`，分支 `codex/cachekit-native-token-plan-v3-20260820` 已推送。
+
+正确性/ABI 门禁：native 2/2、JNI 2/2、ASan/UBSan 2/2，streaming Java 16/16，CacheKit/JNI Java 27/27；control/candidate 都通过 JDK 11 ABI probe，实际 kernel 均为 `aarch64-sve256-hybrid-crc32c`。
+
+| Leg | Commit | raw K/s | cores | K/s/core | wall s |
+|---|---|---:|---:|---:|---:|
+| control | `20e545d13b` | 223.24 | 26.13 | 8.54 | 223.972 |
+| Token32 V3 | `219f837010` | 223.68 | 26.17 | 8.55 | 223.536 |
+
+Token32 V3 的 q16 K/s/core 增量为 `+0.12%`，wall throughput `+0.20%`，CPU `+0.15%`，低于 `+2%` 门槛，不扩轮、不作为独立性能项。两腿都是 50M、无 checkpoint、2 个物理 TM 容器/8 TM JVM/16 slots，每腿 43 个 CPU samples 均覆盖 8 TMs，吞吐公式审计有效。
+
+runtime summary 中 control 为 1,407,555 native batches / 89,794,384 input keys / 44,416,777 groups，candidate 为 1,224,098 / 78,057,971 / 44,437,799。groups 几乎一致而进入新 grouping seam 的 batches/input keys 较少，说明该 activity counter 受 backend seam/批次分布影响，不能当作端到端 records 等价证明。功能正确性以差分、collision、malformed-plan、stable-order 测试为主；Nexmark 只证明真实作业未失败和性能口径有效。
+
+下一主线按 profiling 排序转为：融合 Native Mailbox compact 与 prepared-key probe/MultiGet，复用 compact 的 selected source indexes 直接访问原 direct prepared arena，删除 `direct prepared key → heap byte[] → direct probe` 往返，仅为真正 RocksDB miss 物化 heap key。紧凑证据：`dse_results/cachekit-native-token-plan-q16-50m-20260820/`；远端：`/home/wuql/flink-cluster/experiments/cachekit-native-token-plan-q16-50m-kunpeng-20260820`。
