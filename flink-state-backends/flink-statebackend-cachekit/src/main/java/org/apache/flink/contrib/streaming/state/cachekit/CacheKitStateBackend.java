@@ -85,6 +85,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final int mapSnapshotCacheMaxEntries;
     private final boolean mapSnapshotCacheNativeEnabled;
     private final boolean mapSnapshotCacheNativeClassifierEnabled;
+    private final boolean mapSnapshotCacheNativeRemoveHintEnabled;
     private final String mapSnapshotCacheNativeKernel;
     private final String mapSnapshotCacheNativeLibraryPath;
     private final boolean listStateCowEnabled;
@@ -237,6 +238,68 @@ public class CacheKitStateBackend extends AbstractStateBackend
             int listStateClearedKeysCapacity,
             boolean priorityQueueOptEnabled,
             boolean diagnosticsEnabled) {
+        this(
+                delegateBackend,
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow,
+                valueBypassEnabled,
+                valueHitRateThreshold,
+                valueHitRateWindow,
+                mapPresenceCacheMaxEntries,
+                mapPresenceCachePolicy,
+                mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheNativeEnabled,
+                mapSnapshotCacheNativeClassifierEnabled,
+                false,
+                mapSnapshotCacheNativeKernel,
+                mapSnapshotCacheNativeLibraryPath,
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled,
+                diagnosticsEnabled);
+    }
+
+    public CacheKitStateBackend(
+            StateBackend delegateBackend,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            boolean mapSnapshotCacheNativeEnabled,
+            boolean mapSnapshotCacheNativeClassifierEnabled,
+            boolean mapSnapshotCacheNativeRemoveHintEnabled,
+            String mapSnapshotCacheNativeKernel,
+            String mapSnapshotCacheNativeLibraryPath,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -258,6 +321,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.mapSnapshotCacheMaxEntries = mapSnapshotCacheMaxEntries;
         this.mapSnapshotCacheNativeEnabled = mapSnapshotCacheNativeEnabled;
         this.mapSnapshotCacheNativeClassifierEnabled = mapSnapshotCacheNativeClassifierEnabled;
+        this.mapSnapshotCacheNativeRemoveHintEnabled = mapSnapshotCacheNativeRemoveHintEnabled;
         this.mapSnapshotCacheNativeKernel = mapSnapshotCacheNativeKernel;
         this.mapSnapshotCacheNativeLibraryPath = mapSnapshotCacheNativeLibraryPath;
         this.listStateCowEnabled = listStateCowEnabled;
@@ -348,6 +412,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapSnapshotCacheMaxEntries,
                 mapSnapshotCacheNativeEnabled,
                 mapSnapshotCacheNativeClassifierEnabled,
+                mapSnapshotCacheNativeRemoveHintEnabled,
                 mapSnapshotCacheNativeKernel,
                 mapSnapshotCacheNativeLibraryPath,
                 listStateCowEnabled,
@@ -431,6 +496,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_CLASSIFIER_ENABLED);
         final String mapSnapshotNativeKernel =
                 config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_KERNEL);
+        final boolean mapSnapshotNativeRemoveHintEnabled =
+                config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_REMOVE_HINT_ENABLED);
         final String mapSnapshotNativeLibraryPath =
                 config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_LIBRARY_PATH);
         final boolean listStateCowEnabled =
@@ -466,6 +533,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapSnapshotMaxEntries,
                 mapSnapshotNativeEnabled,
                 mapSnapshotNativeClassifierEnabled,
+                mapSnapshotNativeRemoveHintEnabled,
                 mapSnapshotNativeKernel,
                 mapSnapshotNativeLibraryPath,
                 listStateCowEnabled,

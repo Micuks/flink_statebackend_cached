@@ -2,6 +2,9 @@ package org.apache.flink.contrib.streaming.state.cachekit.nativebench;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /** JNI boundary cost probe. This is not a Flink integration or a Nexmark result. */
 public final class NativeSnapshotBench {
@@ -28,6 +31,19 @@ public final class NativeSnapshotBench {
     private static native String kernelName(long handle);
 
     private static native int vectorBytes(long handle);
+
+    private static native long createBytes(
+            int capacity, int kernel, Object missSentinel, Object emptySentinel);
+
+    private static native void destroyBytes(long handle);
+
+    private static native boolean putBytes(long handle, byte[] key, Object value);
+
+    private static native Object lookupBytes(long handle, byte[] key);
+
+    private static native int echoBytes(byte[] key);
+
+    private static native int byteVectorBytes(long handle);
 
     public static void main(String[] args) {
         if (args.length != 1) {
@@ -58,6 +74,7 @@ public final class NativeSnapshotBench {
                 runKernel(kernel, keys, namespaces, input, output);
             }
         }
+        runByteKeyBench();
     }
 
     private static void runJavaBaseline(long[] keys, long[] namespaces) {
@@ -153,6 +170,144 @@ public final class NativeSnapshotBench {
                 nanosPerOperation,
                 1000.0 / nanosPerOperation,
                 result.checksum);
+    }
+
+    private static void runByteKeyBench() {
+        final int keyBytes = 32;
+        byte[][] stored = new byte[ENTRIES][];
+        for (int index = 0; index < stored.length; index++) {
+            stored[index] = encodeKey(index, keyBytes);
+        }
+        byte[][] queries = new byte[QUERY_COUNT][];
+        ByteKey[] wrappedQueries = new ByteKey[QUERY_COUNT];
+        long random = 0x243f6a8885a308d3L;
+        for (int index = 0; index < queries.length; index++) {
+            random ^= random << 13;
+            random ^= random >>> 7;
+            random ^= random << 17;
+            int key = (index & 3) != 0 ? (int) (random & 2047) : 4096 + (int) (random & 2047);
+            queries[index] = key < ENTRIES ? stored[key] : encodeKey(key, keyBytes);
+            wrappedQueries[index] = new ByteKey(queries[index]);
+        }
+
+        Map<ByteKey, Integer> javaLru =
+                new LinkedHashMap<ByteKey, Integer>(CAPACITY, 0.75f, true);
+        for (int index = 0; index < stored.length; index++) {
+            javaLru.put(new ByteKey(stored[index]), index);
+        }
+        for (int warmup = 0; warmup < 5; warmup++) {
+            runJavaByteLru(javaLru, wrappedQueries, 1);
+        }
+        report("java", 1, "byte-lru", runJavaByteLru(javaLru, wrappedQueries, ROUNDS));
+        report("java", 1, "byte-copy", runByteCopy(queries, ROUNDS));
+        report("jni", 1, "byte-echo", runByteEcho(queries, ROUNDS));
+
+        Object miss = new Object();
+        Object empty = new Object();
+        for (int kernel = 0; kernel <= 2; kernel++) {
+            if (!kernelSupported(kernel)) {
+                continue;
+            }
+            long handle = createBytes(CAPACITY, kernel, miss, empty);
+            try {
+                for (int index = 0; index < stored.length; index++) {
+                    if (!putBytes(handle, stored[index], Integer.valueOf(index))) {
+                        throw new AssertionError("native byte put failed");
+                    }
+                }
+                for (int warmup = 0; warmup < 3; warmup++) {
+                    runNativeBytes(handle, queries, miss, 1);
+                }
+                report(
+                        kernel == 0 ? "scalar" : kernel == 1 ? "neon" : "sve",
+                        byteVectorBytes(handle),
+                        "byte-full",
+                        runNativeBytes(handle, queries, miss, ROUNDS));
+            } finally {
+                destroyBytes(handle);
+            }
+        }
+    }
+
+    private static Measurement runJavaByteLru(
+            Map<ByteKey, Integer> table, ByteKey[] queries, int rounds) {
+        long checksum = 0;
+        long start = System.nanoTime();
+        for (int round = 0; round < rounds; round++) {
+            for (ByteKey key : queries) {
+                Integer value = table.get(key);
+                checksum += value == null ? 0 : value + 1;
+            }
+        }
+        return new Measurement(System.nanoTime() - start, (long) queries.length * rounds, checksum);
+    }
+
+    private static Measurement runByteCopy(byte[][] queries, int rounds) {
+        byte[] target = new byte[queries[0].length];
+        long checksum = 0;
+        long start = System.nanoTime();
+        for (int round = 0; round < rounds; round++) {
+            for (byte[] key : queries) {
+                System.arraycopy(key, 0, target, 0, key.length);
+                checksum += target[0] & 0xff;
+            }
+        }
+        return new Measurement(System.nanoTime() - start, (long) queries.length * rounds, checksum);
+    }
+
+    private static Measurement runByteEcho(byte[][] queries, int rounds) {
+        long checksum = 0;
+        long start = System.nanoTime();
+        for (int round = 0; round < rounds; round++) {
+            for (byte[] key : queries) {
+                checksum += echoBytes(key);
+            }
+        }
+        return new Measurement(System.nanoTime() - start, (long) queries.length * rounds, checksum);
+    }
+
+    private static Measurement runNativeBytes(
+            long handle, byte[][] queries, Object miss, int rounds) {
+        long checksum = 0;
+        long start = System.nanoTime();
+        for (int round = 0; round < rounds; round++) {
+            for (byte[] key : queries) {
+                Object value = lookupBytes(handle, key);
+                checksum += value == miss ? 0 : ((Integer) value) + 1;
+            }
+        }
+        return new Measurement(System.nanoTime() - start, (long) queries.length * rounds, checksum);
+    }
+
+    private static byte[] encodeKey(long value, int size) {
+        byte[] key = new byte[size];
+        for (int index = 0; index < key.length; index++) {
+            value ^= value << 13;
+            value ^= value >>> 7;
+            value ^= value << 17;
+            key[index] = (byte) value;
+        }
+        return key;
+    }
+
+    private static final class ByteKey {
+        private final byte[] bytes;
+        private final int hash;
+
+        private ByteKey(byte[] bytes) {
+            this.bytes = bytes;
+            this.hash = Arrays.hashCode(bytes);
+        }
+
+        @Override
+        public int hashCode() {
+            return hash;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof ByteKey && Arrays.equals(bytes, ((ByteKey) other).bytes);
+        }
     }
 
     private static final class Measurement {

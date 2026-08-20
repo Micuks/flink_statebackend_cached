@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(cachekit_snapshot_native LANGUAGES CXX)
 
+option(CACHEKIT_FORCE_FNV_HASH "Force the portable FNV hash for A/B benchmarks" OFF)
+
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -14,6 +16,9 @@ add_library(cachekit_snapshot_core STATIC
 set_target_properties(cachekit_snapshot_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(cachekit_snapshot_core PUBLIC include PRIVATE src)
 target_compile_options(cachekit_snapshot_core PRIVATE -O3 -Wall -Wextra -Werror)
+if(CACHEKIT_FORCE_FNV_HASH)
+    target_compile_definitions(cachekit_snapshot_core PRIVATE CACHEKIT_FORCE_FNV_HASH=1)
+endif()
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
     target_compile_options(cachekit_snapshot_core PRIVATE -march=armv8.2-a -mtune=tsv110)

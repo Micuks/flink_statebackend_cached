@@ -12,9 +12,12 @@ namespace cachekit {
 
 enum class PutResult : std::uint8_t {
     kRejected = 0,
-    kStored = 1,
-    kStoredWithEviction = 2,
+    kUpdated = 1,
+    kInserted = 2,
+    kInsertedWithEviction = 3,
 };
+
+std::uint64_t HashByteKey(const std::uint8_t* bytes, std::size_t size);
 
 struct ByteLookupResult {
     bool found;
@@ -37,7 +40,8 @@ public:
             SnapshotKind kind,
             const std::uint8_t* payload,
             std::size_t payload_size,
-            std::vector<std::uint8_t>* displaced_payload = nullptr);
+            std::vector<std::uint8_t>* displaced_payload = nullptr,
+            std::uint64_t* displaced_hash = nullptr);
     ByteLookupResult Lookup(const std::uint8_t* key, std::size_t key_size);
     bool Remove(
             const std::uint8_t* key,
@@ -49,6 +53,7 @@ public:
     ProbeKernel active_kernel() const;
     std::size_t vector_bytes() const;
     const char* active_kernel_name() const;
+    const char* hash_name() const;
 
 private:
     class Impl;

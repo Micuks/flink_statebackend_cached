@@ -3,10 +3,20 @@
 #include "byte_probe.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
+
+#if defined(__linux__) && defined(__aarch64__)
+#include <arm_acle.h>
+#include <asm/hwcap.h>
+#include <sys/auxv.h>
+#endif
 
 namespace cachekit {
 namespace {
@@ -15,19 +25,101 @@ constexpr std::uint8_t kSlotEmpty = 0;
 constexpr std::uint8_t kSlotDeleted = 1;
 constexpr std::size_t kNeonBytes = 16;
 constexpr std::size_t kMaximumVectorBytes = 256;
+constexpr std::uint64_t kMidrImplementerMask = UINT64_C(0xff000000);
+constexpr std::uint64_t kMidrPartMask = UINT64_C(0x0000fff0);
+constexpr std::uint64_t kHiSiliconImplementer = UINT64_C(0x48000000);
+constexpr std::uint64_t kHiSiliconTsv110 = UINT64_C(0x0000d010);
+constexpr std::uint64_t kHiSiliconHip09 = UINT64_C(0x0000d020);
 
-std::uint64_t HashBytes(const std::uint8_t* bytes, std::size_t size) {
-    std::uint64_t hash = UINT64_C(1469598103934665603);
-    for (std::size_t index = 0; index < size; ++index) {
-        hash ^= bytes[index];
-        hash *= UINT64_C(1099511628211);
+bool IsKunpengSnapshotTarget() {
+    std::ifstream midr_file(
+            "/sys/devices/system/cpu/cpu0/regs/identification/midr_el1");
+    std::string value;
+    if (midr_file >> value) {
+        char* end = nullptr;
+        const std::uint64_t midr = std::strtoull(value.c_str(), &end, 0);
+        if (end != value.c_str() && *end == '\0') {
+            const std::uint64_t implementer = midr & kMidrImplementerMask;
+            const std::uint64_t part = midr & kMidrPartMask;
+            return implementer == kHiSiliconImplementer
+                    && (part == kHiSiliconTsv110 || part == kHiSiliconHip09);
+        }
     }
+
+    std::ifstream cpuinfo("/proc/cpuinfo");
+    bool hi_silicon = false;
+    bool supported_part = false;
+    std::string line;
+    while (std::getline(cpuinfo, line)) {
+        if (line.find("CPU implementer") != std::string::npos
+                && line.find("0x48") != std::string::npos) {
+            hi_silicon = true;
+        }
+        if (line.find("CPU part") != std::string::npos
+                && (line.find("0xd01") != std::string::npos
+                    || line.find("0xd02") != std::string::npos)) {
+            supported_part = true;
+        }
+    }
+    return hi_silicon && supported_part;
+}
+
+std::uint64_t Avalanche(std::uint64_t hash) {
     hash ^= hash >> 30;
     hash *= UINT64_C(0xbf58476d1ce4e5b9);
     hash ^= hash >> 27;
     hash *= UINT64_C(0x94d049bb133111eb);
     return hash ^ (hash >> 31);
 }
+
+std::uint64_t HashByteKeyFnv(const std::uint8_t* bytes, std::size_t size) {
+    std::uint64_t hash = UINT64_C(1469598103934665603);
+    for (std::size_t index = 0; index < size; ++index) {
+        hash ^= bytes[index];
+        hash *= UINT64_C(1099511628211);
+    }
+    return Avalanche(hash);
+}
+
+bool KunpengCrc32Available() {
+#if defined(CACHEKIT_FORCE_FNV_HASH)
+    return false;
+#else
+#if defined(__linux__) && defined(__aarch64__) && defined(HWCAP_CRC32)
+    return IsKunpengSnapshotTarget() && (getauxval(AT_HWCAP) & HWCAP_CRC32) != 0;
+#else
+    return false;
+#endif
+#endif
+}
+
+std::uint64_t HashTableKey(
+        const std::uint8_t* bytes,
+        std::size_t size,
+        bool use_kunpeng_crc32) {
+#if defined(__linux__) && defined(__aarch64__)
+    if (use_kunpeng_crc32 && size == 16) {
+        std::uint64_t first;
+        std::uint64_t second;
+        std::memcpy(&first, bytes, sizeof(first));
+        std::memcpy(&second, bytes + sizeof(first), sizeof(second));
+        std::uint32_t crc = __crc32cd(UINT32_C(0x9e3779b9), first);
+        crc = __crc32cd(crc, second);
+        return Avalanche(crc);
+    }
+#else
+    (void) use_kunpeng_crc32;
+#endif
+    return HashByteKeyFnv(bytes, size);
+}
+
+}  // namespace
+
+std::uint64_t HashByteKey(const std::uint8_t* bytes, std::size_t size) {
+    return HashByteKeyFnv(bytes, size);
+}
+
+namespace {
 
 std::uint8_t Fingerprint(std::uint64_t hash) {
     return static_cast<std::uint8_t>(2 + ((hash >> 57) & 0x7f));
@@ -48,6 +140,9 @@ std::size_t TableCapacity(std::size_t max_entries) {
 
 ProbeKernel SelectKernel(ProbeKernel requested) {
     if (requested == ProbeKernel::kAuto) {
+        if (IsKunpengSnapshotTarget()) {
+            return ProbeKernel::kScalar;
+        }
         if (SveAvailable() && SveVectorBytes() != 0) {
             return ProbeKernel::kSve;
         }
@@ -129,6 +224,7 @@ public:
               kernel_(SelectKernel(requested_kernel)),
               vector_bytes_(VectorBytes(kernel_)),
               find_slot_(FindFunction(kernel_)),
+              use_kunpeng_crc32_(KunpengCrc32Available()),
               control_(capacity_ + vector_bytes_, kSlotEmpty),
               hashes_(capacity_),
               keys_(capacity_),
@@ -143,34 +239,46 @@ public:
             SnapshotKind kind,
             const std::uint8_t* payload,
             std::size_t payload_size,
-            std::vector<std::uint8_t>* displaced_payload) {
+            std::vector<std::uint8_t>* displaced_payload,
+            std::uint64_t* displaced_hash) {
         if (displaced_payload != nullptr) {
             displaced_payload->clear();
+        }
+        if (displaced_hash != nullptr) {
+            *displaced_hash = 0;
         }
         if (key == nullptr || key_size == 0
                 || (kind == SnapshotKind::kSingle && (payload == nullptr || payload_size == 0))) {
             return PutResult::kRejected;
         }
-        const std::uint64_t hash = HashBytes(key, key_size);
+        const std::uint64_t hash = TableHash(key, key_size);
         int slot = Find(key, key_size, hash);
         if (slot >= 0) {
             MovePayload(slot, displaced_payload);
             kinds_[slot] = static_cast<std::uint8_t>(kind);
             Assign(payloads_[slot], payload, payload_size);
             Touch(slot);
-            return PutResult::kStored;
+            return PutResult::kUpdated;
         }
 
         bool evicted = false;
         if (size_ == max_entries_) {
+            if (displaced_hash != nullptr) {
+                const std::vector<std::uint8_t>& displaced_key = keys_[lru_head_];
+                *displaced_hash = HashByteKey(displaced_key.data(), displaced_key.size());
+            }
             RemoveSlot(lru_head_, displaced_payload);
             evicted = true;
         }
+        MaybeRebuild();
         slot = FindInsertionSlot(hash);
         if (slot < 0) {
             return PutResult::kRejected;
         }
         const std::size_t index = static_cast<std::size_t>(slot);
+        if (control_[index] == kSlotDeleted) {
+            --deleted_;
+        }
         SetControl(index, Fingerprint(hash));
         hashes_[index] = hash;
         keys_[index].assign(key, key + key_size);
@@ -178,14 +286,14 @@ public:
         Assign(payloads_[index], payload, payload_size);
         Append(slot);
         ++size_;
-        return evicted ? PutResult::kStoredWithEviction : PutResult::kStored;
+        return evicted ? PutResult::kInsertedWithEviction : PutResult::kInserted;
     }
 
     ByteLookupResult Lookup(const std::uint8_t* key, std::size_t key_size) {
         if (key == nullptr || key_size == 0) {
             return {false, SnapshotKind::kEmpty, nullptr, 0};
         }
-        const std::uint64_t hash = HashBytes(key, key_size);
+        const std::uint64_t hash = TableHash(key, key_size);
         const int slot = Find(key, key_size, hash);
         if (slot < 0) {
             return {false, SnapshotKind::kEmpty, nullptr, 0};
@@ -209,12 +317,13 @@ public:
         if (key == nullptr || key_size == 0) {
             return false;
         }
-        const std::uint64_t hash = HashBytes(key, key_size);
+        const std::uint64_t hash = TableHash(key, key_size);
         const int slot = Find(key, key_size, hash);
         if (slot < 0) {
             return false;
         }
         RemoveSlot(slot, removed_payload);
+        MaybeRebuild();
         return true;
     }
 
@@ -236,14 +345,20 @@ public:
         lru_head_ = -1;
         lru_tail_ = -1;
         size_ = 0;
+        deleted_ = 0;
     }
 
     std::size_t size() const { return size_; }
     ProbeKernel active_kernel() const { return kernel_; }
     std::size_t vector_bytes() const { return vector_bytes_; }
     const char* active_kernel_name() const { return KernelName(kernel_); }
+    const char* hash_name() const { return use_kunpeng_crc32_ ? "crc32c-16" : "fnv64"; }
 
 private:
+    std::uint64_t TableHash(const std::uint8_t* key, std::size_t key_size) const {
+        return HashTableKey(key, key_size, use_kunpeng_crc32_);
+    }
+
     static void Assign(
             std::vector<std::uint8_t>& destination,
             const std::uint8_t* source,
@@ -343,6 +458,60 @@ private:
         keys_[slot].clear();
         MovePayload(slot, removed_payload);
         --size_;
+        ++deleted_;
+    }
+
+    void MaybeRebuild() {
+        const std::size_t threshold = std::max<std::size_t>(64, capacity_ / 8);
+        if (deleted_ < threshold) {
+            return;
+        }
+
+        std::vector<std::uint8_t> new_control(
+                capacity_ + vector_bytes_, kSlotEmpty);
+        std::vector<std::uint64_t> new_hashes(capacity_);
+        std::vector<std::vector<std::uint8_t>> new_keys(capacity_);
+        std::vector<std::uint8_t> new_kinds(capacity_);
+        std::vector<std::vector<std::uint8_t>> new_payloads(capacity_);
+        std::vector<int> new_lru_prev(capacity_, -1);
+        std::vector<int> new_lru_next(capacity_, -1);
+        int new_head = -1;
+        int new_tail = -1;
+
+        for (int old_slot = lru_head_; old_slot >= 0; old_slot = lru_next_[old_slot]) {
+            const std::uint64_t hash = hashes_[old_slot];
+            std::size_t new_slot = hash & mask_;
+            while (new_control[new_slot] != kSlotEmpty) {
+                new_slot = (new_slot + 1) & mask_;
+            }
+            const std::uint8_t fingerprint = Fingerprint(hash);
+            new_control[new_slot] = fingerprint;
+            if (new_slot < vector_bytes_) {
+                new_control[capacity_ + new_slot] = fingerprint;
+            }
+            new_hashes[new_slot] = hash;
+            new_keys[new_slot] = std::move(keys_[old_slot]);
+            new_kinds[new_slot] = kinds_[old_slot];
+            new_payloads[new_slot] = std::move(payloads_[old_slot]);
+            new_lru_prev[new_slot] = new_tail;
+            if (new_tail >= 0) {
+                new_lru_next[new_tail] = static_cast<int>(new_slot);
+            } else {
+                new_head = static_cast<int>(new_slot);
+            }
+            new_tail = static_cast<int>(new_slot);
+        }
+
+        control_.swap(new_control);
+        hashes_.swap(new_hashes);
+        keys_.swap(new_keys);
+        kinds_.swap(new_kinds);
+        payloads_.swap(new_payloads);
+        lru_prev_.swap(new_lru_prev);
+        lru_next_.swap(new_lru_next);
+        lru_head_ = new_head;
+        lru_tail_ = new_tail;
+        deleted_ = 0;
     }
 
     const std::size_t max_entries_;
@@ -351,6 +520,7 @@ private:
     const ProbeKernel kernel_;
     const std::size_t vector_bytes_;
     const ByteFindSlotFunction find_slot_;
+    const bool use_kunpeng_crc32_;
     std::vector<std::uint8_t> control_;
     std::vector<std::uint64_t> hashes_;
     std::vector<std::vector<std::uint8_t>> keys_;
@@ -361,6 +531,7 @@ private:
     int lru_head_ = -1;
     int lru_tail_ = -1;
     std::size_t size_ = 0;
+    std::size_t deleted_ = 0;
 };
 
 ByteSnapshotTable::ByteSnapshotTable(
@@ -376,9 +547,10 @@ PutResult ByteSnapshotTable::Put(
         SnapshotKind kind,
         const std::uint8_t* payload,
         std::size_t payload_size,
-        std::vector<std::uint8_t>* displaced_payload) {
+        std::vector<std::uint8_t>* displaced_payload,
+        std::uint64_t* displaced_hash) {
     return impl_->Put(
-            key, key_size, kind, payload, payload_size, displaced_payload);
+            key, key_size, kind, payload, payload_size, displaced_payload, displaced_hash);
 }
 
 ByteLookupResult ByteSnapshotTable::Lookup(const std::uint8_t* key, std::size_t key_size) {
@@ -411,6 +583,10 @@ std::size_t ByteSnapshotTable::vector_bytes() const {
 
 const char* ByteSnapshotTable::active_kernel_name() const {
     return impl_->active_kernel_name();
+}
+
+const char* ByteSnapshotTable::hash_name() const {
+    return impl_->hash_name();
 }
 
 }  // namespace cachekit

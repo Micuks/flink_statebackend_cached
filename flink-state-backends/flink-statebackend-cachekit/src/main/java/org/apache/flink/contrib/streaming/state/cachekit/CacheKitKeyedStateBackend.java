@@ -102,6 +102,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int mapSnapshotCacheMaxEntries;
     private final boolean mapSnapshotCacheNativeEnabled;
     private final boolean mapSnapshotCacheNativeClassifierEnabled;
+    private final boolean mapSnapshotCacheNativeRemoveHintEnabled;
     private final String mapSnapshotCacheNativeKernel;
     private final String mapSnapshotCacheNativeLibraryPath;
     private final boolean listStateCowEnabled;
@@ -311,6 +312,82 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int listStateClearedKeysCapacity,
             boolean priorityQueueOptEnabled,
             boolean diagnosticsEnabled) {
+        this(
+                delegate,
+                kvStateRegistry,
+                keySerializer,
+                userCodeClassLoader,
+                executionConfig,
+                ttlTimeProvider,
+                cancelStreamRegistry,
+                metricGroup,
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow,
+                valueBypassEnabled,
+                valueHitRateThreshold,
+                valueHitRateWindow,
+                mapPresenceCacheMaxEntries,
+                mapPresenceCachePolicy,
+                mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheNativeEnabled,
+                mapSnapshotCacheNativeClassifierEnabled,
+                false,
+                mapSnapshotCacheNativeKernel,
+                mapSnapshotCacheNativeLibraryPath,
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled,
+                diagnosticsEnabled);
+    }
+
+    public CacheKitKeyedStateBackend(
+            AbstractKeyedStateBackend<K> delegate,
+            TaskKvStateRegistry kvStateRegistry,
+            TypeSerializer<K> keySerializer,
+            ClassLoader userCodeClassLoader,
+            ExecutionConfig executionConfig,
+            TtlTimeProvider ttlTimeProvider,
+            CloseableRegistry cancelStreamRegistry,
+            MetricGroup metricGroup,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            boolean mapSnapshotCacheNativeEnabled,
+            boolean mapSnapshotCacheNativeClassifierEnabled,
+            boolean mapSnapshotCacheNativeRemoveHintEnabled,
+            String mapSnapshotCacheNativeKernel,
+            String mapSnapshotCacheNativeLibraryPath,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -343,6 +420,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapSnapshotCacheMaxEntries = mapSnapshotCacheMaxEntries;
         this.mapSnapshotCacheNativeEnabled = mapSnapshotCacheNativeEnabled;
         this.mapSnapshotCacheNativeClassifierEnabled = mapSnapshotCacheNativeClassifierEnabled;
+        this.mapSnapshotCacheNativeRemoveHintEnabled = mapSnapshotCacheNativeRemoveHintEnabled;
         this.mapSnapshotCacheNativeKernel = mapSnapshotCacheNativeKernel;
         this.mapSnapshotCacheNativeLibraryPath = mapSnapshotCacheNativeLibraryPath;
         this.listStateCowEnabled = listStateCowEnabled;
@@ -454,6 +532,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapSnapshotCacheMetrics,
                     mapSnapshotCacheNativeEnabled,
                     mapSnapshotCacheNativeClassifierEnabled,
+                    mapSnapshotCacheNativeRemoveHintEnabled,
                     mapSnapshotCacheNativeKernel,
                     mapSnapshotCacheNativeLibraryPath);
             wrappersByDelegateIdentity.put(internal, wrapped);
@@ -589,6 +668,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapSnapshotCacheMetrics,
                     mapSnapshotCacheNativeEnabled,
                     mapSnapshotCacheNativeClassifierEnabled,
+                    mapSnapshotCacheNativeRemoveHintEnabled,
                     mapSnapshotCacheNativeKernel,
                     mapSnapshotCacheNativeLibraryPath);
             wrappersByDelegateIdentity.put(internal, wrapped);

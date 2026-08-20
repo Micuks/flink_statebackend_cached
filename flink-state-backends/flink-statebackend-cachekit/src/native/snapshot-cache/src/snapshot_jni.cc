@@ -4,6 +4,7 @@
 
 #include <jni.h>
 
+#include <chrono>
 #include <cstring>
 #include <cstdint>
 #include <stdexcept>
@@ -105,7 +106,8 @@ public:
             const std::uint8_t* key,
             std::size_t key_size,
             SnapshotKind kind,
-            jobject user_key) {
+            jobject user_key,
+            std::uint64_t* displaced_hash) {
         jobject retained_user_key = nullptr;
         std::vector<std::uint8_t> payload;
         if (kind == SnapshotKind::kSingle) {
@@ -126,7 +128,8 @@ public:
                     kind,
                     payload.empty() ? nullptr : payload.data(),
                     payload.size(),
-                    &displaced);
+                    &displaced,
+                    displaced_hash);
         } catch (...) {
             if (retained_user_key != nullptr) {
                 env->DeleteGlobalRef(retained_user_key);
@@ -240,6 +243,8 @@ public:
 
     std::size_t size() const { return table_.size(); }
     const char* active_kernel_name() const { return table_.active_kernel_name(); }
+    const char* hash_name() const { return table_.hash_name(); }
+    std::size_t vector_bytes() const { return table_.vector_bytes(); }
 
 private:
     static jobject DecodePayload(const std::uint8_t* payload, std::size_t payload_size) {
@@ -270,6 +275,22 @@ JniByteSnapshotCache* ByteCache(jlong handle) {
 
 jlong ByteHandle(JniByteSnapshotCache* cache) {
     return static_cast<jlong>(reinterpret_cast<std::uintptr_t>(cache));
+}
+
+using ProfileClock = std::chrono::steady_clock;
+
+void RecordNativeCoreNanos(
+        JNIEnv* env,
+        jlongArray native_core_nanos,
+        ProfileClock::time_point start,
+        ProfileClock::time_point end) {
+    if (native_core_nanos == nullptr || env->GetArrayLength(native_core_nanos) < 1) {
+        ThrowIllegalArgument(env, "native core timing output must contain one element");
+        return;
+    }
+    const jlong elapsed = static_cast<jlong>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count());
+    env->SetLongArrayRegion(native_core_nanos, 0, 1, &elapsed);
 }
 
 }  // namespace
@@ -367,6 +388,104 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapsho
 }
 
 extern "C" JNIEXPORT jlong JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_createBytes(
+        JNIEnv* env,
+        jclass,
+        jint capacity,
+        jint kernel,
+        jobject miss_sentinel,
+        jobject empty_sentinel) {
+    try {
+        return ByteHandle(new JniByteSnapshotCache(
+                env,
+                static_cast<std::size_t>(capacity),
+                Kernel(kernel),
+                miss_sentinel,
+                empty_sentinel,
+                miss_sentinel,
+                false));
+    } catch (const std::exception& error) {
+        ThrowIllegalArgument(env, error.what());
+        return 0;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_destroyBytes(
+        JNIEnv* env, jclass, jlong handle) {
+    if (handle != 0) {
+        ByteCache(handle)->Destroy(env);
+        delete ByteCache(handle);
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_putBytes(
+        JNIEnv* env,
+        jclass,
+        jlong handle,
+        jbyteArray key,
+        jobject value) {
+    if (handle == 0 || key == nullptr || value == nullptr) {
+        return JNI_FALSE;
+    }
+    const jsize key_size = env->GetArrayLength(key);
+    jbyte* key_bytes = env->GetByteArrayElements(key, nullptr);
+    if (key_bytes == nullptr) {
+        return JNI_FALSE;
+    }
+    const cachekit::PutResult result = ByteCache(handle)->Put(
+            env,
+            reinterpret_cast<const std::uint8_t*>(key_bytes),
+            static_cast<std::size_t>(key_size),
+            SnapshotKind::kSingle,
+            value,
+            nullptr);
+    env->ReleaseByteArrayElements(key, key_bytes, JNI_ABORT);
+    return result == cachekit::PutResult::kRejected ? JNI_FALSE : JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_lookupBytes(
+        JNIEnv* env, jclass, jlong handle, jbyteArray key) {
+    if (handle == 0 || key == nullptr) {
+        return nullptr;
+    }
+    const jsize key_size = env->GetArrayLength(key);
+    jbyte* key_bytes = static_cast<jbyte*>(env->GetPrimitiveArrayCritical(key, nullptr));
+    if (key_bytes == nullptr) {
+        return nullptr;
+    }
+    jobject result = ByteCache(handle)->Lookup(
+            reinterpret_cast<const std::uint8_t*>(key_bytes),
+            static_cast<std::size_t>(key_size));
+    env->ReleasePrimitiveArrayCritical(key, key_bytes, JNI_ABORT);
+    return env->NewLocalRef(result);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_echoBytes(
+        JNIEnv* env, jclass, jbyteArray key) {
+    if (key == nullptr || env->GetArrayLength(key) == 0) {
+        return 0;
+    }
+    jbyte* key_bytes = static_cast<jbyte*>(env->GetPrimitiveArrayCritical(key, nullptr));
+    if (key_bytes == nullptr) {
+        return 0;
+    }
+    const jint result = static_cast<jint>(
+            static_cast<unsigned char>(key_bytes[0]) + env->GetArrayLength(key));
+    env->ReleasePrimitiveArrayCritical(key, key_bytes, JNI_ABORT);
+    return result;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_byteVectorBytes(
+        JNIEnv*, jclass, jlong handle) {
+    return static_cast<jint>(ByteCache(handle)->vector_bytes());
+}
+
+extern "C" JNIEXPORT jlong JNICALL
 Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeCreate(
         JNIEnv* env,
         jclass,
@@ -415,12 +534,14 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
         jint key_offset,
         jint key_size,
         jint kind,
-        jobject user_key) {
+        jobject user_key,
+        jlongArray displaced_hash_out) {
     const jsize key_capacity = key == nullptr ? 0 : env->GetArrayLength(key);
     if (handle == 0 || key == nullptr || key_offset < 0 || key_size <= 0
             || key_offset > key_capacity || key_size > key_capacity - key_offset
             || (kind != 1 && kind != 2)
-            || (kind == 2 && user_key == nullptr)) {
+            || (kind == 2 && user_key == nullptr)
+            || (displaced_hash_out != nullptr && env->GetArrayLength(displaced_hash_out) < 1)) {
         ThrowIllegalArgument(env, "invalid native snapshot put arguments");
         return 0;
     }
@@ -431,20 +552,114 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
     const SnapshotKind snapshot_kind =
             kind == 1 ? SnapshotKind::kEmpty : SnapshotKind::kSingle;
     cachekit::PutResult result = cachekit::PutResult::kRejected;
+    std::uint64_t displaced_hash = 0;
     try {
         result = ByteCache(handle)->Put(
                 env,
                 reinterpret_cast<const std::uint8_t*>(key_bytes + key_offset),
                 static_cast<std::size_t>(key_size),
                 snapshot_kind,
-                user_key);
+                user_key,
+                displaced_hash_out == nullptr ? nullptr : &displaced_hash);
     } catch (const std::exception& error) {
         if (!env->ExceptionCheck()) {
             ThrowIllegalState(env, error.what());
         }
     }
     env->ReleaseByteArrayElements(key, key_bytes, JNI_ABORT);
+    if (!env->ExceptionCheck()
+            && result == cachekit::PutResult::kInsertedWithEviction
+            && displaced_hash_out != nullptr) {
+        const jlong value = static_cast<jlong>(displaced_hash);
+        env->SetLongArrayRegion(displaced_hash_out, 0, 1, &value);
+    }
     return static_cast<jint>(result);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativePutProfiled(
+        JNIEnv* env,
+        jclass,
+        jlong handle,
+        jbyteArray key,
+        jint key_offset,
+        jint key_size,
+        jint kind,
+        jobject user_key,
+        jlongArray native_core_nanos,
+        jlongArray displaced_hash_out) {
+    const jsize key_capacity = key == nullptr ? 0 : env->GetArrayLength(key);
+    if (handle == 0 || key == nullptr || key_offset < 0 || key_size <= 0
+            || key_offset > key_capacity || key_size > key_capacity - key_offset
+            || (kind != 1 && kind != 2)
+            || (kind == 2 && user_key == nullptr)
+            || native_core_nanos == nullptr || env->GetArrayLength(native_core_nanos) < 1
+            || (displaced_hash_out != nullptr && env->GetArrayLength(displaced_hash_out) < 1)) {
+        ThrowIllegalArgument(env, "invalid profiled native snapshot put arguments");
+        return 0;
+    }
+    jbyte* key_bytes = env->GetByteArrayElements(key, nullptr);
+    if (key_bytes == nullptr) {
+        return 0;
+    }
+    const SnapshotKind snapshot_kind =
+            kind == 1 ? SnapshotKind::kEmpty : SnapshotKind::kSingle;
+    cachekit::PutResult result = cachekit::PutResult::kRejected;
+    std::uint64_t displaced_hash = 0;
+    ProfileClock::time_point core_start;
+    ProfileClock::time_point core_end;
+    try {
+        core_start = ProfileClock::now();
+        result = ByteCache(handle)->Put(
+                env,
+                reinterpret_cast<const std::uint8_t*>(key_bytes + key_offset),
+                static_cast<std::size_t>(key_size),
+                snapshot_kind,
+                user_key,
+                displaced_hash_out == nullptr ? nullptr : &displaced_hash);
+        core_end = ProfileClock::now();
+    } catch (const std::exception& error) {
+        if (!env->ExceptionCheck()) {
+            ThrowIllegalState(env, error.what());
+        }
+    }
+    env->ReleaseByteArrayElements(key, key_bytes, JNI_ABORT);
+    if (!env->ExceptionCheck()) {
+        RecordNativeCoreNanos(env, native_core_nanos, core_start, core_end);
+        if (result == cachekit::PutResult::kInsertedWithEviction
+                && displaced_hash_out != nullptr) {
+            const jlong value = static_cast<jlong>(displaced_hash);
+            env->SetLongArrayRegion(displaced_hash_out, 0, 1, &value);
+        }
+    }
+    return static_cast<jint>(result);
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeHashForTesting0(
+        JNIEnv* env,
+        jclass,
+        jbyteArray key,
+        jint key_offset,
+        jint key_size) {
+    const jsize key_capacity = key == nullptr ? 0 : env->GetArrayLength(key);
+    if (key == nullptr || key_offset < 0 || key_size < 0
+            || key_offset > key_capacity || key_size > key_capacity - key_offset) {
+        ThrowIllegalArgument(env, "invalid native snapshot hash arguments");
+        return 0;
+    }
+    if (key_size == 0) {
+        return static_cast<jlong>(cachekit::HashByteKey(nullptr, 0));
+    }
+    jbyte* key_bytes = static_cast<jbyte*>(env->GetPrimitiveArrayCritical(key, nullptr));
+    if (key_bytes == nullptr) {
+        return 0;
+    }
+    const std::uint64_t hash = cachekit::HashByteKey(
+            reinterpret_cast<const std::uint8_t*>(key_bytes + key_offset),
+            static_cast<std::size_t>(key_size));
+    env->ReleasePrimitiveArrayCritical(key, key_bytes, JNI_ABORT);
+    return static_cast<jlong>(hash);
 }
 
 extern "C" JNIEXPORT jobject JNICALL
@@ -481,6 +696,47 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
     return env->NewLocalRef(retained_result);
 }
 
+extern "C" JNIEXPORT jobject JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeLookupProfiled(
+        JNIEnv* env,
+        jclass,
+        jlong handle,
+        jbyteArray key,
+        jint key_offset,
+        jint key_size,
+        jlongArray native_core_nanos) {
+    const jsize key_capacity = key == nullptr ? 0 : env->GetArrayLength(key);
+    if (handle == 0 || key == nullptr || key_offset < 0 || key_size <= 0
+            || key_offset > key_capacity || key_size > key_capacity - key_offset
+            || native_core_nanos == nullptr || env->GetArrayLength(native_core_nanos) < 1) {
+        ThrowIllegalArgument(env, "invalid profiled native snapshot lookup arguments");
+        return nullptr;
+    }
+    jbyte* key_bytes = static_cast<jbyte*>(env->GetPrimitiveArrayCritical(key, nullptr));
+    if (key_bytes == nullptr) {
+        return nullptr;
+    }
+    jobject retained_result = nullptr;
+    ProfileClock::time_point core_start;
+    ProfileClock::time_point core_end;
+    try {
+        core_start = ProfileClock::now();
+        retained_result = ByteCache(handle)->Lookup(
+                reinterpret_cast<const std::uint8_t*>(key_bytes + key_offset),
+                static_cast<std::size_t>(key_size));
+        core_end = ProfileClock::now();
+    } catch (const std::exception& error) {
+        env->ReleasePrimitiveArrayCritical(key, key_bytes, JNI_ABORT);
+        if (!env->ExceptionCheck()) {
+            ThrowIllegalState(env, error.what());
+        }
+        return nullptr;
+    }
+    env->ReleasePrimitiveArrayCritical(key, key_bytes, JNI_ABORT);
+    RecordNativeCoreNanos(env, native_core_nanos, core_start, core_end);
+    return env->ExceptionCheck() ? nullptr : env->NewLocalRef(retained_result);
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeRemove(
         JNIEnv* env,
@@ -505,6 +761,37 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
             static_cast<std::size_t>(key_size));
     env->ReleaseByteArrayElements(key, key_bytes, JNI_ABORT);
     return removed ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeRemoveProfiled(
+        JNIEnv* env,
+        jclass,
+        jlong handle,
+        jbyteArray key,
+        jint key_offset,
+        jint key_size,
+        jlongArray native_core_nanos) {
+    const jsize key_capacity = key == nullptr ? 0 : env->GetArrayLength(key);
+    if (handle == 0 || key == nullptr || key_offset < 0 || key_size <= 0
+            || key_offset > key_capacity || key_size > key_capacity - key_offset
+            || native_core_nanos == nullptr || env->GetArrayLength(native_core_nanos) < 1) {
+        ThrowIllegalArgument(env, "invalid profiled native snapshot remove arguments");
+        return JNI_FALSE;
+    }
+    jbyte* key_bytes = env->GetByteArrayElements(key, nullptr);
+    if (key_bytes == nullptr) {
+        return JNI_FALSE;
+    }
+    const ProfileClock::time_point core_start = ProfileClock::now();
+    const bool removed = ByteCache(handle)->Remove(
+            env,
+            reinterpret_cast<const std::uint8_t*>(key_bytes + key_offset),
+            static_cast<std::size_t>(key_size));
+    const ProfileClock::time_point core_end = ProfileClock::now();
+    env->ReleaseByteArrayElements(key, key_bytes, JNI_ABORT);
+    RecordNativeCoreNanos(env, native_core_nanos, core_start, core_end);
+    return env->ExceptionCheck() ? JNI_FALSE : (removed ? JNI_TRUE : JNI_FALSE);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -539,6 +826,16 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
         return nullptr;
     }
     return env->NewStringUTF(ByteCache(handle)->active_kernel_name());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeHashName(
+        JNIEnv* env, jclass, jlong handle) {
+    if (handle == 0) {
+        ThrowIllegalState(env, "native snapshot cache is closed");
+        return nullptr;
+    }
+    return env->NewStringUTF(ByteCache(handle)->hash_name());
 }
 
 extern "C" JNIEXPORT jstring JNICALL

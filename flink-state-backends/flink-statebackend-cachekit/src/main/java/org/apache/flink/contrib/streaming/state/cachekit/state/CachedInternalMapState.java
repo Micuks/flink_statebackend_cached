@@ -255,6 +255,52 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             boolean nativeSnapshotClassifierEnabled,
             String nativeMapSnapshotKernel,
             String nativeMapSnapshotLibraryPath) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                presenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicyType,
+                mapCacheLruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                iterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheMetrics,
+                nativeMapSnapshotCacheEnabled,
+                nativeSnapshotClassifierEnabled,
+                false,
+                nativeMapSnapshotKernel,
+                nativeMapSnapshotLibraryPath);
+    }
+
+    public CachedInternalMapState(
+            InternalMapState<K, N, UK, UV> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            PresenceCacheImplementation presenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicyType,
+            int mapCacheLruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean iterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            MapSnapshotCacheMetrics mapSnapshotCacheMetrics,
+            boolean nativeMapSnapshotCacheEnabled,
+            boolean nativeSnapshotClassifierEnabled,
+            boolean nativeRemoveHintEnabled,
+            String nativeMapSnapshotKernel,
+            String nativeMapSnapshotLibraryPath) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -363,6 +409,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                                     nativeMapSnapshotKernel,
                                     nativeMapSnapshotLibraryPath,
                                     nativeSnapshotClassifierEnabled,
+                                    nativeRemoveHintEnabled,
+                                    mapSnapshotCacheMetrics,
                                     Objects.requireNonNull(
                                             keySerializer,
                                             "Native snapshot support requires a key serializer"),
