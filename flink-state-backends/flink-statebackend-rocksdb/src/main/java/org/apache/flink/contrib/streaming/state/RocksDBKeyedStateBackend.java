@@ -479,7 +479,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             }
 
             // ... and finally close the DB instance ...
-            IOUtils.closeQuietly(db);
+            RocksDBDisposeGuard.closeQuietly(db);
 
             columnFamilyOptions.forEach(IOUtils::closeQuietly);
 
