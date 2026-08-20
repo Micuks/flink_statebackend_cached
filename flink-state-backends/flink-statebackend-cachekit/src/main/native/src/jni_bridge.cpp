@@ -47,6 +47,7 @@ using cachekit::native::bridge::ProbeDirectBatch;
 constexpr const char* kIllegalArgument = "java/lang/IllegalArgumentException";
 constexpr const char* kIllegalState = "java/lang/IllegalStateException";
 constexpr const char* kOutOfMemory = "java/lang/OutOfMemoryError";
+constexpr jint kJniAbiVersion = 2;
 
 struct BridgeHandle final {
     BridgeHandle(
@@ -148,8 +149,14 @@ void ThrowBridgeFailure(JNIEnv* environment, BatchBridgeCode code) {
 
 extern "C" {
 
+JNIEXPORT jint JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequestPlaneBridge_nativeAbiVersion(
+        JNIEnv*, jclass) {
+    return kJniAbiVersion;
+}
+
 JNIEXPORT jlong JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequestPlaneBridge_nativeCreate(
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequestPlaneBridge_nativeCreateV2(
         JNIEnv* environment,
         jclass,
         jint capacity_entries,

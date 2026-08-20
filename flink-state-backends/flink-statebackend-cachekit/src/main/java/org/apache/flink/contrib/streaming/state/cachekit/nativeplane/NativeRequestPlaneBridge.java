@@ -96,6 +96,7 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
   // Deliberately no SVE2 bit: the native runtime currently proves SVE and vector length only.
 
   private static final String LIBRARY_NAME = "cachekit_native_request_plane_jni";
+  private static final int EXPECTED_JNI_ABI_VERSION = 2;
   private static final Object LIBRARY_LOAD_LOCK = new Object();
 
   private static volatile boolean libraryLoaded;
@@ -179,8 +180,9 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
       throw new IllegalArgumentException("Unknown native kernel preference.");
     }
     ensureLibraryLoaded(libraryPath);
+    verifyNativeAbiCompatibility();
     return new NativeRequestPlaneBridge(
-        nativeCreate(
+        nativeCreateV2(
             capacityEntries,
             maxBatchEntries,
             keyArenaBytes,
@@ -361,7 +363,27 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
     }
   }
 
-  private static native long nativeCreate(
+  private static void verifyNativeAbiCompatibility() {
+    final int actualVersion;
+    try {
+      actualVersion = nativeAbiVersion();
+    } catch (LinkageError failure) {
+      throw new IllegalStateException(
+          "Native request-plane JNI does not expose the required ABI handshake.", failure);
+    }
+    if (actualVersion != EXPECTED_JNI_ABI_VERSION) {
+      throw new IllegalStateException(
+          "Native request-plane JNI ABI mismatch: expected "
+              + EXPECTED_JNI_ABI_VERSION
+              + " but loaded "
+              + actualVersion
+              + ".");
+    }
+  }
+
+  private static native int nativeAbiVersion();
+
+  private static native long nativeCreateV2(
       int capacityEntries,
       int maxBatchEntries,
       long keyArenaBytes,
