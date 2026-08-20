@@ -451,14 +451,36 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
 
     @Override
     public void close() {
+        // First serialize with any JNI caller and stop new leases/calls. Existing batch slots can
+        // still be owned by queued or completing state tasks; destroying the plane before those
+        // leases are returned leaves teardown correctness dependent on task timing.
         synchronized (planeLock) {
             if (planeClosed) {
                 return;
             }
             active = false;
             disableCause = new IllegalStateException("Native request plane was closed.");
-            planeClosed = true;
-            plane.close();
+        }
+
+        boolean interrupted = false;
+        synchronized (availableSlots) {
+            while (availableSlots.size() != options.batchSlots()) {
+                try {
+                    availableSlots.wait();
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        }
+
+        synchronized (planeLock) {
+            if (!planeClosed) {
+                planeClosed = true;
+                plane.close();
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -490,6 +512,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         synchronized (availableSlots) {
             slot.leased = false;
             availableSlots.addLast(slot);
+            availableSlots.notifyAll();
         }
     }
 

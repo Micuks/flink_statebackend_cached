@@ -24,13 +24,54 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Collections;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 class NativeRequestPlaneCoordinatorTest {
+
+    @Test
+    void testCloseWaitsForOutstandingRegularSlot() throws Exception {
+        FakePlane plane = new FakePlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(1), plane);
+        NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot();
+        assertNotNull(slot);
+
+        CountDownLatch closeStarted = new CountDownLatch(1);
+        CountDownLatch closeReturned = new CountDownLatch(1);
+        Thread closer =
+                new Thread(
+                        () -> {
+                            closeStarted.countDown();
+                            coordinator.close();
+                            closeReturned.countDown();
+                        },
+                        "native-coordinator-close");
+        try {
+            closer.start();
+            assertTrue(closeStarted.await(5, TimeUnit.SECONDS));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (coordinator.isActive() && System.nanoTime() < deadline) {
+                Thread.yield();
+            }
+            assertFalse(coordinator.isActive());
+            assertNull(coordinator.tryAcquireBatchSlot());
+            assertFalse(closeReturned.await(200, TimeUnit.MILLISECONDS));
+            assertEquals(0, plane.closeCalls);
+        } finally {
+            slot.close();
+            closer.join(5000);
+        }
+        assertFalse(closer.isAlive());
+        assertEquals(0, closeReturned.getCount());
+        assertEquals(1, plane.closeCalls);
+    }
 
     @Test
     void testConstructionMetadataFailureClosesPlaneBeforeOwnershipEscapes() {

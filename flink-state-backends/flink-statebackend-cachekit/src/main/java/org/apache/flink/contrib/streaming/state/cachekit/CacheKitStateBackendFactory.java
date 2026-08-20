@@ -301,6 +301,58 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Probe mailbox-compacted prepared keys in their original direct arena. "
                                                                         + "Only RocksDB misses materialize heap key arrays; requires native mailbox and prefetch.");
 
+        public static final ConfigOption<Boolean>
+                        NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_BYPASS_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Temporarily bypass zero-useful-hit native prepared-key probe/fill per ValueState. "
+                                                                        + "Mailbox compaction and the authoritative RocksDB path remain unchanged.");
+
+        public static final ConfigOption<Integer>
+                        NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_WINDOW_KEYS =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.window-keys")
+                                        .intType()
+                                        .defaultValue(4096);
+
+        public static final ConfigOption<Integer>
+                        NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_WINDOW_BATCHES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.window-batches")
+                                        .intType()
+                                        .defaultValue(64);
+
+        public static final ConfigOption<Integer>
+                        NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_ZERO_WINDOWS =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.zero-windows")
+                                        .intType()
+                                        .defaultValue(2);
+
+        public static final ConfigOption<Integer>
+                        NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_COOLDOWN_BATCHES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.cooldown-batches")
+                                        .intType()
+                                        .defaultValue(256);
+
+        public static final ConfigOption<Integer>
+                        NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_RECOVERY_MIN_USEFUL =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.recovery-min-useful")
+                                        .intType()
+                                        .defaultValue(16);
+
+        public static final ConfigOption<Double>
+                        NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_RECOVERY_USEFUL_RATE =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.recovery-useful-rate")
+                                        .doubleType()
+                                        .defaultValue(0.02);
+
         public static final ConfigOption<Boolean> NATIVE_LOCAL_PREAGG_ENABLED =
                         ConfigOptions.key("state.backend.cachekit.native.local-preagg.enabled")
                                         .booleanType()

@@ -98,6 +98,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final java.util.concurrent.locks.ReadWriteLock lifecycleLock =
             new java.util.concurrent.locks.ReentrantReadWriteLock();
 
+    /**
+     * State-local ownership of tasks submitted to the TM-wide prefetch executor.
+     *
+     * <p>The lifecycle read/write lock only drains RocksDB calls. A task also owns reservations,
+     * direct buffers, and possibly a native batch slot before and after that call. Backend teardown
+     * must therefore wait for the complete task (including its completion callback) before closing
+     * the shared native request plane.
+     */
+    private final Object prefetchTaskMonitor = new Object();
+    private final java.util.Set<PrefetchExecutor.DropAwareTask> outstandingPrefetchTasks =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+
     // ---- Backpressure-driven async prefetch (off-mailbox worker -> staging -> L1) ----
 
     /** Hard admission cap on staged entries. */
@@ -128,6 +140,46 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     1024,
                     1,
                     1_000_000);
+    private static final boolean NATIVE_ADAPTIVE_PROBE_BYPASS_ENABLED =
+            loadBooleanConfig(
+                    "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.enabled",
+                    false);
+    private static final int NATIVE_ADAPTIVE_PROBE_WINDOW_KEYS =
+            loadIntConfig(
+                    "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.window-keys",
+                    4096,
+                    1,
+                    1_000_000);
+    private static final int NATIVE_ADAPTIVE_PROBE_WINDOW_BATCHES =
+            loadIntConfig(
+                    "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.window-batches",
+                    64,
+                    1,
+                    1_000_000);
+    private static final int NATIVE_ADAPTIVE_PROBE_ZERO_WINDOWS =
+            loadIntConfig(
+                    "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.zero-windows",
+                    2,
+                    1,
+                    1000);
+    private static final int NATIVE_ADAPTIVE_PROBE_COOLDOWN_BATCHES =
+            loadIntConfig(
+                    "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.cooldown-batches",
+                    256,
+                    1,
+                    1_000_000);
+    private static final int NATIVE_ADAPTIVE_PROBE_RECOVERY_MIN_USEFUL =
+            loadIntConfig(
+                    "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.recovery-min-useful",
+                    16,
+                    0,
+                    1_000_000);
+    private static final double NATIVE_ADAPTIVE_PROBE_RECOVERY_USEFUL_RATE =
+            loadDoubleConfig(
+                    "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.recovery-useful-rate",
+                    0.02,
+                    0.0,
+                    1.0);
     private final int asyncStagingMaxEntries;
     private final long asyncStagingMaxRetainedBytes;
     /**
@@ -255,6 +307,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeMutationTombstonesApplied;
     private final java.util.concurrent.atomic.AtomicLong nativeWriteEpoch =
             new java.util.concurrent.atomic.AtomicLong();
+    private AdaptiveNativeProbeController adaptiveNativeProbeController;
 
     // Worker-only serializers and scratch inputs. PrefetchExecutor serializes all tasks on its
     // single shared worker; mailbox paths use separate fields below.
@@ -831,6 +884,20 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         this.nativeRequestPlaneCoordinator = nativeRequestPlaneCoordinator;
         this.nativeStateId = nativeStateId;
+        this.adaptiveNativeProbeController =
+                NATIVE_ADAPTIVE_PROBE_BYPASS_ENABLED
+                                && nativeRequestPlaneCoordinator != null
+                                && nativeRequestPlaneCoordinator
+                                        .options()
+                                        .compactSelectedProbeEnabled()
+                        ? new AdaptiveNativeProbeController(
+                                NATIVE_ADAPTIVE_PROBE_WINDOW_KEYS,
+                                NATIVE_ADAPTIVE_PROBE_WINDOW_BATCHES,
+                                NATIVE_ADAPTIVE_PROBE_ZERO_WINDOWS,
+                                NATIVE_ADAPTIVE_PROBE_COOLDOWN_BATCHES,
+                                NATIVE_ADAPTIVE_PROBE_RECOVERY_MIN_USEFUL,
+                                NATIVE_ADAPTIVE_PROBE_RECOVERY_USEFUL_RATE)
+                        : null;
         // The narrow invalidation proof relies on the prepared-key reservation identity checked
         // before and after RocksDB I/O. Generic query-wire prefetch and the experimental native
         // coordinator retain the conservative state-wide generation barrier.
@@ -1342,6 +1409,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // cancellation. Volatile publication makes it stop before its next chunk, while the write
         // lock below still drains the one native delegate access that may already be in flight.
         closed = true;
+        cancelQueuedAndAwaitPrefetchTasks();
         lifecycleLock.writeLock().lock();
         try {
             prefetchUnusedStagedOnClose += staging.size();
@@ -1520,6 +1588,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             ? 0
                             : nativeRequestPlaneCoordinator.leaseMisses());
         }
+        if (adaptiveNativeProbeController != null) {
+            LOG.info(
+                    "[CACHEKIT NATIVE ADAPTIVE PROBE] mode={} transitions={} windows={} "
+                            + "bypassedBatches={} bypassedKeys={}",
+                    adaptiveNativeProbeController.mode(),
+                    adaptiveNativeProbeController.transitions(),
+                    adaptiveNativeProbeController.completedWindows(),
+                    adaptiveNativeProbeController.bypassedBatches(),
+                    adaptiveNativeProbeController.bypassedKeys());
+        }
     }
 
     long getPrefetchMultiGetCallsForTesting() {
@@ -1544,6 +1622,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getPrefetchValuesPromotedForTesting() {
         return prefetchValuesPromoted;
+    }
+
+    void setAdaptiveNativeProbeControllerForTesting(
+            AdaptiveNativeProbeController controller) {
+        this.adaptiveNativeProbeController = controller;
     }
 
     long getPrefetchLazyValuesStagedForTesting() {
@@ -2440,9 +2523,17 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             PrefetchReservation reservation,
             Runnable task,
             Runnable completion) {
-        return new PrefetchExecutor.DropAwareTask() {
+        final class TrackedPrefetchTask implements PrefetchExecutor.DropAwareTask {
+            // 0=pending, 1=running, 2=completed. The transition makes run/onDrop idempotent even
+            // when queue cancellation races executor dequeue.
+            private final java.util.concurrent.atomic.AtomicInteger state =
+                    new java.util.concurrent.atomic.AtomicInteger();
+
             @Override
             public void run() {
+                if (!state.compareAndSet(0, 1)) {
+                    return;
+                }
                 final long startedNanos = System.nanoTime();
                 final long queueNanos =
                         Math.max(0L, startedNanos - reservation.submittedNanos);
@@ -2456,22 +2547,80 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchWorkerRunNanos += runNanos;
                     prefetchWorkerRunNanosMax =
                             Math.max(prefetchWorkerRunNanosMax, runNanos);
-                    releaseReservations(reservations, reservation);
-                    if (completion != null) {
-                        completion.run();
-                    }
+                    finish(false);
                 }
             }
 
             @Override
             public void onDrop() {
-                prefetchTasksDropped++;
-                releaseReservations(reservations, reservation);
-                if (completion != null) {
-                    completion.run();
+                if (state.compareAndSet(0, 2)) {
+                    finish(true);
                 }
             }
-        };
+
+            private void finish(boolean dropped) {
+                try {
+                    if (dropped) {
+                        prefetchTasksDropped++;
+                    }
+                    releaseReservations(reservations, reservation);
+                    if (completion != null) {
+                        completion.run();
+                    }
+                } finally {
+                    state.set(2);
+                    synchronized (prefetchTaskMonitor) {
+                        outstandingPrefetchTasks.remove(this);
+                        prefetchTaskMonitor.notifyAll();
+                    }
+                }
+            }
+        }
+
+        TrackedPrefetchTask tracked = new TrackedPrefetchTask();
+        boolean accepted;
+        synchronized (prefetchTaskMonitor) {
+            accepted = !closed;
+            if (accepted) {
+                outstandingPrefetchTasks.add(tracked);
+            }
+        }
+        if (!accepted) {
+            tracked.onDrop();
+        }
+        return tracked;
+    }
+
+    /**
+     * Cancels only this state's queued tasks, then waits for any task already running to finish its
+     * completion callback and release its native slot. No lifecycle write lock is held while
+     * waiting, so a worker already inside a guarded RocksDB read can observe {@link #closed}, leave
+     * the read side, and complete without a lock cycle.
+     */
+    private void cancelQueuedAndAwaitPrefetchTasks() {
+        java.util.List<PrefetchExecutor.DropAwareTask> snapshot;
+        synchronized (prefetchTaskMonitor) {
+            snapshot = new java.util.ArrayList<>(outstandingPrefetchTasks);
+        }
+        for (PrefetchExecutor.DropAwareTask tracked : snapshot) {
+            PrefetchExecutor.cancelIfQueued(tracked);
+        }
+
+        boolean interrupted = false;
+        synchronized (prefetchTaskMonitor) {
+            while (!outstandingPrefetchTasks.isEmpty()) {
+                try {
+                    prefetchTaskMonitor.wait();
+                } catch (InterruptedException ignored) {
+                    // Teardown cannot safely destroy the native plane while a task still owns a
+                    // slot. Preserve the interrupt after the correctness barrier has drained.
+                    interrupted = true;
+                }
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private void releaseReservations(
@@ -2559,7 +2708,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (!admitAsyncPrefetchWorkerTask()) {
                 return;
             }
-            if (nativeBatchSlot != null
+            boolean shouldProbeNative = nativeBatchSlot != null;
+            if (shouldProbeNative
+                    && compactSelectedPrepared
+                    && adaptiveNativeProbeController != null) {
+                shouldProbeNative =
+                        adaptiveNativeProbeController.shouldProbe(rocksDBKeys.size());
+            }
+            if (shouldProbeNative
                     && executeNativePreparedBatch(
                             rocksDBKeys,
                             storageKeys,
@@ -2742,6 +2898,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         nativeHitBytesDirect += batchHitBytesDirect;
         nativeNegativeHits += batchNegativeHits;
         nativeMisses += batchMisses;
+        if (compactSelectedPrepared && adaptiveNativeProbeController != null) {
+            adaptiveNativeProbeController.recordProbe(
+                    processed, batchHits + batchNegativeHits);
+        }
 
         java.util.List<byte[]> missValues;
         if (reservation != null

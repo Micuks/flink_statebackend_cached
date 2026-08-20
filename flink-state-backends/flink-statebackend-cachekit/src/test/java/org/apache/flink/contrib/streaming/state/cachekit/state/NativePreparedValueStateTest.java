@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
@@ -41,6 +42,8 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
@@ -59,6 +62,89 @@ import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.junit.jupiter.api.Test;
 
 class NativePreparedValueStateTest {
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testCloseWaitsForCompleteNativeTaskAndSlotRelease() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(null);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+
+        CountDownLatch probeEntered = new CountDownLatch(1);
+        CountDownLatch releaseProbe = new CountDownLatch(1);
+        CountDownLatch closeReturned = new CountDownLatch(1);
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        fakePlane.blockNextProbe(probeEntered, releaseProbe);
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(testOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        128,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true,
+                        8,
+                        1 << 20,
+                        false,
+                        coordinator,
+                        27);
+        state.setCurrentNamespace("window-close-drain");
+
+        Runnable task = state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2"));
+        assertNotNull(task);
+        Thread worker = new Thread(task, "native-prefetch-close-drain");
+        Thread closer =
+                new Thread(
+                        () -> {
+                            state.close();
+                            closeReturned.countDown();
+                        },
+                        "native-state-close");
+        try {
+            worker.start();
+            assertTrue(probeEntered.await(5, TimeUnit.SECONDS));
+            closer.start();
+            assertFalse(closeReturned.await(200, TimeUnit.MILLISECONDS));
+            assertEquals(0, fakePlane.closeCalls);
+        } finally {
+            releaseProbe.countDown();
+            worker.join(5000);
+            closer.join(5000);
+        }
+        assertFalse(worker.isAlive());
+        assertFalse(closer.isAlive());
+        assertEquals(0, closeReturned.getCount());
+
+        coordinator.close();
+        assertEquals(1, fakePlane.closeCalls);
+    }
 
     @Test
     @SuppressWarnings("unchecked")
@@ -477,6 +563,90 @@ class NativePreparedValueStateTest {
         assertEquals(99, state.value());
         currentKey.set("k3");
         assertEquals(33, state.value());
+
+        state.close();
+        coordinator.close();
+        assertEquals(1, fakePlane.closeCalls);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAdaptiveBypassSkipsZeroUsefulNativeProbeButKeepsRocksDbPath() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(null);
+        doAnswer(
+                        invocation -> {
+                            byte[] serialized =
+                                    KvStateSerializer.serializeKeyAndNamespace(
+                                            invocation.getArgument(0),
+                                            StringSerializer.INSTANCE,
+                                            invocation.getArgument(1),
+                                            StringSerializer.INSTANCE);
+                            ((PositionedDataOutputView) invocation.getArgument(4))
+                                    .write(serialized);
+                            return null;
+                        })
+                .when(reader)
+                .serializeBatchKeyAndNamespace(any(), any(), any(), any(), any());
+        when(reader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
+                .thenAnswer(
+                        invocation ->
+                                Arrays.asList(
+                                        KvStateSerializer.serializeValue(
+                                                11, IntSerializer.INSTANCE),
+                                        KvStateSerializer.serializeValue(
+                                                22, IntSerializer.INSTANCE)));
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(compactSelectedOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true,
+                        8,
+                        1 << 20,
+                        false,
+                        coordinator,
+                        29);
+        state.setCurrentNamespace("window-adaptive-bypass");
+        AdaptiveNativeProbeController controller =
+                new AdaptiveNativeProbeController(2, 1, 1, 16, 1, 0.01);
+        state.setAdaptiveNativeProbeControllerForTesting(controller);
+
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
+        assertEquals(AdaptiveNativeProbeController.Mode.BYPASS, controller.mode());
+        assertEquals(1, coordinator.probeCalls());
+        assertEquals(1, coordinator.fillCalls());
+
+        state.buildAsyncPrefetchTask(Arrays.asList("k3", "k4")).run();
+        assertEquals(1, coordinator.probeCalls());
+        assertEquals(1, coordinator.fillCalls());
+        assertEquals(1, controller.bypassedBatches());
+        assertEquals(2, controller.bypassedKeys());
+        assertEquals(2, state.getNativeMailboxCompactBatchesForTesting());
+        verify(reader, times(2)).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
 
         state.close();
         coordinator.close();
@@ -1327,6 +1497,8 @@ class NativePreparedValueStateTest {
         private boolean failNextProbe;
         private boolean corruptNextProbeSlice;
         private boolean internalErrorNextFill;
+        private CountDownLatch probeEntered;
+        private CountDownLatch releaseProbe;
         private int compactCalls;
         private int closeCalls;
 
@@ -1415,6 +1587,21 @@ class NativePreparedValueStateTest {
         @Override
         public int probeBatch(
                 SerializedKeyBatch<?, ?> keys, ByteBuffer valueOutput, ByteBuffer probeResults) {
+            CountDownLatch entered = probeEntered;
+            CountDownLatch release = releaseProbe;
+            probeEntered = null;
+            releaseProbe = null;
+            if (entered != null) {
+                entered.countDown();
+                try {
+                    if (!release.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Timed out waiting to release native probe");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("Interrupted while blocking native probe", interrupted);
+                }
+            }
             if (failNextProbe) {
                 failNextProbe = false;
                 throw new IllegalStateException("injected probe failure");
@@ -1507,6 +1694,11 @@ class NativePreparedValueStateTest {
             values.put(
                     new NativeKey(stateId, generation, Arrays.copyOf(key, key.length)),
                     new StoredValue(generation, false, Arrays.copyOf(value, value.length)));
+        }
+
+        private void blockNextProbe(CountDownLatch entered, CountDownLatch release) {
+            this.probeEntered = entered;
+            this.releaseProbe = release;
         }
 
         private void preloadNegative(int stateId, long generation, byte[] key) {
