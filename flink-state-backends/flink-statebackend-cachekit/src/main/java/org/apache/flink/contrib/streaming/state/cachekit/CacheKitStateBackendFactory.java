@@ -320,6 +320,16 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         .withDescription(
                                                         "Bypassed lookup opportunities before reopening a full observation window for workload phase changes.");
 
+        public static final ConfigOption<Integer>
+                        NATIVE_MAP_SNAPSHOT_ADAPTIVE_EARLY_ZERO_PROBES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.map-snapshot.adaptive-bypass.early-zero-probes")
+                                        .intType()
+                                        .defaultValue(0)
+                                        .withDescription(
+                                                        "Optional early stop: bypass native MapSnapshot when the first N probes in an observation window contain zero useful EMPTY/SINGLE hits. "
+                                                                        + "Zero disables this shortcut; any useful hit keeps the full window active.");
+
         public static final ConfigOption<Boolean> NATIVE_MAILBOX_BATCH_ENABLED =
                         ConfigOptions.key("state.backend.cachekit.native.mailbox-batch.enabled")
                                         .booleanType()
@@ -582,7 +592,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_BYPASS_ENABLED),
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_WINDOW_PROBES),
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_MIN_USEFUL_HIT_RATE),
-                                config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_RESAMPLE_INTERVAL_PROBES));
+                                config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_RESAMPLE_INTERVAL_PROBES),
+                                config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_EARLY_ZERO_PROBES));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

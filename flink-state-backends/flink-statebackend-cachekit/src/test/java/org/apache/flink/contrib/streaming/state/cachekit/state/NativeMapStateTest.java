@@ -367,6 +367,167 @@ class NativeMapStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testAdaptiveSnapshotEarlyZeroBypassTriggersAfterExactly512Misses()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        configureSerializers(delegate);
+        when(delegate.entries()).thenReturn(Collections.emptyList());
+
+        OneEntryPlane plane = new OneEntryPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(snapshotOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createAdaptiveSnapshotState(
+                        delegate, currentKey, coordinator, 8192, 0.02, 10000, 512);
+
+        assertEquals(0, consume(state.entries()));
+        for (int i = 1; i < 512; i++) {
+            state.put("mutation-" + i, i);
+            assertEquals(0, consume(state.entries()));
+        }
+        assertEquals(512, state.getNativeSnapshotProbesForTesting());
+        assertFalse(state.isNativeSnapshotAdaptiveBypassingForTesting());
+
+        state.put("mutation-512", 512);
+        assertEquals(0, consume(state.entries()));
+
+        verify(delegate, times(513)).entries();
+        assertEquals(512, state.getNativeSnapshotProbesForTesting());
+        assertEquals(512, state.getNativeSnapshotFillsForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveEvaluatedWindowsForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveBypassTransitionsForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveEarlyZeroTransitionsForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveBypassedProbesForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveBypassedFillsForTesting());
+        assertTrue(state.isNativeSnapshotAdaptiveBypassingForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAdaptiveSnapshotUsefulHitBefore512ContinuesFullWindow() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        configureSerializers(delegate);
+        when(delegate.entries()).thenReturn(Collections.emptyList());
+
+        OneEntryPlane plane = new OneEntryPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(snapshotOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createAdaptiveSnapshotState(
+                        delegate, currentKey, coordinator, 8192, 0.02, 10000, 512);
+
+        assertEquals(0, consume(state.entries()));
+        for (int i = 1; i <= 512; i++) {
+            assertEquals(0, consume(state.entries()));
+        }
+
+        verify(delegate, times(1)).entries();
+        assertEquals(513, state.getNativeSnapshotProbesForTesting());
+        assertEquals(512, state.getNativeSnapshotNegativeHitsForTesting());
+        assertEquals(0, state.getNativeSnapshotAdaptiveEvaluatedWindowsForTesting());
+        assertEquals(0, state.getNativeSnapshotAdaptiveBypassTransitionsForTesting());
+        assertEquals(0, state.getNativeSnapshotAdaptiveEarlyZeroTransitionsForTesting());
+        assertFalse(state.isNativeSnapshotAdaptiveBypassingForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAdaptiveSnapshotUsefulHitOnProbe512PreventsEarlyBypass() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        configureSerializers(delegate);
+        when(delegate.entries()).thenReturn(Collections.emptyList());
+
+        OneEntryPlane plane = new OneEntryPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(snapshotOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createAdaptiveSnapshotState(
+                        delegate, currentKey, coordinator, 8192, 0.02, 10000, 512);
+
+        assertEquals(0, consume(state.entries()));
+        for (int i = 1; i < 511; i++) {
+            state.put("mutation-" + i, i);
+            assertEquals(0, consume(state.entries()));
+        }
+        assertEquals(511, state.getNativeSnapshotProbesForTesting());
+
+        assertEquals(0, consume(state.entries()));
+        assertEquals(512, state.getNativeSnapshotProbesForTesting());
+        assertEquals(1, state.getNativeSnapshotNegativeHitsForTesting());
+
+        state.put("mutation-511", 511);
+        assertEquals(0, consume(state.entries()));
+        assertEquals(513, state.getNativeSnapshotProbesForTesting());
+        assertEquals(0, state.getNativeSnapshotAdaptiveEarlyZeroTransitionsForTesting());
+        assertFalse(state.isNativeSnapshotAdaptiveBypassingForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAdaptiveSnapshotColdResampleRunsFullWindowAndRecovers() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        configureSerializers(delegate);
+        when(delegate.entries()).thenReturn(Collections.emptyList());
+
+        OneEntryPlane plane = new OneEntryPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(snapshotOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createAdaptiveSnapshotState(delegate, currentKey, coordinator, 8, 0.5, 2, 2);
+
+        assertEquals(0, consume(state.entries()));
+        state.put("initial-miss-2", 2);
+        assertEquals(0, consume(state.entries()));
+        state.put("enter-bypass", 3);
+        assertEquals(0, consume(state.entries()));
+        assertTrue(state.isNativeSnapshotAdaptiveBypassingForTesting());
+
+        assertEquals(0, consume(state.entries()));
+        state.put("recovery-miss-1", 4);
+        assertEquals(0, consume(state.entries()));
+        assertTrue(state.isNativeSnapshotAdaptiveRecoveryWindowForTesting());
+        state.put("recovery-miss-2", 5);
+        assertEquals(0, consume(state.entries()));
+        assertTrue(state.isNativeSnapshotAdaptiveRecoveryWindowForTesting());
+
+        for (int i = 0; i < 6; i++) {
+            assertEquals(0, consume(state.entries()));
+        }
+        assertEquals(10, state.getNativeSnapshotProbesForTesting());
+        assertTrue(state.isNativeSnapshotAdaptiveRecoveryWindowForTesting());
+
+        assertEquals(0, consume(state.entries()));
+        assertEquals(11, state.getNativeSnapshotProbesForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveBypassTransitionsForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveEarlyZeroTransitionsForTesting());
+        assertEquals(1, state.getNativeSnapshotAdaptiveTrialTransitionsForTesting());
+        assertEquals(2, state.getNativeSnapshotAdaptiveEvaluatedWindowsForTesting());
+        assertFalse(state.isNativeSnapshotAdaptiveRecoveryWindowForTesting());
+        assertFalse(state.isNativeSnapshotAdaptiveBypassingForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testAdaptiveDisabledAcceptsZeroedFieldsFromOlderSerializedOptions() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
         InternalMapState<String, VoidNamespace, String, Integer> delegate =
@@ -502,6 +663,25 @@ class NativeMapStateTest {
                     int windowProbes,
                     double minUsefulHitRate,
                     int resampleIntervalProbes) {
+        return createAdaptiveSnapshotState(
+                delegate,
+                currentKey,
+                coordinator,
+                windowProbes,
+                minUsefulHitRate,
+                resampleIntervalProbes,
+                0);
+    }
+
+    private static CachedInternalMapState<String, VoidNamespace, String, Integer>
+            createAdaptiveSnapshotState(
+                    InternalMapState<String, VoidNamespace, String, Integer> delegate,
+                    AtomicReference<String> currentKey,
+                    NativeRequestPlaneCoordinator coordinator,
+                    int windowProbes,
+                    double minUsefulHitRate,
+                    int resampleIntervalProbes,
+                    int earlyZeroProbes) {
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =
                 new CachedInternalMapState<>(
                         delegate,
@@ -529,7 +709,8 @@ class NativeMapStateTest {
                         true,
                         windowProbes,
                         minUsefulHitRate,
-                        resampleIntervalProbes);
+                        resampleIntervalProbes,
+                        earlyZeroProbes);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
         return state;
     }

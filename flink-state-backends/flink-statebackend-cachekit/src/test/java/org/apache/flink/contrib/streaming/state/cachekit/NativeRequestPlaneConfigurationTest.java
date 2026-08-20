@@ -49,6 +49,7 @@ class NativeRequestPlaneConfigurationTest {
         assertEquals(8192, options.mapSnapshotAdaptiveWindowProbes());
         assertEquals(0.02, options.mapSnapshotAdaptiveMinUsefulHitRate());
         assertEquals(262144, options.mapSnapshotAdaptiveResampleIntervalProbes());
+        assertEquals(0, options.mapSnapshotAdaptiveEarlyZeroProbes());
         assertFalse(options.mailboxBatchEnabled());
         assertFalse(options.prefetchEnabled());
         assertFalse(options.preaggEnabled());
@@ -80,6 +81,9 @@ class NativeRequestPlaneConfigurationTest {
         config.set(
                 CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_RESAMPLE_INTERVAL_PROBES,
                 5678);
+        config.set(
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_EARLY_ZERO_PROBES,
+                321);
         config.set(CacheKitStateBackendFactory.NATIVE_PREFETCH_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAILBOX_BATCH_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_LOCAL_PREAGG_ENABLED, true);
@@ -105,6 +109,7 @@ class NativeRequestPlaneConfigurationTest {
         assertEquals(1234, options.mapSnapshotAdaptiveWindowProbes());
         assertEquals(0.125, options.mapSnapshotAdaptiveMinUsefulHitRate());
         assertEquals(5678, options.mapSnapshotAdaptiveResampleIntervalProbes());
+        assertEquals(321, options.mapSnapshotAdaptiveEarlyZeroProbes());
         assertTrue(options.mailboxBatchEnabled());
         assertTrue(options.prefetchEnabled());
         assertTrue(options.preaggEnabled());
@@ -232,6 +237,44 @@ class NativeRequestPlaneConfigurationTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalidResample));
+
+        Configuration invalidEarlyZero = new Configuration();
+        invalidEarlyZero.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        invalidEarlyZero.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
+        invalidEarlyZero.set(
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_EARLY_ZERO_PROBES,
+                1);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalidEarlyZero));
+
+        Configuration earlyZeroExceedsWindow = new Configuration();
+        earlyZeroExceedsWindow.set(
+                CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        earlyZeroExceedsWindow.set(
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
+        earlyZeroExceedsWindow.set(
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_WINDOW_PROBES, 8);
+        earlyZeroExceedsWindow.set(
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_EARLY_ZERO_PROBES,
+                9);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(earlyZeroExceedsWindow));
+
+        Configuration earlyZeroWithoutAdaptive = new Configuration();
+        earlyZeroWithoutAdaptive.set(
+                CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        earlyZeroWithoutAdaptive.set(
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
+        earlyZeroWithoutAdaptive.set(
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_EARLY_ZERO_PROBES,
+                512);
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        CacheKitStateBackendFactory.nativeRequestPlaneOptions(
+                                earlyZeroWithoutAdaptive));
     }
 
     @Test

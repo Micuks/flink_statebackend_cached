@@ -60,6 +60,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final int mapSnapshotAdaptiveWindowProbes;
     private final double mapSnapshotAdaptiveMinUsefulHitRate;
     private final int mapSnapshotAdaptiveResampleIntervalProbes;
+    private final int mapSnapshotAdaptiveEarlyZeroProbes;
 
     public NativeRequestPlaneOptions(
             boolean enabled,
@@ -456,6 +457,60 @@ public final class NativeRequestPlaneOptions implements Serializable {
             int mapSnapshotAdaptiveWindowProbes,
             double mapSnapshotAdaptiveMinUsefulHitRate,
             int mapSnapshotAdaptiveResampleIntervalProbes) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                aarch64Only,
+                writeThroughMutations,
+                valueCacheEnabled,
+                mapCacheEnabled,
+                mapSnapshotEnabled,
+                prefetchEnabled,
+                mailboxBatchEnabled,
+                preaggEnabled,
+                compactSelectedProbeEnabled,
+                mapSnapshotAdaptiveBypassEnabled,
+                mapSnapshotAdaptiveWindowProbes,
+                mapSnapshotAdaptiveMinUsefulHitRate,
+                mapSnapshotAdaptiveResampleIntervalProbes,
+                0);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only,
+            boolean writeThroughMutations,
+            boolean valueCacheEnabled,
+            boolean mapCacheEnabled,
+            boolean mapSnapshotEnabled,
+            boolean prefetchEnabled,
+            boolean mailboxBatchEnabled,
+            boolean preaggEnabled,
+            boolean compactSelectedProbeEnabled,
+            boolean mapSnapshotAdaptiveBypassEnabled,
+            int mapSnapshotAdaptiveWindowProbes,
+            double mapSnapshotAdaptiveMinUsefulHitRate,
+            int mapSnapshotAdaptiveResampleIntervalProbes,
+            int mapSnapshotAdaptiveEarlyZeroProbes) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
         this.kernel = normalizeKernel(kernel);
@@ -538,11 +593,25 @@ public final class NativeRequestPlaneOptions implements Serializable {
             throw new IllegalArgumentException(
                     "Native MapSnapshot adaptive window must be at least 2, resample must be positive, and useful-hit rate must be in [0, 1].");
         }
+        if (mapSnapshotAdaptiveEarlyZeroProbes < 0
+                || (mapSnapshotAdaptiveEarlyZeroProbes > 0
+                        && (mapSnapshotAdaptiveEarlyZeroProbes < 2
+                                || mapSnapshotAdaptiveEarlyZeroProbes
+                                        > mapSnapshotAdaptiveWindowProbes))) {
+            throw new IllegalArgumentException(
+                    "Native MapSnapshot adaptive early-zero probes must be 0 (disabled) or in [2, window-probes].");
+        }
+        if (mapSnapshotAdaptiveEarlyZeroProbes > 0
+                && !mapSnapshotAdaptiveBypassEnabled) {
+            throw new IllegalArgumentException(
+                    "Native MapSnapshot adaptive early-zero probes require adaptive bypass to be enabled.");
+        }
         this.mapSnapshotAdaptiveBypassEnabled = mapSnapshotAdaptiveBypassEnabled;
         this.mapSnapshotAdaptiveWindowProbes = mapSnapshotAdaptiveWindowProbes;
         this.mapSnapshotAdaptiveMinUsefulHitRate = mapSnapshotAdaptiveMinUsefulHitRate;
         this.mapSnapshotAdaptiveResampleIntervalProbes =
                 mapSnapshotAdaptiveResampleIntervalProbes;
+        this.mapSnapshotAdaptiveEarlyZeroProbes = mapSnapshotAdaptiveEarlyZeroProbes;
     }
 
     public static NativeRequestPlaneOptions disabled() {
@@ -655,6 +724,10 @@ public final class NativeRequestPlaneOptions implements Serializable {
 
     public int mapSnapshotAdaptiveResampleIntervalProbes() {
         return mapSnapshotAdaptiveResampleIntervalProbes;
+    }
+
+    public int mapSnapshotAdaptiveEarlyZeroProbes() {
+        return mapSnapshotAdaptiveEarlyZeroProbes;
     }
 
     public boolean prefetchEnabled() {

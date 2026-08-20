@@ -543,7 +543,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                                     ? 262144
                                     : nativeRequestPlaneCoordinator
                                             .options()
-                                            .mapSnapshotAdaptiveResampleIntervalProbes());
+                                            .mapSnapshotAdaptiveResampleIntervalProbes(),
+                            nativeRequestPlaneCoordinator == null
+                                    ? 0
+                                    : nativeRequestPlaneCoordinator
+                                            .options()
+                                            .mapSnapshotAdaptiveEarlyZeroProbes());
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -743,7 +748,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                                     ? 262144
                                     : nativeRequestPlaneCoordinator
                                             .options()
-                                            .mapSnapshotAdaptiveResampleIntervalProbes());
+                                            .mapSnapshotAdaptiveResampleIntervalProbes(),
+                            nativeRequestPlaneCoordinator == null
+                                    ? 0
+                                    : nativeRequestPlaneCoordinator
+                                            .options()
+                                            .mapSnapshotAdaptiveEarlyZeroProbes());
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
