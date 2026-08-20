@@ -14,6 +14,10 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
+import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.api.common.typeutils.base.MapSerializer;
+import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.runtime.state.VoidNamespace;
@@ -27,11 +31,13 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -763,5 +769,284 @@ class CachedInternalMapStateTest {
         assertEquals(2, metrics.probes());
         assertEquals(1, metrics.hits());
         assertEquals(1, metrics.singleShortCircuits());
+    }
+
+    @Test
+    void testSmallSnapshotShortCircuitPreservesCapturedMutationContext() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Integer> entries = new LinkedHashMap<>();
+        entries.put("uk1", 1);
+        entries.put("uk2", 2);
+        when(delegate.entries()).thenReturn(entries.entrySet());
+        when(delegate.get("uk1")).thenReturn(1);
+        when(delegate.get("uk2")).thenReturn(2);
+        doAnswer(
+                        invocation -> {
+                            assertEquals("k1", currentKey.get());
+                            return null;
+                        })
+                .when(delegate)
+                .put("uk1", 10);
+        doAnswer(
+                        invocation -> {
+                            assertEquals("k1", currentKey.get());
+                            return null;
+                        })
+                .when(delegate)
+                .remove("uk2");
+        MapSnapshotCacheMetrics metrics = MapSnapshotCacheMetrics.forTesting();
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createSmallSnapshotState(delegate, currentKey, metrics);
+
+        for (Map.Entry<String, Integer> ignored : state.entries()) {
+            // Complete traversal publishes the bounded two-entry snapshot.
+        }
+        assertEquals(1, metrics.storesSmall());
+
+        Iterable<Map.Entry<String, Integer>> snapshotEntries = state.entries();
+        Iterator<Map.Entry<String, Integer>> iterator = snapshotEntries.iterator();
+        currentKey.set("later-key");
+        Map.Entry<String, Integer> first = iterator.next();
+        assertEquals(1, first.setValue(10));
+        assertEquals("later-key", currentKey.get());
+        assertEquals(10, snapshotEntries.iterator().next().getValue());
+        iterator.next();
+        iterator.remove();
+        assertEquals("later-key", currentKey.get());
+        assertEquals(1, consumeEntries(snapshotEntries));
+
+        verify(delegate, times(1)).entries();
+        verify(delegate, times(1)).put("uk1", 10);
+        verify(delegate, times(1)).remove("uk2");
+        assertEquals(1, metrics.smallShortCircuits());
+    }
+
+    @Test
+    void testSmallSnapshotKeysIteratorForwardsRemove() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Integer> entries = new LinkedHashMap<>();
+        entries.put("uk1", 1);
+        entries.put("uk2", 2);
+        when(delegate.entries()).thenReturn(entries.entrySet());
+        when(delegate.get("uk1")).thenReturn(1);
+        when(delegate.get("uk2")).thenReturn(2);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createSmallSnapshotState(
+                        delegate, currentKey, MapSnapshotCacheMetrics.forTesting());
+
+        for (Map.Entry<String, Integer> ignored : state.entries()) {
+            // Backfill.
+        }
+        Iterator<String> keys = state.keys().iterator();
+        assertEquals("uk1", keys.next());
+        keys.remove();
+
+        verify(delegate, times(1)).remove("uk1");
+        verify(delegate, times(1)).entries();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testSnapshotDoesNotExposeMutableInternalUserKey() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, byte[], Integer> delegate =
+                mock(InternalMapState.class);
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                BytePrimitiveArraySerializer.INSTANCE, IntSerializer.INSTANCE));
+        byte[] original = new byte[] {1, 2};
+        Map<byte[], Integer> entries = new LinkedHashMap<>();
+        entries.put(original, 7);
+        when(delegate.entries()).thenReturn(entries.entrySet());
+        when(delegate.get(any(byte[].class))).thenReturn(7);
+        CachedInternalMapState<String, VoidNamespace, byte[], Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        100,
+                        MapSnapshotCacheMetrics.forTesting(),
+                        null,
+                        0,
+                        false,
+                        0,
+                        false,
+                        2);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        for (Map.Entry<byte[], Integer> ignored : state.entries()) {
+            // Backfill a copied SINGLE key.
+        }
+        Iterator<Map.Entry<byte[], Integer>> iterator = state.entries().iterator();
+        Map.Entry<byte[], Integer> entry = iterator.next();
+        entry.getKey()[0] = 99;
+        iterator.remove();
+
+        verify(delegate)
+                .remove(
+                        org.mockito.ArgumentMatchers.argThat(
+                                value -> {
+                                    assertArrayEquals(new byte[] {1, 2}, value);
+                                    return true;
+                                }));
+    }
+
+    @Test
+    void testDelegateKeysRemoveInvalidatesFilledCaches() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Integer> entries = new LinkedHashMap<>();
+        entries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(entries.entrySet());
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        true,
+                        0);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Iterator<String> keys = state.keys().iterator();
+        assertEquals("uk1", keys.next());
+        keys.remove();
+
+        assertNull(state.get("uk1"));
+        assertFalse(state.contains("uk1"));
+        verify(delegate, times(0)).get("uk1");
+        verify(delegate, times(0)).contains("uk1");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testDelegateKeysIteratorCapturesMutableStateKey() throws Exception {
+        MutableKey originalKey = new MutableKey(1);
+        AtomicReference<MutableKey> currentKey = new AtomicReference<>(originalKey);
+        InternalMapState<MutableKey, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        TypeSerializer<MutableKey> keySerializer = mock(TypeSerializer.class);
+        when(keySerializer.copy(any(MutableKey.class)))
+                .thenAnswer(
+                        invocation -> {
+                            MutableKey source = invocation.getArgument(0);
+                            return new MutableKey(source.value);
+                        });
+        when(delegate.getKeySerializer()).thenReturn(keySerializer);
+        Map<String, Integer> entries = new LinkedHashMap<>();
+        entries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(entries.entrySet());
+        CachedInternalMapState<MutableKey, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.OBJECT,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        true,
+                        0);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Iterator<String> keys = state.keys().iterator();
+        assertEquals("uk1", keys.next());
+        originalKey.value = 2;
+        keys.remove();
+
+        currentKey.set(new MutableKey(1));
+        assertFalse(state.contains("uk1"));
+        verify(delegate, times(0)).contains("uk1");
+    }
+
+    private static int consumeEntries(Iterable<Map.Entry<String, Integer>> entries) {
+        int count = 0;
+        for (Map.Entry<String, Integer> ignored : entries) {
+            count++;
+        }
+        return count;
+    }
+
+    private static final class MutableKey {
+        private int value;
+
+        private MutableKey(int value) {
+            this.value = value;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof MutableKey && value == ((MutableKey) other).value;
+        }
+
+        @Override
+        public int hashCode() {
+            return value;
+        }
+    }
+
+    private static CachedInternalMapState<String, VoidNamespace, String, Integer>
+            createSmallSnapshotState(
+                    InternalMapState<String, VoidNamespace, String, Integer> delegate,
+                    AtomicReference<String> currentKey,
+                    MapSnapshotCacheMetrics metrics) {
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        100,
+                        metrics,
+                        null,
+                        0,
+                        false,
+                        0,
+                        false,
+                        3);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        return state;
     }
 }

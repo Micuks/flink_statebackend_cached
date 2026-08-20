@@ -196,6 +196,36 @@ class NativeMapStateTest {
         coordinator.close();
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void testMutationMakesOlderNativeEmptySnapshotMissInsteadOfFalseEmpty() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        configureSerializers(delegate);
+        when(delegate.entries())
+                .thenReturn(
+                        Collections.emptyList(),
+                        Collections.singletonList(
+                                new AbstractMap.SimpleImmutableEntry<>("uk1", 7)));
+
+        OneEntryPlane plane = new OneEntryPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(snapshotOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createSnapshotState(delegate, currentKey, coordinator);
+
+        assertEquals(0, consume(state.entries()));
+        state.put("uk1", 7);
+        assertEquals(1, consume(state.entries()));
+
+        verify(delegate, times(2)).entries();
+        assertEquals(0, state.getNativeSnapshotNegativeHitsForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
     private static void configureSerializers(
             InternalMapState<String, VoidNamespace, String, Integer> delegate) {
         when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);

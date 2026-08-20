@@ -154,6 +154,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         + "Caches (Key, Namespace) -> {EMPTY | SINGLE(UserKey)} to short-circuit "
                                                         + "entries()/iterator() calls. Set 0 to disable.");
 
+        public static final ConfigOption<Integer> MAP_SNAPSHOT_SMALL_MAX_ENTRIES = ConfigOptions
+                        .key("state.backend.cachekit.map.snapshot.small.max-entries")
+                        .intType()
+                        .defaultValue(1)
+                        .withDescription(
+                                        "Largest completely observed small MapState admitted to the Java snapshot cache. "
+                                                        + "1 preserves EMPTY/SINGLE behavior; 2-16 enables bounded point-get "
+                                                        + "replay in original iteration order. Native snapshots remain EMPTY/SINGLE.");
+
         public static final ConfigOption<Boolean> DIAGNOSTICS_ENABLED = ConfigOptions
                         .key("state.backend.cachekit.diagnostics.enabled")
                         .booleanType()
@@ -426,6 +435,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final int mapHitRateWindow = config.get(MAP_HIT_RATE_WINDOW);
                 final boolean mapIterationCacheFillEnabled = config.get(MAP_ITERATION_CACHE_FILL_ENABLED);
                 final int mapSnapshotMaxEntries = Math.max(0, config.get(MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
+		final int mapSnapshotSmallMaxEntries =
+				Math.max(1, Math.min(16, config.get(MAP_SNAPSHOT_SMALL_MAX_ENTRIES)));
 		final boolean diagnosticsEnabled = config.get(DIAGNOSTICS_ENABLED);
 		final NativeRequestPlaneOptions nativeRequestPlaneOptions =
 				nativeRequestPlaneOptions(config);
@@ -437,7 +448,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 			final boolean priorityQueueOptEnabled = config.get(PRIORITY_QUEUE_OPT_ENABLED);
 
 			System.out.printf(
-				"CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, diagnostics=%s, delegate=%s, listStateCow=%s, listStateRyw=%s, clearedKeysCap=%d, priorityQueueOpt=%s%n",
+				"CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, mapSnapshotSmallMax=%d, diagnostics=%s, delegate=%s, listStateCow=%s, listStateRyw=%s, clearedKeysCap=%d, priorityQueueOpt=%s%n",
                                 maxEntries,
                                 policyType,
                                 lruOverflow,
@@ -456,6 +467,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 							mapHitRateWindow,
 							mapIterationCacheFillEnabled,
 							mapSnapshotMaxEntries,
+							mapSnapshotSmallMaxEntries,
 							diagnosticsEnabled,
 							delegateClass,
 							listStateCowEnabled,
@@ -501,6 +513,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 								mapHitRateWindow,
 								mapIterationCacheFillEnabled,
 								mapSnapshotMaxEntries,
+								mapSnapshotSmallMaxEntries,
 								listStateCowEnabled,
 								listStateRywEnabled,
 							clearedKeysCapacity,

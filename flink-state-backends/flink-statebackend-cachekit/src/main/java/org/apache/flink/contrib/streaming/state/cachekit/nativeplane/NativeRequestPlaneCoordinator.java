@@ -647,6 +647,24 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             preparedKeys.appendSerialized(stateId, probeGeneration, directKeyWriter);
         }
 
+        /**
+         * Prepares one exact-generation key even when value-cache mutations use latest-key probes.
+         *
+         * <p>MapSnapshot invalidation relies on a generation mismatch producing MISS. It must not
+         * observe an older EMPTY/SINGLE entry through the latest-generation sentinel.
+         */
+        public void prepareExact(
+                int stateId,
+                long generation,
+                SerializedKeyBatch.DirectKeyWriter directKeyWriter)
+                throws IOException {
+            requireLeased();
+            preparedKeys.clear();
+            compactedEntryCount = 0;
+            preparedFillGeneration = generation;
+            preparedKeys.appendSerialized(stateId, generation, directKeyWriter);
+        }
+
         /** Prepares an indexed exact-key batch without materializing per-key heap arrays. */
         public void prepareLatestDirect(
                 int stateId,

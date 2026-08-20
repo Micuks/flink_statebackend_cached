@@ -21,7 +21,7 @@ import org.apache.flink.metrics.MetricGroup;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Task-level diagnostics for the MapState EMPTY/SINGLE snapshot cache.
+ * Task-level diagnostics for the MapState EMPTY/SINGLE/SMALL snapshot cache.
  *
  * <p>One instance is shared by all MapState wrappers in a keyed backend so that the REST metrics
  * remain unique within the task metric group. Diagnostics are intentionally opt-in because the
@@ -37,8 +37,10 @@ public final class MapSnapshotCacheMetrics {
     private final AtomicLong misses = new AtomicLong();
     private final AtomicLong emptyShortCircuits = new AtomicLong();
     private final AtomicLong singleShortCircuits = new AtomicLong();
+    private final AtomicLong smallShortCircuits = new AtomicLong();
     private final AtomicLong storesEmpty = new AtomicLong();
     private final AtomicLong storesSingle = new AtomicLong();
+    private final AtomicLong storesSmall = new AtomicLong();
     private final AtomicLong multiEntrySkips = new AtomicLong();
     private final AtomicLong invalidations = new AtomicLong();
     private final AtomicLong staleInvalidations = new AtomicLong();
@@ -66,8 +68,13 @@ public final class MapSnapshotCacheMetrics {
                 diagnostics,
                 "map_snapshot_cache_single_short_circuits",
                 metrics.singleShortCircuits);
+        registerGauge(
+                diagnostics,
+                "map_snapshot_cache_small_short_circuits",
+                metrics.smallShortCircuits);
         registerGauge(diagnostics, "map_snapshot_cache_stores_empty", metrics.storesEmpty);
         registerGauge(diagnostics, "map_snapshot_cache_stores_single", metrics.storesSingle);
+        registerGauge(diagnostics, "map_snapshot_cache_stores_small", metrics.storesSmall);
         registerGauge(diagnostics, "map_snapshot_cache_multi_entry_skips", metrics.multiEntrySkips);
         registerGauge(diagnostics, "map_snapshot_cache_invalidations", metrics.invalidations);
         registerGauge(
@@ -106,12 +113,20 @@ public final class MapSnapshotCacheMetrics {
         increment(singleShortCircuits);
     }
 
+    void recordSmallShortCircuit() {
+        increment(smallShortCircuits);
+    }
+
     void recordStoreEmpty() {
         increment(storesEmpty);
     }
 
     void recordStoreSingle() {
         increment(storesSingle);
+    }
+
+    void recordStoreSmall() {
+        increment(storesSmall);
     }
 
     void recordMultiEntrySkip() {
@@ -150,12 +165,20 @@ public final class MapSnapshotCacheMetrics {
         return singleShortCircuits.get();
     }
 
+    long smallShortCircuits() {
+        return smallShortCircuits.get();
+    }
+
     long storesEmpty() {
         return storesEmpty.get();
     }
 
     long storesSingle() {
         return storesSingle.get();
+    }
+
+    long storesSmall() {
+        return storesSmall.get();
     }
 
     long invalidations() {
