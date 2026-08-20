@@ -77,6 +77,9 @@ enum class FillStatus : std::uint8_t {
 
 struct Options {
     std::size_t capacity_entries = 1024;
+    // Zero preserves the legacy C++ API contract by using capacity_entries.
+    // JNI callers pass their configured batch-entry limit explicitly.
+    std::size_t max_batch_entries = 0;
     std::size_t key_arena_bytes = 1U << 20U;
     std::size_t value_arena_bytes = 4U << 20U;
     std::uint32_t min_native_batch_size = kDefaultMinNativeBatchSize;
@@ -85,6 +88,14 @@ struct Options {
     // Production callers leave this at all ones.  Tests may reduce it to force
     // fingerprint collisions and verify the mandatory exact-key comparison.
     std::uint32_t fingerprint_mask = 0xffffffffU;
+};
+
+struct GroupBatchDiagnostics {
+    std::uint64_t batches = 0;
+    std::uint64_t fingerprint_calls = 0;
+    std::uint64_t probe_steps = 0;
+    std::uint64_t exact_comparisons = 0;
+    std::uint64_t epoch_resets = 0;
 };
 
 struct KeyView {
@@ -163,8 +174,10 @@ public:
 
     std::size_t size() const noexcept;
     std::size_t capacity() const noexcept;
+    std::size_t max_batch_entries() const noexcept;
     std::uint64_t evictions() const noexcept;
     std::uint32_t min_native_batch_size() const noexcept;
+    GroupBatchDiagnostics group_batch_diagnostics() const noexcept;
     KernelKind kernel_kind() const noexcept;
     const char* kernel_name() const noexcept;
     HostFeatures host_features() const noexcept;
