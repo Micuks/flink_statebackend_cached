@@ -236,6 +236,23 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                                                 "state.backend.cachekit.bp-prefetch.head-guard-records")
                                         .intType()
                                         .defaultValue(0));
+                int asyncPrefetchSlidingDrainRecords =
+                        cfg.getInteger(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.sliding-drain-records")
+                                        .intType()
+                                        .defaultValue(0));
+                boolean unalignedCheckpoints =
+                        cfg.getBoolean(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "execution.checkpointing.unaligned.enabled")
+                                        .booleanType()
+                                        .defaultValue(false));
+                // A retained lookahead tail is not part of unaligned channel state. Until it has
+                // an explicit snapshot serializer, fail closed to the original whole-batch flush.
+                if (unalignedCheckpoints) {
+                    asyncPrefetchSlidingDrainRecords = 0;
+                }
                 @SuppressWarnings("unchecked")
                 Input<IN> headInput = (Input<IN>) mainOperator;
                 java.util.function.BooleanSupplier bp =
@@ -253,7 +270,8 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                         backpressureGated,
                         asyncPrefetchChunks,
                         asyncPrefetchChunkSize,
-                        asyncPrefetchHeadGuardRecords);
+                        asyncPrefetchHeadGuardRecords,
+                        asyncPrefetchSlidingDrainRecords);
             }
 
             boolean enabled =

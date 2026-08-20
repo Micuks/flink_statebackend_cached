@@ -119,4 +119,46 @@ class StreamRecordBatchOutputTest {
         output.append(new StreamRecord<>("tail-4"));
         assertEquals(5, output.asyncPrefetchScheduledUntilForTesting());
     }
+
+    @Test
+    void testRollingWindowDrainsHeadRefillsAndFlushesTailBeforeWatermark() throws Exception {
+        @SuppressWarnings("unchecked")
+        DataOutput<String> wrapped = mock(DataOutput.class);
+        @SuppressWarnings("unchecked")
+        Input<String> input = mock(Input.class);
+        StreamRecordBatchOutput<String> output =
+                new StreamRecordBatchOutput<>(
+                        wrapped,
+                        input,
+                        true,
+                        false,
+                        6,
+                        0,
+                        null,
+                        true,
+                        () -> false,
+                        false,
+                        true,
+                        2,
+                        2,
+                        2);
+        StreamRecord<String>[] records = new StreamRecord[8];
+        for (int i = 0; i < records.length; i++) {
+            records[i] = new StreamRecord<>("record-" + i);
+            output.emitRecord(records[i]);
+        }
+
+        // High watermark 6 drains two records twice and retains a four-record lookahead tail.
+        assertEquals(4, output.size());
+        Watermark watermark = new Watermark(456L);
+        output.emitWatermark(watermark);
+
+        InOrder order = inOrder(wrapped);
+        for (StreamRecord<String> record : records) {
+            order.verify(wrapped).emitRecord(record);
+        }
+        order.verify(wrapped).emitWatermark(watermark);
+        assertEquals(0, output.size());
+        assertFalse(output.shouldFlush());
+    }
 }
