@@ -820,6 +820,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 super.dispose();
             } finally {
                 closeWrappers();
+                LOG.info(
+                        "[CACHEKIT MAP SNAPSHOT CACHE] {}",
+                        mapSnapshotCacheMetrics.diagnosticSummary());
                 closeNativeRequestPlane();
                 shutdownFlushExecutors();
                 delegate.dispose();

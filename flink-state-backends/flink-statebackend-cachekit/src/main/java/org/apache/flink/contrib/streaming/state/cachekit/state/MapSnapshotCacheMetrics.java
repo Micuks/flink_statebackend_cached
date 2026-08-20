@@ -185,6 +185,29 @@ public final class MapSnapshotCacheMetrics {
         return invalidations.get();
     }
 
+    /** Returns one stable, machine-readable snapshot for end-of-task audit logs. */
+    public String diagnosticSummary() {
+        return String.format(
+                "enabled=%s probes=%d hits=%d misses=%d emptyShortCircuits=%d "
+                        + "singleShortCircuits=%d smallShortCircuits=%d storesEmpty=%d "
+                        + "storesSingle=%d storesSmall=%d multiEntrySkips=%d invalidations=%d "
+                        + "staleInvalidations=%d evictions=%d",
+                enabled,
+                probes.get(),
+                hits.get(),
+                misses.get(),
+                emptyShortCircuits.get(),
+                singleShortCircuits.get(),
+                smallShortCircuits.get(),
+                storesEmpty.get(),
+                storesSingle.get(),
+                storesSmall.get(),
+                multiEntrySkips.get(),
+                invalidations.get(),
+                staleInvalidations.get(),
+                evictions.get());
+    }
+
     private void increment(AtomicLong counter) {
         if (enabled) {
             counter.incrementAndGet();

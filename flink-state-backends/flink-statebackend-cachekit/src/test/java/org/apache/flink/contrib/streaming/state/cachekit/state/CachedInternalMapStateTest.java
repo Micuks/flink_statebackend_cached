@@ -804,6 +804,7 @@ class CachedInternalMapStateTest {
             // Complete traversal publishes the bounded two-entry snapshot.
         }
         assertEquals(1, metrics.storesSmall());
+        assertTrue(metrics.diagnosticSummary().contains("storesSmall=1"));
 
         Iterable<Map.Entry<String, Integer>> snapshotEntries = state.entries();
         Iterator<Map.Entry<String, Integer>> iterator = snapshotEntries.iterator();
