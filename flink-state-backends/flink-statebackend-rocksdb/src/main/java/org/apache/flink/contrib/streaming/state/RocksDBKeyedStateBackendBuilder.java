@@ -257,7 +257,7 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
 
     RocksDBKeyedStateBackendBuilder<K> setMapIteratorPackedTinyScan(
             boolean enabled, int maxEntries, int maxBytes) {
-        checkArgument(maxEntries >= 1 && maxEntries <= 8, "maxEntries must be in [1, 8]");
+        checkArgument(maxEntries >= 1 && maxEntries <= 128, "maxEntries must be in [1, 128]");
         checkArgument(
                 maxBytes >= RocksDBPackedTinyMapScan.HEADER_BYTES && maxBytes <= 64 * 1024,
                 "maxBytes must be in [16, 65536]");

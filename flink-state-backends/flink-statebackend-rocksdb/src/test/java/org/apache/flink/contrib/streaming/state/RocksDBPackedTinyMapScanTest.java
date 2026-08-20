@@ -160,6 +160,33 @@ public class RocksDBPackedTinyMapScanTest {
         assertArrayEquals(value, copyValue(result, 0));
     }
 
+    @Test
+    public void testExpandedEntryCapAccepts128AndRejectsForged129Count() throws Exception {
+        byte[][] keys = new byte[128][];
+        byte[][] values = new byte[128][];
+        for (int index = 0; index < keys.length; index++) {
+            keys[index] =
+                    concat(
+                            BINARY_PREFIX,
+                            new byte[] {(byte) (index >>> 8), (byte) index});
+            values[index] = new byte[] {0x00};
+        }
+        RocksDBPackedTinyMapScan.Result result =
+                decode(
+                        completePayload(keys, values),
+                        BINARY_PREFIX,
+                        0,
+                        128,
+                        64 * 1024);
+        assertEquals(RocksDBPackedTinyMapScan.Outcome.COMPLETE, result.outcome);
+        assertEquals(128, result.entryCount());
+        assertArrayEquals(keys[127], copyKey(result, 127));
+
+        byte[] forged = completePayload(keys, values);
+        putInt(forged, 8, 129);
+        assertMalformed(forged, BINARY_PREFIX, 0, 128, 64 * 1024);
+    }
+
     private static byte[] copyKey(RocksDBPackedTinyMapScan.Result result, int index) {
         return Arrays.copyOfRange(
                 result.encodedPage,

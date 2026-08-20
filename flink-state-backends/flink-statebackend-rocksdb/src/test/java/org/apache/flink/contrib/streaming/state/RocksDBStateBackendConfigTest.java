@@ -111,7 +111,7 @@ public class RocksDBStateBackendConfigTest {
         configuration.set(RocksDBOptions.MAP_ITERATOR_SINGLE_KEY_FETCH_ENABLED, true);
         configuration.set(RocksDBOptions.MAP_ITERATOR_PREFIX_UPPER_BOUND_ENABLED, true);
         configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_ENABLED, true);
-        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES, 8);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES, 64);
         configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES, 4096);
         EmbeddedRocksDBStateBackend configuredBackend =
                 new EmbeddedRocksDBStateBackend()
@@ -123,7 +123,7 @@ public class RocksDBStateBackendConfigTest {
             assertTrue(keyedBackend.isMapIteratorSingleKeyFetchEnabled());
             assertTrue(keyedBackend.isMapIteratorPrefixUpperBoundEnabled());
             assertTrue(keyedBackend.isMapIteratorPackedTinyScanEnabled());
-            assertEquals(8, keyedBackend.getMapIteratorPackedTinyScanMaxEntries());
+            assertEquals(64, keyedBackend.getMapIteratorPackedTinyScanMaxEntries());
             assertEquals(4096, keyedBackend.getMapIteratorPackedTinyScanMaxBytes());
             keyedBackend.setCurrentKey(1);
             MapState<Integer, Integer> state =
@@ -436,13 +436,13 @@ public class RocksDBStateBackendConfigTest {
     @Test
     public void testPackedTinyMapScanRejectsUnsupportedLimits() {
         Configuration tooManyEntries = new Configuration();
-        tooManyEntries.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES, 9);
+        tooManyEntries.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES, 129);
         try {
             new EmbeddedRocksDBStateBackend()
                     .configure(tooManyEntries, Thread.currentThread().getContextClassLoader());
             fail("Expected max-entry validation failure.");
         } catch (IllegalConfigurationException expected) {
-            assertTrue(expected.getMessage().contains("between 1 and 8"));
+            assertTrue(expected.getMessage().contains("between 1 and 128"));
         }
 
         Configuration tooManyBytes = new Configuration();

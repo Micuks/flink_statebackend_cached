@@ -288,10 +288,11 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
                 config.get(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES);
         this.mapIteratorPackedTinyScanMaxBytes =
                 config.get(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES);
-        if (mapIteratorPackedTinyScanMaxEntries < 1 || mapIteratorPackedTinyScanMaxEntries > 8) {
+        if (mapIteratorPackedTinyScanMaxEntries < 1
+                || mapIteratorPackedTinyScanMaxEntries > 128) {
             throw new IllegalConfigurationException(
                     RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES.key()
-                            + " must be between 1 and 8.");
+                            + " must be between 1 and 128.");
         }
         if (mapIteratorPackedTinyScanMaxBytes < RocksDBPackedTinyMapScan.HEADER_BYTES
                 || mapIteratorPackedTinyScanMaxBytes > 64 * 1024) {

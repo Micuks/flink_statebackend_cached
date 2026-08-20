@@ -77,7 +77,7 @@ public class RocksDBOptions {
                     .intType()
                     .defaultValue(8)
                     .withDescription(
-                            "Maximum entry count for a complete packed tiny MapState scan. Values must be between 1 and 8.");
+                            "Maximum entry count for a complete packed tiny MapState scan. Values must be between 1 and 128.");
 
     /** Maximum encoded byte size accepted from one packed tiny MapState scan. */
     @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
