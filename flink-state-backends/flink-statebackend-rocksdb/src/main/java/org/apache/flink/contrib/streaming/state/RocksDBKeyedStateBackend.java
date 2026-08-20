@@ -91,6 +91,7 @@ import java.util.Map;
 import java.util.Spliterator;
 import java.util.Spliterators;
 import java.util.concurrent.RunnableFuture;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -203,6 +204,17 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     /** The max memory size for one batch in {@link RocksDBWriteBatchWrapper}. */
     private final long writeBatchSize;
 
+    /** Whether MapState iterator entries reuse the raw key fetched for the prefix check. */
+    private final boolean mapIteratorSingleKeyFetchEnabled;
+
+    private final LongAdder mapIteratorEntriesLoaded = new LongAdder();
+    private final LongAdder mapIteratorKeyJniCalls = new LongAdder();
+    private final LongAdder mapIteratorDuplicateKeyFetchesAvoided = new LongAdder();
+    private final LongAdder mapIteratorValueJniCalls = new LongAdder();
+    private final LongAdder mapIteratorPages = new LongAdder();
+    private final LongAdder mapIteratorSeeks = new LongAdder();
+    private final LongAdder mapIteratorNativeIterators = new LongAdder();
+
     /** Map of created k/v states. */
     private final Map<String, State> createdKVStates;
 
@@ -284,7 +296,8 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             PriorityQueueSetFactory priorityQueueFactory,
             RocksDbTtlCompactFiltersManager ttlCompactFiltersManager,
             InternalKeyContext<K> keyContext,
-            @Nonnegative long writeBatchSize) {
+            @Nonnegative long writeBatchSize,
+            boolean mapIteratorSingleKeyFetchEnabled) {
 
         super(
                 kvStateRegistry,
@@ -313,6 +326,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.writeOptions = optionsContainer.getWriteOptions();
         this.readOptions = optionsContainer.getReadOptions();
         this.writeBatchSize = writeBatchSize;
+        this.mapIteratorSingleKeyFetchEnabled = mapIteratorSingleKeyFetchEnabled;
         this.db = db;
         this.rocksDBResourceGuard = rocksDBResourceGuard;
         this.checkpointSnapshotStrategy = checkpointSnapshotStrategy;
@@ -445,6 +459,21 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         // parallel.
         rocksDBResourceGuard.close();
 
+        if (mapIteratorNativeIterators.sum() > 0) {
+            LOG.info(
+                    "[CACHEKIT ROCKSDB MAP ITERATOR] singleKeyFetch={} entriesLoaded={} "
+                            + "keyJniCalls={} duplicateKeyFetchesAvoided={} valueJniCalls={} "
+                            + "pages={} seeks={} nativeIterators={}",
+                    mapIteratorSingleKeyFetchEnabled,
+                    mapIteratorEntriesLoaded.sum(),
+                    mapIteratorKeyJniCalls.sum(),
+                    mapIteratorDuplicateKeyFetchesAvoided.sum(),
+                    mapIteratorValueJniCalls.sum(),
+                    mapIteratorPages.sum(),
+                    mapIteratorSeeks.sum(),
+                    mapIteratorNativeIterators.sum());
+        }
+
         // IMPORTANT: null reference to signal potential async checkpoint workers that the db was
         // disposed, as
         // working on the disposed object results in SEGFAULTS.
@@ -493,6 +522,61 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
         IOUtils.closeQuietly(checkpointSnapshotStrategy);
         this.disposed = true;
+    }
+
+    boolean isMapIteratorSingleKeyFetchEnabled() {
+        return mapIteratorSingleKeyFetchEnabled;
+    }
+
+    void recordMapIteratorPageStats(
+            long entriesLoaded,
+            long keyJniCalls,
+            long duplicateKeyFetchesAvoided,
+            long valueJniCalls,
+            long seeks,
+            long nativeIterators) {
+        mapIteratorEntriesLoaded.add(entriesLoaded);
+        mapIteratorKeyJniCalls.add(keyJniCalls);
+        mapIteratorDuplicateKeyFetchesAvoided.add(duplicateKeyFetchesAvoided);
+        mapIteratorValueJniCalls.add(valueJniCalls);
+        mapIteratorPages.increment();
+        mapIteratorSeeks.add(seeks);
+        mapIteratorNativeIterators.add(nativeIterators);
+    }
+
+    @VisibleForTesting
+    long getMapIteratorEntriesLoaded() {
+        return mapIteratorEntriesLoaded.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorKeyJniCalls() {
+        return mapIteratorKeyJniCalls.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorDuplicateKeyFetchesAvoided() {
+        return mapIteratorDuplicateKeyFetchesAvoided.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorValueJniCalls() {
+        return mapIteratorValueJniCalls.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPages() {
+        return mapIteratorPages.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorSeeks() {
+        return mapIteratorSeeks.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorNativeIterators() {
+        return mapIteratorNativeIterators.sum();
     }
 
     @Nonnull

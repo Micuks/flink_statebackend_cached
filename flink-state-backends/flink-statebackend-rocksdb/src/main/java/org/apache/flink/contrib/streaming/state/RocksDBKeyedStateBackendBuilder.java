@@ -116,6 +116,8 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
     /** RocksDB property-based and statistics-based native metrics options. */
     private RocksDBNativeMetricOptions nativeMetricOptions;
 
+    private boolean mapIteratorSingleKeyFetchEnabled;
+
     private int numberOfTransferingThreads;
     private long writeBatchSize =
             RocksDBConfigurableOptions.WRITE_BATCH_SIZE.defaultValue().getBytes();
@@ -169,6 +171,7 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
         this.metricGroup = metricGroup;
         this.enableIncrementalCheckpointing = false;
         this.nativeMetricOptions = new RocksDBNativeMetricOptions();
+        this.mapIteratorSingleKeyFetchEnabled = false;
         this.numberOfTransferingThreads =
                 RocksDBOptions.CHECKPOINT_TRANSFER_THREAD_NUM.defaultValue();
     }
@@ -227,6 +230,12 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
     RocksDBKeyedStateBackendBuilder<K> setNativeMetricOptions(
             RocksDBNativeMetricOptions nativeMetricOptions) {
         this.nativeMetricOptions = nativeMetricOptions;
+        return this;
+    }
+
+    RocksDBKeyedStateBackendBuilder<K> setMapIteratorSingleKeyFetchEnabled(
+            boolean mapIteratorSingleKeyFetchEnabled) {
+        this.mapIteratorSingleKeyFetchEnabled = mapIteratorSingleKeyFetchEnabled;
         return this;
     }
 
@@ -435,7 +444,8 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
                 priorityQueueFactory,
                 ttlCompactFiltersManager,
                 keyContext,
-                writeBatchSize);
+                writeBatchSize,
+                mapIteratorSingleKeyFetchEnabled);
     }
 
     private RocksDBRestoreOperation getRocksDBRestoreOperation(

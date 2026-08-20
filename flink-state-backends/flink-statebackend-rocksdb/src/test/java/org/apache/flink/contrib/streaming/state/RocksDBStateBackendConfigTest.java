@@ -19,6 +19,9 @@
 package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
@@ -37,6 +40,8 @@ import org.apache.flink.runtime.query.KvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.StateBackend;
+import org.apache.flink.runtime.state.VoidNamespace;
+import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.filesystem.FsStateBackend;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueSetFactory;
 import org.apache.flink.runtime.state.memory.MemoryStateBackend;
@@ -60,6 +65,8 @@ import org.rocksdb.util.SizeUnit;
 import java.io.File;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Iterator;
+import java.util.Map;
 
 import static org.apache.flink.contrib.streaming.state.RocksDBTestUtils.createKeyedStateBackend;
 import static org.hamcrest.CoreMatchers.anyOf;
@@ -93,6 +100,158 @@ public class RocksDBStateBackendConfigTest {
 
         EmbeddedRocksDBStateBackend backend = new EmbeddedRocksDBStateBackend();
         assertEquals(defaultIncremental, backend.isIncrementalCheckpointsEnabled());
+    }
+
+    @Test
+    public void testMapIteratorSingleKeyFetchConfigurationAndPagingSemantics() throws Exception {
+        Configuration configuration = new Configuration();
+        configuration.set(RocksDBOptions.MAP_ITERATOR_SINGLE_KEY_FETCH_ENABLED, true);
+        EmbeddedRocksDBStateBackend configuredBackend =
+                new EmbeddedRocksDBStateBackend()
+                        .configure(configuration, Thread.currentThread().getContextClassLoader());
+        MockEnvironment environment = new MockEnvironmentBuilder().build();
+        RocksDBKeyedStateBackend<Integer> keyedBackend =
+                createKeyedStateBackend(configuredBackend, environment, IntSerializer.INSTANCE);
+        try {
+            assertTrue(keyedBackend.isMapIteratorSingleKeyFetchEnabled());
+            keyedBackend.setCurrentKey(1);
+            MapState<Integer, Integer> state =
+                    keyedBackend.getPartitionedState(
+                            VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "single-key-fetch", Integer.class, Integer.class));
+
+            for (int i = 0; i < 257; i++) {
+                state.put(i, i * 10);
+            }
+
+            int entries = 0;
+            Iterator<Map.Entry<Integer, Integer>> iterator = state.entries().iterator();
+            while (iterator.hasNext()) {
+                Map.Entry<Integer, Integer> entry = iterator.next();
+                entries++;
+                if (entry.getKey() == 127) {
+                    assertEquals(Integer.valueOf(1270), entry.setValue(7000));
+                } else if (entry.getKey() == 128) {
+                    iterator.remove();
+                }
+            }
+
+            assertEquals(257, entries);
+            assertEquals(Integer.valueOf(7000), state.get(127));
+            assertFalse(state.contains(128));
+            assertEquals(257, keyedBackend.getMapIteratorEntriesLoaded());
+            assertEquals(259, keyedBackend.getMapIteratorKeyJniCalls());
+            assertEquals(257, keyedBackend.getMapIteratorDuplicateKeyFetchesAvoided());
+            assertEquals(257, keyedBackend.getMapIteratorValueJniCalls());
+            assertEquals(3, keyedBackend.getMapIteratorPages());
+            assertEquals(3, keyedBackend.getMapIteratorSeeks());
+            assertEquals(3, keyedBackend.getMapIteratorNativeIterators());
+
+            int keys = 0;
+            for (Integer ignored : state.keys()) {
+                keys++;
+            }
+            int values = 0;
+            for (Integer ignored : state.values()) {
+                values++;
+            }
+            assertEquals(256, keys);
+            assertEquals(256, values);
+            assertEquals(769, keyedBackend.getMapIteratorEntriesLoaded());
+            assertEquals(773, keyedBackend.getMapIteratorKeyJniCalls());
+            assertEquals(769, keyedBackend.getMapIteratorDuplicateKeyFetchesAvoided());
+            assertEquals(769, keyedBackend.getMapIteratorValueJniCalls());
+            assertEquals(7, keyedBackend.getMapIteratorPages());
+            assertEquals(7, keyedBackend.getMapIteratorSeeks());
+            assertEquals(7, keyedBackend.getMapIteratorNativeIterators());
+
+            MapStateDescriptor<Integer, Integer> namespacedDescriptor =
+                    new MapStateDescriptor<>(
+                            "single-key-fetch-namespaced", Integer.class, Integer.class);
+            keyedBackend.setCurrentKey(1);
+            MapState<Integer, Integer> namespacedState =
+                    keyedBackend.getPartitionedState(
+                            "namespace-a", StringSerializer.INSTANCE, namespacedDescriptor);
+            namespacedState.put(1, 11);
+            keyedBackend.getPartitionedState(
+                            "namespace-b", StringSerializer.INSTANCE, namespacedDescriptor)
+                    .put(1, 12);
+            keyedBackend.setCurrentKey(2);
+            keyedBackend.getPartitionedState(
+                            "namespace-a", StringSerializer.INSTANCE, namespacedDescriptor)
+                    .put(1, 21);
+
+            keyedBackend.setCurrentKey(1);
+            assertEquals(
+                    Integer.valueOf(11),
+                    keyedBackend
+                            .getPartitionedState(
+                                    "namespace-a",
+                                    StringSerializer.INSTANCE,
+                                    namespacedDescriptor)
+                            .get(1));
+            assertEquals(
+                    Integer.valueOf(12),
+                    keyedBackend
+                            .getPartitionedState(
+                                    "namespace-b",
+                                    StringSerializer.INSTANCE,
+                                    namespacedDescriptor)
+                            .get(1));
+            keyedBackend.setCurrentKey(2);
+            assertEquals(
+                    Integer.valueOf(21),
+                    keyedBackend
+                            .getPartitionedState(
+                                    "namespace-a",
+                                    StringSerializer.INSTANCE,
+                                    namespacedDescriptor)
+                            .get(1));
+        } finally {
+            keyedBackend.dispose();
+            environment.close();
+        }
+    }
+
+    @Test
+    public void testMapIteratorSingleKeyFetchDisabledByDefault() throws Exception {
+        MockEnvironment environment = new MockEnvironmentBuilder().build();
+        RocksDBKeyedStateBackend<Integer> keyedBackend =
+                createKeyedStateBackend(
+                        new EmbeddedRocksDBStateBackend(), environment, IntSerializer.INSTANCE);
+        try {
+            assertFalse(keyedBackend.isMapIteratorSingleKeyFetchEnabled());
+            keyedBackend.setCurrentKey(1);
+            MapState<Integer, Integer> state =
+                    keyedBackend.getPartitionedState(
+                            VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "single-key-fetch-default-off",
+                                    Integer.class,
+                                    Integer.class));
+            state.put(1, 10);
+            state.put(2, 20);
+            state.put(3, 30);
+
+            int entries = 0;
+            for (Map.Entry<Integer, Integer> ignored : state.entries()) {
+                entries++;
+            }
+            assertEquals(3, entries);
+            assertEquals(3, keyedBackend.getMapIteratorEntriesLoaded());
+            assertEquals(6, keyedBackend.getMapIteratorKeyJniCalls());
+            assertEquals(0, keyedBackend.getMapIteratorDuplicateKeyFetchesAvoided());
+            assertEquals(3, keyedBackend.getMapIteratorValueJniCalls());
+            assertEquals(1, keyedBackend.getMapIteratorPages());
+            assertEquals(1, keyedBackend.getMapIteratorSeeks());
+            assertEquals(1, keyedBackend.getMapIteratorNativeIterators());
+        } finally {
+            keyedBackend.dispose();
+            environment.close();
+        }
     }
 
     @Test

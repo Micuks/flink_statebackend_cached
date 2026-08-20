@@ -35,6 +35,20 @@ import static org.apache.flink.contrib.streaming.state.PredefinedOptions.SPINNIN
 /** Configuration options for the RocksDB backend. */
 public class RocksDBOptions {
 
+    /**
+     * Fetches the raw key of each RocksDB MapState iterator position only once. This avoids a
+     * duplicate JNI byte-array copy between the prefix check and entry construction while keeping
+     * iterator ordering, paging, and mutation semantics unchanged.
+     */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Boolean> MAP_ITERATOR_SINGLE_KEY_FETCH_ENABLED =
+            ConfigOptions.key(
+                            "state.backend.cachekit.rocksdb.map-iterator.single-key-fetch.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether RocksDB MapState iterators reuse the raw key fetched for the prefix check when constructing the current entry. Disabled by default while the optimization is experimentally validated.");
+
     /** The local directory (on the TaskManager) where RocksDB puts its files. */
     @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
     public static final ConfigOption<String> LOCAL_DIRECTORIES =

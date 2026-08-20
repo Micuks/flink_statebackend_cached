@@ -635,10 +635,16 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             // use try-with-resources to ensure RocksIterator can be release even some runtime
             // exception
             // occurred in the below code block.
+            long entriesLoaded = 0;
+            long keyJniCalls = 0;
+            long duplicateKeyFetchesAvoided = 0;
+            long valueJniCalls = 0;
+            long seeks = 0;
+            long nativeIterators = 0;
             try (RocksIteratorWrapper iterator =
                     RocksDBOperationUtils.getRocksIterator(
                             db, columnFamily, backend.getReadOptions())) {
-
+                nativeIterators = 1;
                 /*
                  * The iteration starts from the prefix bytes at the first loading. After #nextEntry() is called,
                  * the currentEntry points to the last returned entry, and at that time, we will start
@@ -651,6 +657,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                 cacheIndex = 0;
 
                 iterator.seek(startBytes);
+                seeks = 1;
 
                 /*
                  * If the entry pointing to the current position is not removed, it will be the first entry in the
@@ -661,8 +668,14 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                 }
 
                 while (true) {
-                    if (!iterator.isValid()
-                            || !startWithKeyPrefix(keyPrefixBytes, iterator.key())) {
+                    if (!iterator.isValid()) {
+                        expired = true;
+                        break;
+                    }
+
+                    byte[] rawKeyBytes = iterator.key();
+                    keyJniCalls++;
+                    if (!startWithKeyPrefix(keyPrefixBytes, rawKeyBytes)) {
                         expired = true;
                         break;
                     }
@@ -671,20 +684,40 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                         break;
                     }
 
+                    byte[] entryRawKeyBytes;
+                    if (backend.isMapIteratorSingleKeyFetchEnabled()) {
+                        entryRawKeyBytes = rawKeyBytes;
+                        duplicateKeyFetchesAvoided++;
+                    } else {
+                        entryRawKeyBytes = iterator.key();
+                        keyJniCalls++;
+                    }
+                    byte[] rawValueBytes = iterator.value();
+                    valueJniCalls++;
+
                     RocksDBMapEntry entry =
                             new RocksDBMapEntry(
                                     db,
                                     keyPrefixBytes.length,
-                                    iterator.key(),
-                                    iterator.value(),
+                                    entryRawKeyBytes,
+                                    rawValueBytes,
                                     keySerializer,
                                     valueSerializer,
                                     dataInputView);
 
                     cacheEntries.add(entry);
+                    entriesLoaded++;
 
                     iterator.next();
                 }
+            } finally {
+                backend.recordMapIteratorPageStats(
+                        entriesLoaded,
+                        keyJniCalls,
+                        duplicateKeyFetchesAvoided,
+                        valueJniCalls,
+                        seeks,
+                        nativeIterators);
             }
         }
     }
