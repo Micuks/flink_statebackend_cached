@@ -173,6 +173,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchMultiGetCalls;
     private volatile long prefetchMultiGetKeys;
     private volatile long prefetchPointGetCalls;
+    /** Speculative prepared batches abandoned after cancellations made them too small to batch. */
+    private volatile long prefetchSmallBatchDrops;
+    private volatile long prefetchSmallBatchKeysDropped;
     private volatile long prefetchValuesStaged;
     private volatile long prefetchMissingValuesStaged;
     private volatile long prefetchValuesPromoted;
@@ -1253,7 +1256,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "recordKeyPrefetch={} multiGet={} chunkSize={} minBatchSize={} "
                             + "tasksBuilt={} tasksExecuted={} tasksDropped={} keysPrepared={} "
                             + "keysDeduplicated={} multiGetCalls={} "
-                            + "multiGetKeys={} pointGetCalls={} staged={} missingStaged={} "
+                            + "multiGetKeys={} pointGetCalls={} smallBatchDrops={} "
+                            + "smallBatchKeysDropped={} staged={} missingStaged={} "
                             + "promoted={} lazyStaging={} lazyStaged={} lazyMaterialized={} "
                             + "lazyMaterializationFailures={} stagingEntries={} retainedBytes={} "
                             + "maxRetainedBytes={} admissionDrops={} staleAborts={} "
@@ -1304,6 +1308,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchMultiGetCalls,
                     prefetchMultiGetKeys,
                     prefetchPointGetCalls,
+                    prefetchSmallBatchDrops,
+                    prefetchSmallBatchKeysDropped,
                     prefetchValuesStaged,
                     prefetchMissingValuesStaged,
                     prefetchValuesPromoted,
@@ -1397,6 +1403,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getPrefetchPointGetCallsForTesting() {
         return prefetchPointGetCalls;
+    }
+
+    long getPrefetchSmallBatchDropsForTesting() {
+        return prefetchSmallBatchDrops;
+    }
+
+    long getPrefetchSmallBatchKeysDroppedForTesting() {
+        return prefetchSmallBatchKeysDropped;
     }
 
     long getPrefetchMissingValuesStagedForTesting() {
@@ -2674,18 +2688,20 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 return;
             }
             if (activeRocksDBKeys.size() < multiGetMinBatchSize) {
-                valueBytes = new java.util.ArrayList<>(activeRocksDBKeys.size());
-                for (byte[] activeRocksDBKey : activeRocksDBKeys) {
-                    prefetchPointGetCalls++;
-                    valueBytes.add(batchReader.getSerializedValueByRocksDBKey(activeRocksDBKey));
-                }
-            } else {
-                prefetchMultiGetCalls++;
-                prefetchMultiGetKeys += activeRocksDBKeys.size();
-                valueBytes =
-                        batchReader.getSerializedValuesByRocksDBKeys(
-                                activeRocksDBKeys, 0, activeRocksDBKeys.size());
+                // This is a speculative path: the authoritative mailbox read will still execute
+                // if no staged value exists. Falling back to point Get here duplicates exactly
+                // that work and was observed to turn every nominal async batch into point reads
+                // after only one live-read cancellation. Drop the shrunken batch instead; this is
+                // semantics-neutral and guarantees that async prepared-key I/O remains batched.
+                prefetchSmallBatchDrops++;
+                prefetchSmallBatchKeysDropped += activeRocksDBKeys.size();
+                return;
             }
+            prefetchMultiGetCalls++;
+            prefetchMultiGetKeys += activeRocksDBKeys.size();
+            valueBytes =
+                    batchReader.getSerializedValuesByRocksDBKeys(
+                            activeRocksDBKeys, 0, activeRocksDBKeys.size());
         } finally {
             lifecycleLock.readLock().unlock();
         }

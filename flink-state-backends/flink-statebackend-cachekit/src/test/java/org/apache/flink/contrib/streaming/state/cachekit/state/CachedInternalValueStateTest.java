@@ -273,10 +273,13 @@ class CachedInternalValueStateTest {
 
         assertEquals(1, state.getPrefetchLiveReadCancellationsForTesting());
         assertEquals(1, state.getPrefetchWorkerCancelledBeforeReadForTesting());
-        verify(batchReader, times(1)).getSerializedValueByRocksDBKey(any());
+        assertEquals(1, state.getPrefetchSmallBatchDropsForTesting());
+        assertEquals(1, state.getPrefetchSmallBatchKeysDroppedForTesting());
+        verify(batchReader, never()).getSerializedValueByRocksDBKey(any());
         verify(batchReader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
         currentKey.set("k2");
-        assertEquals(22, state.value());
+        assertEquals(17, state.value());
+        verify(delegate, times(2)).value();
         state.close();
     }
 
@@ -321,7 +324,9 @@ class CachedInternalValueStateTest {
         assertEquals(1, state.getPrefetchWorkerCancelledBeforeReadForTesting());
         assertTrue(state.hasInFlightReservationForTesting("k1", VoidNamespace.INSTANCE));
 
-        verify(batchReader, times(1)).getSerializedValueByRocksDBKey(any());
+        assertEquals(1, state.getPrefetchSmallBatchDropsForTesting());
+        assertEquals(1, state.getPrefetchSmallBatchKeysDroppedForTesting());
+        verify(batchReader, never()).getSerializedValueByRocksDBKey(any());
         verify(batchReader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
         state.close();
     }
@@ -809,8 +814,10 @@ class CachedInternalValueStateTest {
         RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
                 (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
         stubPreparedKeySerialization(batchReader);
-        when(batchReader.getSerializedValueByRocksDBKey(any()))
-                .thenReturn(new byte[5], new byte[4]);
+        when(batchReader.getSerializedValuesByRocksDBKeys(any(), eq(0), eq(2)))
+                .thenReturn(
+                        Arrays.asList(new byte[5], new byte[5]),
+                        Arrays.asList(new byte[4], new byte[4]));
 
         CachedInternalValueState<String, VoidNamespace, Integer> state =
                 new CachedInternalValueState<>(
@@ -831,16 +838,16 @@ class CachedInternalValueStateTest {
                         10,
                         4L);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
-        state.buildAsyncPrefetchTask(Collections.singletonList("oversized")).run();
+        state.buildAsyncPrefetchTask(Arrays.asList("oversized-1", "oversized-2")).run();
         assertEquals(0, state.getStagingSizeForTesting());
         assertEquals(0, state.getStagingRetainedBytesForTesting());
         assertEquals(1, state.getPrefetchStagingAdmissionDropsForTesting());
 
-        state.buildAsyncPrefetchTask(Collections.singletonList("exact")).run();
+        state.buildAsyncPrefetchTask(Arrays.asList("exact-1", "exact-2")).run();
         assertEquals(1, state.getStagingSizeForTesting());
         assertEquals(4, state.getStagingRetainedBytesForTesting());
         assertEquals(1, state.getPrefetchLazyValuesStagedForTesting());
-        assertEquals(1, state.getPrefetchStagingAdmissionDropsForTesting());
+        assertEquals(2, state.getPrefetchStagingAdmissionDropsForTesting());
         state.close();
         assertEquals(0, state.getStagingRetainedBytesForTesting());
     }
@@ -860,8 +867,8 @@ class CachedInternalValueStateTest {
                 (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
         stubPreparedKeySerialization(batchReader);
         byte[] lazyValue = KvStateSerializer.serializeValue(1, IntSerializer.INSTANCE);
-        when(batchReader.getSerializedValueByRocksDBKey(any()))
-                .thenReturn(lazyValue);
+        when(batchReader.getSerializedValuesByRocksDBKeys(any(), eq(0), eq(2)))
+                .thenReturn(Arrays.asList(lazyValue, lazyValue));
 
         CachedInternalValueState<String, VoidNamespace, Integer> state =
                 new CachedInternalValueState<>(
@@ -880,16 +887,19 @@ class CachedInternalValueStateTest {
                         false,
                         true);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
-        state.buildAsyncPrefetchTask(Collections.singletonList("k1")).run();
-        assertEquals(lazyValue.length, state.getStagingRetainedBytesForTesting());
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
+        assertEquals(2L * lazyValue.length, state.getStagingRetainedBytesForTesting());
 
         state.prefetchForImmediateUse(Collections.singletonList("k1"));
-        assertEquals(1, state.getStagingSizeForTesting());
-        assertEquals(lazyValue.length, state.getStagingRetainedBytesForTesting());
+        assertEquals(2, state.getStagingSizeForTesting());
+        assertEquals(2L * lazyValue.length, state.getStagingRetainedBytesForTesting());
         currentKey.set("k1");
         assertEquals(1, state.value());
         assertEquals(1, state.getPrefetchLazyValuesMaterializedForTesting());
-        verify(batchReader, times(1)).getSerializedValueByRocksDBKey(any());
+        assertEquals(lazyValue.length, state.getStagingRetainedBytesForTesting());
+        verify(batchReader, times(1))
+                .getSerializedValuesByRocksDBKeys(any(), eq(0), eq(2));
+        verify(batchReader, never()).getSerializedValueByRocksDBKey(any());
     }
 
     @Test
@@ -1184,7 +1194,7 @@ class CachedInternalValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void testChunkedMultiGetUsesPointReadForSingleKeyTail() throws Exception {
+    void testChunkedMultiGetDropsSingleKeySpeculativeTail() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, VoidNamespace, Integer> delegate =
                 mock(
@@ -1193,6 +1203,7 @@ class CachedInternalValueStateTest {
         when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
         when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
         when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(33);
 
         RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
                 (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
@@ -1229,13 +1240,15 @@ class CachedInternalValueStateTest {
         assertEquals(33, state.value());
         verify(batchReader, times(1))
                 .getSerializedValuesByRocksDBKeys(any(), eq(0), eq(2));
-        verify(batchReader, times(1)).getSerializedValueByRocksDBKey(any());
-        verify(delegate, never()).value();
+        verify(batchReader, never()).getSerializedValueByRocksDBKey(any());
+        verify(delegate, times(1)).value();
+        assertEquals(1, state.getPrefetchSmallBatchDropsForTesting());
+        assertEquals(1, state.getPrefetchSmallBatchKeysDroppedForTesting());
     }
 
     @Test
     @SuppressWarnings("unchecked")
-    void testMultiGetUsesPointReadsBelowConfiguredMinimumBatchSize() throws Exception {
+    void testPreparedPrefetchDropsSpeculativeBatchBelowMinimum() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, VoidNamespace, Integer> delegate =
                 mock(
@@ -1275,13 +1288,15 @@ class CachedInternalValueStateTest {
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.buildAsyncPrefetchTask(Arrays.asList("p1", "p2", "p3")).run();
-        verify(batchReader, times(3)).getSerializedValueByRocksDBKey(any());
+        verify(batchReader, never()).getSerializedValueByRocksDBKey(any());
         verify(batchReader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+        assertEquals(1, state.getPrefetchSmallBatchDropsForTesting());
+        assertEquals(3, state.getPrefetchSmallBatchKeysDroppedForTesting());
 
         state.buildAsyncPrefetchTask(Arrays.asList("m1", "m2", "m3", "m4")).run();
         verify(batchReader, times(1))
                 .getSerializedValuesByRocksDBKeys(any(), eq(0), eq(4));
-        assertEquals(3, state.getPrefetchPointGetCallsForTesting());
+        assertEquals(0, state.getPrefetchPointGetCallsForTesting());
         assertEquals(1, state.getPrefetchMultiGetCallsForTesting());
     }
 
