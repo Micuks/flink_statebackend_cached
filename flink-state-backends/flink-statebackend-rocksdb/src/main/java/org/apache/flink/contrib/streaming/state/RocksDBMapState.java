@@ -874,8 +874,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                     ReadOptions ignoredBoundedReadOptions = boundedReadOptions) {
                 try {
                     packedResult =
-                            RocksDBPackedTinyMapScan.tryScan(
-                                    db,
+                            backend.tryScanPackedTinyMap(
                                     columnFamily,
                                     boundedReadOptions == null
                                             ? backend.getReadOptions()

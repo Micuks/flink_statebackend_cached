@@ -103,6 +103,7 @@ public class RocksDBStateBackendConfigTest {
 
         EmbeddedRocksDBStateBackend backend = new EmbeddedRocksDBStateBackend();
         assertEquals(defaultIncremental, backend.isIncrementalCheckpointsEnabled());
+        assertFalse(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_REUSE_ENABLED.defaultValue());
     }
 
     @Test
@@ -111,6 +112,7 @@ public class RocksDBStateBackendConfigTest {
         configuration.set(RocksDBOptions.MAP_ITERATOR_SINGLE_KEY_FETCH_ENABLED, true);
         configuration.set(RocksDBOptions.MAP_ITERATOR_PREFIX_UPPER_BOUND_ENABLED, true);
         configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_ENABLED, true);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_REUSE_ENABLED, true);
         configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES, 64);
         configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES, 4096);
         EmbeddedRocksDBStateBackend configuredBackend =
@@ -120,6 +122,7 @@ public class RocksDBStateBackendConfigTest {
         RocksDBKeyedStateBackend<Integer> keyedBackend =
                 createKeyedStateBackend(configuredBackend, environment, IntSerializer.INSTANCE);
         try {
+            assertFalse(keyedBackend.isMapIteratorPackedTinyScanReuseEligible());
             assertTrue(keyedBackend.isMapIteratorSingleKeyFetchEnabled());
             assertTrue(keyedBackend.isMapIteratorPrefixUpperBoundEnabled());
             assertTrue(keyedBackend.isMapIteratorPackedTinyScanEnabled());
@@ -323,6 +326,51 @@ public class RocksDBStateBackendConfigTest {
             assertEquals(2, keyedBackend.getMapIteratorPackedScanCompletes());
             assertEquals(0, keyedBackend.getMapIteratorPackedScanIteratorFallbacks());
             assertEquals(3, keyedBackend.getMapIteratorPackedScanEntries());
+        } finally {
+            keyedBackend.dispose();
+            environment.close();
+        }
+    }
+
+    @Test
+    public void testPackedTinyMapScanRefreshesOneIdleIteratorAcrossMutations() throws Exception {
+        Configuration configuration = new Configuration();
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PREFIX_UPPER_BOUND_ENABLED, false);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_ENABLED, true);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_REUSE_ENABLED, true);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES, 8);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES, 4096);
+        EmbeddedRocksDBStateBackend configuredBackend =
+                new EmbeddedRocksDBStateBackend()
+                        .configure(configuration, Thread.currentThread().getContextClassLoader());
+        MockEnvironment environment = new MockEnvironmentBuilder().build();
+        RocksDBKeyedStateBackend<Integer> keyedBackend =
+                createKeyedStateBackend(configuredBackend, environment, IntSerializer.INSTANCE);
+        try {
+            assertTrue(keyedBackend.isMapIteratorPackedTinyScanReuseEligible());
+            keyedBackend.setCurrentKey(78);
+            MapState<Integer, Integer> state =
+                    keyedBackend.getPartitionedState(
+                            VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "packed-tiny-reused-refresh", Integer.class, Integer.class));
+
+            assertFalse(state.entries().iterator().hasNext());
+            state.put(1, 10);
+            state.put(2, 20);
+
+            Map<Integer, Integer> values = new HashMap<>();
+            for (Map.Entry<Integer, Integer> entry : state.entries()) {
+                values.put(entry.getKey(), entry.getValue());
+            }
+            assertEquals(2, values.size());
+            assertEquals(Integer.valueOf(10), values.get(1));
+            assertEquals(Integer.valueOf(20), values.get(2));
+            assertEquals(2, keyedBackend.getMapIteratorPackedReuseBorrows());
+            assertEquals(1, keyedBackend.getMapIteratorPackedReuseFreshCreates());
+            assertEquals(2, keyedBackend.getMapIteratorPackedRefreshSuccesses());
+            assertEquals(0, keyedBackend.getMapIteratorPackedReuseDiscards());
         } finally {
             keyedBackend.dispose();
             environment.close();

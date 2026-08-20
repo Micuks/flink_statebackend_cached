@@ -19,6 +19,7 @@
 package org.apache.flink.contrib.streaming.state;
 
 import org.rocksdb.ColumnFamilyHandle;
+import org.rocksdb.PackedTinyMapScanIterator;
 import org.rocksdb.ReadOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
@@ -125,6 +126,24 @@ final class RocksDBPackedTinyMapScan {
                 db.scanPrefixTinyMapV1(
                         columnFamily,
                         readOptions,
+                        seekPrefix,
+                        prefixCompareOffset,
+                        maxEntries,
+                        maxBytes);
+        return decode(encoded, seekPrefix, prefixCompareOffset, maxEntries, maxBytes);
+    }
+
+    static Result tryScan(
+            RocksDB db,
+            PackedTinyMapScanIterator iterator,
+            byte[] seekPrefix,
+            int prefixCompareOffset,
+            int maxEntries,
+            int maxBytes)
+            throws RocksDBException {
+        final byte[] encoded =
+                db.scanPrefixTinyMapV1(
+                        iterator,
                         seekPrefix,
                         prefixCompareOffset,
                         maxEntries,

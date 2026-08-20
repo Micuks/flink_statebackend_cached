@@ -69,6 +69,16 @@ public class RocksDBOptions {
                     .withDescription(
                             "Whether a complete tiny MapState prefix is fetched as one self-describing packed JNI result. Overflow and malformed results fall back to the ordinary RocksIterator; RocksDB errors fail the operation. Disabled by default while experimentally validated.");
 
+    /** Reuses one idle native iterator per column family for packed tiny MapState scans. */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Boolean> MAP_ITERATOR_PACKED_TINY_SCAN_REUSE_ENABLED =
+            ConfigOptions.key(
+                            "state.backend.cachekit.rocksdb.map-iterator.packed-tiny-scan.iterator-reuse.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether packed tiny MapState scans reuse a refreshed RocksIterator from a single idle slot per column family. Reuse is disabled automatically for snapshot, bounded, tailing, pinned, or internal-key ReadOptions. Refresh NotSupported and missing-JNI compatibility failures fall back to the fresh-iterator V1 path; storage and scan errors fail the operation. Disabled by default while experimentally validated.");
+
     /** Maximum number of entries accepted from one packed tiny MapState scan. */
     @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
     public static final ConfigOption<Integer> MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES =

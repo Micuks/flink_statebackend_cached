@@ -119,6 +119,7 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
     private boolean mapIteratorSingleKeyFetchEnabled;
     private boolean mapIteratorPrefixUpperBoundEnabled;
     private boolean mapIteratorPackedTinyScanEnabled;
+    private boolean mapIteratorPackedTinyScanReuseEnabled;
     private int mapIteratorPackedTinyScanMaxEntries;
     private int mapIteratorPackedTinyScanMaxBytes;
 
@@ -178,6 +179,7 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
         this.mapIteratorSingleKeyFetchEnabled = false;
         this.mapIteratorPrefixUpperBoundEnabled = false;
         this.mapIteratorPackedTinyScanEnabled = false;
+        this.mapIteratorPackedTinyScanReuseEnabled = false;
         this.mapIteratorPackedTinyScanMaxEntries =
                 RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES.defaultValue();
         this.mapIteratorPackedTinyScanMaxBytes =
@@ -264,6 +266,12 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
         this.mapIteratorPackedTinyScanEnabled = enabled;
         this.mapIteratorPackedTinyScanMaxEntries = maxEntries;
         this.mapIteratorPackedTinyScanMaxBytes = maxBytes;
+        return this;
+    }
+
+    RocksDBKeyedStateBackendBuilder<K> setMapIteratorPackedTinyScanReuseEnabled(
+            boolean enabled) {
+        this.mapIteratorPackedTinyScanReuseEnabled = enabled;
         return this;
     }
 
@@ -476,6 +484,7 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
                 mapIteratorSingleKeyFetchEnabled,
                 mapIteratorPrefixUpperBoundEnabled,
                 mapIteratorPackedTinyScanEnabled,
+                mapIteratorPackedTinyScanReuseEnabled,
                 mapIteratorPackedTinyScanMaxEntries,
                 mapIteratorPackedTinyScanMaxBytes);
     }

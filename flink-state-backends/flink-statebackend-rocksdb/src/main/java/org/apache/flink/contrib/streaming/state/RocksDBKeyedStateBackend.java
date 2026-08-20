@@ -208,8 +208,10 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean mapIteratorSingleKeyFetchEnabled;
     private final boolean mapIteratorPrefixUpperBoundEnabled;
     private final boolean mapIteratorPackedTinyScanEnabled;
+    private final boolean mapIteratorPackedTinyScanReuseEnabled;
     private final int mapIteratorPackedTinyScanMaxEntries;
     private final int mapIteratorPackedTinyScanMaxBytes;
+    private final RocksDBPackedTinyMapIteratorPool mapIteratorPackedTinyScanIteratorPool;
 
     private final LongAdder mapIteratorEntriesLoaded = new LongAdder();
     private final LongAdder mapIteratorKeyJniCalls = new LongAdder();
@@ -314,6 +316,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean mapIteratorSingleKeyFetchEnabled,
             boolean mapIteratorPrefixUpperBoundEnabled,
             boolean mapIteratorPackedTinyScanEnabled,
+            boolean mapIteratorPackedTinyScanReuseEnabled,
             int mapIteratorPackedTinyScanMaxEntries,
             int mapIteratorPackedTinyScanMaxBytes) {
 
@@ -347,9 +350,16 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapIteratorSingleKeyFetchEnabled = mapIteratorSingleKeyFetchEnabled;
         this.mapIteratorPrefixUpperBoundEnabled = mapIteratorPrefixUpperBoundEnabled;
         this.mapIteratorPackedTinyScanEnabled = mapIteratorPackedTinyScanEnabled;
+        this.mapIteratorPackedTinyScanReuseEnabled = mapIteratorPackedTinyScanReuseEnabled;
         this.mapIteratorPackedTinyScanMaxEntries = mapIteratorPackedTinyScanMaxEntries;
         this.mapIteratorPackedTinyScanMaxBytes = mapIteratorPackedTinyScanMaxBytes;
         this.db = db;
+        this.mapIteratorPackedTinyScanIteratorPool =
+                mapIteratorPackedTinyScanEnabled
+                                && mapIteratorPackedTinyScanReuseEnabled
+                                && !mapIteratorPrefixUpperBoundEnabled
+                        ? new RocksDBPackedTinyMapIteratorPool(db, readOptions)
+                        : null;
         this.rocksDBResourceGuard = rocksDBResourceGuard;
         this.checkpointSnapshotStrategy = checkpointSnapshotStrategy;
         this.writeBatchWrapper = writeBatchWrapper;
@@ -486,9 +496,13 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     "[CACHEKIT ROCKSDB MAP ITERATOR] singleKeyFetch={} prefixUpperBound={} entriesLoaded={} "
                             + "keyJniCalls={} duplicateKeyFetchesAvoided={} valueJniCalls={} "
                             + "pages={} seeks={} nativeIterators={} boundedIterators={} upperBoundFallbacks={} "
-                            + "packedTinyScan={} packedMaxEntries={} packedMaxBytes={} packedAttempts={} "
+                            + "packedTinyScan={} packedIteratorReuseConfigured={} "
+                            + "packedIteratorReuseEligible={} packedMaxEntries={} packedMaxBytes={} packedAttempts={} "
                             + "packedCompletes={} packedOverflows={} packedErrors={} packedMalformed={} "
-                            + "packedIteratorFallbacks={} packedEntries={} packedBytes={}",
+                            + "packedIteratorFallbacks={} packedEntries={} packedBytes={} "
+                            + "packedReuseBorrows={} packedRefreshSuccesses={} packedFreshCreates={} "
+                            + "packedConcurrentCreates={} packedRefreshFallbacks={} packedScanFallbacks={} "
+                            + "packedReuseReturns={} packedReuseDiscards={}",
                     mapIteratorSingleKeyFetchEnabled,
                     mapIteratorPrefixUpperBoundEnabled,
                     mapIteratorEntriesLoaded.sum(),
@@ -501,6 +515,8 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapIteratorBoundedIterators.sum(),
                     mapIteratorUpperBoundFallbacks.sum(),
                     mapIteratorPackedTinyScanEnabled,
+                    mapIteratorPackedTinyScanReuseEnabled,
+                    isMapIteratorPackedTinyScanReuseEligible(),
                     mapIteratorPackedTinyScanMaxEntries,
                     mapIteratorPackedTinyScanMaxBytes,
                     mapIteratorPackedScanAttempts.sum(),
@@ -510,7 +526,15 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapIteratorPackedScanMalformed.sum(),
                     mapIteratorPackedScanIteratorFallbacks.sum(),
                     mapIteratorPackedScanEntries.sum(),
-                    mapIteratorPackedScanBytes.sum());
+                    mapIteratorPackedScanBytes.sum(),
+                    packedIteratorPoolCounter(PoolCounter.BORROWS),
+                    packedIteratorPoolCounter(PoolCounter.REFRESH_SUCCESSES),
+                    packedIteratorPoolCounter(PoolCounter.FRESH_CREATES),
+                    packedIteratorPoolCounter(PoolCounter.CONCURRENT_CREATES),
+                    packedIteratorPoolCounter(PoolCounter.REFRESH_FALLBACKS),
+                    packedIteratorPoolCounter(PoolCounter.SCAN_FALLBACKS),
+                    packedIteratorPoolCounter(PoolCounter.RETURNS),
+                    packedIteratorPoolCounter(PoolCounter.DISCARDS));
         }
 
         // IMPORTANT: null reference to signal potential async checkpoint workers that the db was
@@ -525,6 +549,15 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             // and no more metric collection will be attempted against the database.
             if (nativeMetricMonitor != null) {
                 nativeMetricMonitor.close();
+            }
+
+            // A RocksIterator owns native state tied to its column family and DB. Close all idle
+            // pooled iterators before closing any column-family handle.
+            if (mapIteratorPackedTinyScanIteratorPool != null) {
+                mapIteratorPackedTinyScanIteratorPool.close();
+                // Never continue into CF/DB destruction if an unexpected state access is still
+                // holding a native iterator. Failing closed leaks resources but avoids UAF/SEGV.
+                mapIteratorPackedTinyScanIteratorPool.ensureDrained();
             }
 
             List<ColumnFamilyOptions> columnFamilyOptions =
@@ -581,6 +614,74 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     int getMapIteratorPackedTinyScanMaxBytes() {
         return mapIteratorPackedTinyScanMaxBytes;
+    }
+
+    boolean isMapIteratorPackedTinyScanReuseEligible() {
+        return mapIteratorPackedTinyScanIteratorPool != null
+                && mapIteratorPackedTinyScanIteratorPool.isEligible();
+    }
+
+    RocksDBPackedTinyMapScan.Result tryScanPackedTinyMap(
+            ColumnFamilyHandle columnFamily,
+            ReadOptions scanReadOptions,
+            byte[] seekPrefix,
+            int prefixCompareOffset,
+            int maxEntries,
+            int maxBytes)
+            throws RocksDBException {
+        if (isMapIteratorPackedTinyScanReuseEligible()) {
+            return mapIteratorPackedTinyScanIteratorPool.tryScan(
+                    columnFamily,
+                    seekPrefix,
+                    prefixCompareOffset,
+                    maxEntries,
+                    maxBytes);
+        }
+        return RocksDBPackedTinyMapScan.tryScan(
+                db,
+                columnFamily,
+                scanReadOptions,
+                seekPrefix,
+                prefixCompareOffset,
+                maxEntries,
+                maxBytes);
+    }
+
+    private enum PoolCounter {
+        BORROWS,
+        REFRESH_SUCCESSES,
+        FRESH_CREATES,
+        CONCURRENT_CREATES,
+        REFRESH_FALLBACKS,
+        SCAN_FALLBACKS,
+        RETURNS,
+        DISCARDS
+    }
+
+    private long packedIteratorPoolCounter(PoolCounter counter) {
+        if (mapIteratorPackedTinyScanIteratorPool == null) {
+            return 0L;
+        }
+        switch (counter) {
+            case BORROWS:
+                return mapIteratorPackedTinyScanIteratorPool.borrows();
+            case REFRESH_SUCCESSES:
+                return mapIteratorPackedTinyScanIteratorPool.refreshSuccesses();
+            case FRESH_CREATES:
+                return mapIteratorPackedTinyScanIteratorPool.freshCreates();
+            case CONCURRENT_CREATES:
+                return mapIteratorPackedTinyScanIteratorPool.concurrentCreates();
+            case REFRESH_FALLBACKS:
+                return mapIteratorPackedTinyScanIteratorPool.refreshFallbacks();
+            case SCAN_FALLBACKS:
+                return mapIteratorPackedTinyScanIteratorPool.scanFallbacks();
+            case RETURNS:
+                return mapIteratorPackedTinyScanIteratorPool.returns();
+            case DISCARDS:
+                return mapIteratorPackedTinyScanIteratorPool.discards();
+            default:
+                throw new IllegalStateException("Unknown packed iterator pool counter: " + counter);
+        }
     }
 
     void recordMapIteratorPackedScan(RocksDBPackedTinyMapScan.Result result) {
@@ -712,6 +813,26 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @VisibleForTesting
     long getMapIteratorPackedScanBytes() {
         return mapIteratorPackedScanBytes.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedReuseBorrows() {
+        return packedIteratorPoolCounter(PoolCounter.BORROWS);
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedRefreshSuccesses() {
+        return packedIteratorPoolCounter(PoolCounter.REFRESH_SUCCESSES);
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedReuseFreshCreates() {
+        return packedIteratorPoolCounter(PoolCounter.FRESH_CREATES);
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedReuseDiscards() {
+        return packedIteratorPoolCounter(PoolCounter.DISCARDS);
     }
 
     @Nonnull
