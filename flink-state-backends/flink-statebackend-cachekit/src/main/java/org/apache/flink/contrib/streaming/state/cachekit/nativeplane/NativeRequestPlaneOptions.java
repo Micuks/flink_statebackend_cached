@@ -55,6 +55,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final boolean prefetchEnabled;
     private final boolean mailboxBatchEnabled;
     private final boolean preaggEnabled;
+    private final boolean compactSelectedProbeEnabled;
 
     public NativeRequestPlaneOptions(
             boolean enabled,
@@ -331,7 +332,8 @@ public final class NativeRequestPlaneOptions implements Serializable {
                 mapSnapshotEnabled,
                 prefetchEnabled,
                 mailboxBatchEnabled,
-                preaggEnabled);
+                preaggEnabled,
+                false);
     }
 
     public NativeRequestPlaneOptions(
@@ -354,6 +356,50 @@ public final class NativeRequestPlaneOptions implements Serializable {
             boolean prefetchEnabled,
             boolean mailboxBatchEnabled,
             boolean preaggEnabled) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                aarch64Only,
+                writeThroughMutations,
+                valueCacheEnabled,
+                mapCacheEnabled,
+                mapSnapshotEnabled,
+                prefetchEnabled,
+                mailboxBatchEnabled,
+                preaggEnabled,
+                false);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only,
+            boolean writeThroughMutations,
+            boolean valueCacheEnabled,
+            boolean mapCacheEnabled,
+            boolean mapSnapshotEnabled,
+            boolean prefetchEnabled,
+            boolean mailboxBatchEnabled,
+            boolean preaggEnabled,
+            boolean compactSelectedProbeEnabled) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
         this.kernel = normalizeKernel(kernel);
@@ -417,6 +463,12 @@ public final class NativeRequestPlaneOptions implements Serializable {
                     "Native LocalPreAgg grouping requires the native request plane to be enabled.");
         }
         this.preaggEnabled = preaggEnabled;
+        if (compactSelectedProbeEnabled
+                && (!enabled || !prefetchEnabled || !mailboxBatchEnabled)) {
+            throw new IllegalArgumentException(
+                    "Compact-selected probe requires native request plane, prefetch, and mailbox batch.");
+        }
+        this.compactSelectedProbeEnabled = compactSelectedProbeEnabled;
     }
 
     public static NativeRequestPlaneOptions disabled() {
@@ -525,6 +577,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
 
     public boolean preaggEnabled() {
         return preaggEnabled;
+    }
+
+    /** Whether compacted mailbox keys are probed directly from their original prepared arena. */
+    public boolean compactSelectedProbeEnabled() {
+        return compactSelectedProbeEnabled;
     }
 
     /** Whether this treatment consumes the bounded Java ValueState cache. */

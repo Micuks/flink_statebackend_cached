@@ -18,6 +18,7 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -46,6 +47,7 @@ import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.contrib.streaming.state.PositionedDataOutputView;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
+import org.apache.flink.contrib.streaming.state.cachekit.PrefetchExecutor;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlane;
 import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneBridge;
@@ -375,6 +377,217 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testCompactSelectedProbeMaterializesOnlyTrueRocksDbMisses() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        doAnswer(
+                        invocation -> {
+                            byte[] serialized =
+                                    KvStateSerializer.serializeKeyAndNamespace(
+                                            invocation.getArgument(0),
+                                            StringSerializer.INSTANCE,
+                                            invocation.getArgument(1),
+                                            StringSerializer.INSTANCE);
+                            ((PositionedDataOutputView) invocation.getArgument(4))
+                                    .write(serialized);
+                            return null;
+                        })
+                .when(reader)
+                .serializeBatchKeyAndNamespace(any(), any(), any(), any(), any());
+        byte[] preparedK1 =
+                KvStateSerializer.serializeKeyAndNamespace(
+                        "k1", StringSerializer.INSTANCE, "window-fused", StringSerializer.INSTANCE);
+        byte[] preparedK2 =
+                KvStateSerializer.serializeKeyAndNamespace(
+                        "k2", StringSerializer.INSTANCE, "window-fused", StringSerializer.INSTANCE);
+        byte[] preparedK3 =
+                KvStateSerializer.serializeKeyAndNamespace(
+                        "k3", StringSerializer.INSTANCE, "window-fused", StringSerializer.INSTANCE);
+        when(reader.getSerializedValueByRocksDBKey(any()))
+                .thenAnswer(
+                        invocation -> {
+                            assertArrayEquals(preparedK3, invocation.getArgument(0));
+                            return KvStateSerializer.serializeValue(33, IntSerializer.INSTANCE);
+                        });
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        fakePlane.preload(
+                19,
+                0,
+                preparedK1,
+                KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE));
+        fakePlane.preloadNegative(19, 0, preparedK2);
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(compactSelectedOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true,
+                        8,
+                        1 << 20,
+                        false,
+                        coordinator,
+                        19);
+        state.setCurrentNamespace("window-fused");
+
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2", "k1", "k3")).run();
+
+        assertEquals(1, state.getNativeMailboxCompactBatchesForTesting());
+        assertEquals(4, state.getNativeMailboxCompactInputKeysForTesting());
+        assertEquals(3, state.getNativeMailboxCompactUniqueKeysForTesting());
+        assertEquals(1, state.getNativeCompactSelectedProbeBatchesForTesting());
+        assertEquals(3, state.getNativeCompactSelectedProbeKeysForTesting());
+        assertEquals(1, state.getNativeCompactSelectedLazyHeapKeyCopiesForTesting());
+        assertEquals(0, state.getNativeCompactPostCompactBytesRecopiedForTesting());
+        assertEquals(0, state.getNativeMailboxDirectSerializationFallbackKeysForTesting());
+        assertEquals(0, state.getNativeMailboxDirectSerializationFallbackBytesForTesting());
+        assertEquals(1, state.getNativeHitsForTesting());
+        assertEquals(1, state.getNativeNegativeHitsForTesting());
+        assertEquals(1, state.getNativeMissesForTesting());
+        assertEquals(1, state.getPrefetchKeysDeduplicatedForTesting());
+        verify(reader, times(1)).getSerializedValueByRocksDBKey(any());
+        verify(reader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+        verify(reader, never()).serializeBatchKeyAndNamespace(any(), any(), any(), any());
+
+        currentKey.set("k1");
+        assertEquals(11, state.value());
+        currentKey.set("k2");
+        assertEquals(99, state.value());
+        currentKey.set("k3");
+        assertEquals(33, state.value());
+
+        state.close();
+        coordinator.close();
+        assertEquals(1, fakePlane.closeCalls);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testCompactSelectedNativeFiltersMailboxCancellationBeforeMissIoAndPublish()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(101);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(null);
+        doAnswer(
+                        invocation -> {
+                            byte[] serialized =
+                                    KvStateSerializer.serializeKeyAndNamespace(
+                                            invocation.getArgument(0),
+                                            StringSerializer.INSTANCE,
+                                            invocation.getArgument(1),
+                                            StringSerializer.INSTANCE);
+                            ((PositionedDataOutputView) invocation.getArgument(4))
+                                    .write(serialized);
+                            return null;
+                        })
+                .when(reader)
+                .serializeBatchKeyAndNamespace(any(), any(), any(), any(), any());
+
+        byte[] preparedK1 =
+                KvStateSerializer.serializeKeyAndNamespace(
+                        "k1", StringSerializer.INSTANCE, "window-cancel", StringSerializer.INSTANCE);
+        byte[] preparedK3 =
+                KvStateSerializer.serializeKeyAndNamespace(
+                        "k3", StringSerializer.INSTANCE, "window-cancel", StringSerializer.INSTANCE);
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        fakePlane.preload(
+                20,
+                0,
+                preparedK1,
+                KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE));
+        fakePlane.preload(
+                20,
+                0,
+                preparedK3,
+                KvStateSerializer.serializeValue(33, IntSerializer.INSTANCE));
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(compactSelectedOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true,
+                        8,
+                        1 << 20,
+                        false,
+                        coordinator,
+                        20);
+        state.setCurrentNamespace("window-cancel");
+
+        Runnable dropped = state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2", "k3"));
+        assertNotNull(dropped);
+        ((PrefetchExecutor.DropAwareTask) dropped).onDrop();
+        assertEquals(0, state.getNativeCompactSelectedProbeBatchesForTesting());
+        assertEquals(0, state.getNativeCompactSelectedProbeKeysForTesting());
+
+        Runnable task = state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2", "k3"));
+        assertNotNull(task);
+        currentKey.set("k1");
+        assertEquals(101, state.value());
+        currentKey.set("k2");
+        assertEquals(101, state.value());
+        task.run();
+
+        assertEquals(2, state.getPrefetchLiveReadCancellationsForTesting());
+        assertEquals(1, state.getPrefetchWorkerCancelledBeforeReadForTesting());
+        assertEquals(1, state.getPrefetchWorkerDiscardedAfterReadForTesting());
+        assertEquals(1, state.getStagingSizeForTesting());
+        assertEquals(1, state.getNativeCompactSelectedProbeBatchesForTesting());
+        assertEquals(3, state.getNativeCompactSelectedProbeKeysForTesting());
+        verify(reader, never()).getSerializedValueByRocksDBKey(any());
+        verify(reader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+        currentKey.set("k3");
+        assertEquals(33, state.value());
+
+        state.close();
+        coordinator.close();
+        assertEquals(1, fakePlane.closeCalls);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testNativeMailboxFallsBackBeforeJniBelowConfiguredThreshold() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
@@ -462,8 +675,11 @@ class NativePreparedValueStateTest {
                                         StringSerializer.INSTANCE,
                                         invocation.getArgument(1),
                                         StringSerializer.INSTANCE));
-        when(reader.getSerializedValueByRocksDBKey(any()))
-                .thenReturn(KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE));
+        when(reader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
+                .thenReturn(
+                        Arrays.asList(
+                                KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE),
+                                KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE)));
 
         FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
         NativeRequestPlaneCoordinator coordinator =
@@ -491,11 +707,11 @@ class NativePreparedValueStateTest {
                         18);
         state.setCurrentNamespace("window-java-prefetch");
 
-        state.buildAsyncPrefetchTask(Arrays.asList("k1")).run();
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
 
         assertEquals(0, coordinator.probeCalls());
         assertEquals(0, state.getNativeBatchesActivatedForTesting());
-        verify(reader, times(1)).getSerializedValueByRocksDBKey(any());
+        verify(reader, times(1)).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
         state.close();
         coordinator.close();
     }
@@ -523,8 +739,11 @@ class NativePreparedValueStateTest {
                                         StringSerializer.INSTANCE,
                                         invocation.getArgument(1),
                                         StringSerializer.INSTANCE));
-        when(reader.getSerializedValueByRocksDBKey(any()))
-                .thenReturn(KvStateSerializer.serializeValue(42, IntSerializer.INSTANCE));
+        when(reader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
+                .thenReturn(
+                        Arrays.asList(
+                                KvStateSerializer.serializeValue(42, IntSerializer.INSTANCE),
+                                KvStateSerializer.serializeValue(43, IntSerializer.INSTANCE)));
 
         FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
         fakePlane.failNextProbe = true;
@@ -553,7 +772,7 @@ class NativePreparedValueStateTest {
                         9);
         state.setCurrentNamespace("window-fallback");
 
-        state.buildAsyncPrefetchTask(Arrays.asList("k1")).run();
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
         currentKey.set("k1");
         assertEquals(42, state.value());
 
@@ -562,7 +781,7 @@ class NativePreparedValueStateTest {
         assertEquals(1, state.getNativeFallbackBatchesForTesting());
         assertEquals(0, state.getNativeBatchesActivatedForTesting());
         assertEquals(1, fakePlane.closeCalls);
-        verify(reader, times(1)).getSerializedValueByRocksDBKey(any());
+        verify(reader, times(1)).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
 
         state.close();
         coordinator.close();
@@ -876,8 +1095,11 @@ class NativePreparedValueStateTest {
                                         StringSerializer.INSTANCE,
                                         invocation.getArgument(1),
                                         StringSerializer.INSTANCE));
-        when(reader.getSerializedValueByRocksDBKey(any()))
-                .thenReturn(KvStateSerializer.serializeValue(42, IntSerializer.INSTANCE));
+        when(reader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
+                .thenReturn(
+                        Arrays.asList(
+                                KvStateSerializer.serializeValue(42, IntSerializer.INSTANCE),
+                                KvStateSerializer.serializeValue(43, IntSerializer.INSTANCE)));
 
         byte[] preparedKey =
                 KvStateSerializer.serializeKeyAndNamespace(
@@ -914,7 +1136,7 @@ class NativePreparedValueStateTest {
                         13);
         state.setCurrentNamespace("window-corrupt");
 
-        state.buildAsyncPrefetchTask(Arrays.asList("k1")).run();
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
         currentKey.set("k1");
         assertEquals(42, state.value());
 
@@ -923,7 +1145,7 @@ class NativePreparedValueStateTest {
         assertEquals(1, state.getNativeFallbackBatchesForTesting());
         assertEquals(0, state.getNativeBatchesActivatedForTesting());
         assertEquals(1, fakePlane.closeCalls);
-        verify(reader, times(1)).getSerializedValueByRocksDBKey(any());
+        verify(reader, times(1)).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
 
         state.close();
         coordinator.close();
@@ -1063,6 +1285,30 @@ class NativePreparedValueStateTest {
                 false,
                 false,
                 false,
+                false,
+                true);
+    }
+
+    private static NativeRequestPlaneOptions compactSelectedOptions() {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                128,
+                4096,
+                4096,
+                16,
+                4096,
+                4096,
+                1,
+                2,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                true,
                 false,
                 true);
     }
@@ -1261,6 +1507,13 @@ class NativePreparedValueStateTest {
             values.put(
                     new NativeKey(stateId, generation, Arrays.copyOf(key, key.length)),
                     new StoredValue(generation, false, Arrays.copyOf(value, value.length)));
+        }
+
+        private void preloadNegative(int stateId, long generation, byte[] key) {
+            stateGenerationWatermarks.merge(stateId, generation, Math::max);
+            values.put(
+                    new NativeKey(stateId, generation, Arrays.copyOf(key, key.length)),
+                    new StoredValue(generation, true, null));
         }
 
         private static NativeKey nativeKey(SerializedKeyBatch<?, ?> batch, int index) {

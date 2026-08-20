@@ -153,6 +153,97 @@ class NativeRequestPlaneCoordinatorTest {
     }
 
     @Test
+    void testMalformedCompactorOutputDisablesPlaneBeforePublishingSelection() throws Exception {
+        FakePlane plane = new FakePlane();
+        plane.compactIndexes = new int[] {1, 0};
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(1), plane);
+
+        try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
+            slot.prepareLatest(
+                    3,
+                    17L,
+                    java.util.Arrays.asList(new byte[] {1}, new byte[] {2}, new byte[] {3}));
+
+            assertThrows(IllegalStateException.class, () -> coordinator.compact(slot));
+            assertFalse(coordinator.isActive());
+            assertEquals(0, coordinator.compactCalls());
+            assertThrows(IndexOutOfBoundsException.class, () -> slot.compactedSourceIndex(0));
+        }
+        coordinator.close();
+        assertEquals(1, plane.closeCalls);
+    }
+
+    @Test
+    void testNonEmptyCompactorCannotSilentlyDropEveryKey() throws Exception {
+        FakePlane plane = new FakePlane();
+        plane.compactIndexes = new int[0];
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(1), plane);
+
+        try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
+            slot.prepareLatest(3, 17L, Collections.singletonList(new byte[] {1}));
+
+            assertThrows(IllegalStateException.class, () -> coordinator.compact(slot));
+            assertFalse(coordinator.isActive());
+            assertEquals(0, coordinator.compactCalls());
+        }
+        coordinator.close();
+        assertEquals(1, plane.closeCalls);
+    }
+
+    @Test
+    void testCompactedProjectionRetainsExactPreparedBytesWithoutArenaCopy() throws Exception {
+        FakePlane plane = new FakePlane();
+        plane.compactIndexes = new int[] {0, 2, 3};
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(1), plane);
+
+        try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
+            slot.prepareLatest(
+                    3,
+                    17L,
+                    java.util.Arrays.asList(
+                            new byte[] {10},
+                            new byte[] {11},
+                            new byte[] {20, 21},
+                            new byte[] {30, 31, 32}));
+            assertEquals(3, coordinator.compact(slot));
+
+            // Simulate an in-flight reservation rejecting the middle compacted key.
+            slot.retainCompactedSource(0, 0);
+            slot.retainCompactedSource(2, 1);
+            slot.projectRetainedCompactedSources(2);
+
+            assertEquals(2, slot.preparedEntryCount());
+            assertArrayEquals(new byte[] {10}, slot.copyPreparedKey(0));
+            assertArrayEquals(new byte[] {30, 31, 32}, slot.copyPreparedKey(1));
+            assertEquals(17L, slot.preparedGeneration());
+            assertEquals(2, coordinator.probe(slot));
+        }
+        coordinator.close();
+    }
+
+    @Test
+    void testCompactedProjectionRejectsReorderedOrOutOfRangeSelection() throws Exception {
+        FakePlane plane = new FakePlane();
+        plane.compactIndexes = new int[] {0, 2};
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(1), plane);
+
+        try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
+            slot.prepareLatest(
+                    3,
+                    17L,
+                    java.util.Arrays.asList(new byte[] {1}, new byte[] {2}, new byte[] {3}));
+            assertEquals(2, coordinator.compact(slot));
+            assertThrows(IndexOutOfBoundsException.class, () -> slot.retainCompactedSource(0, 1));
+            assertThrows(IllegalArgumentException.class, () -> slot.projectRetainedCompactedSources(3));
+        }
+        coordinator.close();
+    }
+
+    @Test
     void testDirectBatchPreparationRetainsExactBytesAndRejectsEmptyKeys() throws Exception {
         FakePlane plane = new FakePlane();
         NativeRequestPlaneCoordinator coordinator =

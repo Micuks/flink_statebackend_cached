@@ -196,6 +196,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             requireActive();
             try {
                 int unique = plane.compactBatch(slot.preparedKeys, slot.uniqueSourceIndexes());
+                validateCompactedSources(slot, unique);
                 compactCalls++;
                 slot.compactedEntryCount = unique;
                 return unique;
@@ -203,6 +204,32 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 disableLocked(failure);
                 throw failure;
             }
+        }
+    }
+
+    private static void validateCompactedSources(BatchSlot slot, int unique) {
+        int inputCount = slot.preparedKeys.entryCount();
+        if (unique < (inputCount == 0 ? 0 : 1) || unique > inputCount) {
+            throw new IllegalStateException(
+                    "Native compact returned invalid unique count "
+                            + unique
+                            + " for "
+                            + inputCount
+                            + " entries.");
+        }
+        ByteBuffer indexes = slot.uniqueSourceIndexes.duplicate().order(ByteOrder.nativeOrder());
+        int previous = -1;
+        for (int target = 0; target < unique; target++) {
+            int source = indexes.getInt(target * Integer.BYTES);
+            if (source <= previous || source < target || source >= inputCount) {
+                throw new IllegalStateException(
+                        "Native compact returned invalid source index "
+                                + source
+                                + " at compacted index "
+                                + target
+                                + ".");
+            }
+            previous = source;
         }
     }
 
@@ -711,6 +738,44 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             return uniqueSourceIndexes.getInt(compactedIndex * Integer.BYTES);
         }
 
+        /** Retains one compacted source index after Java reservation filtering. */
+        public void retainCompactedSource(int compactedIndex, int retainedIndex) {
+            requireLeased();
+            if (compactedIndex < 0
+                    || compactedIndex >= compactedEntryCount
+                    || retainedIndex < 0
+                    || retainedIndex > compactedIndex) {
+                throw new IndexOutOfBoundsException(
+                        "Cannot retain compacted index "
+                                + compactedIndex
+                                + " at "
+                                + retainedIndex
+                                + ".");
+            }
+            int source = uniqueSourceIndexes.getInt(compactedIndex * Integer.BYTES);
+            uniqueSourceIndexes.putInt(retainedIndex * Integer.BYTES, source);
+        }
+
+        /**
+         * Projects the prepared-key metadata onto the retained compacted sources.
+         *
+         * <p>The direct key arena is not copied. The selected metadata remains in stable first-seen
+         * order and becomes the exact batch consumed by the following native probe.
+         */
+        public void projectRetainedCompactedSources(int retainedCount) {
+            requireLeased();
+            if (retainedCount < 0 || retainedCount > compactedEntryCount) {
+                throw new IllegalArgumentException(
+                        "Retained compacted count "
+                                + retainedCount
+                                + " outside [0, "
+                                + compactedEntryCount
+                                + "].");
+            }
+            preparedKeys.retainSerializedEntries(uniqueSourceIndexes, retainedCount);
+            compactedEntryCount = retainedCount;
+        }
+
         public int sourceGroupIndex(int sourceIndex) {
             requireLeased();
             if (sourceIndex < 0 || sourceIndex >= preparedKeys.entryCount()) {
@@ -975,6 +1040,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             missKeys.clear();
             fillValueBytes = 0;
             preparedFillGeneration = 0;
+            compactedEntryCount = 0;
         }
 
         private void requireLeased() {

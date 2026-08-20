@@ -288,6 +288,71 @@ class SerializedKeyBatchTest {
     }
 
     @Test
+    void testMetadataOnlyProjectionRetainsStableExactKeysWithoutArenaCopy() throws Exception {
+        SerializedKeyBatch<byte[], byte[]> batch =
+                SerializedKeyBatch.forSerializedBytes(
+                        ByteBuffer.allocateDirect(64),
+                        ByteBuffer.allocateDirect(5 * SerializedKeyBatch.METADATA_RECORD_BYTES));
+        batch.appendSerialized(7, 11L, new byte[] {10});
+        batch.appendSerialized(7, 11L, new byte[] {11});
+        batch.appendSerialized(7, 11L, new byte[] {20, 21});
+        batch.appendSerialized(7, 11L, new byte[] {22});
+        batch.appendSerialized(7, 11L, new byte[] {30, 31, 32});
+        byte[] arenaBefore = copyBytes(batch.arenaSlice());
+        ByteBuffer selected = ByteBuffer.allocateDirect(3 * Integer.BYTES).order(ByteOrder.nativeOrder());
+        selected.putInt(0, 0);
+        selected.putInt(Integer.BYTES, 2);
+        selected.putInt(2 * Integer.BYTES, 4);
+
+        batch.retainSerializedEntries(selected, 3);
+
+        assertEquals(3, batch.entryCount());
+        assertEquals(0, batch.arenaOffset(0));
+        assertEquals(2, batch.arenaOffset(1));
+        assertEquals(5, batch.arenaOffset(2));
+        assertEquals(1, batch.serializedLength(0));
+        assertEquals(2, batch.serializedLength(1));
+        assertEquals(3, batch.serializedLength(2));
+        assertArrayEquals(arenaBefore, copyBytes(batch.arenaSlice()));
+    }
+
+    @Test
+    void testInvalidProjectionIsAtomicAndRejectsReservedMetadata() throws Exception {
+        ByteBuffer rawMetadata =
+                ByteBuffer.allocateDirect(3 * SerializedKeyBatch.METADATA_RECORD_BYTES)
+                        .order(ByteOrder.nativeOrder());
+        SerializedKeyBatch<byte[], byte[]> batch =
+                SerializedKeyBatch.forSerializedBytes(ByteBuffer.allocateDirect(32), rawMetadata);
+        batch.appendSerialized(7, 11L, new byte[] {10});
+        batch.appendSerialized(7, 11L, new byte[] {20});
+        batch.appendSerialized(7, 11L, new byte[] {30});
+        byte[] metadataBefore = copyBytes(batch.metadataSlice());
+        byte[] arenaBefore = copyBytes(batch.arenaSlice());
+        ByteBuffer reordered = ByteBuffer.allocateDirect(2 * Integer.BYTES).order(ByteOrder.nativeOrder());
+        reordered.putInt(0, 2);
+        reordered.putInt(Integer.BYTES, 1);
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> batch.retainSerializedEntries(reordered, 2));
+        assertEquals(3, batch.entryCount());
+        assertArrayEquals(metadataBefore, copyBytes(batch.metadataSlice()));
+        assertArrayEquals(arenaBefore, copyBytes(batch.arenaSlice()));
+
+        rawMetadata.putInt(
+                SerializedKeyBatch.METADATA_RECORD_BYTES + SerializedKeyBatch.RESERVED_OFFSET, 1);
+        ByteBuffer reserved = ByteBuffer.allocateDirect(Integer.BYTES).order(ByteOrder.nativeOrder());
+        reserved.putInt(0, 1);
+        byte[] corruptMetadataBefore = copyBytes(batch.metadataSlice());
+        assertThrows(
+                IllegalStateException.class,
+                () -> batch.retainSerializedEntries(reserved, 1));
+        assertEquals(3, batch.entryCount());
+        assertArrayEquals(corruptMetadataBefore, copyBytes(batch.metadataSlice()));
+        assertArrayEquals(arenaBefore, copyBytes(batch.arenaSlice()));
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void testSerializerFailuresRollbackAndBatchRemainsReusable() throws Exception {
         TypeSerializer<String> namespaceSerializer = mock(TypeSerializer.class);

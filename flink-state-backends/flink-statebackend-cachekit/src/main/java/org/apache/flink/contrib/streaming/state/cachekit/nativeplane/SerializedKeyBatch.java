@@ -242,6 +242,79 @@ public final class SerializedKeyBatch<K, N> {
         return visible.slice().asReadOnlyBuffer().order(METADATA_BYTE_ORDER);
     }
 
+    /**
+     * Projects a stable, increasing subset of metadata entries in place.
+     *
+     * <p>The serialized arena is immutable and remains untouched. Only the fixed-width metadata
+     * records are compacted, so a later native probe can reuse already-prepared key bytes without
+     * materializing heap arrays or copying those bytes back into another direct batch. Source
+     * indexes must be strictly increasing; that both preserves arrival order and makes the
+     * forward in-place copy safe.
+     */
+    void retainSerializedEntries(ByteBuffer sourceIndexes, int retainedCount) {
+        Objects.requireNonNull(sourceIndexes, "sourceIndexes");
+        if (retainedCount < 0 || retainedCount > entryCount) {
+            throw new IllegalArgumentException(
+                    "Retained entry count "
+                            + retainedCount
+                            + " outside [0, "
+                            + entryCount
+                            + "].");
+        }
+        ByteBuffer indexes = sourceIndexes.duplicate().order(METADATA_BYTE_ORDER);
+        if (indexes.limit() < retainedCount * Integer.BYTES) {
+            throw new IllegalArgumentException("Source-index buffer is too small.");
+        }
+        final int originalEntryCount = entryCount;
+        int previousSource = -1;
+        // Validate the complete projection before mutating metadata. Native compact output is an
+        // untrusted protocol boundary; a late malformed index must not leave a partially projected
+        // batch behind for a Java fallback or a reused slot.
+        for (int target = 0; target < retainedCount; target++) {
+            int source = indexes.getInt(target * Integer.BYTES);
+            if (source <= previousSource || source < target || source >= originalEntryCount) {
+                throw new IllegalArgumentException(
+                        "Projected source index "
+                                + source
+                                + " is not a stable increasing entry at target "
+                                + target
+                                + ".");
+            }
+            int sourceBase = source * METADATA_RECORD_BYTES;
+            int stateId = metadata.getInt(sourceBase + STATE_ID_OFFSET);
+            int reserved = metadata.getInt(sourceBase + RESERVED_OFFSET);
+            long generation = metadata.getLong(sourceBase + GENERATION_OFFSET);
+            int arenaOffset = metadata.getInt(sourceBase + ARENA_OFFSET_OFFSET);
+            int length = metadata.getInt(sourceBase + LENGTH_OFFSET);
+            if (reserved != 0) {
+                throw new IllegalStateException(
+                        "Projected serialized-key metadata has a non-zero reserved field.");
+            }
+            if (arenaOffset < 0
+                    || length < 0
+                    || arenaOffset > arenaOutput.position() - length) {
+                throw new IllegalStateException("Projected serialized-key metadata is invalid.");
+            }
+            previousSource = source;
+        }
+        for (int target = 0; target < retainedCount; target++) {
+            int source = indexes.getInt(target * Integer.BYTES);
+            int sourceBase = source * METADATA_RECORD_BYTES;
+            int stateId = metadata.getInt(sourceBase + STATE_ID_OFFSET);
+            int reserved = metadata.getInt(sourceBase + RESERVED_OFFSET);
+            long generation = metadata.getLong(sourceBase + GENERATION_OFFSET);
+            int arenaOffset = metadata.getInt(sourceBase + ARENA_OFFSET_OFFSET);
+            int length = metadata.getInt(sourceBase + LENGTH_OFFSET);
+            int targetBase = target * METADATA_RECORD_BYTES;
+            metadata.putInt(targetBase + STATE_ID_OFFSET, stateId);
+            metadata.putInt(targetBase + RESERVED_OFFSET, reserved);
+            metadata.putLong(targetBase + GENERATION_OFFSET, generation);
+            metadata.putInt(targetBase + ARENA_OFFSET_OFFSET, arenaOffset);
+            metadata.putInt(targetBase + LENGTH_OFFSET, length);
+        }
+        entryCount = retainedCount;
+    }
+
     private int metadataBase(int entryIndex) {
         if (entryIndex < 0 || entryIndex >= entryCount) {
             throw new IndexOutOfBoundsException(

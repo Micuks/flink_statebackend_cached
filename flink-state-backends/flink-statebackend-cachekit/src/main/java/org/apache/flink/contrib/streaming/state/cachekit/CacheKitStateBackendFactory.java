@@ -292,6 +292,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Enable native prepared-key probe, miss compaction, direct-hit deserialization, "
                                                                         + "and fill around the authoritative RocksDB MultiGet path.");
 
+        public static final ConfigOption<Boolean> NATIVE_COMPACT_SELECTED_PROBE_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.compact-selected-probe.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Probe mailbox-compacted prepared keys in their original direct arena. "
+                                                                        + "Only RocksDB misses materialize heap key arrays; requires native mailbox and prefetch.");
+
         public static final ConfigOption<Boolean> NATIVE_LOCAL_PREAGG_ENABLED =
                         ConfigOptions.key("state.backend.cachekit.native.local-preagg.enabled")
                                         .booleanType()
@@ -468,7 +477,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_MAP_SNAPSHOT_ENABLED),
                                 config.get(NATIVE_PREFETCH_ENABLED),
                                 config.get(NATIVE_MAILBOX_BATCH_ENABLED),
-                                config.get(NATIVE_LOCAL_PREAGG_ENABLED));
+                                config.get(NATIVE_LOCAL_PREAGG_ENABLED),
+                                config.get(NATIVE_COMPACT_SELECTED_PROBE_ENABLED));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

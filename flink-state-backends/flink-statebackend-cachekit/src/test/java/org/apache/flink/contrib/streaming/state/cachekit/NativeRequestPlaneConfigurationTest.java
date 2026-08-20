@@ -48,6 +48,7 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(options.mailboxBatchEnabled());
         assertFalse(options.prefetchEnabled());
         assertFalse(options.preaggEnabled());
+        assertFalse(options.compactSelectedProbeEnabled());
         assertFalse(options.requiresValueCache());
     }
 
@@ -70,6 +71,7 @@ class NativeRequestPlaneConfigurationTest {
         config.set(CacheKitStateBackendFactory.NATIVE_PREFETCH_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAILBOX_BATCH_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_LOCAL_PREAGG_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_COMPACT_SELECTED_PROBE_ENABLED, true);
 
         NativeRequestPlaneOptions options =
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(config);
@@ -90,6 +92,7 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(options.mailboxBatchEnabled());
         assertTrue(options.prefetchEnabled());
         assertTrue(options.preaggEnabled());
+        assertTrue(options.compactSelectedProbeEnabled());
         assertTrue(options.requiresValueCache());
     }
 
@@ -188,5 +191,24 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(prefetch)
                         .requiresValueCache());
+    }
+
+    @Test
+    void testCompactSelectedProbeRequiresMailboxAndPrefetch() {
+        Configuration missingMailbox = new Configuration();
+        missingMailbox.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        missingMailbox.set(CacheKitStateBackendFactory.NATIVE_PREFETCH_ENABLED, true);
+        missingMailbox.set(CacheKitStateBackendFactory.NATIVE_COMPACT_SELECTED_PROBE_ENABLED, true);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(missingMailbox));
+
+        Configuration missingPrefetch = new Configuration();
+        missingPrefetch.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        missingPrefetch.set(CacheKitStateBackendFactory.NATIVE_MAILBOX_BATCH_ENABLED, true);
+        missingPrefetch.set(CacheKitStateBackendFactory.NATIVE_COMPACT_SELECTED_PROBE_ENABLED, true);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(missingPrefetch));
     }
 }
