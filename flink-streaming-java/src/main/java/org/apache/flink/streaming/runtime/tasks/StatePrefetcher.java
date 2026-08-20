@@ -19,6 +19,7 @@
 package org.apache.flink.streaming.runtime.tasks;
 
 import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.runtime.state.BatchKeyGroupingSupport;
 import org.apache.flink.runtime.state.KeyedStateBackend;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.Input;
@@ -26,6 +27,7 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
 
 /**
  * Backpressure-driven state prefetch (key extraction + submission side).
@@ -46,9 +48,9 @@ import java.lang.reflect.Method;
  *   <li><b>No reorder</b> — this class only warms the cache; record dispatch order is the caller's
  *       unchanged arrival-order replay.
  *   <li><b>Stale-safe</b> — key extraction and task submission run on the mailbox thread; CacheKit
- *       performs RocksDB reads on its worker and only publishes speculative staging entries.
- *       The ValueState wrapper checks the captured write generation before promotion and falls
- *       back to the authoritative read after any intervening mutation.
+ *       performs RocksDB reads on its worker and only publishes speculative staging entries. The
+ *       ValueState wrapper checks the captured write generation before promotion and falls back to
+ *       the authoritative read after any intervening mutation.
  *   <li><b>Best-effort</b> — every path is wrapped in try/catch; a failed prefetch never touches
  *       the authoritative read path or the {@code emitRecord} dispatch.
  * </ul>
@@ -166,8 +168,7 @@ public final class StatePrefetcher {
             // Native mailbox mode preserves the raw arrival-order key vector so the selected
             // AArch64 kernel can compact exact duplicates after serialization. Other backends keep
             // the original LinkedHashSet behavior.
-            java.util.Collection keys =
-                    newKeyCollection(ksb, Math.max(2, toIndex - fromIndex));
+            java.util.Collection keys = newKeyCollection(ksb, Math.max(2, toIndex - fromIndex));
             if (extractKeys(selector, buf, fromIndex, toIndex, keys) && !keys.isEmpty()) {
                 prefetchMethod.invoke(ksb, keys);
             }
@@ -281,6 +282,45 @@ public final class StatePrefetcher {
             return plan.length == keys.size() + 1 ? plan : null;
         } catch (Throwable failure) {
             return null;
+        }
+    }
+
+    /**
+     * Groups caller-owned 32-bit hash tokens without reflection or a heap plan copy.
+     *
+     * <p>A negative return value means that the caller must retain its Java grouping path.
+     */
+    public static int groupHashTokensNatively(
+            Input<?> headOperator, ByteBuffer tokens, int count, ByteBuffer packedPlan) {
+        if (headOperator == null
+                || count <= 0
+                || tokens == null
+                || packedPlan == null
+                || !(headOperator instanceof AbstractStreamOperator)) {
+            return -1;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            return groupHashTokensNatively(backend, tokens, count, packedPlan);
+        } catch (Throwable failure) {
+            return -1;
+        }
+    }
+
+    static int groupHashTokensNatively(
+            KeyedStateBackend<?> backend, ByteBuffer tokens, int count, ByteBuffer packedPlan) {
+        if (!(backend instanceof BatchKeyGroupingSupport)) {
+            return -1;
+        }
+        BatchKeyGroupingSupport grouping = (BatchKeyGroupingSupport) backend;
+        if (count > grouping.maxGroupingEntries()) {
+            return -1;
+        }
+        try {
+            return grouping.groupHashTokens(tokens, count, packedPlan);
+        } catch (Throwable failure) {
+            return -1;
         }
     }
 

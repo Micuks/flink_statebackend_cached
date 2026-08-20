@@ -16,11 +16,14 @@
 package org.apache.flink.streaming.runtime.tasks;
 
 import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.runtime.state.BatchKeyGroupingSupport;
 import org.apache.flink.runtime.state.KeyedStateBackend;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -116,8 +119,27 @@ class StatePrefetcherTest {
         org.mockito.Mockito.when(((NativePreaggHook) backend).nativePreaggGroupIds(keys))
                 .thenReturn(new int[] {2, 0, 1, 0});
 
-        assertArrayEquals(
-                new int[] {2, 0, 1, 0}, StatePrefetcher.groupKeysNatively(backend, keys));
+        assertArrayEquals(new int[] {2, 0, 1, 0}, StatePrefetcher.groupKeysNatively(backend, keys));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testPackedNativeGroupingUsesDirectCapabilityWithoutReflection() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(BatchKeyGroupingSupport.class));
+        BatchKeyGroupingSupport grouping = (BatchKeyGroupingSupport) backend;
+        ByteBuffer tokens =
+                ByteBuffer.allocateDirect(3 * Integer.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer plan =
+                ByteBuffer.allocateDirect(BatchKeyGroupingSupport.requiredPackedPlanBytes(3))
+                        .order(ByteOrder.nativeOrder());
+        org.mockito.Mockito.when(grouping.maxGroupingEntries()).thenReturn(512);
+        org.mockito.Mockito.when(grouping.groupHashTokens(tokens, 3, plan)).thenReturn(2);
+
+        assertEquals(2, StatePrefetcher.groupHashTokensNatively(backend, tokens, 3, plan));
+        verify(grouping).groupHashTokens(tokens, 3, plan);
     }
 
     public interface ImmediatePrefetchHook {

@@ -18,6 +18,29 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
+
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
@@ -31,32 +54,7 @@ import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeReque
 import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.SerializedKeyBatch;
 import org.apache.flink.queryablestate.client.state.serialization.KvStateSerializer;
 import org.apache.flink.runtime.state.internal.InternalValueState;
-
 import org.junit.jupiter.api.Test;
-
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.util.Arrays;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.Objects;
-import java.util.concurrent.atomic.AtomicReference;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.withSettings;
 
 class NativePreparedValueStateTest {
 
@@ -92,10 +90,7 @@ class NativePreparedValueStateTest {
                         "point-ns",
                         StringSerializer.INSTANCE);
         fakePlane.preload(
-                41,
-                0,
-                preparedKey,
-                KvStateSerializer.serializeValue(42, IntSerializer.INSTANCE));
+                41, 0, preparedKey, KvStateSerializer.serializeValue(42, IntSerializer.INSTANCE));
         NativeRequestPlaneCoordinator coordinator =
                 NativeRequestPlaneCoordinator.forTesting(valueCacheOptions(true), fakePlane);
         CachedInternalValueState<String, String, Integer> state =
@@ -116,6 +111,7 @@ class NativePreparedValueStateTest {
                         true,
                         1,
                         1 << 20,
+                        false,
                         coordinator,
                         41);
         state.setCurrentNamespace("point-ns");
@@ -163,6 +159,7 @@ class NativePreparedValueStateTest {
                         true,
                         1,
                         1 << 20,
+                        false,
                         coordinator,
                         42);
         state.setCurrentNamespace("point-ns");
@@ -178,8 +175,7 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void testProbeCompactsMissesAndReusesPositiveAndNegativeHitsWithNamespace()
-            throws Exception {
+    void testProbeCompactsMissesAndReusesPositiveAndNegativeHitsWithNamespace() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
                 mock(
@@ -243,6 +239,7 @@ class NativePreparedValueStateTest {
                         true,
                         1,
                         1 << 20,
+                        false,
                         coordinator,
                         7);
         state.setCurrentNamespace("window-7");
@@ -269,9 +266,7 @@ class NativePreparedValueStateTest {
         assertEquals(2, state.getNativeHitsForTesting());
         assertEquals(0, state.getNativeHitBytesCopiedForTesting());
         assertEquals(
-                2L
-                        * KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE)
-                                .length,
+                2L * KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE).length,
                 state.getNativeHitBytesDirectForTesting());
         assertEquals(1, state.getNativeNegativeHitsForTesting());
         assertEquals(3, state.getNativeMissesForTesting());
@@ -358,6 +353,7 @@ class NativePreparedValueStateTest {
                         true,
                         1,
                         1 << 20,
+                        false,
                         coordinator,
                         17);
         state.setCurrentNamespace("window-mailbox");
@@ -426,6 +422,7 @@ class NativePreparedValueStateTest {
                         true,
                         1,
                         1 << 20,
+                        false,
                         coordinator,
                         18);
         state.setCurrentNamespace("window-mailbox-threshold");
@@ -489,6 +486,7 @@ class NativePreparedValueStateTest {
                         true,
                         1,
                         1 << 20,
+                        false,
                         coordinator,
                         18);
         state.setCurrentNamespace("window-java-prefetch");
@@ -550,6 +548,7 @@ class NativePreparedValueStateTest {
                         true,
                         8,
                         1 << 20,
+                        false,
                         coordinator,
                         9);
         state.setCurrentNamespace("window-fallback");
@@ -620,6 +619,7 @@ class NativePreparedValueStateTest {
                         true,
                         8,
                         1 << 20,
+                        false,
                         coordinator,
                         11);
         state.setCurrentNamespace("session-42");
@@ -698,6 +698,7 @@ class NativePreparedValueStateTest {
                         true,
                         128,
                         1 << 20,
+                        false,
                         coordinator,
                         21);
         writer.setCurrentNamespace("window-write-heavy");
@@ -722,8 +723,7 @@ class NativePreparedValueStateTest {
                         StringSerializer.INSTANCE,
                         "window-write-heavy",
                         StringSerializer.INSTANCE);
-        NativeRequestPlaneCoordinator.BatchSlot oldFill =
-                coordinator.tryAcquireBatchSlot();
+        NativeRequestPlaneCoordinator.BatchSlot oldFill = coordinator.tryAcquireBatchSlot();
         assertNotNull(oldFill);
         oldFill.prepareFill(
                 21,
@@ -733,8 +733,7 @@ class NativePreparedValueStateTest {
                         KvStateSerializer.serializeValue(10, IntSerializer.INSTANCE)));
         assertEquals(1, coordinator.fill(oldFill));
         assertEquals(
-                NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION,
-                oldFill.fillStatus(0));
+                NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION, oldFill.fillStatus(0));
         oldFill.close();
 
         CachedInternalValueState<String, String, Integer> readerState =
@@ -755,6 +754,7 @@ class NativePreparedValueStateTest {
                         true,
                         128,
                         1 << 20,
+                        false,
                         coordinator,
                         21);
         readerState.setCurrentNamespace("window-write-heavy");
@@ -793,6 +793,7 @@ class NativePreparedValueStateTest {
                         true,
                         128,
                         1 << 20,
+                        false,
                         coordinator,
                         21);
         afterClear.setCurrentNamespace("window-write-heavy");
@@ -830,8 +831,7 @@ class NativePreparedValueStateTest {
                 NativeRequestPlaneBridge.FILL_INSERTED,
                 coordinator.updateExactKey(37, 11, other, new byte[] {11}));
 
-        try (NativeRequestPlaneCoordinator.BatchSlot delayed =
-                coordinator.tryAcquireBatchSlot()) {
+        try (NativeRequestPlaneCoordinator.BatchSlot delayed = coordinator.tryAcquireBatchSlot()) {
             assertNotNull(delayed);
             delayed.prepareFill(
                     37,
@@ -840,16 +840,13 @@ class NativePreparedValueStateTest {
                     java.util.Collections.singletonList(new byte[] {5}));
             assertEquals(1, coordinator.fill(delayed));
             assertEquals(
-                    NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION,
-                    delayed.fillStatus(0));
+                    NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION, delayed.fillStatus(0));
             assertEquals(NativeRequestPlaneBridge.ERROR_OK, delayed.fillError(0));
         }
 
-        try (NativeRequestPlaneCoordinator.BatchSlot probe =
-                coordinator.tryAcquireBatchSlot()) {
+        try (NativeRequestPlaneCoordinator.BatchSlot probe = coordinator.tryAcquireBatchSlot()) {
             assertNotNull(probe);
-            probe.prepareLatest(
-                    37, 11, java.util.Collections.singletonList(key));
+            probe.prepareLatest(37, 11, java.util.Collections.singletonList(key));
             assertEquals(1, coordinator.probe(probe));
             assertEquals(NativeRequestPlaneBridge.PROBE_MISS, probe.probeStatus(0));
         }
@@ -890,10 +887,7 @@ class NativePreparedValueStateTest {
                         StringSerializer.INSTANCE);
         FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
         fakePlane.preload(
-                13,
-                0,
-                preparedKey,
-                KvStateSerializer.serializeValue(7, IntSerializer.INSTANCE));
+                13, 0, preparedKey, KvStateSerializer.serializeValue(7, IntSerializer.INSTANCE));
         fakePlane.corruptNextProbeSlice = true;
         NativeRequestPlaneCoordinator coordinator =
                 NativeRequestPlaneCoordinator.forTesting(testOptions(), fakePlane);
@@ -915,6 +909,7 @@ class NativePreparedValueStateTest {
                         true,
                         8,
                         1 << 20,
+                        false,
                         coordinator,
                         13);
         state.setCurrentNamespace("window-corrupt");
@@ -937,8 +932,7 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void testInternalFillErrorDisablesNativeButKeepsAuthoritativeRocksDBResult()
-            throws Exception {
+    void testInternalFillErrorDisablesNativeButKeepsAuthoritativeRocksDBResult() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
                 mock(
@@ -984,6 +978,7 @@ class NativePreparedValueStateTest {
                         true,
                         8,
                         1 << 20,
+                        false,
                         coordinator,
                         15);
         state.setCurrentNamespace("window-fill-error");
@@ -1074,23 +1069,8 @@ class NativePreparedValueStateTest {
 
     private static NativeRequestPlaneOptions prefetchOffOptions() {
         return new NativeRequestPlaneOptions(
-                true,
-                "",
-                "auto",
-                128,
-                4096,
-                4096,
-                16,
-                4096,
-                4096,
-                1,
-                2,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false);
+                true, "", "auto", 128, 4096, 4096, 16, 4096, 4096, 1, 2, false, false, false, false,
+                false, false);
     }
 
     private static final class FakeNativeRequestPlane implements NativeRequestPlane {
@@ -1123,14 +1103,12 @@ class NativePreparedValueStateTest {
             for (int i = 0; i < keys.entryCount(); i++) {
                 int base = i * NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES;
                 int offset =
-                        metadata.getInt(
-                                base + NativeRequestPlaneBridge.FILL_VALUE_ARENA_OFFSET);
+                        metadata.getInt(base + NativeRequestPlaneBridge.FILL_VALUE_ARENA_OFFSET);
                 int length =
                         metadata.getInt(base + NativeRequestPlaneBridge.FILL_VALUE_LENGTH_OFFSET);
                 int flags =
                         metadata.getInt(base + NativeRequestPlaneBridge.FILL_VALUE_FLAGS_OFFSET);
-                boolean negative =
-                        (flags & NativeRequestPlaneBridge.FILL_VALUE_NEGATIVE_FLAG) != 0;
+                boolean negative = (flags & NativeRequestPlaneBridge.FILL_VALUE_NEGATIVE_FLAG) != 0;
                 byte[] value = null;
                 if (!negative) {
                     value = new byte[length];
@@ -1157,8 +1135,7 @@ class NativePreparedValueStateTest {
                         results.putInt(
                                 resultBase + NativeRequestPlaneBridge.FILL_RESULT_ERROR_OFFSET,
                                 NativeRequestPlaneBridge.ERROR_INVALID_ARGUMENT);
-                    } else if (stateWatermark != null
-                            && key.generation < stateWatermark) {
+                    } else if (stateWatermark != null && key.generation < stateWatermark) {
                         results.putInt(
                                 resultBase + NativeRequestPlaneBridge.FILL_RESULT_STATUS_OFFSET,
                                 NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION);
@@ -1173,9 +1150,7 @@ class NativePreparedValueStateTest {
                             NativeKey oldest = values.keySet().iterator().next();
                             values.remove(oldest);
                         }
-                        values.put(
-                                key,
-                                new StoredValue(key.generation, negative, value));
+                        values.put(key, new StoredValue(key.generation, negative, value));
                         results.putInt(
                                 resultBase + NativeRequestPlaneBridge.FILL_RESULT_STATUS_OFFSET,
                                 existing == null
@@ -1193,9 +1168,7 @@ class NativePreparedValueStateTest {
 
         @Override
         public int probeBatch(
-                SerializedKeyBatch<?, ?> keys,
-                ByteBuffer valueOutput,
-                ByteBuffer probeResults) {
+                SerializedKeyBatch<?, ?> keys, ByteBuffer valueOutput, ByteBuffer probeResults) {
             if (failNextProbe) {
                 failNextProbe = false;
                 throw new IllegalStateException("injected probe failure");
@@ -1224,16 +1197,14 @@ class NativePreparedValueStateTest {
                     output.put(stored.value);
                 }
                 int base = i * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES;
-                results.putInt(
-                        base + NativeRequestPlaneBridge.PROBE_RESULT_STATUS_OFFSET, status);
+                results.putInt(base + NativeRequestPlaneBridge.PROBE_RESULT_STATUS_OFFSET, status);
                 results.putInt(base + NativeRequestPlaneBridge.PROBE_RESULT_ERROR_OFFSET, 0);
                 results.putInt(
                         base + NativeRequestPlaneBridge.PROBE_RESULT_ARENA_OFFSET,
                         corruptNextProbeSlice && status == NativeRequestPlaneBridge.PROBE_HIT
                                 ? valueOutput.capacity()
                                 : length == 0 ? 0 : valueOffset);
-                results.putInt(
-                        base + NativeRequestPlaneBridge.PROBE_RESULT_LENGTH_OFFSET, length);
+                results.putInt(base + NativeRequestPlaneBridge.PROBE_RESULT_LENGTH_OFFSET, length);
                 if (status == NativeRequestPlaneBridge.PROBE_HIT) {
                     corruptNextProbeSlice = false;
                 }
@@ -1243,8 +1214,7 @@ class NativePreparedValueStateTest {
         }
 
         @Override
-        public int compactBatch(
-                SerializedKeyBatch<?, ?> keys, ByteBuffer uniqueSourceIndexes) {
+        public int compactBatch(SerializedKeyBatch<?, ?> keys, ByteBuffer uniqueSourceIndexes) {
             compactCalls++;
             ByteBuffer indexes = uniqueSourceIndexes.duplicate().order(ByteOrder.nativeOrder());
             int written = 0;
@@ -1252,7 +1222,8 @@ class NativePreparedValueStateTest {
                 NativeKey candidateKey = nativeKey(keys, candidate);
                 boolean duplicate = false;
                 for (int unique = 0; unique < written; unique++) {
-                    if (candidateKey.equals(nativeKey(keys, indexes.getInt(unique * Integer.BYTES)))) {
+                    if (candidateKey.equals(
+                            nativeKey(keys, indexes.getInt(unique * Integer.BYTES)))) {
                         duplicate = true;
                         break;
                     }
@@ -1289,8 +1260,7 @@ class NativePreparedValueStateTest {
             }
             values.put(
                     new NativeKey(stateId, generation, Arrays.copyOf(key, key.length)),
-                    new StoredValue(
-                            generation, false, Arrays.copyOf(value, value.length)));
+                    new StoredValue(generation, false, Arrays.copyOf(value, value.length)));
         }
 
         private static NativeKey nativeKey(SerializedKeyBatch<?, ?> batch, int index) {
@@ -1333,8 +1303,7 @@ class NativePreparedValueStateTest {
                 return false;
             }
             NativeKey that = (NativeKey) other;
-            return stateId == that.stateId
-                    && Arrays.equals(bytes, that.bytes);
+            return stateId == that.stateId && Arrays.equals(bytes, that.bytes);
         }
 
         @Override

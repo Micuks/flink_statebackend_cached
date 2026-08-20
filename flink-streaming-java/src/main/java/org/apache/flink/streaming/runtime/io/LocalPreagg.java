@@ -21,6 +21,7 @@ package org.apache.flink.streaming.runtime.io;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.configuration.GlobalConfiguration;
 import org.apache.flink.metrics.Counter;
+import org.apache.flink.runtime.state.BatchKeyGroupingSupport;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.AbstractUdfStreamOperator;
 import org.apache.flink.streaming.api.operators.BatchableKeyedFunction;
@@ -31,6 +32,8 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.StatePrefetcher;
 
 import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -68,6 +71,8 @@ public final class LocalPreagg {
                     .getBoolean("state.backend.cachekit.native.local-preagg.enabled", false);
     private static final ThreadLocal<ExtractionBuffers> NATIVE_EXTRACTION_BUFFERS =
             ThreadLocal.withInitial(ExtractionBuffers::new);
+    private static final ThreadLocal<NativeGroupingWorkspace> NATIVE_GROUPING_WORKSPACE =
+            ThreadLocal.withInitial(NativeGroupingWorkspace::new);
 
     private static final ConcurrentHashMap<Class<?>, Field> KEY_SELECTOR_FIELD_CACHE =
             new ConcurrentHashMap<>();
@@ -172,6 +177,11 @@ public final class LocalPreagg {
                         : new ExtractionBuffers();
         final ArrayList<Object> recordKeys = extractionBuffers.keys;
         final ArrayList<Object> recordValues = extractionBuffers.values;
+        final NativeGroupingWorkspace groupingWorkspace =
+                NATIVE_EXTRACTION_REUSE_ENABLED ? NATIVE_GROUPING_WORKSPACE.get() : null;
+        if (groupingWorkspace != null) {
+            groupingWorkspace.prepare(n);
+        }
         recordKeys.clear();
         recordValues.clear();
         recordKeys.ensureCapacity(n);
@@ -189,14 +199,32 @@ public final class LocalPreagg {
                 lastRec = rec;
                 Object value = rec.getValue();
                 Object key = selector.getKey(value);
+                if (groupingWorkspace != null) {
+                    groupingWorkspace.putToken(recordKeys.size(), Objects.hashCode(key));
+                }
                 recordKeys.add(key);
                 recordValues.add(value);
             }
             if (recordKeys.isEmpty()) {
                 return false;
             }
-            final GroupedInputs groups =
-                    groupInputs(recordKeys, recordValues, StatePrefetcher.groupKeysNatively(headOperator, recordKeys));
+            GroupedInputs groups = null;
+            if (groupingWorkspace != null) {
+                int groupCount =
+                        StatePrefetcher.groupHashTokensNatively(
+                                headOperator,
+                                groupingWorkspace.tokens,
+                                recordKeys.size(),
+                                groupingWorkspace.plan);
+                if (groupCount > 0) {
+                    groups =
+                            groupInputsPacked(
+                                    recordKeys, recordValues, groupingWorkspace, groupCount);
+                }
+            }
+            if (groups == null) {
+                groups = groupInputs(recordKeys, recordValues, null);
+            }
             // The exact set of state keys is now known and deduplicated. CacheKit can issue one
             // synchronous MultiGet so processBatchForKey observes warm ValueState, without the
             // wasted per-record speculation that used to run before grouping.
@@ -242,6 +270,164 @@ public final class LocalPreagg {
     private static final class ExtractionBuffers {
         private final ArrayList<Object> keys = new ArrayList<>();
         private final ArrayList<Object> values = new ArrayList<>();
+    }
+
+    static final class NativeGroupingWorkspace {
+        private ByteBuffer tokens = directBuffer(Integer.BYTES);
+        private ByteBuffer plan = directBuffer(BatchKeyGroupingSupport.requiredPackedPlanBytes(1));
+        private int[] positions = new int[1];
+
+        void prepare(int sourceCapacity) {
+            if (sourceCapacity <= 0) {
+                return;
+            }
+            int tokenBytes = Math.multiplyExact(sourceCapacity, Integer.BYTES);
+            int planBytes = BatchKeyGroupingSupport.requiredPackedPlanBytes(sourceCapacity);
+            if (tokens.capacity() < tokenBytes) {
+                tokens = directBuffer(grownCapacity(tokens.capacity(), tokenBytes));
+            }
+            if (plan.capacity() < planBytes) {
+                plan = directBuffer(grownCapacity(plan.capacity(), planBytes));
+            }
+            if (positions.length < sourceCapacity) {
+                positions = new int[grownCapacity(positions.length, sourceCapacity)];
+            }
+            tokens.clear();
+            plan.clear();
+            plan.putInt(0, 0);
+        }
+
+        private void putToken(int source, int token) {
+            tokens.putInt(source * Integer.BYTES, token);
+        }
+
+        ByteBuffer planBuffer() {
+            return plan;
+        }
+
+        private static ByteBuffer directBuffer(int bytes) {
+            return ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());
+        }
+
+        private static int grownCapacity(int current, int required) {
+            int capacity = Math.max(1, current);
+            while (capacity < required) {
+                if (capacity > Integer.MAX_VALUE / 2) {
+                    return required;
+                }
+                capacity *= 2;
+            }
+            return capacity;
+        }
+    }
+
+    /**
+     * Validates a native packed plan and scatters values once.
+     *
+     * <p>No record is processed before this method returns. Any malformed layout, unstable group
+     * order, or unequal-key hash collision therefore falls back for the whole batch.
+     */
+    static GroupedInputs groupInputsPacked(
+            List<Object> recordKeys,
+            List<Object> recordValues,
+            NativeGroupingWorkspace workspace,
+            int returnedGroupCount) {
+        if (recordKeys.size() != recordValues.size() || recordKeys.isEmpty()) {
+            return null;
+        }
+        final ByteBuffer plan = workspace.plan;
+        final int sourceCount = recordKeys.size();
+        if (plan.getInt(0) != BatchKeyGroupingSupport.PACKED_PLAN_MAGIC
+                || plan.getInt(Integer.BYTES) != BatchKeyGroupingSupport.PACKED_PLAN_VERSION
+                || plan.getInt(2 * Integer.BYTES) != sourceCount
+                || plan.getInt(3 * Integer.BYTES) != returnedGroupCount) {
+            return null;
+        }
+        final int groupCount = returnedGroupCount;
+        if (groupCount <= 0 || groupCount > sourceCount) {
+            return null;
+        }
+        final int firstSourceBase = BatchKeyGroupingSupport.PACKED_PLAN_HEADER_BYTES;
+        final int offsetsBase = firstSourceBase + groupCount * Integer.BYTES;
+        final int sourceGroupBase = offsetsBase + (groupCount + 1) * Integer.BYTES;
+        final int requiredBytes = sourceGroupBase + sourceCount * Integer.BYTES;
+        if (requiredBytes > plan.capacity()) {
+            return null;
+        }
+
+        ArrayList<Object> keys = new ArrayList<>(groupCount);
+        for (int group = 0; group < groupCount; group++) {
+            keys.add(null);
+            int firstSource = plan.getInt(firstSourceBase + group * Integer.BYTES);
+            if (firstSource < 0
+                    || firstSource >= sourceCount
+                    || (group == 0 && firstSource != 0)
+                    || (group > 0
+                            && firstSource
+                                    <= plan.getInt(
+                                            firstSourceBase + (group - 1) * Integer.BYTES))) {
+                return null;
+            }
+        }
+        if (plan.getInt(offsetsBase) != 0
+                || plan.getInt(offsetsBase + groupCount * Integer.BYTES) != sourceCount) {
+            return null;
+        }
+        for (int group = 0; group < groupCount; group++) {
+            int begin = plan.getInt(offsetsBase + group * Integer.BYTES);
+            int end = plan.getInt(offsetsBase + (group + 1) * Integer.BYTES);
+            if (begin < 0 || begin >= end || end > sourceCount) {
+                return null;
+            }
+            workspace.positions[group] = begin;
+        }
+
+        Object[] flatValues = new Object[sourceCount];
+        int nextGroup = 0;
+        for (int source = 0; source < sourceCount; source++) {
+            int group = plan.getInt(sourceGroupBase + source * Integer.BYTES);
+            if (group < 0 || group >= groupCount) {
+                return null;
+            }
+            int firstSource = plan.getInt(firstSourceBase + group * Integer.BYTES);
+            Object key = recordKeys.get(source);
+            if (source == firstSource) {
+                if (group != nextGroup) {
+                    return null;
+                }
+                keys.set(group, key);
+                nextGroup++;
+            } else if (source < firstSource
+                    || group >= nextGroup
+                    || !Objects.equals(keys.get(group), key)) {
+                return null;
+            }
+            int position = workspace.positions[group]++;
+            int groupEnd = plan.getInt(offsetsBase + (group + 1) * Integer.BYTES);
+            if (position >= groupEnd) {
+                return null;
+            }
+            flatValues[position] = recordValues.get(source);
+        }
+        if (nextGroup != groupCount) {
+            return null;
+        }
+        for (int group = 0; group < groupCount; group++) {
+            if (workspace.positions[group]
+                    != plan.getInt(offsetsBase + (group + 1) * Integer.BYTES)) {
+                return null;
+            }
+        }
+
+        ArrayList<List<Object>> values = new ArrayList<>(groupCount);
+        for (int group = 0; group < groupCount; group++) {
+            values.add(
+                    new MutableArraySliceList(
+                            flatValues,
+                            plan.getInt(offsetsBase + group * Integer.BYTES),
+                            plan.getInt(offsetsBase + (group + 1) * Integer.BYTES)));
+        }
+        return new GroupedInputs(keys, values, true);
     }
 
     static GroupedInputs groupInputs(
@@ -315,13 +501,12 @@ public final class LocalPreagg {
         }
         LinkedHashMap<Object, List<Object>> javaGroups = new LinkedHashMap<>();
         for (int source = 0; source < recordKeys.size(); source++) {
-            javaGroups.computeIfAbsent(recordKeys.get(source), ignored -> new ArrayList<>())
+            javaGroups
+                    .computeIfAbsent(recordKeys.get(source), ignored -> new ArrayList<>())
                     .add(recordValues.get(source));
         }
         return new GroupedInputs(
-                new ArrayList<>(javaGroups.keySet()),
-                new ArrayList<>(javaGroups.values()),
-                false);
+                new ArrayList<>(javaGroups.keySet()), new ArrayList<>(javaGroups.values()), false);
     }
 
     /**
@@ -332,8 +517,7 @@ public final class LocalPreagg {
      * immutable. Removal shifts only inside this group's non-overlapping region and does not
      * allocate another backing array.
      */
-    static final class MutableArraySliceList extends AbstractList<Object>
-            implements RandomAccess {
+    static final class MutableArraySliceList extends AbstractList<Object> implements RandomAccess {
         private final Object[] values;
         private final int start;
         private int size;
@@ -390,8 +574,7 @@ public final class LocalPreagg {
         final List<List<Object>> values;
         final boolean nativeGrouped;
 
-        private GroupedInputs(
-                List<Object> keys, List<List<Object>> values, boolean nativeGrouped) {
+        private GroupedInputs(List<Object> keys, List<List<Object>> values, boolean nativeGrouped) {
             this.keys = keys;
             this.values = values;
             this.nativeGrouped = nativeGrouped;

@@ -18,18 +18,17 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit.nativeplane;
 
-import org.junit.jupiter.api.Test;
-
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.util.Collections;
-
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.Collections;
+import org.junit.jupiter.api.Test;
 
 class NativeRequestPlaneCoordinatorTest {
 
@@ -54,17 +53,7 @@ class NativeRequestPlaneCoordinatorTest {
                 () ->
                         NativeRequestPlaneCoordinator.forTesting(
                                 new NativeRequestPlaneOptions(
-                                        true,
-                                        "",
-                                        "auto",
-                                        16,
-                                        1024,
-                                        1024,
-                                        4,
-                                        1024,
-                                        1024,
-                                        1,
-                                        1,
+                                        true, "", "auto", 16, 1024, 1024, 4, 1024, 1024, 1, 1,
                                         true),
                                 plane));
 
@@ -114,8 +103,7 @@ class NativeRequestPlaneCoordinatorTest {
                 NativeRequestPlaneCoordinator.forTesting(options(1), plane);
         assertEquals("x86_64", coordinator.detectedFeatures());
 
-        try (NativeRequestPlaneCoordinator.BatchSlot slot =
-                coordinator.tryAcquireBatchSlot()) {
+        try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
             assertNotNull(slot);
             slot.prepareLatest(3, 17L, Collections.singletonList(new byte[] {1, 2, 3}));
             assertEquals(17L, slot.preparedGeneration());
@@ -131,8 +119,7 @@ class NativeRequestPlaneCoordinatorTest {
         NativeRequestPlaneCoordinator coordinator =
                 NativeRequestPlaneCoordinator.forTesting(options(1), plane);
 
-        try (NativeRequestPlaneCoordinator.BatchSlot slot =
-                coordinator.tryAcquireBatchSlot()) {
+        try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
             slot.prepareLatest(
                     3,
                     17L,
@@ -152,8 +139,7 @@ class NativeRequestPlaneCoordinatorTest {
         NativeRequestPlaneCoordinator coordinator =
                 NativeRequestPlaneCoordinator.forTesting(options(1), plane);
 
-        try (NativeRequestPlaneCoordinator.BatchSlot slot =
-                coordinator.tryAcquireBatchSlot()) {
+        try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
             slot.prepareLatest(
                     3,
                     17L,
@@ -172,8 +158,7 @@ class NativeRequestPlaneCoordinatorTest {
         NativeRequestPlaneCoordinator coordinator =
                 NativeRequestPlaneCoordinator.forTesting(options(1), plane);
 
-        try (NativeRequestPlaneCoordinator.BatchSlot slot =
-                coordinator.tryAcquireBatchSlot()) {
+        try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
             slot.prepareLatestDirect(
                     3,
                     17L,
@@ -199,8 +184,7 @@ class NativeRequestPlaneCoordinatorTest {
         NativeRequestPlaneCoordinator coordinator =
                 NativeRequestPlaneCoordinator.forTesting(options(1), plane);
 
-        try (NativeRequestPlaneCoordinator.BatchSlot slot =
-                coordinator.tryAcquireBatchSlot()) {
+        try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
             slot.prepareLatest(
                     3,
                     17L,
@@ -213,6 +197,24 @@ class NativeRequestPlaneCoordinatorTest {
             assertEquals(2, slot.sourceGroupIndex(3));
             assertEquals(1, coordinator.groupCalls());
         }
+        coordinator.close();
+    }
+
+    @Test
+    void testTokenGrouperDelegatesCallerOwnedDirectBuffers() {
+        FakePlane plane = new FakePlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(1), plane);
+        ByteBuffer tokens =
+                ByteBuffer.allocateDirect(3 * Integer.BYTES).order(ByteOrder.nativeOrder());
+        tokens.putInt(0, 1);
+        tokens.putInt(Integer.BYTES, 2);
+        tokens.putInt(2 * Integer.BYTES, 1);
+        ByteBuffer plan = ByteBuffer.allocateDirect(56).order(ByteOrder.nativeOrder());
+
+        assertEquals(2, coordinator.groupHashTokens(tokens, 3, plan));
+        assertEquals(1, plane.tokenGroupCalls);
+        assertEquals(1, coordinator.groupCalls());
         coordinator.close();
     }
 
@@ -259,6 +261,7 @@ class NativeRequestPlaneCoordinatorTest {
         private byte[] fillValue;
         private boolean fillNegative;
         private long fillGeneration;
+        private int tokenGroupCalls;
 
         @Override
         public int fillBatch(
@@ -274,8 +277,7 @@ class NativeRequestPlaneCoordinatorTest {
 
             ByteBuffer metadata = valueMetadata.duplicate().order(ByteOrder.nativeOrder());
             int flags = metadata.getInt(NativeRequestPlaneBridge.FILL_VALUE_FLAGS_OFFSET);
-            fillNegative =
-                    (flags & NativeRequestPlaneBridge.FILL_VALUE_NEGATIVE_FLAG) != 0;
+            fillNegative = (flags & NativeRequestPlaneBridge.FILL_VALUE_NEGATIVE_FLAG) != 0;
             int offset = metadata.getInt(NativeRequestPlaneBridge.FILL_VALUE_ARENA_OFFSET);
             int length = metadata.getInt(NativeRequestPlaneBridge.FILL_VALUE_LENGTH_OFFSET);
             fillValue = null;
@@ -297,9 +299,7 @@ class NativeRequestPlaneCoordinatorTest {
 
         @Override
         public int probeBatch(
-                SerializedKeyBatch<?, ?> keys,
-                ByteBuffer valueOutput,
-                ByteBuffer probeResults) {
+                SerializedKeyBatch<?, ?> keys, ByteBuffer valueOutput, ByteBuffer probeResults) {
             if (keys.entryCount() > 0) {
                 probeGeneration = keys.generation(0);
             }
@@ -307,16 +307,22 @@ class NativeRequestPlaneCoordinatorTest {
         }
 
         @Override
-        public int compactBatch(
-                SerializedKeyBatch<?, ?> keys, ByteBuffer uniqueSourceIndexes) {
+        public int compactBatch(SerializedKeyBatch<?, ?> keys, ByteBuffer uniqueSourceIndexes) {
             if (compactIndexes == null) {
                 return NativeRequestPlane.super.compactBatch(keys, uniqueSourceIndexes);
             }
-            ByteBuffer output = uniqueSourceIndexes.duplicate().order(java.nio.ByteOrder.nativeOrder());
+            ByteBuffer output =
+                    uniqueSourceIndexes.duplicate().order(java.nio.ByteOrder.nativeOrder());
             for (int index = 0; index < compactIndexes.length; index++) {
                 output.putInt(index * Integer.BYTES, compactIndexes[index]);
             }
             return compactIndexes.length;
+        }
+
+        @Override
+        public int groupHashTokens(ByteBuffer tokens, int count, ByteBuffer packedPlan) {
+            tokenGroupCalls++;
+            return 2;
         }
 
         @Override

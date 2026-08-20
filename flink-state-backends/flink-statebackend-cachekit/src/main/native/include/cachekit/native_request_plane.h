@@ -169,6 +169,16 @@ public:
             std::uint32_t* source_group_indexes,
             std::size_t count,
             std::size_t* unique_count) const noexcept;
+    // Groups caller-provided 32-bit identity tokens without fingerprinting key
+    // bytes.  This is a speculative grouping plan only: callers must still
+    // validate exact Java key equality before applying a grouped operation.
+    ErrorCode GroupTokenBatch(
+            const std::uint32_t* tokens,
+            std::uint32_t* first_source_indexes,
+            std::uint32_t* source_group_indexes,
+            std::uint32_t* group_counts,
+            std::size_t count,
+            std::size_t* group_count) const noexcept;
 
     void Clear() noexcept;
 

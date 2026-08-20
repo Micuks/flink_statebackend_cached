@@ -1014,6 +1014,78 @@ void TestGroupBatchLargeCollisionSafePlan() {
     }
 }
 
+void TestGroupTokenBatchStablePlanAndCounts() {
+    Options options;
+    options.capacity_entries = 2;
+    options.max_batch_entries = 8;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+    const std::uint32_t tokens[] = {7U, 8U, 7U, 9U, 8U};
+    std::uint32_t first_sources[5] = {};
+    std::uint32_t source_groups[5] = {};
+    std::uint32_t group_counts[5] = {};
+    std::size_t group_count = 0;
+    const GroupBatchDiagnostics before = plane->group_batch_diagnostics();
+    CHECK(plane->GroupTokenBatch(
+                  tokens,
+                  first_sources,
+                  source_groups,
+                  group_counts,
+                  5,
+                  &group_count) == ErrorCode::kOk);
+    const GroupBatchDiagnostics after = plane->group_batch_diagnostics();
+    CHECK(group_count == 3);
+    CHECK(first_sources[0] == 0 && first_sources[1] == 1 && first_sources[2] == 3);
+    CHECK(source_groups[0] == 0 && source_groups[1] == 1 && source_groups[2] == 0);
+    CHECK(source_groups[3] == 2 && source_groups[4] == 1);
+    CHECK(group_counts[0] == 2 && group_counts[1] == 2 && group_counts[2] == 1);
+    CHECK(after.fingerprint_calls == before.fingerprint_calls);
+    CHECK(after.batches - before.batches == 1);
+}
+
+void TestGroupTokenBatchFailsClosedAndSurvivesEpochWrap() {
+    Options options;
+    options.capacity_entries = 2;
+    options.max_batch_entries = 4;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+    const std::uint32_t tokens[] = {1U, 2U, 1U, 3U, 4U};
+
+    for (std::size_t batch = 0; batch < 256; ++batch) {
+        std::uint32_t first_sources[4] = {};
+        std::uint32_t source_groups[4] = {};
+        std::uint32_t group_counts[4] = {};
+        std::size_t group_count = 99;
+        CHECK(plane->GroupTokenBatch(
+                      tokens,
+                      first_sources,
+                      source_groups,
+                      group_counts,
+                      4,
+                      &group_count) == ErrorCode::kOk);
+        CHECK(group_count == 3);
+        CHECK(first_sources[0] == 0 && first_sources[1] == 1 && first_sources[2] == 3);
+        CHECK(source_groups[0] == 0 && source_groups[1] == 1 &&
+              source_groups[2] == 0 && source_groups[3] == 2);
+        CHECK(group_counts[0] == 2 && group_counts[1] == 1 && group_counts[2] == 1);
+    }
+    const GroupBatchDiagnostics diagnostics = plane->group_batch_diagnostics();
+    CHECK(diagnostics.epoch_resets == 1);
+
+    std::uint32_t first_sources[5] = {};
+    std::uint32_t source_groups[5] = {};
+    std::uint32_t group_counts[5] = {};
+    std::size_t group_count = 99;
+    CHECK(plane->GroupTokenBatch(
+                  tokens,
+                  first_sources,
+                  source_groups,
+                  group_counts,
+                  5,
+                  &group_count) == ErrorCode::kCapacityExceeded);
+    CHECK(group_count == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -1036,6 +1108,8 @@ int main() {
     TestGroupBatchEpochWrapPreservesResults();
     TestGroupBatchRandomDifferentialAndLinearCounters();
     TestGroupBatchLargeCollisionSafePlan();
+    TestGroupTokenBatchStablePlanAndCounts();
+    TestGroupTokenBatchFailsClosedAndSurvivesEpochWrap();
     TestCAbiBatchSmoke();
     std::cout << "all native request-plane tests passed" << std::endl;
     return 0;

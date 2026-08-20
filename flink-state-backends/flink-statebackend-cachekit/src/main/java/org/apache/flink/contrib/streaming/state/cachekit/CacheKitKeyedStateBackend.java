@@ -15,72 +15,69 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit;
 
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RunnableFuture;
+import java.util.stream.Stream;
+import javax.annotation.Nonnull;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneCoordinator;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneOptions;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalListState;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMapState;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalPriorityQueueSet;
 import org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalValueState;
 import org.apache.flink.contrib.streaming.state.cachekit.state.MapSnapshotCacheMetrics;
-import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneCoordinator;
-import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneOptions;
-import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
-import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
-import org.apache.flink.runtime.state.SavepointResources;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
+import org.apache.flink.runtime.state.BatchKeyGroupingSupport;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
 import org.apache.flink.runtime.state.KeyGroupedInternalPriorityQueue;
+import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.KeyedStateHandle;
+import org.apache.flink.runtime.state.PriorityComparable;
+import org.apache.flink.runtime.state.SavepointResources;
 import org.apache.flink.runtime.state.SnapshotResult;
-import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.state.StateSnapshotTransformer;
+import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
+import org.apache.flink.runtime.state.heap.HeapPriorityQueueSet;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalListState;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
-import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
-import org.apache.flink.runtime.state.heap.HeapPriorityQueueSet;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
-import org.apache.flink.runtime.state.Keyed;
-import org.apache.flink.runtime.state.PriorityComparable;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.Preconditions;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.annotation.Nonnull;
-
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.stream.Stream;
-import java.util.Collection;
-import java.util.IdentityHashMap;
-import java.util.Map;
-import java.util.Objects;
-import java.util.concurrent.RunnableFuture;
-import org.apache.flink.api.java.tuple.Tuple2;
-
 /**
- * Minimal delegating {@link AbstractKeyedStateBackend} wrapper that adds
- * caching for ValueState.
+ * Minimal delegating {@link AbstractKeyedStateBackend} wrapper that adds caching for ValueState.
  *
- * <p>
- * This class is intentionally small and only intercepts
- * {@link #getOrCreateKeyedState} to wrap
+ * <p>This class is intentionally small and only intercepts {@link #getOrCreateKeyedState} to wrap
  * {@link InternalValueState} instances.
  */
-public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
+public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
+        implements BatchKeyGroupingSupport {
 
     private static final long serialVersionUID = 1L;
     private static final Logger LOG = LoggerFactory.getLogger(CacheKitKeyedStateBackend.class);
@@ -292,8 +289,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     listStateCowEnabled
                             ? Executors.newSingleThreadExecutor(
                                     r -> {
-                                        Thread t =
-                                                new Thread(r, "cachekit-list-state-flush");
+                                        Thread t = new Thread(r, "cachekit-list-state-flush");
                                         t.setDaemon(true);
                                         return t;
                                     })
@@ -353,7 +349,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @Nonnull
     @Override
-    @SuppressWarnings({ "unchecked", "rawtypes" })
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public <N, S extends State, V> S getOrCreateKeyedState(
             TypeSerializer<N> namespaceSerializer, StateDescriptor<S, V> stateDescriptor)
             throws Exception {
@@ -363,7 +359,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
     }
 
-    @SuppressWarnings({ "unchecked", "rawtypes" })
+    @SuppressWarnings({"unchecked", "rawtypes"})
     private <N, S extends State, V> S getOrCreateKeyedStateInternal(
             TypeSerializer<N> namespaceSerializer, StateDescriptor<S, V> stateDescriptor)
             throws Exception {
@@ -382,22 +378,23 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             }
             InternalValueState<K, N, V> delegateValue = (InternalValueState<K, N, V>) internal;
             requireNativeCapableValueState(delegateValue);
-            CachedInternalValueState<K, N, V> wrapped = new CachedInternalValueState<>(
-                    delegateValue,
-                    this::getCurrentKey,
-                    this::setCurrentKey,
-                    valueCacheMaxEntries,
-                    valueCachePolicy,
-                    valueCacheLruOverflow,
-                    valueBypassEnabled,
-                    valueHitRateThreshold,
-                    valueHitRateWindow,
-                    BP_PREFETCH_MULTIGET,
-                    VALUE_STICKY_UPDATE_IN_PLACE,
-                    VALUE_LAZY_STAGING,
-                    BP_PREFETCH_KEY_SCOPED_INVALIDATION,
-                    nativeRequestPlaneCoordinator,
-                    allocateNativeStateId());
+            CachedInternalValueState<K, N, V> wrapped =
+                    new CachedInternalValueState<>(
+                            delegateValue,
+                            this::getCurrentKey,
+                            this::setCurrentKey,
+                            valueCacheMaxEntries,
+                            valueCachePolicy,
+                            valueCacheLruOverflow,
+                            valueBypassEnabled,
+                            valueHitRateThreshold,
+                            valueHitRateWindow,
+                            BP_PREFETCH_MULTIGET,
+                            VALUE_STICKY_UPDATE_IN_PLACE,
+                            VALUE_LAZY_STAGING,
+                            BP_PREFETCH_KEY_SCOPED_INVALIDATION,
+                            nativeRequestPlaneCoordinator,
+                            allocateNativeStateId());
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -416,37 +413,45 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             if (existing != null) {
                 return (S) existing;
             }
-            InternalMapState<K, N, Object, Object> delegateMap = (InternalMapState<K, N, Object, Object>) internal;
-            CachedInternalMapState<K, N, Object, Object> wrapped = new CachedInternalMapState<>(
-                    delegateMap,
-                    this::getCurrentKey,
-                    this::setCurrentKey,
-                    mapPresenceCacheMaxEntries,
-                    mapPresenceCachePolicy,
-                    mapPresenceCacheLruOverflow,
-                    mapPresenceCacheImplementation,
-                    mapCacheMaxEntries,
-                    mapCachePolicy,
-                    mapCacheLruOverflow,
-                    mapBypassEnabled,
-                    mapHitRateThreshold,
-                    mapHitRateWindow,
-                    mapIterationCacheFillEnabled,
-                    mapSnapshotCacheMaxEntries,
-                    mapSnapshotCacheMetrics,
-                    nativeRequestPlaneCoordinator,
-                    nativeRequestPlaneCoordinator != null
-                                    && nativeRequestPlaneCoordinator.options().mapCacheEnabled()
-                            ? allocateNativeStateId()
-                            : 0,
-                    nativeRequestPlaneCoordinator != null
-                            && nativeRequestPlaneCoordinator.options().mapCacheEnabled(),
-                    nativeRequestPlaneCoordinator != null
-                                    && nativeRequestPlaneCoordinator.options().mapSnapshotEnabled()
-                            ? allocateNativeStateId()
-                            : 0,
-                    nativeRequestPlaneCoordinator != null
-                            && nativeRequestPlaneCoordinator.options().mapSnapshotEnabled());
+            InternalMapState<K, N, Object, Object> delegateMap =
+                    (InternalMapState<K, N, Object, Object>) internal;
+            CachedInternalMapState<K, N, Object, Object> wrapped =
+                    new CachedInternalMapState<>(
+                            delegateMap,
+                            this::getCurrentKey,
+                            this::setCurrentKey,
+                            mapPresenceCacheMaxEntries,
+                            mapPresenceCachePolicy,
+                            mapPresenceCacheLruOverflow,
+                            mapPresenceCacheImplementation,
+                            mapCacheMaxEntries,
+                            mapCachePolicy,
+                            mapCacheLruOverflow,
+                            mapBypassEnabled,
+                            mapHitRateThreshold,
+                            mapHitRateWindow,
+                            mapIterationCacheFillEnabled,
+                            mapSnapshotCacheMaxEntries,
+                            mapSnapshotCacheMetrics,
+                            nativeRequestPlaneCoordinator,
+                            nativeRequestPlaneCoordinator != null
+                                            && nativeRequestPlaneCoordinator
+                                                    .options()
+                                                    .mapCacheEnabled()
+                                    ? allocateNativeStateId()
+                                    : 0,
+                            nativeRequestPlaneCoordinator != null
+                                    && nativeRequestPlaneCoordinator.options().mapCacheEnabled(),
+                            nativeRequestPlaneCoordinator != null
+                                            && nativeRequestPlaneCoordinator
+                                                    .options()
+                                                    .mapSnapshotEnabled()
+                                    ? allocateNativeStateId()
+                                    : 0,
+                            nativeRequestPlaneCoordinator != null
+                                    && nativeRequestPlaneCoordinator
+                                            .options()
+                                            .mapSnapshotEnabled());
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -468,8 +473,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     (TypeSerializer<Object>)
                             ((ListStateDescriptor<?>) stateDescriptor).getElementSerializer();
             Preconditions.checkNotNull(
-                    elementSerializer,
-                    "ListState must have an element serializer configured");
+                    elementSerializer, "ListState must have an element serializer configured");
             CachedInternalListState<K, N, Object> wrapped =
                     new CachedInternalListState<>(
                             delegateList,
@@ -514,11 +518,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     }
 
     @Override
-    @SuppressWarnings({ "unchecked", "rawtypes" })
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public <N, SV, SEV, S extends State, IS extends S> IS createOrUpdateInternalState(
             TypeSerializer<N> namespaceSerializer,
             StateDescriptor<S, SV> stateDesc,
-            StateSnapshotTransformer.StateSnapshotTransformFactory<SEV> stateSnapshotTransformFactory)
+            StateSnapshotTransformer.StateSnapshotTransformFactory<SEV>
+                    stateSnapshotTransformFactory)
             throws Exception {
         synchronized (lifecycleLock) {
             ensureOpen();
@@ -527,14 +532,16 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
     }
 
-    @SuppressWarnings({ "unchecked", "rawtypes" })
+    @SuppressWarnings({"unchecked", "rawtypes"})
     private <N, SV, SEV, S extends State, IS extends S> IS createOrUpdateInternalStateInternal(
             TypeSerializer<N> namespaceSerializer,
             StateDescriptor<S, SV> stateDesc,
-            StateSnapshotTransformer.StateSnapshotTransformFactory<SEV> stateSnapshotTransformFactory)
+            StateSnapshotTransformer.StateSnapshotTransformFactory<SEV>
+                    stateSnapshotTransformFactory)
             throws Exception {
-        IS state = delegate.createOrUpdateInternalState(
-                namespaceSerializer, stateDesc, stateSnapshotTransformFactory);
+        IS state =
+                delegate.createOrUpdateInternalState(
+                        namespaceSerializer, stateDesc, stateSnapshotTransformFactory);
 
         // Wrap ValueState with cache layer
         if (!(state instanceof InternalKvState)) {
@@ -551,22 +558,23 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             }
             InternalValueState<K, N, SV> delegateValue = (InternalValueState<K, N, SV>) internal;
             requireNativeCapableValueState(delegateValue);
-            CachedInternalValueState<K, N, SV> wrapped = new CachedInternalValueState<>(
-                    delegateValue,
-                    this::getCurrentKey,
-                    this::setCurrentKey,
-                    valueCacheMaxEntries,
-                    valueCachePolicy,
-                    valueCacheLruOverflow,
-                    valueBypassEnabled,
-                    valueHitRateThreshold,
-                    valueHitRateWindow,
-                    BP_PREFETCH_MULTIGET,
-                    VALUE_STICKY_UPDATE_IN_PLACE,
-                    VALUE_LAZY_STAGING,
-                    BP_PREFETCH_KEY_SCOPED_INVALIDATION,
-                    nativeRequestPlaneCoordinator,
-                    allocateNativeStateId());
+            CachedInternalValueState<K, N, SV> wrapped =
+                    new CachedInternalValueState<>(
+                            delegateValue,
+                            this::getCurrentKey,
+                            this::setCurrentKey,
+                            valueCacheMaxEntries,
+                            valueCachePolicy,
+                            valueCacheLruOverflow,
+                            valueBypassEnabled,
+                            valueHitRateThreshold,
+                            valueHitRateWindow,
+                            BP_PREFETCH_MULTIGET,
+                            VALUE_STICKY_UPDATE_IN_PLACE,
+                            VALUE_LAZY_STAGING,
+                            BP_PREFETCH_KEY_SCOPED_INVALIDATION,
+                            nativeRequestPlaneCoordinator,
+                            allocateNativeStateId());
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
@@ -585,37 +593,45 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             if (existing != null) {
                 return (IS) existing;
             }
-            InternalMapState<K, N, Object, Object> delegateMap = (InternalMapState<K, N, Object, Object>) internal;
-            CachedInternalMapState<K, N, Object, Object> wrapped = new CachedInternalMapState<>(
-                    delegateMap,
-                    this::getCurrentKey,
-                    this::setCurrentKey,
-                    mapPresenceCacheMaxEntries,
-                    mapPresenceCachePolicy,
-                    mapPresenceCacheLruOverflow,
-                    mapPresenceCacheImplementation,
-                    mapCacheMaxEntries,
-                    mapCachePolicy,
-                    mapCacheLruOverflow,
-                    mapBypassEnabled,
-                    mapHitRateThreshold,
-                    mapHitRateWindow,
-                    mapIterationCacheFillEnabled,
-                    mapSnapshotCacheMaxEntries,
-                    mapSnapshotCacheMetrics,
-                    nativeRequestPlaneCoordinator,
-                    nativeRequestPlaneCoordinator != null
-                                    && nativeRequestPlaneCoordinator.options().mapCacheEnabled()
-                            ? allocateNativeStateId()
-                            : 0,
-                    nativeRequestPlaneCoordinator != null
-                            && nativeRequestPlaneCoordinator.options().mapCacheEnabled(),
-                    nativeRequestPlaneCoordinator != null
-                                    && nativeRequestPlaneCoordinator.options().mapSnapshotEnabled()
-                            ? allocateNativeStateId()
-                            : 0,
-                    nativeRequestPlaneCoordinator != null
-                            && nativeRequestPlaneCoordinator.options().mapSnapshotEnabled());
+            InternalMapState<K, N, Object, Object> delegateMap =
+                    (InternalMapState<K, N, Object, Object>) internal;
+            CachedInternalMapState<K, N, Object, Object> wrapped =
+                    new CachedInternalMapState<>(
+                            delegateMap,
+                            this::getCurrentKey,
+                            this::setCurrentKey,
+                            mapPresenceCacheMaxEntries,
+                            mapPresenceCachePolicy,
+                            mapPresenceCacheLruOverflow,
+                            mapPresenceCacheImplementation,
+                            mapCacheMaxEntries,
+                            mapCachePolicy,
+                            mapCacheLruOverflow,
+                            mapBypassEnabled,
+                            mapHitRateThreshold,
+                            mapHitRateWindow,
+                            mapIterationCacheFillEnabled,
+                            mapSnapshotCacheMaxEntries,
+                            mapSnapshotCacheMetrics,
+                            nativeRequestPlaneCoordinator,
+                            nativeRequestPlaneCoordinator != null
+                                            && nativeRequestPlaneCoordinator
+                                                    .options()
+                                                    .mapCacheEnabled()
+                                    ? allocateNativeStateId()
+                                    : 0,
+                            nativeRequestPlaneCoordinator != null
+                                    && nativeRequestPlaneCoordinator.options().mapCacheEnabled(),
+                            nativeRequestPlaneCoordinator != null
+                                            && nativeRequestPlaneCoordinator
+                                                    .options()
+                                                    .mapSnapshotEnabled()
+                                    ? allocateNativeStateId()
+                                    : 0,
+                            nativeRequestPlaneCoordinator != null
+                                    && nativeRequestPlaneCoordinator
+                                            .options()
+                                            .mapSnapshotEnabled());
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
@@ -636,8 +652,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     (TypeSerializer<Object>)
                             ((ListStateDescriptor<?>) stateDesc).getElementSerializer();
             Preconditions.checkNotNull(
-                    elementSerializer,
-                    "ListState must have an element serializer configured");
+                    elementSerializer, "ListState must have an element serializer configured");
             CachedInternalListState<K, N, Object> wrapped =
                     new CachedInternalListState<>(
                             delegateList,
@@ -656,8 +671,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     }
 
     @Override
-    public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>> KeyGroupedInternalPriorityQueue<T> create(
-            String stateName, TypeSerializer<T> byteOrderedElementSerializer) {
+    public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
+            KeyGroupedInternalPriorityQueue<T> create(
+                    String stateName, TypeSerializer<T> byteOrderedElementSerializer) {
         synchronized (lifecycleLock) {
             ensureOpen();
             KeyGroupedInternalPriorityQueue<T> delegateQueue =
@@ -667,8 +683,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     }
 
     @Override
-    public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>> KeyGroupedInternalPriorityQueue<T> create(
-            String stateName, TypeSerializer<T> byteOrderedElementSerializer, boolean allowFutureMetadataUpdates) {
+    public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
+            KeyGroupedInternalPriorityQueue<T> create(
+                    String stateName,
+                    TypeSerializer<T> byteOrderedElementSerializer,
+                    boolean allowFutureMetadataUpdates) {
         synchronized (lifecycleLock) {
             ensureOpen();
             KeyGroupedInternalPriorityQueue<T> delegateQueue =
@@ -684,6 +703,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
      *
      * <p>We use a Heap whitelist (instanceof HeapPriorityQueueSet) instead of a RocksDB blacklist.
      * This correctly handles:
+     *
      * <ul>
      *   <li>RocksDB Timer → KeyGroupPartitionedPriorityQueue (non-Heap) → skipped ✅
      *   <li>RocksDB configured with Heap Timer → HeapPriorityQueueSet → optimized ✅
@@ -807,8 +827,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     }
 
     /**
-     * When true (default), ValueState prefetch is submitted to the shared off-mailbox worker
-     * thread instead of being executed synchronously in the mailbox critical path.
+     * When true (default), ValueState prefetch is submitted to the shared off-mailbox worker thread
+     * instead of being executed synchronously in the mailbox critical path.
      */
     private static final boolean BP_PREFETCH_ASYNC =
             loadBooleanFlag("state.backend.cachekit.bp-prefetch.async.enabled", true);
@@ -817,9 +837,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private static final boolean BP_PREFETCH_MULTIGET =
             loadBooleanFlag("state.backend.cachekit.bp-prefetch.multiget.enabled", false);
     /**
-     * Invalidates only the prepared key touched by a delegate-visible write. The default keeps
-     * the legacy state-wide generation barrier; the narrower mode is opt-in until its Nexmark
-     * gate passes.
+     * Invalidates only the prepared key touched by a delegate-visible write. The default keeps the
+     * legacy state-wide generation barrier; the narrower mode is opt-in until its Nexmark gate
+     * passes.
      */
     private static final boolean BP_PREFETCH_KEY_SCOPED_INVALIDATION =
             loadBooleanFlag(
@@ -830,14 +850,14 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
      * ownership check.
      */
     private static final boolean VALUE_STICKY_UPDATE_IN_PLACE =
-            loadBooleanFlag(
-                    "state.backend.cachekit.value.sticky-update-in-place.enabled", false);
+            loadBooleanFlag("state.backend.cachekit.value.sticky-update-in-place.enabled", false);
     /**
      * Defers materialization of speculative RocksDB ValueState results until mailbox promotion.
      * Synchronous local-preagg prefetch remains eager. Disabled by default pending Nexmark A/B.
      */
     private static final boolean VALUE_LAZY_STAGING =
             loadBooleanFlag("state.backend.cachekit.value.lazy-staging.enabled", false);
+
     private static boolean loadBooleanFlag(String key, boolean defaultValue) {
         try {
             return org.apache.flink.configuration.GlobalConfiguration.loadConfiguration()
@@ -851,8 +871,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     }
 
     /**
-     * True when at least one cached ValueState wrapper exists, i.e. a prefetch could land.
-     * Called reflectively by StatePrefetcher before it pays the per-batch key extraction. Wrappers
+     * True when at least one cached ValueState wrapper exists, i.e. a prefetch could land. Called
+     * reflectively by StatePrefetcher before it pays the per-batch key extraction. Wrappers
      * register lazily on first state access, so this must be re-evaluated per call, not cached by
      * the caller.
      */
@@ -877,6 +897,65 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         return nativeRequestPlaneCoordinator != null
                 && nativeRequestPlaneCoordinator.isActive()
                 && nativeRequestPlaneCoordinator.options().mailboxBatchEnabled();
+    }
+
+    @Override
+    public int maxGroupingEntries() {
+        NativeRequestPlaneCoordinator coordinator = nativeRequestPlaneCoordinator;
+        return coordinator != null
+                        && coordinator.isActive()
+                        && coordinator.options().preaggEnabled()
+                ? coordinator.options().batchEntries()
+                : 0;
+    }
+
+    /**
+     * Groups caller-owned Java hash tokens directly into a caller-owned packed plan.
+     *
+     * <p>The native result is deliberately not trusted as Java key identity. LocalPreagg validates
+     * every source key with {@link Objects#equals(Object, Object)} before it processes any record;
+     * an unequal-key hash collision therefore causes a whole-batch Java fallback.
+     */
+    @Override
+    public int groupHashTokens(ByteBuffer tokens, int count, ByteBuffer packedPlan) {
+        synchronized (lifecycleLock) {
+            if (closed
+                    || disposed
+                    || count <= 0
+                    || nativeRequestPlaneCoordinator == null
+                    || !nativeRequestPlaneCoordinator.isActive()
+                    || !nativeRequestPlaneCoordinator.options().preaggEnabled()
+                    || count > nativeRequestPlaneCoordinator.options().batchEntries()) {
+                nativePreaggFallbacks++;
+                return -1;
+            }
+            if (count < nativeRequestPlaneCoordinator.options().minBatchSize()) {
+                nativePreaggFallbacks++;
+                nativePreaggThresholdFallbacks++;
+                return -1;
+            }
+            try {
+                int groupCount =
+                        nativeRequestPlaneCoordinator.groupHashTokens(tokens, count, packedPlan);
+                nativePreaggGroupBatches++;
+                nativePreaggInputKeys += count;
+                nativePreaggGroups += groupCount;
+                if (nativePreaggGroupBatches % 5000L == 1L) {
+                    LOG.info(
+                            "[CACHEKIT NATIVE PREAGG] batches={} inputKeys={} groups={} "
+                                    + "fallbacks={} kernel={} groupingKernel=token32-scalar",
+                            nativePreaggGroupBatches,
+                            nativePreaggInputKeys,
+                            nativePreaggGroups,
+                            nativePreaggFallbacks,
+                            nativeRequestPlaneCoordinator.selectedKernel());
+                }
+                return groupCount;
+            } catch (Throwable failure) {
+                nativePreaggFallbacks++;
+                return -1;
+            }
+        }
     }
 
     /**
@@ -912,8 +991,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         Integer.MAX_VALUE,
                         0L,
                         keys.size(),
-                        (index, output) ->
-                                output.writeInt(nativePreaggHashToken(keys.get(index))));
+                        (index, output) -> output.writeInt(nativePreaggHashToken(keys.get(index))));
                 int groupCount = nativeRequestPlaneCoordinator.group(slot);
                 int[] plan = new int[keys.size() + 1];
                 plan[0] = groupCount;
@@ -975,10 +1053,14 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         return nativePreaggThresholdFallbacks;
     }
 
-    @SuppressWarnings({ "unchecked", "rawtypes" })
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public void prefetch(Collection<? extends K> keys) {
         synchronized (lifecycleLock) {
-            if (closed || disposed || keys == null || keys.isEmpty() || wrappersByDelegateIdentity.isEmpty()) {
+            if (closed
+                    || disposed
+                    || keys == null
+                    || keys.isEmpty()
+                    || wrappersByDelegateIdentity.isEmpty()) {
                 return;
             }
             if (BP_PREFETCH_ASYNC) {

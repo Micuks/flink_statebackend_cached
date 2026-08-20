@@ -1030,6 +1030,85 @@ ErrorCode RequestPlane::GroupBatch(
     return ErrorCode::kOk;
 }
 
+ErrorCode RequestPlane::GroupTokenBatch(
+        const std::uint32_t* tokens,
+        std::uint32_t* first_source_indexes,
+        std::uint32_t* source_group_indexes,
+        std::uint32_t* group_counts,
+        std::size_t count,
+        std::size_t* group_count) const noexcept {
+    if (group_count == nullptr) {
+        return ErrorCode::kInvalidArgument;
+    }
+    *group_count = 0;
+    if ((count != 0 &&
+         (tokens == nullptr || first_source_indexes == nullptr ||
+          source_group_indexes == nullptr || group_counts == nullptr)) ||
+        count > std::numeric_limits<std::uint32_t>::max()) {
+        return ErrorCode::kInvalidArgument;
+    }
+    if (count > impl_->options.max_batch_entries) {
+        return ErrorCode::kCapacityExceeded;
+    }
+
+    GroupBatchDiagnostics batch_diagnostics;
+    batch_diagnostics.batches = 1;
+    const auto publish_diagnostics = [&]() noexcept {
+        impl_->group_diagnostics.batches += batch_diagnostics.batches;
+        impl_->group_diagnostics.probe_steps += batch_diagnostics.probe_steps;
+        impl_->group_diagnostics.exact_comparisons +=
+                batch_diagnostics.exact_comparisons;
+        impl_->group_diagnostics.epoch_resets += batch_diagnostics.epoch_resets;
+    };
+    std::uint8_t next_epoch = static_cast<std::uint8_t>(impl_->group_epoch + 1U);
+    if (next_epoch == 0U) {
+        std::fill(impl_->group_epochs.begin(), impl_->group_epochs.end(), 0U);
+        next_epoch = 1U;
+        ++batch_diagnostics.epoch_resets;
+    }
+    impl_->group_epoch = next_epoch;
+
+    const std::size_t table_mask = impl_->group_table.size() - 1U;
+    std::size_t written = 0;
+    for (std::size_t index = 0; index < count; ++index) {
+        const std::uint32_t token = tokens[index];
+        std::size_t slot = GroupHash(token, 0U, 0U, sizeof(token)) & table_mask;
+        bool resolved = false;
+        for (std::size_t probe = 0; probe < impl_->group_table.size(); ++probe) {
+            ++batch_diagnostics.probe_steps;
+            if (impl_->group_epochs[slot] != impl_->group_epoch) {
+                const std::uint32_t group = static_cast<std::uint32_t>(written);
+                first_source_indexes[written] = static_cast<std::uint32_t>(index);
+                group_counts[written] = 1U;
+                impl_->group_table[slot] = group + 1U;
+                impl_->group_epochs[slot] = impl_->group_epoch;
+                source_group_indexes[index] = group;
+                ++written;
+                resolved = true;
+                break;
+            }
+
+            const std::size_t group =
+                    static_cast<std::size_t>(impl_->group_table[slot] - 1U);
+            ++batch_diagnostics.exact_comparisons;
+            if (tokens[first_source_indexes[group]] == token) {
+                source_group_indexes[index] = static_cast<std::uint32_t>(group);
+                ++group_counts[group];
+                resolved = true;
+                break;
+            }
+            slot = (slot + 1U) & table_mask;
+        }
+        if (!resolved) {
+            publish_diagnostics();
+            return ErrorCode::kCapacityExceeded;
+        }
+    }
+    *group_count = written;
+    publish_diagnostics();
+    return ErrorCode::kOk;
+}
+
 void RequestPlane::Clear() noexcept {
     impl_->Clear();
 }

@@ -18,8 +18,6 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit.nativeplane;
 
-import org.apache.flink.annotation.Internal;
-
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -27,12 +25,13 @@ import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import org.apache.flink.annotation.Internal;
 
 /**
  * Keyed-backend owner for one native request plane and a bounded set of direct batch slots.
  *
- * <p>Probe, fill, disable, and close are serialized because the native plane is single-owner.
- * A slot is leased before an async task is queued; inability to lease is an explicit Java-path
+ * <p>Probe, fill, disable, and close are serialized because the native plane is single-owner. A
+ * slot is leased before an async task is queued; inability to lease is an explicit Java-path
  * fallback rather than unbounded direct-memory allocation.
  */
 @Internal
@@ -196,9 +195,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         synchronized (planeLock) {
             requireActive();
             try {
-                int unique =
-                        plane.compactBatch(
-                                slot.preparedKeys, slot.uniqueSourceIndexes());
+                int unique = plane.compactBatch(slot.preparedKeys, slot.uniqueSourceIndexes());
                 compactCalls++;
                 slot.compactedEntryCount = unique;
                 return unique;
@@ -221,6 +218,25 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                                 slot.sourceGroupIndexes());
                 groupCalls++;
                 slot.compactedEntryCount = unique;
+                return unique;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
+    /** Groups caller-owned 32-bit hash tokens without constructing generic key metadata. */
+    public int groupHashTokens(ByteBuffer tokens, int count, ByteBuffer packedPlan) {
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                int unique = plane.groupHashTokens(tokens, count, packedPlan);
+                if (unique <= 0 || unique > count) {
+                    throw new IllegalStateException(
+                            "Native token grouping returned invalid group count " + unique);
+                }
+                groupCalls++;
                 return unique;
             } catch (RuntimeException | LinkageError failure) {
                 disableLocked(failure);
@@ -303,8 +319,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                                 || status == NativeRequestPlaneBridge.FILL_UPDATED);
         boolean superseded =
                 error == NativeRequestPlaneBridge.ERROR_OK
-                        && status
-                                == NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION;
+                        && status == NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION;
         if (!applied && !superseded) {
             throw new IllegalStateException(
                     "Native exact-key update returned status=" + status + ", error=" + error + ".");
@@ -474,8 +489,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         private long preparedFillGeneration;
         private int compactedEntryCount;
 
-        private BatchSlot(
-                NativeRequestPlaneCoordinator owner, NativeRequestPlaneOptions options) {
+        private BatchSlot(NativeRequestPlaneCoordinator owner, NativeRequestPlaneOptions options) {
             this(owner, options, false);
         }
 
@@ -489,8 +503,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             int preparedMetadataBytes =
                     mutationOnly
                             ? 0
-                            : Math.multiplyExact(
-                                    entries, SerializedKeyBatch.METADATA_RECORD_BYTES);
+                            : Math.multiplyExact(entries, SerializedKeyBatch.METADATA_RECORD_BYTES);
             int missArenaBytes = options.batchKeyArenaBytes();
             int missMetadataBytes =
                     Math.multiplyExact(entries, SerializedKeyBatch.METADATA_RECORD_BYTES);
@@ -499,22 +512,17 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                     mutationOnly
                             ? 0
                             : Math.multiplyExact(
-                                    entries,
-                                    NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
+                                    entries, NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
             int valueArenaBytes = options.batchValueArenaBytes();
             int valueMetadataBytes =
-                    Math.multiplyExact(
-                            entries, NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES);
+                    Math.multiplyExact(entries, NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES);
             int fillResultBytes =
-                    Math.multiplyExact(
-                            entries, NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES);
-            int uniqueIndexBytes =
-                    mutationOnly ? 0 : Math.multiplyExact(entries, Integer.BYTES);
+                    Math.multiplyExact(entries, NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES);
+            int uniqueIndexBytes = mutationOnly ? 0 : Math.multiplyExact(entries, Integer.BYTES);
             int groupIndexBytes = uniqueIndexBytes;
 
             ByteBuffer preparedArena = ByteBuffer.allocateDirect(preparedArenaBytes);
-            ByteBuffer preparedMetadata =
-                    ByteBuffer.allocateDirect(preparedMetadataBytes);
+            ByteBuffer preparedMetadata = ByteBuffer.allocateDirect(preparedMetadataBytes);
             ByteBuffer missArena = ByteBuffer.allocateDirect(missArenaBytes);
             ByteBuffer missMetadata = ByteBuffer.allocateDirect(missMetadataBytes);
             this.preparedKeys =
@@ -523,22 +531,17 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             this.probeValueOutput = ByteBuffer.allocateDirect(probeValueBytes);
             this.probeValueInput = new DirectBufferDataInputView(probeValueOutput);
             this.probeResults =
-                    ByteBuffer.allocateDirect(probeResultBytes)
-                            .order(ByteOrder.nativeOrder());
+                    ByteBuffer.allocateDirect(probeResultBytes).order(ByteOrder.nativeOrder());
             this.valueArena = ByteBuffer.allocateDirect(valueArenaBytes);
             this.valueArenaOutput = new DirectBufferDataOutputView(this.valueArena);
             this.valueMetadata =
-                    ByteBuffer.allocateDirect(valueMetadataBytes)
-                            .order(ByteOrder.nativeOrder());
+                    ByteBuffer.allocateDirect(valueMetadataBytes).order(ByteOrder.nativeOrder());
             this.fillResults =
-                    ByteBuffer.allocateDirect(fillResultBytes)
-                            .order(ByteOrder.nativeOrder());
+                    ByteBuffer.allocateDirect(fillResultBytes).order(ByteOrder.nativeOrder());
             this.uniqueSourceIndexes =
-                    ByteBuffer.allocateDirect(uniqueIndexBytes)
-                            .order(ByteOrder.nativeOrder());
+                    ByteBuffer.allocateDirect(uniqueIndexBytes).order(ByteOrder.nativeOrder());
             this.sourceGroupIndexes =
-                    ByteBuffer.allocateDirect(groupIndexBytes)
-                            .order(ByteOrder.nativeOrder());
+                    ByteBuffer.allocateDirect(groupIndexBytes).order(ByteOrder.nativeOrder());
             this.allocatedDirectBytes =
                     (long) preparedArenaBytes
                             + preparedMetadataBytes
@@ -621,9 +624,9 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 final int sourceIndex = index;
                 int appended =
                         preparedKeys.appendSerialized(
-                        stateId,
-                        probeGeneration,
-                        output -> directKeyWriter.write(sourceIndex, output));
+                                stateId,
+                                probeGeneration,
+                                output -> directKeyWriter.write(sourceIndex, output));
                 if (preparedKeys.serializedLength(appended) == 0) {
                     throw new IOException(
                             "Prepared native direct key at index " + index + " is empty.");
@@ -757,8 +760,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             checkPreparedIndex(index);
             ByteBuffer results = probeResults.duplicate().order(ByteOrder.nativeOrder());
             int base = index * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES;
-            int offset =
-                    results.getInt(base + NativeRequestPlaneBridge.PROBE_RESULT_ARENA_OFFSET);
+            int offset = results.getInt(base + NativeRequestPlaneBridge.PROBE_RESULT_ARENA_OFFSET);
             int length = results.getInt(base + NativeRequestPlaneBridge.PROBE_RESULT_LENGTH_OFFSET);
             if (offset < 0 || length < 0 || offset > probeValueOutput.capacity() - length) {
                 throw new IllegalStateException("Native probe returned an invalid value slice.");
@@ -834,8 +836,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             ByteBuffer results = probeResults.duplicate().order(ByteOrder.nativeOrder());
             results.position(0);
             results.limit(
-                    preparedKeys.entryCount()
-                            * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
+                    preparedKeys.entryCount() * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
             return results.slice().order(ByteOrder.nativeOrder());
         }
 
@@ -937,8 +938,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                     metadataBase + NativeRequestPlaneBridge.FILL_VALUE_RESERVED_OFFSET, 0);
         }
 
-        private void putFillValueMetadata(int index, DirectValueWriter writer)
-                throws IOException {
+        private void putFillValueMetadata(int index, DirectValueWriter writer) throws IOException {
             int metadataBase = index * NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES;
             if (writer == null) {
                 valueMetadata.putInt(

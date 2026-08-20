@@ -18,6 +18,7 @@
 
 #include "jni_batch_codec.h"
 
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -54,6 +55,14 @@ bool RequiredBytes(
         return false;
     }
     *result = count * record_bytes;
+    return true;
+}
+
+bool CheckedAdd(std::size_t left, std::size_t right, std::size_t* result) noexcept {
+    if (left > std::numeric_limits<std::size_t>::max() - right) {
+        return false;
+    }
+    *result = left + right;
     return true;
 }
 
@@ -131,6 +140,8 @@ void BatchScratch::ReserveEntries(std::size_t count) {
     probe_results_.reserve(count);
     unique_source_indexes_.reserve(count);
     source_group_indexes_.reserve(count);
+    source_tokens_.reserve(count);
+    group_counts_.reserve(count);
     reserved_entries_ = count;
     ++growth_count_;
 }
@@ -235,6 +246,123 @@ BatchBridgeCode GroupDirectBatch(
                     scratch->source_group_indexes_[index]);
         }
         *unique_count = written;
+        return BatchBridgeCode::kOk;
+    } catch (const std::bad_alloc&) {
+        return BatchBridgeCode::kAllocationFailed;
+    } catch (const std::length_error&) {
+        return BatchBridgeCode::kOverflow;
+    } catch (...) {
+        return BatchBridgeCode::kNativeError;
+    }
+}
+
+BatchBridgeCode GroupTokenPlanDirectBatch(
+        RequestPlane* plane,
+        BatchScratch* scratch,
+        ConstBuffer source_tokens,
+        std::size_t count,
+        MutableBuffer packed_plan,
+        std::size_t* group_count) noexcept {
+    if (!IsValid(packed_plan)) {
+        return BatchBridgeCode::kInvalidArgument;
+    }
+    if (packed_plan.size < sizeof(std::uint32_t)) {
+        return BatchBridgeCode::kOutputTooSmall;
+    }
+    WriteNative<std::uint32_t>(
+            packed_plan.data + kTokenPlanMagicOffset, 0U);
+    if (group_count != nullptr) {
+        *group_count = 0;
+    }
+    if (plane == nullptr || scratch == nullptr || group_count == nullptr ||
+        !IsValid(source_tokens)) {
+        return BatchBridgeCode::kInvalidArgument;
+    }
+
+    std::size_t required_tokens = 0;
+    if (!RequiredBytes(count, sizeof(std::uint32_t), &required_tokens)) {
+        return BatchBridgeCode::kOverflow;
+    }
+    if (source_tokens.size < required_tokens) {
+        return BatchBridgeCode::kInputOutOfBounds;
+    }
+    try {
+        scratch->ReserveEntries(count);
+        scratch->source_tokens_.resize(count);
+        scratch->unique_source_indexes_.resize(count);
+        scratch->source_group_indexes_.resize(count);
+        scratch->group_counts_.resize(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            scratch->source_tokens_[index] = ReadNative<std::uint32_t>(
+                    source_tokens.data + index * sizeof(std::uint32_t));
+        }
+
+        std::size_t written = 0;
+        if (plane->GroupTokenBatch(
+                    scratch->source_tokens_.data(),
+                    scratch->unique_source_indexes_.data(),
+                    scratch->source_group_indexes_.data(),
+                    scratch->group_counts_.data(),
+                    count,
+                    &written) != ErrorCode::kOk) {
+            return BatchBridgeCode::kNativeError;
+        }
+
+        std::size_t first_source_bytes = 0;
+        std::size_t offsets_bytes = 0;
+        std::size_t source_group_bytes = 0;
+        std::size_t offsets_count = 0;
+        std::size_t offsets_base = 0;
+        std::size_t source_group_base = 0;
+        std::size_t required_plan = 0;
+        if (!RequiredBytes(written, sizeof(std::uint32_t), &first_source_bytes) ||
+            !CheckedAdd(written, 1U, &offsets_count) ||
+            !RequiredBytes(offsets_count, sizeof(std::uint32_t), &offsets_bytes) ||
+            !RequiredBytes(count, sizeof(std::uint32_t), &source_group_bytes) ||
+            !CheckedAdd(kTokenPlanHeaderBytes, first_source_bytes, &offsets_base) ||
+            !CheckedAdd(offsets_base, offsets_bytes, &source_group_base) ||
+            !CheckedAdd(source_group_base, source_group_bytes, &required_plan)) {
+            return BatchBridgeCode::kOverflow;
+        }
+        if (packed_plan.size < required_plan) {
+            return BatchBridgeCode::kOutputTooSmall;
+        }
+
+        for (std::size_t group = 0; group < written; ++group) {
+            WriteNative<std::uint32_t>(
+                    packed_plan.data + kTokenPlanHeaderBytes +
+                            group * sizeof(std::uint32_t),
+                    scratch->unique_source_indexes_[group]);
+        }
+        std::uint32_t offset = 0U;
+        WriteNative<std::uint32_t>(packed_plan.data + offsets_base, offset);
+        for (std::size_t group = 0; group < written; ++group) {
+            offset += scratch->group_counts_[group];
+            WriteNative<std::uint32_t>(
+                    packed_plan.data + offsets_base +
+                            (group + 1U) * sizeof(std::uint32_t),
+                    offset);
+        }
+        for (std::size_t source = 0; source < count; ++source) {
+            WriteNative<std::uint32_t>(
+                    packed_plan.data + source_group_base +
+                            source * sizeof(std::uint32_t),
+                    scratch->source_group_indexes_[source]);
+        }
+
+        WriteNative<std::uint32_t>(
+                packed_plan.data + kTokenPlanSourceCountOffset,
+                static_cast<std::uint32_t>(count));
+        WriteNative<std::uint32_t>(
+                packed_plan.data + kTokenPlanGroupCountOffset,
+                static_cast<std::uint32_t>(written));
+        WriteNative<std::uint32_t>(
+                packed_plan.data + kTokenPlanVersionOffset,
+                kTokenPlanLayoutVersion);
+        std::atomic_thread_fence(std::memory_order_release);
+        WriteNative<std::uint32_t>(
+                packed_plan.data + kTokenPlanMagicOffset, kTokenPlanMagic);
+        *group_count = written;
         return BatchBridgeCode::kOk;
     } catch (const std::bad_alloc&) {
         return BatchBridgeCode::kAllocationFailed;

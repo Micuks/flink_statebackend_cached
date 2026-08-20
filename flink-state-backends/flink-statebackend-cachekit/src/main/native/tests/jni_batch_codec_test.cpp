@@ -380,6 +380,134 @@ void TestScratchCapacityIsReusedAcrossFillAndProbe() {
     CHECK(scratch.growth_count() == initial_growth_count + 1);
 }
 
+std::vector<std::uint8_t> TokenBytes(
+        const std::vector<std::uint32_t>& tokens) {
+    std::vector<std::uint8_t> bytes(tokens.size() * sizeof(std::uint32_t));
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+        Write<std::uint32_t>(&bytes, index * sizeof(std::uint32_t), tokens[index]);
+    }
+    return bytes;
+}
+
+void TestGroupTokenPlanUsesStablePackedLayout() {
+    std::unique_ptr<RequestPlane> plane = MakePlane();
+    BatchScratch scratch(5);
+    const std::vector<std::uint8_t> token_bytes =
+            TokenBytes({7U, 8U, 7U, 9U, 8U});
+    std::vector<std::uint8_t> plan(64U, 0xa5U);
+    std::size_t group_count = 99U;
+    CHECK(GroupTokenPlanDirectBatch(
+                  plane.get(),
+                  &scratch,
+                  {token_bytes.data(), token_bytes.size()},
+                  5U,
+                  {plan.data(), plan.size()},
+                  &group_count) == BatchBridgeCode::kOk);
+    CHECK(group_count == 3U);
+    CHECK(Read<std::uint32_t>(plan, kTokenPlanMagicOffset) == kTokenPlanMagic);
+    CHECK(Read<std::uint32_t>(plan, kTokenPlanVersionOffset) ==
+          kTokenPlanLayoutVersion);
+    CHECK(Read<std::uint32_t>(plan, kTokenPlanSourceCountOffset) == 5U);
+    CHECK(Read<std::uint32_t>(plan, kTokenPlanGroupCountOffset) == 3U);
+
+    const std::size_t first_sources = kTokenPlanHeaderBytes;
+    CHECK(Read<std::uint32_t>(plan, first_sources) == 0U);
+    CHECK(Read<std::uint32_t>(plan, first_sources + 4U) == 1U);
+    CHECK(Read<std::uint32_t>(plan, first_sources + 8U) == 3U);
+    const std::size_t offsets = first_sources + 12U;
+    CHECK(Read<std::uint32_t>(plan, offsets) == 0U);
+    CHECK(Read<std::uint32_t>(plan, offsets + 4U) == 2U);
+    CHECK(Read<std::uint32_t>(plan, offsets + 8U) == 4U);
+    CHECK(Read<std::uint32_t>(plan, offsets + 12U) == 5U);
+    const std::size_t source_groups = offsets + 16U;
+    CHECK(Read<std::uint32_t>(plan, source_groups) == 0U);
+    CHECK(Read<std::uint32_t>(plan, source_groups + 4U) == 1U);
+    CHECK(Read<std::uint32_t>(plan, source_groups + 8U) == 0U);
+    CHECK(Read<std::uint32_t>(plan, source_groups + 12U) == 2U);
+    CHECK(Read<std::uint32_t>(plan, source_groups + 16U) == 1U);
+}
+
+void TestGroupTokenPlanEmptyBatchAndFailureMagic() {
+    std::unique_ptr<RequestPlane> plane = MakePlane();
+    BatchScratch scratch;
+    std::vector<std::uint8_t> empty_plan(kTokenPlanWorstCaseBaseBytes, 0xa5U);
+    std::size_t group_count = 99U;
+    CHECK(GroupTokenPlanDirectBatch(
+                  plane.get(),
+                  &scratch,
+                  {nullptr, 0U},
+                  0U,
+                  {empty_plan.data(), empty_plan.size()},
+                  &group_count) == BatchBridgeCode::kOk);
+    CHECK(group_count == 0U);
+    CHECK(Read<std::uint32_t>(empty_plan, kTokenPlanMagicOffset) ==
+          kTokenPlanMagic);
+    CHECK(Read<std::uint32_t>(empty_plan, kTokenPlanSourceCountOffset) == 0U);
+    CHECK(Read<std::uint32_t>(empty_plan, kTokenPlanGroupCountOffset) == 0U);
+    CHECK(Read<std::uint32_t>(empty_plan, kTokenPlanHeaderBytes) == 0U);
+
+    const std::vector<std::uint8_t> token_bytes = TokenBytes({1U, 2U});
+    std::vector<std::uint8_t> failure_plan(64U, 0xa5U);
+    Write<std::uint32_t>(&failure_plan, kTokenPlanMagicOffset, kTokenPlanMagic);
+    group_count = 99U;
+    CHECK(GroupTokenPlanDirectBatch(
+                  plane.get(),
+                  &scratch,
+                  {token_bytes.data(), token_bytes.size() - 1U},
+                  2U,
+                  {failure_plan.data(), failure_plan.size()},
+                  &group_count) == BatchBridgeCode::kInputOutOfBounds);
+    CHECK(group_count == 0U);
+    CHECK(Read<std::uint32_t>(failure_plan, kTokenPlanMagicOffset) == 0U);
+
+    Write<std::uint32_t>(&failure_plan, kTokenPlanMagicOffset, kTokenPlanMagic);
+    group_count = 99U;
+    CHECK(GroupTokenPlanDirectBatch(
+                  nullptr,
+                  &scratch,
+                  {token_bytes.data(), token_bytes.size()},
+                  2U,
+                  {failure_plan.data(), failure_plan.size()},
+                  &group_count) == BatchBridgeCode::kInvalidArgument);
+    CHECK(group_count == 0U);
+    CHECK(Read<std::uint32_t>(failure_plan, kTokenPlanMagicOffset) == 0U);
+
+    std::vector<std::uint8_t> too_small(4U, 0xa5U);
+    Write<std::uint32_t>(&too_small, 0U, kTokenPlanMagic);
+    group_count = 99U;
+    CHECK(GroupTokenPlanDirectBatch(
+                  plane.get(),
+                  &scratch,
+                  {token_bytes.data(), token_bytes.size()},
+                  2U,
+                  {too_small.data(), too_small.size()},
+                  &group_count) == BatchBridgeCode::kOutputTooSmall);
+    CHECK(group_count == 0U);
+    CHECK(Read<std::uint32_t>(too_small, kTokenPlanMagicOffset) == 0U);
+}
+
+void TestGroupTokenPlanReusesScratchCapacity() {
+    std::unique_ptr<RequestPlane> plane = MakePlane();
+    BatchScratch scratch(4U);
+    const std::uint64_t growth_count = scratch.growth_count();
+    const std::vector<std::uint8_t> token_bytes = TokenBytes({1U, 2U, 1U, 3U});
+    std::vector<std::uint8_t> plan(
+            kTokenPlanWorstCaseBaseBytes +
+                    kTokenPlanWorstCasePerSourceBytes * 4U);
+    for (std::size_t iteration = 0; iteration < 256U; ++iteration) {
+        std::size_t group_count = 0;
+        CHECK(GroupTokenPlanDirectBatch(
+                      plane.get(),
+                      &scratch,
+                      {token_bytes.data(), token_bytes.size()},
+                      4U,
+                      {plan.data(), plan.size()},
+                      &group_count) == BatchBridgeCode::kOk);
+        CHECK(group_count == 3U);
+        CHECK(scratch.growth_count() == growth_count);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -388,6 +516,9 @@ int main() {
     TestProbeOutputTooSmallDoesNotWritePartialRecords();
     TestGenerationMismatchLatestProbeAndZeroCount();
     TestScratchCapacityIsReusedAcrossFillAndProbe();
+    TestGroupTokenPlanUsesStablePackedLayout();
+    TestGroupTokenPlanEmptyBatchAndFailureMagic();
+    TestGroupTokenPlanReusesScratchCapacity();
     std::cout << "all JNI batch codec tests passed" << std::endl;
     return 0;
 }
