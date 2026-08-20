@@ -49,6 +49,16 @@ public class RocksDBOptions {
                     .withDescription(
                             "Whether RocksDB MapState iterators reuse the raw key fetched for the prefix check when constructing the current entry. Disabled by default while the optimization is experimentally validated.");
 
+    /** Stops MapState prefix scans in RocksDB instead of fetching one terminal key through JNI. */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Boolean> MAP_ITERATOR_PREFIX_UPPER_BOUND_ENABLED =
+            ConfigOptions.key(
+                            "state.backend.cachekit.rocksdb.map-iterator.prefix-upper-bound.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether RocksDB MapState iterators use the unsigned bytewise successor of the key/namespace prefix as an exclusive iterate_upper_bound. Prefixes without a successor retain the Java prefix-check fallback. Disabled by default while experimentally validated.");
+
     /** The local directory (on the TaskManager) where RocksDB puts its files. */
     @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
     public static final ConfigOption<String> LOCAL_DIRECTORIES =

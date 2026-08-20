@@ -106,6 +106,7 @@ public class RocksDBStateBackendConfigTest {
     public void testMapIteratorSingleKeyFetchConfigurationAndPagingSemantics() throws Exception {
         Configuration configuration = new Configuration();
         configuration.set(RocksDBOptions.MAP_ITERATOR_SINGLE_KEY_FETCH_ENABLED, true);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PREFIX_UPPER_BOUND_ENABLED, true);
         EmbeddedRocksDBStateBackend configuredBackend =
                 new EmbeddedRocksDBStateBackend()
                         .configure(configuration, Thread.currentThread().getContextClassLoader());
@@ -114,6 +115,7 @@ public class RocksDBStateBackendConfigTest {
                 createKeyedStateBackend(configuredBackend, environment, IntSerializer.INSTANCE);
         try {
             assertTrue(keyedBackend.isMapIteratorSingleKeyFetchEnabled());
+            assertTrue(keyedBackend.isMapIteratorPrefixUpperBoundEnabled());
             keyedBackend.setCurrentKey(1);
             MapState<Integer, Integer> state =
                     keyedBackend.getPartitionedState(
@@ -142,12 +144,14 @@ public class RocksDBStateBackendConfigTest {
             assertEquals(Integer.valueOf(7000), state.get(127));
             assertFalse(state.contains(128));
             assertEquals(257, keyedBackend.getMapIteratorEntriesLoaded());
-            assertEquals(259, keyedBackend.getMapIteratorKeyJniCalls());
+            assertEquals(257, keyedBackend.getMapIteratorKeyJniCalls());
             assertEquals(257, keyedBackend.getMapIteratorDuplicateKeyFetchesAvoided());
             assertEquals(257, keyedBackend.getMapIteratorValueJniCalls());
             assertEquals(3, keyedBackend.getMapIteratorPages());
             assertEquals(3, keyedBackend.getMapIteratorSeeks());
             assertEquals(3, keyedBackend.getMapIteratorNativeIterators());
+            assertEquals(3, keyedBackend.getMapIteratorBoundedIterators());
+            assertEquals(0, keyedBackend.getMapIteratorUpperBoundFallbacks());
 
             int keys = 0;
             for (Integer ignored : state.keys()) {
@@ -160,12 +164,14 @@ public class RocksDBStateBackendConfigTest {
             assertEquals(256, keys);
             assertEquals(256, values);
             assertEquals(769, keyedBackend.getMapIteratorEntriesLoaded());
-            assertEquals(773, keyedBackend.getMapIteratorKeyJniCalls());
+            assertEquals(769, keyedBackend.getMapIteratorKeyJniCalls());
             assertEquals(769, keyedBackend.getMapIteratorDuplicateKeyFetchesAvoided());
             assertEquals(769, keyedBackend.getMapIteratorValueJniCalls());
             assertEquals(7, keyedBackend.getMapIteratorPages());
             assertEquals(7, keyedBackend.getMapIteratorSeeks());
             assertEquals(7, keyedBackend.getMapIteratorNativeIterators());
+            assertEquals(7, keyedBackend.getMapIteratorBoundedIterators());
+            assertEquals(0, keyedBackend.getMapIteratorUpperBoundFallbacks());
 
             MapStateDescriptor<Integer, Integer> namespacedDescriptor =
                     new MapStateDescriptor<>(
@@ -223,6 +229,7 @@ public class RocksDBStateBackendConfigTest {
                         new EmbeddedRocksDBStateBackend(), environment, IntSerializer.INSTANCE);
         try {
             assertFalse(keyedBackend.isMapIteratorSingleKeyFetchEnabled());
+            assertFalse(keyedBackend.isMapIteratorPrefixUpperBoundEnabled());
             keyedBackend.setCurrentKey(1);
             MapState<Integer, Integer> state =
                     keyedBackend.getPartitionedState(
@@ -248,10 +255,28 @@ public class RocksDBStateBackendConfigTest {
             assertEquals(1, keyedBackend.getMapIteratorPages());
             assertEquals(1, keyedBackend.getMapIteratorSeeks());
             assertEquals(1, keyedBackend.getMapIteratorNativeIterators());
+            assertEquals(0, keyedBackend.getMapIteratorBoundedIterators());
+            assertEquals(0, keyedBackend.getMapIteratorUpperBoundFallbacks());
         } finally {
             keyedBackend.dispose();
             environment.close();
         }
+    }
+
+    @Test
+    public void testMapIteratorPrefixSuccessor() {
+        assertArrayEquals(
+                new byte[] {0x01, 0x03},
+                RocksDBMapState.unsignedBytewisePrefixSuccessor(
+                        new byte[] {0x01, 0x02, (byte) 0xff}));
+        assertArrayEquals(
+                new byte[] {0x02},
+                RocksDBMapState.unsignedBytewisePrefixSuccessor(
+                        new byte[] {0x01, (byte) 0xff}));
+        assertNull(
+                RocksDBMapState.unsignedBytewisePrefixSuccessor(
+                        new byte[] {(byte) 0xff, (byte) 0xff}));
+        assertNull(RocksDBMapState.unsignedBytewisePrefixSuccessor(new byte[0]));
     }
 
     @Test

@@ -39,6 +39,8 @@ import org.apache.flink.util.StateMigrationException;
 import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
+import org.rocksdb.ReadOptions;
+import org.rocksdb.Slice;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -641,10 +643,33 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             long valueJniCalls = 0;
             long seeks = 0;
             long nativeIterators = 0;
-            try (RocksIteratorWrapper iterator =
+            long boundedIterators = 0;
+            long upperBoundFallbacks = 0;
+            final byte[] prefixUpperBound =
+                    backend.isMapIteratorPrefixUpperBoundEnabled()
+                            ? unsignedBytewisePrefixSuccessor(keyPrefixBytes)
+                            : null;
+            if (backend.isMapIteratorPrefixUpperBoundEnabled() && prefixUpperBound == null) {
+                upperBoundFallbacks = 1;
+            }
+            final Slice upperBoundSlice =
+                    prefixUpperBound == null ? null : new Slice(prefixUpperBound);
+            final ReadOptions boundedReadOptions =
+                    upperBoundSlice == null
+                            ? null
+                            : new ReadOptions(backend.getReadOptions())
+                                    .setIterateUpperBound(upperBoundSlice);
+            try (Slice ignoredUpperBoundSlice = upperBoundSlice;
+                    ReadOptions ignoredBoundedReadOptions = boundedReadOptions;
+                    RocksIteratorWrapper iterator =
                     RocksDBOperationUtils.getRocksIterator(
-                            db, columnFamily, backend.getReadOptions())) {
+                            db,
+                            columnFamily,
+                            boundedReadOptions == null
+                                    ? backend.getReadOptions()
+                                    : boundedReadOptions)) {
                 nativeIterators = 1;
+                boundedIterators = boundedReadOptions == null ? 0 : 1;
                 /*
                  * The iteration starts from the prefix bytes at the first loading. After #nextEntry() is called,
                  * the currentEntry points to the last returned entry, and at that time, we will start
@@ -673,14 +698,15 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                         break;
                     }
 
-                    byte[] rawKeyBytes = iterator.key();
-                    keyJniCalls++;
-                    if (!startWithKeyPrefix(keyPrefixBytes, rawKeyBytes)) {
-                        expired = true;
+                    if (cacheEntries.size() >= CACHE_SIZE_LIMIT) {
                         break;
                     }
 
-                    if (cacheEntries.size() >= CACHE_SIZE_LIMIT) {
+                    byte[] rawKeyBytes = iterator.key();
+                    keyJniCalls++;
+                    if (boundedReadOptions == null
+                            && !startWithKeyPrefix(keyPrefixBytes, rawKeyBytes)) {
+                        expired = true;
                         break;
                     }
 
@@ -717,9 +743,25 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                         duplicateKeyFetchesAvoided,
                         valueJniCalls,
                         seeks,
-                        nativeIterators);
+                        nativeIterators,
+                        boundedIterators,
+                        upperBoundFallbacks);
             }
         }
+    }
+
+    /** Returns the shortest unsigned-byte lexicographic successor, or null for all-0xff. */
+    @Nullable
+    static byte[] unsignedBytewisePrefixSuccessor(byte[] prefix) {
+        byte[] successor = Arrays.copyOf(prefix, prefix.length);
+        for (int index = successor.length - 1; index >= 0; index--) {
+            int unsigned = successor[index] & 0xff;
+            if (unsigned != 0xff) {
+                successor[index] = (byte) (unsigned + 1);
+                return Arrays.copyOf(successor, index + 1);
+            }
+        }
+        return null;
     }
 
     @SuppressWarnings("unchecked")

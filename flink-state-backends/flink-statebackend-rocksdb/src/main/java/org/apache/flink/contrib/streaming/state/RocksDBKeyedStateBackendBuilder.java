@@ -117,6 +117,7 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
     private RocksDBNativeMetricOptions nativeMetricOptions;
 
     private boolean mapIteratorSingleKeyFetchEnabled;
+    private boolean mapIteratorPrefixUpperBoundEnabled;
 
     private int numberOfTransferingThreads;
     private long writeBatchSize =
@@ -172,6 +173,7 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
         this.enableIncrementalCheckpointing = false;
         this.nativeMetricOptions = new RocksDBNativeMetricOptions();
         this.mapIteratorSingleKeyFetchEnabled = false;
+        this.mapIteratorPrefixUpperBoundEnabled = false;
         this.numberOfTransferingThreads =
                 RocksDBOptions.CHECKPOINT_TRANSFER_THREAD_NUM.defaultValue();
     }
@@ -236,6 +238,12 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
     RocksDBKeyedStateBackendBuilder<K> setMapIteratorSingleKeyFetchEnabled(
             boolean mapIteratorSingleKeyFetchEnabled) {
         this.mapIteratorSingleKeyFetchEnabled = mapIteratorSingleKeyFetchEnabled;
+        return this;
+    }
+
+    RocksDBKeyedStateBackendBuilder<K> setMapIteratorPrefixUpperBoundEnabled(
+            boolean mapIteratorPrefixUpperBoundEnabled) {
+        this.mapIteratorPrefixUpperBoundEnabled = mapIteratorPrefixUpperBoundEnabled;
         return this;
     }
 
@@ -445,7 +453,8 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
                 ttlCompactFiltersManager,
                 keyContext,
                 writeBatchSize,
-                mapIteratorSingleKeyFetchEnabled);
+                mapIteratorSingleKeyFetchEnabled,
+                mapIteratorPrefixUpperBoundEnabled);
     }
 
     private RocksDBRestoreOperation getRocksDBRestoreOperation(

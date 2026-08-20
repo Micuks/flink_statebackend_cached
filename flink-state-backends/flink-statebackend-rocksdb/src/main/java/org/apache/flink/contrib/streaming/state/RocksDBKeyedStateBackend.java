@@ -206,6 +206,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     /** Whether MapState iterator entries reuse the raw key fetched for the prefix check. */
     private final boolean mapIteratorSingleKeyFetchEnabled;
+    private final boolean mapIteratorPrefixUpperBoundEnabled;
 
     private final LongAdder mapIteratorEntriesLoaded = new LongAdder();
     private final LongAdder mapIteratorKeyJniCalls = new LongAdder();
@@ -214,6 +215,8 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final LongAdder mapIteratorPages = new LongAdder();
     private final LongAdder mapIteratorSeeks = new LongAdder();
     private final LongAdder mapIteratorNativeIterators = new LongAdder();
+    private final LongAdder mapIteratorBoundedIterators = new LongAdder();
+    private final LongAdder mapIteratorUpperBoundFallbacks = new LongAdder();
 
     /** Map of created k/v states. */
     private final Map<String, State> createdKVStates;
@@ -297,7 +300,8 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             RocksDbTtlCompactFiltersManager ttlCompactFiltersManager,
             InternalKeyContext<K> keyContext,
             @Nonnegative long writeBatchSize,
-            boolean mapIteratorSingleKeyFetchEnabled) {
+            boolean mapIteratorSingleKeyFetchEnabled,
+            boolean mapIteratorPrefixUpperBoundEnabled) {
 
         super(
                 kvStateRegistry,
@@ -327,6 +331,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.readOptions = optionsContainer.getReadOptions();
         this.writeBatchSize = writeBatchSize;
         this.mapIteratorSingleKeyFetchEnabled = mapIteratorSingleKeyFetchEnabled;
+        this.mapIteratorPrefixUpperBoundEnabled = mapIteratorPrefixUpperBoundEnabled;
         this.db = db;
         this.rocksDBResourceGuard = rocksDBResourceGuard;
         this.checkpointSnapshotStrategy = checkpointSnapshotStrategy;
@@ -461,17 +466,20 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         if (mapIteratorNativeIterators.sum() > 0) {
             LOG.info(
-                    "[CACHEKIT ROCKSDB MAP ITERATOR] singleKeyFetch={} entriesLoaded={} "
+                    "[CACHEKIT ROCKSDB MAP ITERATOR] singleKeyFetch={} prefixUpperBound={} entriesLoaded={} "
                             + "keyJniCalls={} duplicateKeyFetchesAvoided={} valueJniCalls={} "
-                            + "pages={} seeks={} nativeIterators={}",
+                            + "pages={} seeks={} nativeIterators={} boundedIterators={} upperBoundFallbacks={}",
                     mapIteratorSingleKeyFetchEnabled,
+                    mapIteratorPrefixUpperBoundEnabled,
                     mapIteratorEntriesLoaded.sum(),
                     mapIteratorKeyJniCalls.sum(),
                     mapIteratorDuplicateKeyFetchesAvoided.sum(),
                     mapIteratorValueJniCalls.sum(),
                     mapIteratorPages.sum(),
                     mapIteratorSeeks.sum(),
-                    mapIteratorNativeIterators.sum());
+                    mapIteratorNativeIterators.sum(),
+                    mapIteratorBoundedIterators.sum(),
+                    mapIteratorUpperBoundFallbacks.sum());
         }
 
         // IMPORTANT: null reference to signal potential async checkpoint workers that the db was
@@ -528,13 +536,19 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         return mapIteratorSingleKeyFetchEnabled;
     }
 
+    boolean isMapIteratorPrefixUpperBoundEnabled() {
+        return mapIteratorPrefixUpperBoundEnabled;
+    }
+
     void recordMapIteratorPageStats(
             long entriesLoaded,
             long keyJniCalls,
             long duplicateKeyFetchesAvoided,
             long valueJniCalls,
             long seeks,
-            long nativeIterators) {
+            long nativeIterators,
+            long boundedIterators,
+            long upperBoundFallbacks) {
         mapIteratorEntriesLoaded.add(entriesLoaded);
         mapIteratorKeyJniCalls.add(keyJniCalls);
         mapIteratorDuplicateKeyFetchesAvoided.add(duplicateKeyFetchesAvoided);
@@ -542,6 +556,8 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         mapIteratorPages.increment();
         mapIteratorSeeks.add(seeks);
         mapIteratorNativeIterators.add(nativeIterators);
+        mapIteratorBoundedIterators.add(boundedIterators);
+        mapIteratorUpperBoundFallbacks.add(upperBoundFallbacks);
     }
 
     @VisibleForTesting
@@ -577,6 +593,16 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @VisibleForTesting
     long getMapIteratorNativeIterators() {
         return mapIteratorNativeIterators.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorBoundedIterators() {
+        return mapIteratorBoundedIterators.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorUpperBoundFallbacks() {
+        return mapIteratorUpperBoundFallbacks.sum();
     }
 
     @Nonnull

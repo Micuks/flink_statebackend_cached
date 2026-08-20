@@ -152,6 +152,7 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
 
     /** Avoids the duplicate raw-key JNI fetch in RocksDB MapState iterators. */
     private final boolean mapIteratorSingleKeyFetchEnabled;
+    private final boolean mapIteratorPrefixUpperBoundEnabled;
 
     // -- runtime values, set on TaskManager when initializing / using the backend
 
@@ -204,6 +205,7 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
         this.numberOfTransferThreads = UNDEFINED_NUMBER_OF_TRANSFER_THREADS;
         this.nativeMetricOptions = new RocksDBNativeMetricOptions();
         this.mapIteratorSingleKeyFetchEnabled = false;
+        this.mapIteratorPrefixUpperBoundEnabled = false;
         this.memoryConfiguration = new RocksDBMemoryConfiguration();
         this.writeBatchSize = UNDEFINED_WRITE_BATCH_SIZE;
         this.overlapFractionThreshold = UNDEFINED_OVERLAP_FRACTION_THRESHOLD;
@@ -270,6 +272,8 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
         this.nativeMetricOptions = RocksDBNativeMetricOptions.fromConfig(config);
         this.mapIteratorSingleKeyFetchEnabled =
                 config.get(RocksDBOptions.MAP_ITERATOR_SINGLE_KEY_FETCH_ENABLED);
+        this.mapIteratorPrefixUpperBoundEnabled =
+                config.get(RocksDBOptions.MAP_ITERATOR_PREFIX_UPPER_BOUND_ENABLED);
 
         // configure RocksDB predefined options
         this.predefinedOptions =
@@ -507,6 +511,8 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
                         .setNativeMetricOptions(
                                 resourceContainer.getMemoryWatcherOptions(nativeMetricOptions))
                         .setMapIteratorSingleKeyFetchEnabled(mapIteratorSingleKeyFetchEnabled)
+                        .setMapIteratorPrefixUpperBoundEnabled(
+                                mapIteratorPrefixUpperBoundEnabled)
                         .setWriteBatchSize(getWriteBatchSize())
                         .setOverlapFractionThreshold(getOverlapFractionThreshold());
         return builder.build();
