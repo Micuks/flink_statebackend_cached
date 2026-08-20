@@ -185,6 +185,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchLiveReadCancellations;
     private volatile long prefetchWorkerCancelledBeforeRead;
     private volatile long prefetchWorkerDiscardedAfterRead;
+    /** Queue delay from mailbox reservation to worker start, for overlap sizing diagnostics. */
+    private volatile long prefetchWorkerQueueNanos;
+    private volatile long prefetchWorkerQueueNanosMax;
+    /** Worker execution time, excluding the shared-executor queue delay. */
+    private volatile long prefetchWorkerRunNanos;
+    private volatile long prefetchWorkerRunNanosMax;
+    /** Age of a reservation when the mailbox overtakes and cancels it. */
+    private volatile long prefetchLiveReadRaceNanos;
+    private volatile long prefetchLiveReadRaceNanosMax;
     private volatile long prefetchAsyncValuesRead;
     private volatile long prefetchAsyncUsefulValues;
     private volatile long prefetchAdaptiveAdmissionSkips;
@@ -813,6 +822,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             // The authoritative read below remains correct, but this is duplicate I/O and direct
             // evidence that the attempted overlap was too short for this key.
             prefetchLiveReadRacedInFlight++;
+            long raceNanos = Math.max(0L, System.nanoTime() - reservation.submittedNanos);
+            prefetchLiveReadRaceNanos += raceNanos;
+            prefetchLiveReadRaceNanosMax =
+                    Math.max(prefetchLiveReadRaceNanosMax, raceNanos);
             boolean cancelled;
             synchronized (staging) {
                 cancelled = inFlight.remove(lookupKey, reservation);
@@ -1246,6 +1259,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "maxRetainedBytes={} admissionDrops={} staleAborts={} "
                             + "liveReadRacedInFlight={} liveReadCancellations={} "
                             + "workerCancelledBeforeRead={} workerDiscardedAfterRead={} "
+                            + "workerQueueAvgUs={} workerQueueMaxUs={} "
+                            + "workerRunAvgUs={} workerRunMaxUs={} "
+                            + "liveReadRaceAvgUs={} liveReadRaceMaxUs={} "
                             + "asyncValuesRead={} asyncUsefulValues={} "
                             + "adaptiveAdmissionSkips={} adaptiveProbeTasks={} "
                             + "unusedStagedOnClose={} "
@@ -1304,6 +1320,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchLiveReadCancellations,
                     prefetchWorkerCancelledBeforeRead,
                     prefetchWorkerDiscardedAfterRead,
+                    nanosAverageMicros(prefetchWorkerQueueNanos, prefetchTasksExecuted),
+                    nanosToMicros(prefetchWorkerQueueNanosMax),
+                    nanosAverageMicros(prefetchWorkerRunNanos, prefetchTasksExecuted),
+                    nanosToMicros(prefetchWorkerRunNanosMax),
+                    nanosAverageMicros(
+                            prefetchLiveReadRaceNanos, prefetchLiveReadRacedInFlight),
+                    nanosToMicros(prefetchLiveReadRaceNanosMax),
                     prefetchAsyncValuesRead,
                     prefetchAsyncUsefulValues,
                     prefetchAdaptiveAdmissionSkips,
@@ -2160,9 +2183,19 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return new PrefetchExecutor.DropAwareTask() {
             @Override
             public void run() {
+                final long startedNanos = System.nanoTime();
+                final long queueNanos =
+                        Math.max(0L, startedNanos - reservation.submittedNanos);
+                prefetchWorkerQueueNanos += queueNanos;
+                prefetchWorkerQueueNanosMax =
+                        Math.max(prefetchWorkerQueueNanosMax, queueNanos);
                 try {
                     task.run();
                 } finally {
+                    final long runNanos = Math.max(0L, System.nanoTime() - startedNanos);
+                    prefetchWorkerRunNanos += runNanos;
+                    prefetchWorkerRunNanosMax =
+                            Math.max(prefetchWorkerRunNanosMax, runNanos);
                     releaseReservations(reservations, reservation);
                     if (completion != null) {
                         completion.run();
@@ -2191,7 +2224,17 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private PrefetchReservation newPrefetchReservation(long generation) {
         return new PrefetchReservation(
-                generation, prefetchReservationSequence.incrementAndGet());
+                generation,
+                prefetchReservationSequence.incrementAndGet(),
+                System.nanoTime());
+    }
+
+    private static long nanosAverageMicros(long totalNanos, long samples) {
+        return samples <= 0 ? 0L : totalNanos / samples / 1_000L;
+    }
+
+    private static long nanosToMicros(long nanos) {
+        return nanos / 1_000L;
     }
 
     /**
@@ -3191,10 +3234,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         private final long generation;
         @SuppressWarnings("unused")
         private final long ticket;
+        private final long submittedNanos;
 
-        private PrefetchReservation(long generation, long ticket) {
+        private PrefetchReservation(long generation, long ticket, long submittedNanos) {
             this.generation = generation;
             this.ticket = ticket;
+            this.submittedNanos = submittedNanos;
         }
     }
 
