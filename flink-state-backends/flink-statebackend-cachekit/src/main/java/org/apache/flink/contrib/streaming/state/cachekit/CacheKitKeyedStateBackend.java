@@ -395,6 +395,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     BP_PREFETCH_MULTIGET,
                     VALUE_STICKY_UPDATE_IN_PLACE,
                     VALUE_LAZY_STAGING,
+                    BP_PREFETCH_KEY_SCOPED_INVALIDATION,
                     nativeRequestPlaneCoordinator,
                     allocateNativeStateId());
             wrappersByDelegateIdentity.put(internal, wrapped);
@@ -563,6 +564,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     BP_PREFETCH_MULTIGET,
                     VALUE_STICKY_UPDATE_IN_PLACE,
                     VALUE_LAZY_STAGING,
+                    BP_PREFETCH_KEY_SCOPED_INVALIDATION,
                     nativeRequestPlaneCoordinator,
                     allocateNativeStateId());
             wrappersByDelegateIdentity.put(internal, wrapped);
@@ -814,6 +816,14 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     /** Uses ordered, incrementally published RocksDB MultiGet chunks for async ValueState reads. */
     private static final boolean BP_PREFETCH_MULTIGET =
             loadBooleanFlag("state.backend.cachekit.bp-prefetch.multiget.enabled", false);
+    /**
+     * Invalidates only the prepared key touched by a delegate-visible write. The default keeps
+     * the legacy state-wide generation barrier; the narrower mode is opt-in until its Nexmark
+     * gate passes.
+     */
+    private static final boolean BP_PREFETCH_KEY_SCOPED_INVALIDATION =
+            loadBooleanFlag(
+                    "state.backend.cachekit.bp-prefetch.key-scoped-invalidation.enabled", false);
     /**
      * Reuses the L1-owned sticky ValueState wrapper for repeated updates to the same key/namespace.
      * Disabled by default until Nexmark validates that the allocation reduction exceeds its extra

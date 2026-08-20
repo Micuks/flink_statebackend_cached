@@ -130,6 +130,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     1_000_000);
     private final int asyncStagingMaxEntries;
     private final long asyncStagingMaxRetainedBytes;
+    /**
+     * Whether delegate-visible writes revoke only the matching prepared-key reservation/staging
+     * entry instead of invalidating unrelated speculative reads for the whole state.
+     */
+    private final boolean keyScopedPrefetchInvalidationEnabled;
 
     /**
      * Values fetched by the shared prefetch worker, waiting to be promoted into L1 by the mailbox
@@ -156,9 +161,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             new java.util.concurrent.atomic.AtomicLong();
 
     /**
-     * Write generation: bumped on every delegate-visible update/clear and dirty flush-through.
-     * Plain write-back entries remain authoritative in L1 and shield an older staged value until
-     * their flush bumps this generation. Single writer (mailbox thread); the worker only reads it.
+     * State-wide write generation used by the conservative invalidation mode. When key-scoped
+     * invalidation is enabled, a delegate-visible write instead revokes only its exact prepared-key
+     * reservation and staging entry. Plain write-back entries remain authoritative in L1 until
+     * flush-through. Single writer (mailbox thread); workers only read this generation.
      */
     private volatile long writeGen;
 
@@ -184,6 +190,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchLazyMaterializationFailures;
     private volatile long prefetchStagingAdmissionDrops;
     private volatile long prefetchStaleAborts;
+    private volatile long prefetchKeyScopedInvalidations;
+    private volatile long prefetchKeyScopedInFlightCancelled;
+    private volatile long prefetchKeyScopedStagedRemoved;
     private volatile long prefetchLiveReadRacedInFlight;
     private volatile long prefetchLiveReadCancellations;
     private volatile long prefetchWorkerCancelledBeforeRead;
@@ -514,12 +523,47 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 hitRateThreshold,
                 hitRateWindow,
                 multiGetPrefetchEnabled,
+                stickyUpdateInPlaceEnabled,
+                lazyStagingEnabled,
+                false,
+                nativeRequestPlaneCoordinator,
+                nativeStateId);
+    }
+
+    public CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean multiGetPrefetchEnabled,
+            boolean stickyUpdateInPlaceEnabled,
+            boolean lazyStagingEnabled,
+            boolean keyScopedPrefetchInvalidationEnabled,
+            NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator,
+            int nativeStateId) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                multiGetPrefetchEnabled,
                 MULTIGET_CHUNK_SIZE,
                 MULTIGET_MIN_BATCH_SIZE,
                 stickyUpdateInPlaceEnabled,
                 lazyStagingEnabled,
                 ASYNC_STAGING_MAX_ENTRIES,
                 ASYNC_STAGING_MAX_RETAINED_BYTES,
+                keyScopedPrefetchInvalidationEnabled,
                 nativeRequestPlaneCoordinator,
                 nativeStateId);
     }
@@ -682,6 +726,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 lazyStagingEnabled,
                 asyncStagingMaxEntries,
                 asyncStagingMaxRetainedBytes,
+                false,
                 null,
                 0);
     }
@@ -703,6 +748,47 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             boolean lazyStagingEnabled,
             int asyncStagingMaxEntries,
             long asyncStagingMaxRetainedBytes,
+            boolean keyScopedPrefetchInvalidationEnabled) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                multiGetPrefetchEnabled,
+                multiGetChunkSize,
+                multiGetMinBatchSize,
+                stickyUpdateInPlaceEnabled,
+                lazyStagingEnabled,
+                asyncStagingMaxEntries,
+                asyncStagingMaxRetainedBytes,
+                keyScopedPrefetchInvalidationEnabled,
+                null,
+                0);
+    }
+
+    CachedInternalValueState(
+            InternalValueState<K, N, V> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean multiGetPrefetchEnabled,
+            int multiGetChunkSize,
+            int multiGetMinBatchSize,
+            boolean stickyUpdateInPlaceEnabled,
+            boolean lazyStagingEnabled,
+            int asyncStagingMaxEntries,
+            long asyncStagingMaxRetainedBytes,
+            boolean keyScopedPrefetchInvalidationEnabled,
             NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator,
             int nativeStateId) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
@@ -737,6 +823,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         this.nativeRequestPlaneCoordinator = nativeRequestPlaneCoordinator;
         this.nativeStateId = nativeStateId;
+        // The narrow invalidation proof relies on the prepared-key reservation identity checked
+        // before and after RocksDB I/O. Generic query-wire prefetch and the experimental native
+        // coordinator retain the conservative state-wide generation barrier.
+        this.keyScopedPrefetchInvalidationEnabled =
+                keyScopedPrefetchInvalidationEnabled
+                        && this.multiGetPrefetchEnabled
+                        && delegate instanceof RocksDBBatchValueReader<?, ?, ?>
+                        && nativeRequestPlaneCoordinator == null;
 
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
@@ -1037,7 +1131,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             CachedValue<V> newValue;
             if (bypassEnabled && isBypassing) {
                 long nativeEpoch =
-                        advanceWriteGeneration(); // staged/native RocksDB reads may now be stale
+                        prepareDelegateWrite(currentKey, currentNamespace);
                 delegate.update(value);
                 publishNativeMutation(currentKey, currentNamespace, value, nativeEpoch);
                 if (reusableValue != null) {
@@ -1065,7 +1159,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (bypassEnabled && isBypassing) {
             // Write-Through (Bypass Mode)
             long nativeEpoch =
-                    advanceWriteGeneration(); // staged/native RocksDB reads may now be stale
+                    prepareDelegateWrite(currentKey, currentNamespace);
             delegate.update(value);
             publishNativeMutation(currentKey, currentNamespace, value, nativeEpoch);
 
@@ -1105,7 +1199,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         if (bypassEnabled && isBypassing) {
             long nativeEpoch =
-                    advanceWriteGeneration(); // staged/native RocksDB reads may now be stale
+                    prepareDelegateWrite(currentKey, currentNamespace);
             delegate.clear();
             publishNativeMutation(currentKey, currentNamespace, null, nativeEpoch);
             newValue = CachedValue.of(cacheKey, null, false);
@@ -1254,6 +1348,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             LOG.info(
                     "[CACHEKIT VALUE PREFETCH] delegate={} namespaceSerializer={} "
                             + "recordKeyPrefetch={} multiGet={} chunkSize={} minBatchSize={} "
+                            + "keyScopedInvalidation={} "
                             + "tasksBuilt={} tasksExecuted={} tasksDropped={} keysPrepared={} "
                             + "keysDeduplicated={} multiGetCalls={} "
                             + "multiGetKeys={} pointGetCalls={} smallBatchDrops={} "
@@ -1261,6 +1356,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "promoted={} lazyStaging={} lazyStaged={} lazyMaterialized={} "
                             + "lazyMaterializationFailures={} stagingEntries={} retainedBytes={} "
                             + "maxRetainedBytes={} admissionDrops={} staleAborts={} "
+                            + "keyScopedInvalidations={} keyScopedInFlightCancelled={} "
+                            + "keyScopedStagedRemoved={} "
                             + "liveReadRacedInFlight={} liveReadCancellations={} "
                             + "workerCancelledBeforeRead={} workerDiscardedAfterRead={} "
                             + "workerQueueAvgUs={} workerQueueMaxUs={} "
@@ -1300,6 +1397,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     multiGetPrefetchEnabled,
                     multiGetChunkSize,
                     multiGetMinBatchSize,
+                    keyScopedPrefetchInvalidationEnabled,
                     prefetchTasksBuilt,
                     prefetchTasksExecuted,
                     prefetchTasksDropped,
@@ -1322,6 +1420,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     asyncStagingMaxRetainedBytes,
                     prefetchStagingAdmissionDrops,
                     prefetchStaleAborts,
+                    prefetchKeyScopedInvalidations,
+                    prefetchKeyScopedInFlightCancelled,
+                    prefetchKeyScopedStagedRemoved,
                     prefetchLiveReadRacedInFlight,
                     prefetchLiveReadCancellations,
                     prefetchWorkerCancelledBeforeRead,
@@ -1445,6 +1546,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getPrefetchStagingAdmissionDropsForTesting() {
         return prefetchStagingAdmissionDrops;
+    }
+
+    long getPrefetchKeyScopedInvalidationsForTesting() {
+        return prefetchKeyScopedInvalidations;
+    }
+
+    long getPrefetchKeyScopedInFlightCancelledForTesting() {
+        return prefetchKeyScopedInFlightCancelled;
+    }
+
+    long getPrefetchKeyScopedStagedRemovedForTesting() {
+        return prefetchKeyScopedStagedRemoved;
+    }
+
+    long getPrefetchStaleAbortsForTesting() {
+        return prefetchStaleAborts;
     }
 
     long getPrefetchLiveReadRacedInFlightForTesting() {
@@ -3133,7 +3250,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
 
             // A dirty flush changes RocksDB content: a concurrent prefetch read may now be stale.
-            long nativeEpoch = advanceWriteGeneration();
+            long nativeEpoch = prepareDelegateWrite(key);
             // Save current context
             K previousKey = currentKeyProvider.getCurrentKey();
             // We rely on 'currentNamespace' field in this class but it might have changed.
@@ -3184,6 +3301,40 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (nativeRequestPlaneCoordinator != null) {
             nativeGenerationAdvances++;
             return nativeWriteEpoch.incrementAndGet();
+        }
+        return 0L;
+    }
+
+    /** Prepare a delegate-visible write using the mailbox-thread lookup scratch key. */
+    private long prepareDelegateWrite(K key, N namespace) {
+        if (!keyScopedPrefetchInvalidationEnabled) {
+            return advanceWriteGeneration();
+        }
+        setLookupKey(key, namespace);
+        return prepareDelegateWrite(lookupKey);
+    }
+
+    /**
+     * Revoke speculative ownership for exactly the written key before RocksDB is mutated.
+     *
+     * <p>The worker publishes under the same {@code staging} monitor and must still own the exact
+     * reservation object. Therefore both race orders are safe: a pre-write publish is removed
+     * here; a post-write publish observes that its reservation was revoked and is discarded.
+     */
+    private long prepareDelegateWrite(KeyNamespaceKey<K, N> key) {
+        if (!keyScopedPrefetchInvalidationEnabled) {
+            return advanceWriteGeneration();
+        }
+        prefetchKeyScopedInvalidations++;
+        synchronized (staging) {
+            if (inFlight.remove(key) != null) {
+                prefetchKeyScopedInFlightCancelled++;
+            }
+            StagedValue<V> removed = staging.remove(key);
+            if (removed != null) {
+                stagingRetainedBytes.addAndGet(-removed.retainedBytes());
+                prefetchKeyScopedStagedRemoved++;
+            }
         }
         return 0L;
     }
@@ -3242,8 +3393,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     /**
-     * Ownership token for one submitted prefetch task. Generation protects against state writes;
-     * ticket identity prevents a later same-generation reservation from reviving an older,
+     * Ownership token for one submitted prefetch task. The state generation protects conservative
+     * mode against writes; in key-scoped mode, exact reservation identity protects the written key.
+     * Ticket identity prevents a later same-generation reservation from reviving an older,
      * cancelled worker (the classic ABA case).
      */
     private static final class PrefetchReservation {
