@@ -179,6 +179,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchMultiGetCalls;
     private volatile long prefetchMultiGetKeys;
     private volatile long prefetchPointGetCalls;
+    private volatile long prefetchImmediatePointGetCalls;
     /** Speculative prepared batches abandoned after cancellations made them too small to batch. */
     private volatile long prefetchSmallBatchDrops;
     private volatile long prefetchSmallBatchKeysDropped;
@@ -1352,7 +1353,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "keyScopedInvalidation={} "
                             + "tasksBuilt={} tasksExecuted={} tasksDropped={} keysPrepared={} "
                             + "keysDeduplicated={} multiGetCalls={} "
-                            + "multiGetKeys={} pointGetCalls={} smallBatchDrops={} "
+                            + "multiGetKeys={} pointGetCalls={} immediatePointGetCalls={} "
+                            + "smallBatchDrops={} "
                             + "smallBatchKeysDropped={} staged={} missingStaged={} "
                             + "promoted={} lazyStaging={} lazyStaged={} lazyMaterialized={} "
                             + "lazyMaterializationFailures={} stagingEntries={} retainedBytes={} "
@@ -1408,6 +1410,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchMultiGetCalls,
                     prefetchMultiGetKeys,
                     prefetchPointGetCalls,
+                    prefetchImmediatePointGetCalls,
                     prefetchSmallBatchDrops,
                     prefetchSmallBatchKeysDropped,
                     prefetchValuesStaged,
@@ -2240,6 +2243,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     if (end - start < multiGetMinBatchSize) {
                         for (int i = start; i < end; i++) {
                             prefetchPointGetCalls++;
+                            prefetchImmediatePointGetCalls++;
                             valueBytes.add(
                                     batchReader.getSerializedValueByRocksDBKey(
                                             rocksDBKeys.get(i)));
