@@ -25,10 +25,6 @@ import org.rocksdb.RocksDBException;
 
 import javax.annotation.Nullable;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-
 /**
  * Fail-closed bridge for the experimental FrocksDB packed tiny-MapState prefix scan.
  *
@@ -58,6 +54,7 @@ final class RocksDBPackedTinyMapScan {
     static final byte STATUS_ERROR = 2;
 
     private static final int MAGIC = 0x434b4d50; // "CKMP"
+    private static final int[] EMPTY_ENTRY_SLICES = new int[0];
 
     private RocksDBPackedTinyMapScan() {}
 
@@ -68,33 +65,50 @@ final class RocksDBPackedTinyMapScan {
         MALFORMED
     }
 
-    static final class EntryBytes {
-        final byte[] rawKey;
-        final byte[] rawValue;
-
-        EntryBytes(byte[] rawKey, byte[] rawValue) {
-            this.rawKey = rawKey;
-            this.rawValue = rawValue;
-        }
-    }
-
     static final class Result {
         final Outcome outcome;
-        final List<EntryBytes> entries;
+        @Nullable final byte[] encodedPage;
+        /** Four ints per entry: key offset, key length, value offset, value length. */
+        final int[] entrySlices;
         final int encodedBytes;
 
-        private Result(Outcome outcome, List<EntryBytes> entries, int encodedBytes) {
+        private Result(
+                Outcome outcome,
+                @Nullable byte[] encodedPage,
+                int[] entrySlices,
+                int encodedBytes) {
             this.outcome = outcome;
-            this.entries = entries;
+            this.encodedPage = encodedPage;
+            this.entrySlices = entrySlices;
             this.encodedBytes = encodedBytes;
         }
 
         static Result fallback(Outcome outcome, int encodedBytes) {
-            return new Result(outcome, Collections.emptyList(), encodedBytes);
+            return new Result(outcome, null, EMPTY_ENTRY_SLICES, encodedBytes);
         }
 
-        static Result complete(List<EntryBytes> entries, int encodedBytes) {
-            return new Result(Outcome.COMPLETE, entries, encodedBytes);
+        static Result complete(byte[] encodedPage, int[] entrySlices, int encodedBytes) {
+            return new Result(Outcome.COMPLETE, encodedPage, entrySlices, encodedBytes);
+        }
+
+        int entryCount() {
+            return entrySlices.length / 4;
+        }
+
+        int keyOffset(int index) {
+            return entrySlices[index * 4];
+        }
+
+        int keyLength(int index) {
+            return entrySlices[index * 4 + 1];
+        }
+
+        int valueOffset(int index) {
+            return entrySlices[index * 4 + 2];
+        }
+
+        int valueLength(int index) {
+            return entrySlices[index * 4 + 3];
         }
     }
 
@@ -149,13 +163,22 @@ final class RocksDBPackedTinyMapScan {
                     status == STATUS_OVERFLOW ? Outcome.OVERFLOW : Outcome.NATIVE_ERROR,
                     encoded.length);
         }
-        if (status != STATUS_COMPLETE || count < 0 || count > maxEntries) {
+        // Every record needs two length fields and at least the null marker in its value. Bound
+        // the primitive slice table before multiplying count by four, even if a direct unit-test
+        // caller supplies a maxEntries value larger than the production configuration permits.
+        final int maximumCountFromBytes = (encoded.length - HEADER_BYTES) / 9;
+        if (status != STATUS_COMPLETE
+                || count < 0
+                || count > maxEntries
+                || count > maximumCountFromBytes
+                || count > Integer.MAX_VALUE / 4) {
             return Result.fallback(Outcome.MALFORMED, encoded.length);
         }
 
         int cursor = HEADER_BYTES;
-        byte[] previousKey = null;
-        final ArrayList<EntryBytes> entries = new ArrayList<>(count);
+        int previousKeyOffset = -1;
+        int previousKeyLength = 0;
+        final int[] entrySlices = count == 0 ? EMPTY_ENTRY_SLICES : new int[count * 4];
         for (int index = 0; index < count; index++) {
             if ((long) cursor + 8L > encoded.length) {
                 return Result.fallback(Outcome.MALFORMED, encoded.length);
@@ -173,52 +196,73 @@ final class RocksDBPackedTinyMapScan {
                 return Result.fallback(Outcome.MALFORMED, encoded.length);
             }
 
-            final byte[] rawKey = copyRange(encoded, (int) keyStart, (int) valueStart);
-            final byte[] rawValue = copyRange(encoded, (int) valueStart, (int) recordEnd);
-            if (!hasExpectedPrefix(rawKey, seekPrefix, prefixCompareOffset)
-                    || (previousKey != null && compareUnsigned(previousKey, rawKey) >= 0)) {
+            if (!hasExpectedPrefix(
+                            encoded,
+                            (int) keyStart,
+                            keyLength,
+                            seekPrefix,
+                            prefixCompareOffset)
+                    || (previousKeyOffset >= 0
+                            && compareUnsigned(
+                                            encoded,
+                                            previousKeyOffset,
+                                            previousKeyLength,
+                                            (int) keyStart,
+                                            keyLength)
+                                    >= 0)) {
                 return Result.fallback(Outcome.MALFORMED, encoded.length);
             }
 
-            entries.add(new EntryBytes(rawKey, rawValue));
-            previousKey = rawKey;
+            final int sliceOffset = index * 4;
+            entrySlices[sliceOffset] = (int) keyStart;
+            entrySlices[sliceOffset + 1] = keyLength;
+            entrySlices[sliceOffset + 2] = (int) valueStart;
+            entrySlices[sliceOffset + 3] = valueLength;
+            previousKeyOffset = (int) keyStart;
+            previousKeyLength = keyLength;
             cursor = (int) recordEnd;
         }
 
         if (cursor != encoded.length) {
             return Result.fallback(Outcome.MALFORMED, encoded.length);
         }
-        return Result.complete(Collections.unmodifiableList(entries), encoded.length);
+        return Result.complete(encoded, entrySlices, encoded.length);
     }
 
     private static boolean hasExpectedPrefix(
-            byte[] rawKey, byte[] seekPrefix, int prefixCompareOffset) {
-        if (rawKey.length < seekPrefix.length) {
+            byte[] encoded,
+            int rawKeyOffset,
+            int rawKeyLength,
+            byte[] seekPrefix,
+            int prefixCompareOffset) {
+        if (rawKeyLength < seekPrefix.length) {
             return false;
         }
         for (int index = prefixCompareOffset; index < seekPrefix.length; index++) {
-            if (rawKey[index] != seekPrefix[index]) {
+            if (encoded[rawKeyOffset + index] != seekPrefix[index]) {
                 return false;
             }
         }
         return true;
     }
 
-    private static int compareUnsigned(byte[] left, byte[] right) {
-        final int common = Math.min(left.length, right.length);
+    private static int compareUnsigned(
+            byte[] encoded,
+            int leftOffset,
+            int leftLength,
+            int rightOffset,
+            int rightLength) {
+        final int common = Math.min(leftLength, rightLength);
         for (int index = 0; index < common; index++) {
-            final int comparison = Integer.compare(left[index] & 0xff, right[index] & 0xff);
+            final int comparison =
+                    Integer.compare(
+                            encoded[leftOffset + index] & 0xff,
+                            encoded[rightOffset + index] & 0xff);
             if (comparison != 0) {
                 return comparison;
             }
         }
-        return Integer.compare(left.length, right.length);
-    }
-
-    private static byte[] copyRange(byte[] source, int start, int end) {
-        final byte[] copy = new byte[end - start];
-        System.arraycopy(source, start, copy, 0, copy.length);
-        return copy;
+        return Integer.compare(leftLength, rightLength);
     }
 
     private static int readInt(byte[] bytes, int offset) {

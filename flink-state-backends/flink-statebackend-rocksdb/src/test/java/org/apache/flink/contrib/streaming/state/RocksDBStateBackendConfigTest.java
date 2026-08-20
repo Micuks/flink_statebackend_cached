@@ -66,6 +66,7 @@ import org.rocksdb.util.SizeUnit;
 import java.io.File;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 
@@ -321,6 +322,108 @@ public class RocksDBStateBackendConfigTest {
             assertEquals(2, keyedBackend.getMapIteratorPackedScanCompletes());
             assertEquals(0, keyedBackend.getMapIteratorPackedScanIteratorFallbacks());
             assertEquals(3, keyedBackend.getMapIteratorPackedScanEntries());
+        } finally {
+            keyedBackend.dispose();
+            environment.close();
+        }
+    }
+
+    @Test
+    public void testPackedTinyFlatPagesRemainIndependentAcrossInterleavedIterators()
+            throws Exception {
+        Configuration configuration = new Configuration();
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_ENABLED, true);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES, 8);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES, 4096);
+        EmbeddedRocksDBStateBackend configuredBackend =
+                new EmbeddedRocksDBStateBackend()
+                        .configure(configuration, Thread.currentThread().getContextClassLoader());
+        MockEnvironment environment = new MockEnvironmentBuilder().build();
+        RocksDBKeyedStateBackend<Integer> keyedBackend =
+                createKeyedStateBackend(configuredBackend, environment, IntSerializer.INSTANCE);
+        try {
+            MapState<Integer, Integer> state =
+                    keyedBackend.getPartitionedState(
+                            VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "packed-tiny-interleaved", Integer.class, Integer.class));
+
+            keyedBackend.setCurrentKey(100);
+            state.put(1, 11);
+            state.put(2, null);
+            Iterator<Map.Entry<Integer, Integer>> first = state.entries().iterator();
+
+            keyedBackend.setCurrentKey(101);
+            state.put(3, 33);
+            state.put(4, 44);
+            Iterator<Map.Entry<Integer, Integer>> second = state.entries().iterator();
+
+            Map<Integer, Integer> firstValues = new HashMap<>();
+            Map<Integer, Integer> secondValues = new HashMap<>();
+            while (first.hasNext() || second.hasNext()) {
+                if (first.hasNext()) {
+                    Map.Entry<Integer, Integer> entry = first.next();
+                    firstValues.put(entry.getKey(), entry.getValue());
+                }
+                if (second.hasNext()) {
+                    Map.Entry<Integer, Integer> entry = second.next();
+                    secondValues.put(entry.getKey(), entry.getValue());
+                }
+            }
+
+            assertEquals(2, firstValues.size());
+            assertEquals(Integer.valueOf(11), firstValues.get(1));
+            assertTrue(firstValues.containsKey(2));
+            assertNull(firstValues.get(2));
+            assertEquals(2, secondValues.size());
+            assertEquals(Integer.valueOf(33), secondValues.get(3));
+            assertEquals(Integer.valueOf(44), secondValues.get(4));
+            assertEquals(2, keyedBackend.getMapIteratorPackedScanCompletes());
+            assertEquals(4, keyedBackend.getMapIteratorPackedScanEntries());
+        } finally {
+            keyedBackend.dispose();
+            environment.close();
+        }
+    }
+
+    @Test
+    public void testPackedTinyOverflowFallsBackFromPrefixAndReturnsEveryEntry() throws Exception {
+        Configuration configuration = new Configuration();
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_ENABLED, true);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES, 1);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES, 4096);
+        EmbeddedRocksDBStateBackend configuredBackend =
+                new EmbeddedRocksDBStateBackend()
+                        .configure(configuration, Thread.currentThread().getContextClassLoader());
+        MockEnvironment environment = new MockEnvironmentBuilder().build();
+        RocksDBKeyedStateBackend<Integer> keyedBackend =
+                createKeyedStateBackend(configuredBackend, environment, IntSerializer.INSTANCE);
+        try {
+            keyedBackend.setCurrentKey(202);
+            MapState<Integer, Integer> state =
+                    keyedBackend.getPartitionedState(
+                            VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "packed-tiny-overflow-fallback",
+                                    Integer.class,
+                                    Integer.class));
+            state.put(1, 10);
+            state.put(2, 20);
+
+            Map<Integer, Integer> values = new HashMap<>();
+            for (Map.Entry<Integer, Integer> entry : state.entries()) {
+                values.put(entry.getKey(), entry.getValue());
+            }
+
+            assertEquals(2, values.size());
+            assertEquals(Integer.valueOf(10), values.get(1));
+            assertEquals(Integer.valueOf(20), values.get(2));
+            assertEquals(1, keyedBackend.getMapIteratorPackedScanAttempts());
+            assertEquals(1, keyedBackend.getMapIteratorPackedScanOverflows());
+            assertEquals(1, keyedBackend.getMapIteratorPackedScanIteratorFallbacks());
+            assertEquals(2, keyedBackend.getMapIteratorEntriesLoaded());
         } finally {
             keyedBackend.dispose();
             environment.close();

@@ -589,7 +589,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         switch (result.outcome) {
             case COMPLETE:
                 mapIteratorPackedScanCompletes.increment();
-                mapIteratorPackedScanEntries.add(result.entries.size());
+                mapIteratorPackedScanEntries.add(result.entryCount());
                 break;
             case OVERFLOW:
                 mapIteratorPackedScanOverflows.increment();

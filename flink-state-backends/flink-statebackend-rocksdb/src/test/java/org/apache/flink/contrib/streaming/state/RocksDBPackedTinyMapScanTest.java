@@ -23,10 +23,11 @@ import org.junit.Test;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.util.Arrays;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertSame;
 
 /** Tests the fail-closed boundary of the packed tiny MapState scan. */
 public class RocksDBPackedTinyMapScanTest {
@@ -38,7 +39,7 @@ public class RocksDBPackedTinyMapScanTest {
         RocksDBPackedTinyMapScan.Result empty =
                 decode(completePayload(new byte[0][], new byte[0][]), BINARY_PREFIX, 1, 8, 1024);
         assertEquals(RocksDBPackedTinyMapScan.Outcome.COMPLETE, empty.outcome);
-        assertTrue(empty.entries.isEmpty());
+        assertEquals(0, empty.entryCount());
 
         byte[][] keys =
                 new byte[][] {
@@ -50,9 +51,9 @@ public class RocksDBPackedTinyMapScanTest {
                 decode(completePayload(keys, values), BINARY_PREFIX, 1, 8, 1024);
 
         assertEquals(RocksDBPackedTinyMapScan.Outcome.COMPLETE, result.outcome);
-        assertEquals(2, result.entries.size());
-        assertArrayEquals(keys[0], result.entries.get(0).rawKey);
-        assertArrayEquals(values[1], result.entries.get(1).rawValue);
+        assertEquals(2, result.entryCount());
+        assertArrayEquals(keys[0], copyKey(result, 0));
+        assertArrayEquals(values[1], copyValue(result, 1));
     }
 
     @Test
@@ -99,6 +100,11 @@ public class RocksDBPackedTinyMapScanTest {
         putInt(badTotalLength, 12, valid.length + 1);
         assertMalformed(badTotalLength, BINARY_PREFIX, 0, 8, 1024);
 
+        byte[] impossibleCount = statusPayload(RocksDBPackedTinyMapScan.STATUS_COMPLETE);
+        putInt(impossibleCount, 8, Integer.MAX_VALUE);
+        assertMalformed(
+                impossibleCount, BINARY_PREFIX, 0, Integer.MAX_VALUE, Integer.MAX_VALUE);
+
         byte[] negativeKeyLength = valid.clone();
         putInt(negativeKeyLength, RocksDBPackedTinyMapScan.HEADER_BYTES, -1);
         assertMalformed(negativeKeyLength, BINARY_PREFIX, 0, 8, 1024);
@@ -139,19 +145,33 @@ public class RocksDBPackedTinyMapScanTest {
     }
 
     @Test
-    public void testDecodedRawKeyAndValueAreOwnedForExactMutation() throws Exception {
+    public void testCompleteResultRetainsOneImmutablePageAndPrimitiveSlices() throws Exception {
         byte[] key = concat(BINARY_PREFIX, new byte[] {0x01, 0x02});
         byte[] value = new byte[] {0x00, 0x11, 0x22};
         byte[] payload = completePayload(new byte[][] {key}, new byte[][] {value});
         RocksDBPackedTinyMapScan.Result result = decode(payload, BINARY_PREFIX, 0, 8, 1024);
 
-        // Mutation of the JNI result buffer after decoding must not alter the exact key/value used
-        // later by RocksDBMapEntry.remove() or setValue().
-        for (int index = 0; index < payload.length; index++) {
-            payload[index] = 0;
-        }
-        assertArrayEquals(key, result.entries.get(0).rawKey);
-        assertArrayEquals(value, result.entries.get(0).rawValue);
+        // The JNI byte[] is already Java-owned and never mutated after publication. Keep exactly
+        // that one page and describe entries with primitive offsets instead of copying two arrays
+        // and allocating EntryBytes for every row.
+        assertSame(payload, result.encodedPage);
+        assertEquals(4, result.entrySlices.length);
+        assertArrayEquals(key, copyKey(result, 0));
+        assertArrayEquals(value, copyValue(result, 0));
+    }
+
+    private static byte[] copyKey(RocksDBPackedTinyMapScan.Result result, int index) {
+        return Arrays.copyOfRange(
+                result.encodedPage,
+                result.keyOffset(index),
+                result.keyOffset(index) + result.keyLength(index));
+    }
+
+    private static byte[] copyValue(RocksDBPackedTinyMapScan.Result result, int index) {
+        return Arrays.copyOfRange(
+                result.encodedPage,
+                result.valueOffset(index),
+                result.valueOffset(index) + result.valueLength(index));
     }
 
     private static RocksDBPackedTinyMapScan.Result decode(

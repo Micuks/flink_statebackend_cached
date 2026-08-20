@@ -404,6 +404,33 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
         return isNull ? null : valueSerializer.deserialize(dataInputView);
     }
 
+    private static <UK> UK deserializeUserKey(
+            DataInputDeserializer dataInputView,
+            int userKeyOffset,
+            byte[] packedPage,
+            int rawKeyOffset,
+            int rawKeyLength,
+            TypeSerializer<UK> keySerializer)
+            throws IOException {
+        dataInputView.setBuffer(
+                packedPage,
+                rawKeyOffset + userKeyOffset,
+                rawKeyLength - userKeyOffset);
+        return keySerializer.deserialize(dataInputView);
+    }
+
+    private static <UV> UV deserializeUserValue(
+            DataInputDeserializer dataInputView,
+            byte[] packedPage,
+            int rawValueOffset,
+            int rawValueLength,
+            TypeSerializer<UV> valueSerializer)
+            throws IOException {
+        dataInputView.setBuffer(packedPage, rawValueOffset, rawValueLength);
+        boolean isNull = dataInputView.readBoolean();
+        return isNull ? null : valueSerializer.deserialize(dataInputView);
+    }
+
     private boolean startWithKeyPrefix(byte[] keyPrefixBytes, byte[] rawKeyBytes) {
         if (rawKeyBytes.length < keyPrefixBytes.length) {
             return false;
@@ -430,10 +457,17 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
          * The raw bytes of the key stored in RocksDB. Each user key is stored in RocksDB with the
          * format #KeyGroup#Key#Namespace#UserKey.
          */
-        private final byte[] rawKeyBytes;
+        @Nullable private byte[] rawKeyBytes;
 
         /** The raw bytes of the value stored in RocksDB. */
-        private byte[] rawValueBytes;
+        @Nullable private byte[] rawValueBytes;
+
+        /** Immutable packed page shared by all entries from one complete tiny scan. */
+        @Nullable private final byte[] packedPage;
+        private final int packedRawKeyOffset;
+        private final int packedRawKeyLength;
+        private final int packedRawValueOffset;
+        private final int packedRawValueLength;
 
         /** True if the entry has been deleted. */
         private boolean deleted;
@@ -471,8 +505,50 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
 
             this.rawKeyBytes = rawKeyBytes;
             this.rawValueBytes = rawValueBytes;
+            this.packedPage = null;
+            this.packedRawKeyOffset = 0;
+            this.packedRawKeyLength = 0;
+            this.packedRawValueOffset = 0;
+            this.packedRawValueLength = 0;
             this.deleted = false;
             this.dataInputView = dataInputView;
+        }
+
+        RocksDBMapEntry(
+                @Nonnull final RocksDB db,
+                @Nonnegative final int userKeyOffset,
+                @Nonnull final byte[] packedPage,
+                @Nonnegative final int rawKeyOffset,
+                @Nonnegative final int rawKeyLength,
+                @Nonnegative final int rawValueOffset,
+                @Nonnegative final int rawValueLength,
+                @Nonnull final TypeSerializer<UK> keySerializer,
+                @Nonnull final TypeSerializer<UV> valueSerializer,
+                @Nonnull DataInputDeserializer dataInputView) {
+            this.db = db;
+            this.userKeyOffset = userKeyOffset;
+            this.keySerializer = keySerializer;
+            this.valueSerializer = valueSerializer;
+            this.rawKeyBytes = null;
+            this.rawValueBytes = null;
+            this.packedPage = packedPage;
+            this.packedRawKeyOffset = rawKeyOffset;
+            this.packedRawKeyLength = rawKeyLength;
+            this.packedRawValueOffset = rawValueOffset;
+            this.packedRawValueLength = rawValueLength;
+            this.deleted = false;
+            this.dataInputView = dataInputView;
+        }
+
+        private byte[] materializeRawKey() {
+            if (rawKeyBytes == null) {
+                rawKeyBytes =
+                        Arrays.copyOfRange(
+                                packedPage,
+                                packedRawKeyOffset,
+                                packedRawKeyOffset + packedRawKeyLength);
+            }
+            return rawKeyBytes;
         }
 
         public void remove() {
@@ -480,7 +556,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             rawValueBytes = null;
 
             try {
-                db.delete(columnFamily, writeOptions, rawKeyBytes);
+                db.delete(columnFamily, writeOptions, materializeRawKey());
             } catch (RocksDBException e) {
                 throw new FlinkRuntimeException("Error while removing data from RocksDB.", e);
             }
@@ -491,8 +567,19 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             if (userKey == null) {
                 try {
                     userKey =
-                            deserializeUserKey(
-                                    dataInputView, userKeyOffset, rawKeyBytes, keySerializer);
+                            packedPage == null
+                                    ? deserializeUserKey(
+                                            dataInputView,
+                                            userKeyOffset,
+                                            rawKeyBytes,
+                                            keySerializer)
+                                    : deserializeUserKey(
+                                            dataInputView,
+                                            userKeyOffset,
+                                            packedPage,
+                                            packedRawKeyOffset,
+                                            packedRawKeyLength,
+                                            keySerializer);
                 } catch (IOException e) {
                     throw new FlinkRuntimeException("Error while deserializing the user key.", e);
                 }
@@ -509,7 +596,15 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                 if (userValue == null) {
                     try {
                         userValue =
-                                deserializeUserValue(dataInputView, rawValueBytes, valueSerializer);
+                                packedPage == null || rawValueBytes != null
+                                        ? deserializeUserValue(
+                                                dataInputView, rawValueBytes, valueSerializer)
+                                        : deserializeUserValue(
+                                                dataInputView,
+                                                packedPage,
+                                                packedRawValueOffset,
+                                                packedRawValueLength,
+                                                valueSerializer);
                     } catch (IOException e) {
                         throw new FlinkRuntimeException(
                                 "Error while deserializing the user value.", e);
@@ -532,7 +627,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                 userValue = value;
                 rawValueBytes = serializeValueNullSensitive(value, valueSerializer);
 
-                db.put(columnFamily, writeOptions, rawKeyBytes, rawValueBytes);
+                db.put(columnFamily, writeOptions, materializeRawKey(), rawValueBytes);
             } catch (IOException | RocksDBException e) {
                 throw new FlinkRuntimeException("Error while putting data into RocksDB.", e);
             }
@@ -684,7 +779,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                  * the iterating from currentEntry if reloading cache is needed.
                  */
                 byte[] startBytes =
-                        (currentEntry == null ? keyPrefixBytes : currentEntry.rawKeyBytes);
+                        (currentEntry == null ? keyPrefixBytes : currentEntry.materializeRawKey());
 
                 cacheEntries.clear();
                 cacheIndex = 0;
@@ -809,13 +904,17 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
 
             cacheEntries.clear();
             cacheIndex = 0;
-            for (RocksDBPackedTinyMapScan.EntryBytes entryBytes : packedResult.entries) {
+            final byte[] packedPage = packedResult.encodedPage;
+            for (int index = 0; index < packedResult.entryCount(); index++) {
                 cacheEntries.add(
                         new RocksDBMapEntry(
                                 db,
                                 keyPrefixBytes.length,
-                                entryBytes.rawKey,
-                                entryBytes.rawValue,
+                                packedPage,
+                                packedResult.keyOffset(index),
+                                packedResult.keyLength(index),
+                                packedResult.valueOffset(index),
+                                packedResult.valueLength(index),
                                 keySerializer,
                                 valueSerializer,
                                 dataInputView));
