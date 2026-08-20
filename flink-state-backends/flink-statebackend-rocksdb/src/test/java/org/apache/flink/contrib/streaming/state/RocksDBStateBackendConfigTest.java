@@ -20,6 +20,7 @@ package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.api.java.typeutils.runtime.NullableSerializer;
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.configuration.CheckpointingOptions;
@@ -347,7 +348,9 @@ public class RocksDBStateBackendConfigTest {
                             VoidNamespace.INSTANCE,
                             VoidNamespaceSerializer.INSTANCE,
                             new MapStateDescriptor<>(
-                                    "packed-tiny-interleaved", Integer.class, Integer.class));
+                                    "packed-tiny-interleaved",
+                                    IntSerializer.INSTANCE,
+                                    NullableSerializer.wrap(IntSerializer.INSTANCE, false)));
 
             keyedBackend.setCurrentKey(100);
             state.put(1, 11);
