@@ -79,6 +79,16 @@ public class RocksDBOptions {
                     .withDescription(
                             "Whether packed tiny MapState scans reuse a refreshed RocksIterator from a single idle slot per column family. Reuse is disabled automatically for snapshot, bounded, tailing, pinned, or internal-key ReadOptions. Refresh NotSupported and missing-JNI compatibility failures fall back to the fresh-iterator V1 path; storage and scan errors fail the operation. Disabled by default while experimentally validated.");
 
+    /** Keeps packed entries as slices of one immutable result page instead of copying each pair. */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Boolean> MAP_ITERATOR_PACKED_TINY_SCAN_FLAT_PAGE_ENABLED =
+            ConfigOptions.key(
+                            "state.backend.cachekit.rocksdb.map-iterator.packed-tiny-scan.flat-page.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "Whether complete packed tiny MapState scans retain one immutable result page and deserialize entries from validated slices. Disabling this option eagerly copies each key and value into independent byte arrays for controlled performance comparison. Enabled by default to preserve the existing packed-scan behavior.");
+
     /** Maximum number of entries accepted from one packed tiny MapState scan. */
     @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
     public static final ConfigOption<Integer> MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES =

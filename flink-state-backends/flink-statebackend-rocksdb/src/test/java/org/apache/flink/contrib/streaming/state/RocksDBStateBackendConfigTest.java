@@ -104,6 +104,7 @@ public class RocksDBStateBackendConfigTest {
         EmbeddedRocksDBStateBackend backend = new EmbeddedRocksDBStateBackend();
         assertEquals(defaultIncremental, backend.isIncrementalCheckpointsEnabled());
         assertFalse(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_REUSE_ENABLED.defaultValue());
+        assertTrue(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_FLAT_PAGE_ENABLED.defaultValue());
     }
 
     @Test
@@ -113,6 +114,7 @@ public class RocksDBStateBackendConfigTest {
         configuration.set(RocksDBOptions.MAP_ITERATOR_PREFIX_UPPER_BOUND_ENABLED, true);
         configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_ENABLED, true);
         configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_REUSE_ENABLED, true);
+        configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_FLAT_PAGE_ENABLED, false);
         configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES, 64);
         configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES, 4096);
         EmbeddedRocksDBStateBackend configuredBackend =
@@ -126,6 +128,7 @@ public class RocksDBStateBackendConfigTest {
             assertTrue(keyedBackend.isMapIteratorSingleKeyFetchEnabled());
             assertTrue(keyedBackend.isMapIteratorPrefixUpperBoundEnabled());
             assertTrue(keyedBackend.isMapIteratorPackedTinyScanEnabled());
+            assertFalse(keyedBackend.isMapIteratorPackedTinyScanFlatPageEnabled());
             assertEquals(64, keyedBackend.getMapIteratorPackedTinyScanMaxEntries());
             assertEquals(4096, keyedBackend.getMapIteratorPackedTinyScanMaxBytes());
             keyedBackend.setCurrentKey(1);
@@ -374,6 +377,96 @@ public class RocksDBStateBackendConfigTest {
         } finally {
             keyedBackend.dispose();
             environment.close();
+        }
+    }
+
+    @Test
+    public void testPackedTinyFlatPageSwitchPreservesMutationSemantics() throws Exception {
+        for (boolean flatPageEnabled : new boolean[] {false, true}) {
+            Configuration configuration = new Configuration();
+            configuration.set(RocksDBOptions.MAP_ITERATOR_PREFIX_UPPER_BOUND_ENABLED, false);
+            configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_ENABLED, true);
+            configuration.set(
+                    RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_FLAT_PAGE_ENABLED,
+                    flatPageEnabled);
+            configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES, 8);
+            configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES, 4096);
+            EmbeddedRocksDBStateBackend configuredBackend =
+                    new EmbeddedRocksDBStateBackend()
+                            .configure(
+                                    configuration,
+                                    Thread.currentThread().getContextClassLoader());
+            MockEnvironment environment = new MockEnvironmentBuilder().build();
+            RocksDBKeyedStateBackend<Integer> keyedBackend =
+                    createKeyedStateBackend(
+                            configuredBackend, environment, IntSerializer.INSTANCE);
+            try {
+                assertEquals(
+                        flatPageEnabled,
+                        keyedBackend.isMapIteratorPackedTinyScanFlatPageEnabled());
+                keyedBackend.setCurrentKey(flatPageEnabled ? 91 : 92);
+                MapState<Integer, Integer> state =
+                        keyedBackend.getPartitionedState(
+                                VoidNamespace.INSTANCE,
+                                VoidNamespaceSerializer.INSTANCE,
+                                new MapStateDescriptor<>(
+                                        "packed-flat-page-" + flatPageEnabled,
+                                        Integer.class,
+                                        Integer.class));
+                state.put(1, 10);
+                state.put(2, 20);
+                state.put(3, 30);
+
+                int seen = 0;
+                Iterator<Map.Entry<Integer, Integer>> iterator = state.entries().iterator();
+                while (iterator.hasNext()) {
+                    Map.Entry<Integer, Integer> entry = iterator.next();
+                    seen++;
+                    if (entry.getKey() == 1) {
+                        assertEquals(Integer.valueOf(10), entry.setValue(11));
+                    } else if (entry.getKey() == 2) {
+                        iterator.remove();
+                    }
+                }
+
+                assertEquals(3, seen);
+                assertEquals(Integer.valueOf(11), state.get(1));
+                assertFalse(state.contains(2));
+                assertEquals(Integer.valueOf(30), state.get(3));
+
+                Iterator<Integer> keys = state.keys().iterator();
+                while (keys.hasNext()) {
+                    if (keys.next() == 3) {
+                        keys.remove();
+                    }
+                }
+                assertFalse(state.contains(3));
+
+                state.put(4, 40);
+                Iterator<Integer> values = state.values().iterator();
+                while (values.hasNext()) {
+                    if (values.next() == 40) {
+                        values.remove();
+                    }
+                }
+                assertFalse(state.contains(4));
+
+                assertEquals(7, keyedBackend.getMapIteratorPackedScanEntries());
+                if (flatPageEnabled) {
+                    assertEquals(7, keyedBackend.getMapIteratorPackedFlatPageEntries());
+                    assertEquals(0, keyedBackend.getMapIteratorPackedCopiedEntries());
+                    assertEquals(0, keyedBackend.getMapIteratorPackedCopiedBytes());
+                    assertEquals(4, keyedBackend.getMapIteratorPackedLazyKeyMaterializations());
+                } else {
+                    assertEquals(0, keyedBackend.getMapIteratorPackedFlatPageEntries());
+                    assertEquals(7, keyedBackend.getMapIteratorPackedCopiedEntries());
+                    assertTrue(keyedBackend.getMapIteratorPackedCopiedBytes() > 0);
+                    assertEquals(0, keyedBackend.getMapIteratorPackedLazyKeyMaterializations());
+                }
+            } finally {
+                keyedBackend.dispose();
+                environment.close();
+            }
         }
     }
 

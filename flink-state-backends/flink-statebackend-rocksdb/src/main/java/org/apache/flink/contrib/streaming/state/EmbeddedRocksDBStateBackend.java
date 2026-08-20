@@ -155,6 +155,7 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
     private final boolean mapIteratorPrefixUpperBoundEnabled;
     private final boolean mapIteratorPackedTinyScanEnabled;
     private final boolean mapIteratorPackedTinyScanReuseEnabled;
+    private final boolean mapIteratorPackedTinyScanFlatPageEnabled;
     private final int mapIteratorPackedTinyScanMaxEntries;
     private final int mapIteratorPackedTinyScanMaxBytes;
 
@@ -212,6 +213,8 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
         this.mapIteratorPrefixUpperBoundEnabled = false;
         this.mapIteratorPackedTinyScanEnabled = false;
         this.mapIteratorPackedTinyScanReuseEnabled = false;
+        this.mapIteratorPackedTinyScanFlatPageEnabled =
+                RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_FLAT_PAGE_ENABLED.defaultValue();
         this.mapIteratorPackedTinyScanMaxEntries =
                 RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES.defaultValue();
         this.mapIteratorPackedTinyScanMaxBytes =
@@ -288,6 +291,8 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
                 config.get(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_ENABLED);
         this.mapIteratorPackedTinyScanReuseEnabled =
                 config.get(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_REUSE_ENABLED);
+        this.mapIteratorPackedTinyScanFlatPageEnabled =
+                config.get(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_FLAT_PAGE_ENABLED);
         this.mapIteratorPackedTinyScanMaxEntries =
                 config.get(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES);
         this.mapIteratorPackedTinyScanMaxBytes =
@@ -549,6 +554,8 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
                                 mapIteratorPackedTinyScanMaxBytes)
                         .setMapIteratorPackedTinyScanReuseEnabled(
                                 mapIteratorPackedTinyScanReuseEnabled)
+                        .setMapIteratorPackedTinyScanFlatPageEnabled(
+                                mapIteratorPackedTinyScanFlatPageEnabled)
                         .setWriteBatchSize(getWriteBatchSize())
                         .setOverlapFractionThreshold(getOverlapFractionThreshold());
         return builder.build();

@@ -547,6 +547,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                                 packedPage,
                                 packedRawKeyOffset,
                                 packedRawKeyOffset + packedRawKeyLength);
+                backend.recordMapIteratorPackedLazyKeyMaterialization();
             }
             return rawKeyBytes;
         }
@@ -904,19 +905,44 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             cacheEntries.clear();
             cacheIndex = 0;
             final byte[] packedPage = packedResult.encodedPage;
-            for (int index = 0; index < packedResult.entryCount(); index++) {
-                cacheEntries.add(
-                        new RocksDBMapEntry(
-                                db,
-                                keyPrefixBytes.length,
-                                packedPage,
-                                packedResult.keyOffset(index),
-                                packedResult.keyLength(index),
-                                packedResult.valueOffset(index),
-                                packedResult.valueLength(index),
-                                keySerializer,
-                                valueSerializer,
-                                dataInputView));
+            final int entryCount = packedResult.entryCount();
+            if (backend.isMapIteratorPackedTinyScanFlatPageEnabled()) {
+                for (int index = 0; index < entryCount; index++) {
+                    cacheEntries.add(
+                            new RocksDBMapEntry(
+                                    db,
+                                    keyPrefixBytes.length,
+                                    packedPage,
+                                    packedResult.keyOffset(index),
+                                    packedResult.keyLength(index),
+                                    packedResult.valueOffset(index),
+                                    packedResult.valueLength(index),
+                                    keySerializer,
+                                    valueSerializer,
+                                    dataInputView));
+                }
+                backend.recordMapIteratorPackedFlatPageEntries(entryCount);
+            } else {
+                long copiedBytes = 0L;
+                for (int index = 0; index < entryCount; index++) {
+                    final int keyOffset = packedResult.keyOffset(index);
+                    final int keyLength = packedResult.keyLength(index);
+                    final int valueOffset = packedResult.valueOffset(index);
+                    final int valueLength = packedResult.valueLength(index);
+                    cacheEntries.add(
+                            new RocksDBMapEntry(
+                                    db,
+                                    keyPrefixBytes.length,
+                                    Arrays.copyOfRange(
+                                            packedPage, keyOffset, keyOffset + keyLength),
+                                    Arrays.copyOfRange(
+                                            packedPage, valueOffset, valueOffset + valueLength),
+                                    keySerializer,
+                                    valueSerializer,
+                                    dataInputView));
+                    copiedBytes += (long) keyLength + valueLength;
+                }
+                backend.recordMapIteratorPackedCopiedEntries(entryCount, copiedBytes);
             }
             // COMPLETE is an explicit native proof that the entire prefix scan fit the limits.
             expired = true;

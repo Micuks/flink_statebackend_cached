@@ -209,6 +209,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean mapIteratorPrefixUpperBoundEnabled;
     private final boolean mapIteratorPackedTinyScanEnabled;
     private final boolean mapIteratorPackedTinyScanReuseEnabled;
+    private final boolean mapIteratorPackedTinyScanFlatPageEnabled;
     private final int mapIteratorPackedTinyScanMaxEntries;
     private final int mapIteratorPackedTinyScanMaxBytes;
     private final RocksDBPackedTinyMapIteratorPool mapIteratorPackedTinyScanIteratorPool;
@@ -230,6 +231,10 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final LongAdder mapIteratorPackedScanIteratorFallbacks = new LongAdder();
     private final LongAdder mapIteratorPackedScanEntries = new LongAdder();
     private final LongAdder mapIteratorPackedScanBytes = new LongAdder();
+    private final LongAdder mapIteratorPackedFlatPageEntries = new LongAdder();
+    private final LongAdder mapIteratorPackedCopiedEntries = new LongAdder();
+    private final LongAdder mapIteratorPackedCopiedBytes = new LongAdder();
+    private final LongAdder mapIteratorPackedLazyKeyMaterializations = new LongAdder();
 
     /** Map of created k/v states. */
     private final Map<String, State> createdKVStates;
@@ -317,6 +322,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean mapIteratorPrefixUpperBoundEnabled,
             boolean mapIteratorPackedTinyScanEnabled,
             boolean mapIteratorPackedTinyScanReuseEnabled,
+            boolean mapIteratorPackedTinyScanFlatPageEnabled,
             int mapIteratorPackedTinyScanMaxEntries,
             int mapIteratorPackedTinyScanMaxBytes) {
 
@@ -351,6 +357,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapIteratorPrefixUpperBoundEnabled = mapIteratorPrefixUpperBoundEnabled;
         this.mapIteratorPackedTinyScanEnabled = mapIteratorPackedTinyScanEnabled;
         this.mapIteratorPackedTinyScanReuseEnabled = mapIteratorPackedTinyScanReuseEnabled;
+        this.mapIteratorPackedTinyScanFlatPageEnabled = mapIteratorPackedTinyScanFlatPageEnabled;
         this.mapIteratorPackedTinyScanMaxEntries = mapIteratorPackedTinyScanMaxEntries;
         this.mapIteratorPackedTinyScanMaxBytes = mapIteratorPackedTinyScanMaxBytes;
         this.db = db;
@@ -500,6 +507,8 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                             + "packedIteratorReuseEligible={} packedMaxEntries={} packedMaxBytes={} packedAttempts={} "
                             + "packedCompletes={} packedOverflows={} packedErrors={} packedMalformed={} "
                             + "packedIteratorFallbacks={} packedEntries={} packedBytes={} "
+                            + "packedFlatPageEnabled={} packedFlatPageEntries={} "
+                            + "packedCopiedEntries={} packedCopiedBytes={} packedLazyKeyMaterializations={} "
                             + "packedReuseBorrows={} packedRefreshSuccesses={} packedFreshCreates={} "
                             + "packedConcurrentCreates={} packedRefreshFallbacks={} packedScanFallbacks={} "
                             + "packedReuseReturns={} packedReuseDiscards={}",
@@ -527,6 +536,11 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapIteratorPackedScanIteratorFallbacks.sum(),
                     mapIteratorPackedScanEntries.sum(),
                     mapIteratorPackedScanBytes.sum(),
+                    mapIteratorPackedTinyScanFlatPageEnabled,
+                    mapIteratorPackedFlatPageEntries.sum(),
+                    mapIteratorPackedCopiedEntries.sum(),
+                    mapIteratorPackedCopiedBytes.sum(),
+                    mapIteratorPackedLazyKeyMaterializations.sum(),
                     packedIteratorPoolCounter(PoolCounter.BORROWS),
                     packedIteratorPoolCounter(PoolCounter.REFRESH_SUCCESSES),
                     packedIteratorPoolCounter(PoolCounter.FRESH_CREATES),
@@ -606,6 +620,10 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     boolean isMapIteratorPackedTinyScanEnabled() {
         return mapIteratorPackedTinyScanEnabled;
+    }
+
+    boolean isMapIteratorPackedTinyScanFlatPageEnabled() {
+        return mapIteratorPackedTinyScanFlatPageEnabled;
     }
 
     int getMapIteratorPackedTinyScanMaxEntries() {
@@ -708,6 +726,19 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     void recordMapIteratorPackedScanIteratorFallback() {
         mapIteratorPackedScanIteratorFallbacks.increment();
+    }
+
+    void recordMapIteratorPackedFlatPageEntries(long entries) {
+        mapIteratorPackedFlatPageEntries.add(entries);
+    }
+
+    void recordMapIteratorPackedCopiedEntries(long entries, long bytes) {
+        mapIteratorPackedCopiedEntries.add(entries);
+        mapIteratorPackedCopiedBytes.add(bytes);
+    }
+
+    void recordMapIteratorPackedLazyKeyMaterialization() {
+        mapIteratorPackedLazyKeyMaterializations.increment();
     }
 
     void recordMapIteratorPageStats(
@@ -813,6 +844,26 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @VisibleForTesting
     long getMapIteratorPackedScanBytes() {
         return mapIteratorPackedScanBytes.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedFlatPageEntries() {
+        return mapIteratorPackedFlatPageEntries.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedCopiedEntries() {
+        return mapIteratorPackedCopiedEntries.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedCopiedBytes() {
+        return mapIteratorPackedCopiedBytes.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedLazyKeyMaterializations() {
+        return mapIteratorPackedLazyKeyMaterializations.sum();
     }
 
     @VisibleForTesting
