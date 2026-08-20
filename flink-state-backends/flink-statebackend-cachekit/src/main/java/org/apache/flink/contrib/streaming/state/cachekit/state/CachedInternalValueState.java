@@ -191,6 +191,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchStagingAdmissionDrops;
     private volatile long prefetchStaleAborts;
     private volatile long prefetchKeyScopedInvalidations;
+    private volatile long prefetchKeyScopedFastNegativeSkips;
     private volatile long prefetchKeyScopedInFlightCancelled;
     private volatile long prefetchKeyScopedStagedRemoved;
     private volatile long prefetchLiveReadRacedInFlight;
@@ -1356,7 +1357,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "promoted={} lazyStaging={} lazyStaged={} lazyMaterialized={} "
                             + "lazyMaterializationFailures={} stagingEntries={} retainedBytes={} "
                             + "maxRetainedBytes={} admissionDrops={} staleAborts={} "
-                            + "keyScopedInvalidations={} keyScopedInFlightCancelled={} "
+                            + "keyScopedInvalidations={} keyScopedFastNegativeSkips={} "
+                            + "keyScopedInFlightCancelled={} "
                             + "keyScopedStagedRemoved={} "
                             + "liveReadRacedInFlight={} liveReadCancellations={} "
                             + "workerCancelledBeforeRead={} workerDiscardedAfterRead={} "
@@ -1421,6 +1423,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchStagingAdmissionDrops,
                     prefetchStaleAborts,
                     prefetchKeyScopedInvalidations,
+                    prefetchKeyScopedFastNegativeSkips,
                     prefetchKeyScopedInFlightCancelled,
                     prefetchKeyScopedStagedRemoved,
                     prefetchLiveReadRacedInFlight,
@@ -1554,6 +1557,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getPrefetchKeyScopedInFlightCancelledForTesting() {
         return prefetchKeyScopedInFlightCancelled;
+    }
+
+    long getPrefetchKeyScopedFastNegativeSkipsForTesting() {
+        return prefetchKeyScopedFastNegativeSkips;
     }
 
     long getPrefetchKeyScopedStagedRemovedForTesting() {
@@ -3326,15 +3333,38 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return advanceWriteGeneration();
         }
         prefetchKeyScopedInvalidations++;
-        synchronized (staging) {
-            if (inFlight.remove(key) != null) {
-                prefetchKeyScopedInFlightCancelled++;
+        // The mailbox thread installs every reservation before submitting its worker. Therefore a
+        // write that observes neither a reservation nor a staged value precedes any future read of
+        // this key and can safely avoid mutating either ConcurrentHashMap or taking staging's
+        // accounting monitor. This is the overwhelmingly common path on q9.
+        PrefetchReservation reservation = inFlight.get(key);
+        if (reservation != null) {
+            // A worker may already be inside publishStagedValue after validating reservation
+            // identity. Serialize cancellation with that validation+put sequence: either the
+            // worker publishes first and we delete its stale value, or we revoke first and its
+            // identity check fails.
+            synchronized (staging) {
+                if (inFlight.remove(key, reservation)) {
+                    prefetchKeyScopedInFlightCancelled++;
+                }
+                StagedValue<V> staged = staging.get(key);
+                if (staged != null && staging.remove(key, staged)) {
+                    stagingRetainedBytes.addAndGet(-staged.retainedBytes());
+                    prefetchKeyScopedStagedRemoved++;
+                }
             }
-            StagedValue<V> removed = staging.remove(key);
-            if (removed != null) {
-                stagingRetainedBytes.addAndGet(-removed.retainedBytes());
-                prefetchKeyScopedStagedRemoved++;
-            }
+            return 0L;
+        }
+        // A worker releases its reservation only after publishing. Therefore, when the mailbox
+        // thread sees no reservation, an absent staged value is a true negative; a future task was
+        // submitted after this write and will read the new delegate value.
+        StagedValue<V> staged = staging.get(key);
+        if (staged == null) {
+            prefetchKeyScopedFastNegativeSkips++;
+            return 0L;
+        }
+        if (removeStagedValue(key, staged)) {
+            prefetchKeyScopedStagedRemoved++;
         }
         return 0L;
     }

@@ -721,6 +721,14 @@ class CachedInternalValueStateTest {
         assertEquals(1, state.getPrefetchValuesPromotedForTesting());
         currentKey.set("stale");
         assertEquals(7, state.value());
+
+        // The common write to a key absent from both speculative maps takes the lock-free
+        // fast-negative path without disturbing subsequent authoritative reads.
+        currentKey.set("never-prefetched");
+        state.update(33);
+        state.flush();
+        assertEquals(1, state.getPrefetchKeyScopedFastNegativeSkipsForTesting());
+        assertEquals(33, state.value());
         state.close();
     }
 
