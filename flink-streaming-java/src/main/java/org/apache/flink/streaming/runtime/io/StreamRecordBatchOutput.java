@@ -431,11 +431,14 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         // the matching prepared-MultiGet reservation before LocalPreagg or ordinary per-record
         // execution can race the worker. Already-published staging remains usable; unsupported
         // backends fail closed inside StatePrefetcher.
+        if (LocalPreagg.dispatch(
+                headOperator, buf, n, numRecordsIn, cancelPrefetchOnDispatch)) {
+            return;
+        }
+        // LocalPreagg reuses its already-deduplicated group keys for cancellation. Only the
+        // ordinary replay path still needs to extract keys from the record prefix here.
         if (cancelPrefetchOnDispatch) {
             cancelPrefetchForDispatch(n);
-        }
-        if (LocalPreagg.dispatch(headOperator, buf, n, numRecordsIn)) {
-            return;
         }
         if (prefetchMode) {
             if (!asyncPrefetchChunks

@@ -18,6 +18,8 @@ package org.apache.flink.streaming.runtime.tasks;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.runtime.state.BatchKeyGroupingSupport;
 import org.apache.flink.runtime.state.KeyedStateBackend;
+import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
+import org.apache.flink.streaming.api.operators.Input;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
 import org.junit.jupiter.api.Test;
@@ -106,6 +108,28 @@ class StatePrefetcherTest {
 
         KeyedStateBackend<Object> unsupported = mock(KeyedStateBackend.class);
         assertEquals(-1, StatePrefetcher.cancelPrefetchForDispatch(unsupported, keys));
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void testDispatchCancellationReusesCallerOwnedGroupedKeys() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(DispatchCancelHook.class));
+        Collection<Integer> groupedKeys = Arrays.asList(1, 2, 3);
+        org.mockito.Mockito.when(
+                        ((DispatchCancelHook) backend).cancelPrefetchForDispatch(groupedKeys))
+                .thenReturn(2);
+        AbstractStreamOperator operator =
+                mock(AbstractStreamOperator.class, withSettings().extraInterfaces(Input.class));
+        org.mockito.Mockito.when(operator.getKeyedStateBackend()).thenReturn(backend);
+
+        assertEquals(
+                2,
+                StatePrefetcher.cancelPrefetchKeysForDispatch(
+                        (Input<?>) operator, groupedKeys));
+        verify((DispatchCancelHook) backend).cancelPrefetchForDispatch(groupedKeys);
     }
 
     @Test

@@ -1359,6 +1359,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 && delegate instanceof RocksDBBatchValueReader<?, ?, ?>;
     }
 
+    /** Cheap mailbox-side gate that avoids scanning keys for wrappers with no cancellable work. */
+    public boolean hasInFlightDispatchPrefetchReservations() {
+        return !closed && supportsDispatchPrefetchCancellation() && !inFlight.isEmpty();
+    }
+
     /**
      * Revoke exact still-in-flight reservations for selected mailbox records.
      *
@@ -1381,6 +1386,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
             prefetchDispatchKeysExamined++;
             setLookupKey(key, namespace);
+            PrefetchReservation reservation = inFlight.get(lookupKey);
+            if (reservation == null) {
+                prefetchDispatchNoReservation++;
+                continue;
+            }
             synchronized (staging) {
                 // A completed speculative read is useful to the record now being dispatched.
                 // Never turn a staging hit back into an authoritative RocksDB point read.
@@ -1388,8 +1398,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchDispatchAlreadyStaged++;
                     continue;
                 }
-                PrefetchReservation reservation = inFlight.get(lookupKey);
-                if (reservation != null && inFlight.remove(lookupKey, reservation)) {
+                if (inFlight.remove(lookupKey, reservation)) {
                     prefetchDispatchCancellations++;
                     cancelled++;
                 } else {

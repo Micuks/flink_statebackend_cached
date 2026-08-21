@@ -151,6 +151,17 @@ public final class LocalPreagg {
     @SuppressWarnings({"unchecked", "rawtypes"})
     public static boolean dispatch(
             Input<?> headOperator, StreamRecord<?>[] buf, int n, Counter numRecordsIn) {
+        return dispatch(headOperator, buf, n, numRecordsIn, false);
+    }
+
+    /** Attempt grouped dispatch while optionally revoking only its exact, deduplicated keys. */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public static boolean dispatch(
+            Input<?> headOperator,
+            StreamRecord<?>[] buf,
+            int n,
+            Counter numRecordsIn,
+            boolean cancelPrefetchOnDispatch) {
         if (!ENABLED || n <= 0 || headOperator == null) {
             return false;
         }
@@ -197,7 +208,8 @@ public final class LocalPreagg {
                         buf,
                         n,
                         numRecordsIn,
-                        workspace)) {
+                        workspace,
+                        cancelPrefetchOnDispatch)) {
                     return true;
                 }
             } catch (Throwable t) {
@@ -266,6 +278,9 @@ public final class LocalPreagg {
             // The exact set of state keys is now known and deduplicated. CacheKit can issue one
             // synchronous MultiGet so processBatchForKey observes warm ValueState, without the
             // wasted per-record speculation that used to run before grouping.
+            if (cancelPrefetchOnDispatch) {
+                StatePrefetcher.cancelPrefetchKeysForDispatch(headOperator, groups.keys);
+            }
             StatePrefetcher.prefetchKeysImmediately(headOperator, groups.keys);
             // Preserve the batch's timestamp context for emitted rows (agg results are not
             // event-time keyed downstream, but keep parity with the per-record path).
@@ -324,7 +339,8 @@ public final class LocalPreagg {
             StreamRecord<?>[] buf,
             int n,
             Counter numRecordsIn,
-            NativeGroupingWorkspace workspace)
+            NativeGroupingWorkspace workspace,
+            boolean cancelPrefetchOnDispatch)
             throws Exception {
         workspace.prepare(n);
         StreamRecord<?> lastRecord = null;
@@ -353,6 +369,9 @@ public final class LocalPreagg {
                 return false;
             }
 
+            if (cancelPrefetchOnDispatch) {
+                StatePrefetcher.cancelPrefetchKeysForDispatch(headOperator, groups.keys);
+            }
             StatePrefetcher.prefetchKeysImmediately(headOperator, groups.keys);
             if (lastRecord != null && lastRecord.hasTimestamp()) {
                 collector.setAbsoluteTimestamp(lastRecord.getTimestamp());

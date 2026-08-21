@@ -1265,7 +1265,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
             for (Object wrapper : wrappersByDelegateIdentity.values()) {
                 if (wrapper instanceof CachedInternalValueState) {
                     CachedInternalValueState valueState = (CachedInternalValueState) wrapper;
-                    if (valueState.supportsDispatchPrefetchCancellation()) {
+                    if (valueState.hasInFlightDispatchPrefetchReservations()) {
                         cancelled += valueState.cancelPrefetchForDispatch(keys);
                     }
                 }

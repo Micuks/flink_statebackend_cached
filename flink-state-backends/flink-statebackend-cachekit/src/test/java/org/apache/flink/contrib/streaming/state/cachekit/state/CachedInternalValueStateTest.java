@@ -235,7 +235,8 @@ class CachedInternalValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void testDispatchCancellationPreservesAlreadyPublishedStaging() throws Exception {
+    void testDispatchCancellationPreservesAlreadyPublishedStagingWithoutReservationScan()
+            throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
         InternalValueState<String, VoidNamespace, Integer> delegate =
                 mock(
@@ -271,7 +272,8 @@ class CachedInternalValueStateTest {
         state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
         assertEquals(2, state.getStagingSizeForTesting());
         assertEquals(0, state.cancelPrefetchForDispatch(Collections.singletonList("k1")));
-        assertEquals(1, state.getPrefetchDispatchAlreadyStagedForTesting());
+        assertEquals(0, state.getPrefetchDispatchAlreadyStagedForTesting());
+        assertEquals(1, state.getPrefetchDispatchNoReservationForTesting());
         assertEquals(11, state.value());
         verify(delegate, never()).value();
         state.close();

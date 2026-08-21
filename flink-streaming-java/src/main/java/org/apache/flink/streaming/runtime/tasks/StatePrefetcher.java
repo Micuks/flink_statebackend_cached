@@ -263,6 +263,29 @@ public final class StatePrefetcher {
         }
     }
 
+    /**
+     * Revoke exact reservations for a caller-owned, already-deduplicated key set.
+     *
+     * <p>LocalPreagg uses this after grouping, avoiding a second KeySelector pass and a second
+     * LinkedHashSet allocation on the mailbox hot path.
+     */
+    public static int cancelPrefetchKeysForDispatch(
+            Input<?> headOperator, java.util.Collection<?> keys) {
+        if (headOperator == null
+                || keys == null
+                || keys.isEmpty()
+                || !(headOperator instanceof AbstractStreamOperator)) {
+            return -1;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            return cancelPrefetchForDispatch(backend, keys);
+        } catch (Throwable failure) {
+            return -1;
+        }
+    }
+
     private static Method lookupDispatchCancelMethod(Class<?> backendClass) {
         Class<?> current = backendClass;
         while (current != null && current != Object.class) {
