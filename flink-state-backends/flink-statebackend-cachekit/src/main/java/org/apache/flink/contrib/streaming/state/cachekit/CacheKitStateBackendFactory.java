@@ -424,6 +424,16 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "record buffer, avoiding materialized value vectors and per-group lists. "
                                                                         + "Requires native LocalPreAgg and is disabled by default.");
 
+        public static final ConfigOption<Boolean> DISTINCT_BATCH_OVERLAY_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.local-preagg.distinct-overlay.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Collapse repeated exact-DISTINCT MapView reads and writes within one "
+                                                                        + "LocalPreagg outer-key batch. Disabled for TTL state; final values "
+                                                                        + "are committed through MapState.putAll before output.");
+
 	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
 			.noDefaultValue()

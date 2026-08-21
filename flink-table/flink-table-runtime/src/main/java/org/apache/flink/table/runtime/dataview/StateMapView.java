@@ -171,9 +171,27 @@ public abstract class StateMapView<N, EK, EV> extends MapView<EK, EV> implements
 
         @Override
         public void putAll(Map<EK, EV> map) throws Exception {
+            if (map == null || map.isEmpty()) {
+                return;
+            }
+            Map<EK, EV> nonNullEntries = new HashMap<>(map.size());
+            boolean hasNullKey = false;
+            EV nullValue = null;
             for (Map.Entry<EK, EV> entry : map.entrySet()) {
-                // entry key might be null, so we can't invoke mapState.putAll(map) directly here
-                put(entry.getKey(), entry.getValue());
+                if (entry.getKey() == null) {
+                    hasNullKey = true;
+                    nullValue = entry.getValue();
+                } else {
+                    nonNullEntries.put(entry.getKey(), entry.getValue());
+                }
+            }
+            if (!nonNullEntries.isEmpty()) {
+                // RocksDB MapState maps this call to one WriteBatch. Keeping the null-key value in
+                // its dedicated ValueState preserves nullable DISTINCT semantics.
+                getMapState().putAll(nonNullEntries);
+            }
+            if (hasNullKey) {
+                getNullState().update(nullValue);
             }
         }
 

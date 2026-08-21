@@ -36,6 +36,9 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.types.RowKind;
 import org.apache.flink.util.Collector;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.Iterator;
 import java.util.List;
 
@@ -48,6 +51,7 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
         implements ReusableBatchableKeyedFunction<RowData, RowData> {
 
     private static final long serialVersionUID = -4767158666069797704L;
+    private static final Logger LOG = LoggerFactory.getLogger(GroupAggFunction.class);
 
     /** The code generated function used to handle aggregates. */
     private final GeneratedAggsHandleFunction genAggsHandler;
@@ -78,6 +82,9 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
 
     // stores the accumulators
     private transient ValueState<RowData> accState = null;
+
+    // Owns the exact-DISTINCT MapViews and their optional batch-scoped overlays.
+    private transient PerKeyStateDataViewStore dataViewStore = null;
 
     /**
      * Creates a {@link GroupAggFunction}.
@@ -112,7 +119,8 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
         // instantiate function
         StateTtlConfig ttlConfig = createTtlConfig(stateRetentionTime);
         function = genAggsHandler.newInstance(getRuntimeContext().getUserCodeClassLoader());
-        function.open(new PerKeyStateDataViewStore(getRuntimeContext(), ttlConfig));
+        dataViewStore = new PerKeyStateDataViewStore(getRuntimeContext(), ttlConfig);
+        function.open(dataViewStore);
         // instantiate equaliser
         equaliser = genRecordEqualiser.newInstance(getRuntimeContext().getUserCodeClassLoader());
 
@@ -240,40 +248,55 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
             firstRow = true;
         }
 
-        function.setAccumulators(accumulators);
-        RowData prevAggValue = function.getValue();
-        for (RowData input : inputRows) {
-            if (isAccumulateMsg(input)) {
-                function.accumulate(input);
-            } else {
-                function.retract(input);
-            }
-        }
-        RowData newAggValue = function.getValue();
-        accumulators = function.getAccumulators();
-
-        if (!recordCounter.recordCountIsZero(accumulators)) {
-            accState.update(accumulators);
-            if (!firstRow) {
-                if (stateRetentionTime <= 0 && equaliser.equals(prevAggValue, newAggValue)) {
-                    return;
+        final boolean distinctBatch = dataViewStore.beginDistinctBatch();
+        boolean distinctBatchCommitted = false;
+        try {
+            function.setAccumulators(accumulators);
+            RowData prevAggValue = function.getValue();
+            for (RowData input : inputRows) {
+                if (isAccumulateMsg(input)) {
+                    function.accumulate(input);
+                } else {
+                    function.retract(input);
                 }
-                if (generateUpdateBefore) {
-                    resultRow.replace(key, prevAggValue).setRowKind(RowKind.UPDATE_BEFORE);
+            }
+            RowData newAggValue = function.getValue();
+            accumulators = function.getAccumulators();
+
+            // Make the DISTINCT map update durable before the accumulator/output of this batch is
+            // made visible. A failure therefore cannot emit a result whose dedup state was lost.
+            if (distinctBatch) {
+                dataViewStore.commitDistinctBatch();
+                distinctBatchCommitted = true;
+            }
+
+            if (!recordCounter.recordCountIsZero(accumulators)) {
+                accState.update(accumulators);
+                if (!firstRow) {
+                    if (stateRetentionTime <= 0 && equaliser.equals(prevAggValue, newAggValue)) {
+                        return;
+                    }
+                    if (generateUpdateBefore) {
+                        resultRow.replace(key, prevAggValue).setRowKind(RowKind.UPDATE_BEFORE);
+                        out.collect(resultRow);
+                    }
+                    resultRow.replace(key, newAggValue).setRowKind(RowKind.UPDATE_AFTER);
+                } else {
+                    resultRow.replace(key, newAggValue).setRowKind(RowKind.INSERT);
+                }
+                out.collect(resultRow);
+            } else {
+                if (!firstRow) {
+                    resultRow.replace(key, prevAggValue).setRowKind(RowKind.DELETE);
                     out.collect(resultRow);
                 }
-                resultRow.replace(key, newAggValue).setRowKind(RowKind.UPDATE_AFTER);
-            } else {
-                resultRow.replace(key, newAggValue).setRowKind(RowKind.INSERT);
+                accState.clear();
+                function.cleanup();
             }
-            out.collect(resultRow);
-        } else {
-            if (!firstRow) {
-                resultRow.replace(key, prevAggValue).setRowKind(RowKind.DELETE);
-                out.collect(resultRow);
+        } finally {
+            if (distinctBatch && !distinctBatchCommitted) {
+                dataViewStore.abortDistinctBatch();
             }
-            accState.clear();
-            function.cleanup();
         }
     }
 
@@ -281,6 +304,11 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
     public void close() throws Exception {
         if (function != null) {
             function.close();
+        }
+        if (dataViewStore != null) {
+            LOG.info(
+                    "[CACHEKIT DISTINCT BATCH OVERLAY] {}",
+                    dataViewStore.distinctBatchDiagnosticSummary());
         }
     }
 }
