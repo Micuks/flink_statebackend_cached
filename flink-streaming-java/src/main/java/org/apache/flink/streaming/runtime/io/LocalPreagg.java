@@ -42,6 +42,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Objects;
 import java.util.RandomAccess;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -91,7 +92,12 @@ public final class LocalPreagg {
     private static final AtomicLong INDEXED_FOLD_RECORDS = new AtomicLong();
     private static final AtomicLong INDEXED_FOLD_GROUPS = new AtomicLong();
     private static final AtomicLong INDEXED_FOLD_PLAN_FALLBACKS = new AtomicLong();
-    private static final String JVM_ID = ManagementFactory.getRuntimeMXBean().getName();
+    // RuntimeMXBean reports the PID inside the container PID namespace.  The 2x4 benchmark
+    // topology launches four TaskManager JVMs in each container, and every nested JVM therefore
+    // reports the same value (for example, "1@taskmanager1").  Append a process-lifetime nonce so
+    // coverage audits can distinguish all eight JVMs without affecting the indexed hot path.
+    private static final String JVM_ID =
+            ManagementFactory.getRuntimeMXBean().getName() + "#" + UUID.randomUUID();
     private static final Field NO_FIELD;
 
     static {
