@@ -51,6 +51,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final int batchSlots;
     private final boolean aarch64Only;
     private final boolean writeThroughMutations;
+    private final boolean readActivatedWriteThrough;
     private final boolean valueCacheEnabled;
     private final boolean mapCacheEnabled;
     private final boolean mapSnapshotEnabled;
@@ -570,6 +571,64 @@ public final class NativeRequestPlaneOptions implements Serializable {
             double mapSnapshotAdaptiveMinUsefulHitRate,
             int mapSnapshotAdaptiveResampleIntervalProbes,
             boolean indexedFoldEnabled) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                aarch64Only,
+                writeThroughMutations,
+                valueCacheEnabled,
+                mapCacheEnabled,
+                mapSnapshotEnabled,
+                prefetchEnabled,
+                mailboxBatchEnabled,
+                preaggEnabled,
+                compactSelectedProbeEnabled,
+                directArenaMultiGetEnabled,
+                mapSnapshotAdaptiveBypassEnabled,
+                mapSnapshotAdaptiveWindowProbes,
+                mapSnapshotAdaptiveMinUsefulHitRate,
+                mapSnapshotAdaptiveResampleIntervalProbes,
+                indexedFoldEnabled,
+                false);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only,
+            boolean writeThroughMutations,
+            boolean valueCacheEnabled,
+            boolean mapCacheEnabled,
+            boolean mapSnapshotEnabled,
+            boolean prefetchEnabled,
+            boolean mailboxBatchEnabled,
+            boolean preaggEnabled,
+            boolean compactSelectedProbeEnabled,
+            boolean directArenaMultiGetEnabled,
+            boolean mapSnapshotAdaptiveBypassEnabled,
+            int mapSnapshotAdaptiveWindowProbes,
+            double mapSnapshotAdaptiveMinUsefulHitRate,
+            int mapSnapshotAdaptiveResampleIntervalProbes,
+            boolean indexedFoldEnabled,
+            boolean readActivatedWriteThrough) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
         this.kernel = normalizeKernel(kernel);
@@ -603,6 +662,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
         this.batchSlots = batchSlots;
         this.aarch64Only = aarch64Only;
         this.writeThroughMutations = writeThroughMutations;
+        if (readActivatedWriteThrough && (!writeThroughMutations || !valueCacheEnabled)) {
+            throw new IllegalArgumentException(
+                    "Read-activated native mutation write-through requires both write-through-mutations and native ValueState cache.");
+        }
+        this.readActivatedWriteThrough = readActivatedWriteThrough;
         if (valueCacheEnabled && !enabled) {
             throw new IllegalArgumentException(
                     "Native ValueState cache requires the native request plane to be enabled.");
@@ -754,6 +818,14 @@ public final class NativeRequestPlaneOptions implements Serializable {
      */
     public boolean writeThroughMutations() {
         return writeThroughMutations;
+    }
+
+    /**
+     * Whether native mutation publication remains dormant until this state id performs a native
+     * value-cache read. Activation is permanent and shared across wrappers.
+     */
+    public boolean readActivatedWriteThrough() {
+        return readActivatedWriteThrough;
     }
 
     /** Whether the separately gated native ValueState point-cache path is enabled. */

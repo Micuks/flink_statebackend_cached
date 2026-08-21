@@ -25,6 +25,9 @@ import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 
@@ -49,6 +52,8 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private final NativeRequestPlane plane;
     private final ArrayDeque<BatchSlot> availableSlots;
     private final BatchSlot mutationSlot;
+    private final ConcurrentMap<Integer, ValueReadActivation> valueReadActivations =
+            new ConcurrentHashMap<>();
     private final String selectedKernel;
     private final long detectedFeatureBits;
 
@@ -136,6 +141,20 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
 
     public NativeRequestPlaneOptions options() {
         return options;
+    }
+
+    /**
+     * Returns the backend-lifetime activation token for one native state id.
+     *
+     * <p>The production backend assigns each writable wrapper an exclusive state id. Tests may
+     * attach read-only observers to the same token, but multiple writable wrappers would also need
+     * to share their generation clock and are deliberately outside this contract.
+     */
+    public ValueReadActivation valueReadActivation(int stateId) {
+        if (stateId <= 0) {
+            throw new IllegalArgumentException("Native state id must be positive: " + stateId);
+        }
+        return valueReadActivations.computeIfAbsent(stateId, ignored -> new ValueReadActivation());
     }
 
     public BatchSlot tryAcquireBatchSlot() {
@@ -514,6 +533,20 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             slot.leased = false;
             availableSlots.addLast(slot);
             availableSlots.notifyAll();
+        }
+    }
+
+    /** Backend-lifetime one-way gate used to preserve coherent read-activated write-through. */
+    @Internal
+    public static final class ValueReadActivation {
+        private final AtomicBoolean active = new AtomicBoolean();
+
+        public boolean activate() {
+            return active.compareAndSet(false, true);
+        }
+
+        public boolean isActive() {
+            return active.get();
         }
     }
 

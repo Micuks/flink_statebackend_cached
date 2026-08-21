@@ -261,6 +261,16 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Also serialize and publish every authoritative ValueState mutation to the native plane. "
                                                                         + "Disabled by default: exact-generation probes invalidate older native entries without duplicate JNI writes.");
 
+        public static final ConfigOption<Boolean>
+                        NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH =
+                                        ConfigOptions.key(
+                                                                        "state.backend.cachekit.native.value-cache.read-activated-write-through.enabled")
+                                                        .booleanType()
+                                                        .defaultValue(false)
+                                                        .withDescription(
+                                                                        "Skip native ValueState mutation publication until the native cache for that state id is first probed. "
+                                                                                        + "Activation is permanent for the backend lifetime, preserving write-through coherence after first use.");
+
         public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_ENABLED =
                         ConfigOptions.key("state.backend.cachekit.native.value-cache.enabled")
                                         .booleanType()
@@ -628,7 +638,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_WINDOW_PROBES),
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_MIN_USEFUL_HIT_RATE),
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_RESAMPLE_INTERVAL_PROBES),
-                                config.get(NATIVE_LOCAL_PREAGG_INDEXED_FOLD_ENABLED));
+                                config.get(NATIVE_LOCAL_PREAGG_INDEXED_FOLD_ENABLED),
+                                config.get(NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

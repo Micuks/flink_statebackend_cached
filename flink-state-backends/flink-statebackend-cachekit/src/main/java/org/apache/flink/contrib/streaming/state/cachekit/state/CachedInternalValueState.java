@@ -63,6 +63,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final boolean lazyStagingEnabled;
     private final NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator;
     private final int nativeStateId;
+    private final NativeRequestPlaneCoordinator.ValueReadActivation nativeValueReadActivation;
 
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
@@ -329,6 +330,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeGenerationAdvances;
     private volatile long nativeMutationAttempts;
     private volatile long nativeMutationWriteThroughSkipped;
+    private volatile long nativeMutationReadInactiveSkipped;
+    private volatile long nativeValueReadActivations;
     private volatile long nativeMutationApplied;
     private volatile long nativeMutationSuperseded;
     private volatile long nativeMutationFailures;
@@ -912,6 +915,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         this.nativeRequestPlaneCoordinator = nativeRequestPlaneCoordinator;
         this.nativeStateId = nativeStateId;
+        this.nativeValueReadActivation =
+                nativeRequestPlaneCoordinator != null
+                                && nativeRequestPlaneCoordinator
+                                        .options()
+                                        .readActivatedWriteThrough()
+                        ? nativeRequestPlaneCoordinator.valueReadActivation(nativeStateId)
+                        : null;
         this.adaptiveNativeProbeController =
                 NATIVE_ADAPTIVE_PROBE_BYPASS_ENABLED
                                 && nativeRequestPlaneCoordinator != null
@@ -1109,6 +1119,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 || !(delegate instanceof RocksDBBatchValueReader<?, ?, ?>)) {
             return NativePointCacheResult.miss();
         }
+        // A fallback delegate read can still fill the native cache. Activate before acquiring a
+        // bounded slot so temporary slot exhaustion cannot create an entry while mutation
+        // write-through remains dormant.
+        activateNativeValueRead();
         NativeRequestPlaneCoordinator.BatchSlot slot =
                 nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
         if (slot == null) {
@@ -1172,6 +1186,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 || !(delegate instanceof RocksDBBatchValueReader<?, ?, ?>)) {
             return;
         }
+        // Publication through this method always follows an authoritative read. Keep activation
+        // at the publication boundary as a defensive invariant if the caller is refactored.
+        activateNativeValueRead();
         try {
             RocksDBBatchValueReader<K, N, V> batchReader =
                     (RocksDBBatchValueReader<K, N, V>) delegate;
@@ -1563,6 +1580,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "nativeRuntimeFailures={} nativeGenerationAdvances={} "
                             + "nativeMutationAttempts={} nativeMutationApplied={} "
                             + "nativeMutationWriteThroughSkipped={} "
+                            + "nativeMutationReadInactiveSkipped={} nativeValueReadActivations={} "
                             + "nativeMutationSuperseded={} nativeMutationFailures={} "
                             + "nativeMutationTombstonesApplied={} nativeActive={} "
                             + "nativeKernel={} nativeFeatureBits={} nativeFeatures={} "
@@ -1660,6 +1678,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeMutationAttempts,
                     nativeMutationApplied,
                     nativeMutationWriteThroughSkipped,
+                    nativeMutationReadInactiveSkipped,
+                    nativeValueReadActivations,
                     nativeMutationSuperseded,
                     nativeMutationFailures,
                     nativeMutationTombstonesApplied,
@@ -2076,6 +2096,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return nativeMutationWriteThroughSkipped;
     }
 
+    long getNativeMutationReadInactiveSkippedForTesting() {
+        return nativeMutationReadInactiveSkipped;
+    }
+
+    long getNativeValueReadActivationsForTesting() {
+        return nativeValueReadActivations;
+    }
+
     long getNativeMutationSupersededForTesting() {
         return nativeMutationSuperseded;
     }
@@ -2233,6 +2261,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (nativeBatchSlot != null
                     && nativeRequestPlaneCoordinator.options().compactSelectedProbeEnabled()) {
                 try {
+                    activateNativeValueRead();
                     reserveCompactedPreparedKeys(storageKeys, reservation, nativeBatchSlot);
                     if (storageKeys.isEmpty()) {
                         nativeBatchSlot.close();
@@ -2262,6 +2291,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         nativeBatchSlot = null;
                     } else {
                         try {
+                            activateNativeValueRead();
                             nativeBatchSlot.prepareLatest(
                                     nativeStateId, nativeWriteEpoch.get(), rocksDBKeys);
                             nativeCompactPostCompactBytesRecopied +=
@@ -2375,6 +2405,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return null;
         }
         try {
+            activateNativeValueRead();
             slot.prepareLatestDirect(
                     nativeStateId,
                     nativeWriteEpoch.get(),
@@ -2460,6 +2491,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return null;
         }
         try {
+            // When this prepared arena can later be probed, activate before capturing its
+            // generation. This closes the only construction-time window in which a concurrent
+            // mutation could still be admitted as "read inactive" after the batch generation was
+            // chosen. Compaction-only mailbox batching does not activate write-through.
+            if (nativeRequestPlaneCoordinator.options().prefetchEnabled()) {
+                activateNativeValueRead();
+            }
             try {
                 slot.prepareLatestDirect(
                         nativeStateId,
@@ -3056,6 +3094,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return null;
         }
         try {
+            activateNativeValueRead();
             slot.prepareLatest(nativeStateId, nativeWriteEpoch.get(), rocksDBKeys);
             return slot;
         } catch (IOException | RuntimeException failure) {
@@ -4247,6 +4286,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeMutationWriteThroughSkipped++;
             return;
         }
+        if (nativeValueReadActivation != null && !nativeValueReadActivation.isActive()) {
+            nativeMutationReadInactiveSkipped++;
+            return;
+        }
         RocksDBBatchValueReader<K, N, V> batchReader =
                 (RocksDBBatchValueReader<K, N, V>) delegate;
         try {
@@ -4274,6 +4317,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeRequestPlaneCoordinator.disable(failure);
             nativeMutationFailures++;
             nativeRuntimeFailures++;
+        }
+    }
+
+    private void activateNativeValueRead() {
+        if (nativeValueReadActivation != null && nativeValueReadActivation.activate()) {
+            nativeValueReadActivations++;
         }
     }
 

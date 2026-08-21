@@ -1768,6 +1768,350 @@ class NativePreparedValueStateTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void testReadActivatedWriteThroughSkipsPureWritesThenPreservesCoherence()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("write-only");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(7);
+
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(null);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        readActivatedWriteThroughOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        128,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true,
+                        128,
+                        1 << 20,
+                        false,
+                        coordinator,
+                        52);
+        state.setCurrentNamespace("read-activated-ns");
+
+        state.update(1);
+        state.flush();
+        assertEquals(1, state.getNativeMutationAttemptsForTesting());
+        assertEquals(1, state.getNativeMutationReadInactiveSkippedForTesting());
+        assertEquals(0, state.getNativeMutationAppliedForTesting());
+        assertEquals(0, state.getNativeValueReadActivationsForTesting());
+
+        currentKey.set("read-key");
+        assertEquals(7, state.value());
+        assertEquals(1, state.getNativeValueReadActivationsForTesting());
+        assertTrue(coordinator.valueReadActivation(52).isActive());
+
+        currentKey.set("write-only");
+        state.update(2);
+        state.flush();
+        assertEquals(2, state.getNativeMutationAttemptsForTesting());
+        assertEquals(1, state.getNativeMutationReadInactiveSkippedForTesting());
+        assertEquals(1, state.getNativeMutationAppliedForTesting());
+
+        CachedInternalValueState<String, String, Integer> readerState =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        128,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true,
+                        128,
+                        1 << 20,
+                        false,
+                        coordinator,
+                        52);
+        readerState.setCurrentNamespace("read-activated-ns");
+        assertEquals(2, readerState.value());
+        assertEquals(1, readerState.getNativeHitsForTesting());
+
+        state.close();
+        readerState.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testSlotExhaustedPointFallbackActivatesBeforeNativeFill() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("hot-key");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(7);
+
+        RocksDBBatchValueReader<String, String, Integer> batchReader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(batchReader.getBatchDefaultValue()).thenReturn(null);
+        when(batchReader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        readActivatedWriteThroughOptions(), new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> state =
+                newReadActivatedValueState(delegate, currentKey, coordinator, 56);
+        state.setCurrentNamespace("read-activated-slot-exhaustion");
+
+        NativeRequestPlaneCoordinator.BatchSlot first = coordinator.tryAcquireBatchSlot();
+        NativeRequestPlaneCoordinator.BatchSlot second = coordinator.tryAcquireBatchSlot();
+        assertNotNull(first);
+        assertNotNull(second);
+        assertNull(coordinator.tryAcquireBatchSlot());
+
+        assertEquals(7, state.value());
+        assertEquals(1, state.getNativeValueReadActivationsForTesting());
+        assertEquals(1, state.getNativeFallbackBatchesForTesting());
+        assertEquals(1, state.getNativeFillKeysForTesting());
+
+        state.update(9);
+        state.flush();
+        assertEquals(1, state.getNativeMutationAppliedForTesting());
+        assertEquals(0, state.getNativeMutationReadInactiveSkippedForTesting());
+
+        first.close();
+        second.close();
+        CachedInternalValueState<String, String, Integer> reader =
+                newReadActivatedValueState(delegate, currentKey, coordinator, 56);
+        reader.setCurrentNamespace("read-activated-slot-exhaustion");
+        assertEquals(9, reader.value());
+        assertEquals(1, reader.getNativeHitsForTesting());
+        verify(delegate, times(1)).value();
+
+        state.close();
+        reader.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testPreparedNativeReadActivatesBeforeWorkerExecution() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(null);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        readActivatedWriteThroughOptions(), new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 53, 8, 1);
+        state.setCurrentNamespace("prepared-activation-ns");
+
+        Runnable task = state.buildAsyncPrefetchTask(Arrays.asList("a", "b"));
+        assertNotNull(task);
+        assertTrue(coordinator.valueReadActivation(53).isActive());
+        assertEquals(1, state.getNativeValueReadActivationsForTesting());
+        task.run();
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testReadActivatedWriteThroughPreservesClearBeforeAndAfterActivation()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("victim");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(null);
+
+        RocksDBBatchValueReader<String, String, Integer> batchReader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(batchReader.getBatchDefaultValue()).thenReturn(null);
+        when(batchReader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        readActivatedWriteThroughOptions(), new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> writer =
+                newReadActivatedValueState(delegate, currentKey, coordinator, 54);
+        writer.setCurrentNamespace("read-activated-clear");
+
+        writer.clear();
+        writer.flush();
+        assertEquals(1, writer.getNativeMutationAttemptsForTesting());
+        assertEquals(1, writer.getNativeMutationReadInactiveSkippedForTesting());
+        assertEquals(0, writer.getNativeMutationAppliedForTesting());
+
+        CachedInternalValueState<String, String, Integer> firstReader =
+                newReadActivatedValueState(delegate, currentKey, coordinator, 54);
+        firstReader.setCurrentNamespace("read-activated-clear");
+        assertNull(firstReader.value());
+        assertEquals(1, firstReader.getNativeMissesForTesting());
+        assertEquals(1, firstReader.getNativeValueReadActivationsForTesting());
+
+        writer.update(9);
+        writer.flush();
+        writer.clear();
+        writer.flush();
+        assertEquals(3, writer.getNativeMutationAttemptsForTesting());
+        assertEquals(1, writer.getNativeMutationReadInactiveSkippedForTesting());
+        assertEquals(2, writer.getNativeMutationAppliedForTesting());
+        assertEquals(1, writer.getNativeMutationTombstonesAppliedForTesting());
+
+        CachedInternalValueState<String, String, Integer> afterClear =
+                newReadActivatedValueState(delegate, currentKey, coordinator, 54);
+        afterClear.setCurrentNamespace("read-activated-clear");
+        assertNull(afterClear.value());
+        assertEquals(1, afterClear.getNativeNegativeHitsForTesting());
+        verify(delegate, times(1)).value();
+
+        writer.close();
+        firstReader.close();
+        afterClear.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testReadActivationRejectsDelayedFillAfterMailboxMutation() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("a");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> batchReader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(batchReader.getBatchDefaultValue()).thenReturn(null);
+        when(batchReader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        readActivatedWriteThroughOptions(), new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 55, 8, 1);
+        state.setCurrentNamespace("read-activated-race");
+
+        Runnable delayedTask = state.buildAsyncPrefetchTask(Arrays.asList("a", "b"));
+        assertNotNull(delayedTask);
+        assertTrue(coordinator.valueReadActivation(55).isActive());
+
+        byte[] preparedA =
+                KvStateSerializer.serializeKeyAndNamespace(
+                        "a",
+                        StringSerializer.INSTANCE,
+                        "read-activated-race",
+                        StringSerializer.INSTANCE);
+        NativeRequestPlaneCoordinator.BatchSlot delayedFill =
+                coordinator.tryAcquireBatchSlot();
+        assertNotNull(delayedFill);
+        delayedFill.prepareFill(
+                55,
+                0,
+                java.util.Collections.singletonList(preparedA),
+                java.util.Collections.singletonList(
+                        KvStateSerializer.serializeValue(7, IntSerializer.INSTANCE)));
+
+        state.update(99);
+        state.flush();
+        assertEquals(1, state.getNativeMutationAppliedForTesting());
+        assertEquals(1, coordinator.fill(delayedFill));
+        assertEquals(
+                NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION,
+                delayedFill.fillStatus(0));
+        delayedFill.close();
+        delayedTask.run();
+
+        CachedInternalValueState<String, String, Integer> reader =
+                newReadActivatedValueState(delegate, currentKey, coordinator, 55);
+        reader.setCurrentNamespace("read-activated-race");
+        assertEquals(99, reader.value());
+        assertEquals(1, reader.getNativeHitsForTesting());
+        verify(delegate, never()).value();
+
+        state.close();
+        reader.close();
+        coordinator.close();
+    }
+
+    @Test
     void testDelayedWorkerFillCannotRacePastPeerMutationAndEviction() throws Exception {
         FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane(1);
         NativeRequestPlaneCoordinator coordinator =
@@ -2003,6 +2347,33 @@ class NativePreparedValueStateTest {
                 stateId);
     }
 
+    private static CachedInternalValueState<String, String, Integer> newReadActivatedValueState(
+            InternalValueState<String, String, Integer> delegate,
+            AtomicReference<String> currentKey,
+            NativeRequestPlaneCoordinator coordinator,
+            int stateId) {
+        return new CachedInternalValueState<>(
+                delegate,
+                currentKey::get,
+                currentKey::set,
+                128,
+                CachePolicyType.LRU,
+                0,
+                false,
+                0.05,
+                1000,
+                true,
+                8,
+                2,
+                false,
+                true,
+                128,
+                1 << 20,
+                false,
+                coordinator,
+                stateId);
+    }
+
     private static NativeRequestPlaneOptions testOptions() {
         return testOptions(false);
     }
@@ -2045,6 +2416,37 @@ class NativePreparedValueStateTest {
                 false,
                 false,
                 false);
+    }
+
+    private static NativeRequestPlaneOptions readActivatedWriteThroughOptions() {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                128,
+                4096,
+                4096,
+                16,
+                4096,
+                4096,
+                1,
+                2,
+                false,
+                true,
+                true,
+                false,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                8192,
+                0.02,
+                262144,
+                false,
+                true);
     }
 
     private static NativeRequestPlaneOptions mailboxOptions() {

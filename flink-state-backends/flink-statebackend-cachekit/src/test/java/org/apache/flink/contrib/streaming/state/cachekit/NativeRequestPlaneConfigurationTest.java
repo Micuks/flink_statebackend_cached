@@ -43,6 +43,7 @@ class NativeRequestPlaneConfigurationTest {
         assertEquals(64, options.minBatchSize());
         assertTrue(options.aarch64Only());
         assertFalse(options.writeThroughMutations());
+        assertFalse(options.readActivatedWriteThrough());
         assertFalse(options.valueCacheEnabled());
         assertFalse(options.mapCacheEnabled());
         assertFalse(options.mapSnapshotEnabled());
@@ -71,6 +72,9 @@ class NativeRequestPlaneConfigurationTest {
         config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_AARCH64_ONLY, false);
         config.set(
                 CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS, true);
+        config.set(
+                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH,
+                true);
         config.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_CACHE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
@@ -101,6 +105,7 @@ class NativeRequestPlaneConfigurationTest {
         assertEquals(3, options.batchSlots());
         assertFalse(options.aarch64Only());
         assertTrue(options.writeThroughMutations());
+        assertTrue(options.readActivatedWriteThrough());
         assertTrue(options.valueCacheEnabled());
         assertTrue(options.mapCacheEnabled());
         assertTrue(options.mapSnapshotEnabled());
@@ -343,6 +348,26 @@ class NativeRequestPlaneConfigurationTest {
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalid);
         assertTrue(options.preaggEnabled());
         assertTrue(options.indexedFoldEnabled());
+    }
+
+    @Test
+    void testReadActivatedWriteThroughRequiresMutationWriteThrough() {
+        Configuration invalid = new Configuration();
+        invalid.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        invalid.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ENABLED, true);
+        invalid.set(
+                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH,
+                true);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalid));
+
+        invalid.set(
+                CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS, true);
+        invalid.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ENABLED, false);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalid));
     }
 
     @Test
