@@ -1257,6 +1257,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                     if (valueState.consumeImmediatePrefetchAccessObserved()) {
                         ((CachedInternalValueState) valueState)
                                 .prefetchForImmediateUse(keys, cancelPrefetchOnDispatch);
+                    } else if (cancelPrefetchOnDispatch
+                            && valueState.hasInFlightDispatchPrefetchReservations()) {
+                        // Keep exact cancellation coverage for a state not observed by an earlier
+                        // batch (or only reached conditionally). This remains inside the single
+                        // backend wrapper traversal; only such inactive states scan the keys.
+                        ((CachedInternalValueState) valueState)
+                                .cancelPrefetchForDispatch(keys);
                     }
                 }
             }

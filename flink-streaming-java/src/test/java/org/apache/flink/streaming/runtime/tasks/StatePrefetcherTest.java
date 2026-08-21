@@ -99,12 +99,15 @@ class StatePrefetcherTest {
                         KeyedStateBackend.class,
                         withSettings()
                                 .extraInterfaces(
-                                        ImmediatePrefetchAfterDispatchHook.class));
+                                        ImmediatePrefetchAfterDispatchHook.class,
+                                        DispatchCancelHook.class));
         Collection<Integer> keys = Arrays.asList(1, 2, 3);
 
         assertTrue(StatePrefetcher.prefetchKeysImmediately(backend, keys, true));
         verify((ImmediatePrefetchAfterDispatchHook) backend)
                 .prefetchForImmediateUseAfterDispatch(keys);
+        verify((DispatchCancelHook) backend, org.mockito.Mockito.never())
+                .cancelPrefetchForDispatch(keys);
     }
 
     @Test
@@ -113,10 +116,16 @@ class StatePrefetcherTest {
         KeyedStateBackend<Object> backend =
                 mock(
                         KeyedStateBackend.class,
-                        withSettings().extraInterfaces(ImmediatePrefetchHook.class));
+                        withSettings()
+                                .extraInterfaces(
+                                        ImmediatePrefetchHook.class, DispatchCancelHook.class));
         Collection<Integer> keys = Arrays.asList(1, 2, 3);
+        org.mockito.Mockito.when(
+                        ((DispatchCancelHook) backend).cancelPrefetchForDispatch(keys))
+                .thenReturn(2);
 
         assertTrue(StatePrefetcher.prefetchKeysImmediately(backend, keys, true));
+        verify((DispatchCancelHook) backend).cancelPrefetchForDispatch(keys);
         verify((ImmediatePrefetchHook) backend).prefetchForImmediateUse(keys);
     }
 

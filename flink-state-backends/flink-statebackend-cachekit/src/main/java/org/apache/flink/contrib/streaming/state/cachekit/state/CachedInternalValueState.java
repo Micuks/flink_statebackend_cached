@@ -2626,9 +2626,19 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 cancelPrefetchOnDispatch && supportsDispatchPrefetchCancellation();
         try {
             for (K key : keys) {
-                if (key == null
-                        || findCachedValueFor(key, namespace) != null
-                        || hasStagedOrInFlightValue(key, namespace, gen, cancelInFlight)) {
+                if (key == null) {
+                    continue;
+                }
+                if (findCachedValueFor(key, namespace) != null) {
+                    if (cancelInFlight) {
+                        // A cache hit still makes an older speculative reservation redundant.
+                        // Reuse the fused lookup for exact revocation, but never enqueue an
+                        // immediate RocksDB read for an already-authoritative cached value.
+                        hasStagedOrInFlightValue(key, namespace, gen, true);
+                    }
+                    continue;
+                }
+                if (hasStagedOrInFlightValue(key, namespace, gen, cancelInFlight)) {
                     continue;
                 }
                 KeyNamespaceKey<K, N> storageKey =

@@ -364,8 +364,9 @@ public final class StatePrefetcher {
                                 StatePrefetcher::lookupImmediatePrefetchAfterDispatchMethod);
                 if (method == NO_METHOD) {
                     // Keep older/foreign backends on the established immediate-prefetch path.
-                    // Exact cancellation is an optional CacheKit capability, not a reason to
-                    // suppress a correct synchronous prefetch when that capability is absent.
+                    // Preserve the earlier two-call protocol when that backend exposes the exact
+                    // cancellation hook but not the newer fused entry point.
+                    cancelPrefetchForDispatch(backend, keys);
                     method =
                             IMMEDIATE_PREFETCH_METHOD_CACHE.computeIfAbsent(
                                     backend.getClass(),
