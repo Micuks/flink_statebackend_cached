@@ -249,6 +249,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchKeyScopedStagedRemoved;
     private volatile long prefetchLiveReadRacedInFlight;
     private volatile long prefetchLiveReadCancellations;
+    private volatile long prefetchDispatchKeysExamined;
+    private volatile long prefetchDispatchCancellations;
+    private volatile long prefetchDispatchAlreadyStaged;
+    private volatile long prefetchDispatchNoReservation;
     private volatile long prefetchWorkerCancelledBeforeRead;
     private volatile long prefetchWorkerDiscardedAfterRead;
     /** Queue delay from mailbox reservation to worker start, for overlap sizing diagnostics. */
@@ -1343,6 +1347,60 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     /**
+     * Whether mailbox record keys can identify exact prepared-MultiGet reservations.
+     *
+     * <p>The generic serialized query-wire path is intentionally excluded: it does not expose the
+     * same prepared-key ownership contract. Non-void namespaces are also excluded because the
+     * future record key alone cannot identify an entry.
+     */
+    public boolean supportsDispatchPrefetchCancellation() {
+        return supportsRecordKeyPrefetch()
+                && multiGetPrefetchEnabled
+                && delegate instanceof RocksDBBatchValueReader<?, ?, ?>;
+    }
+
+    /**
+     * Revoke exact still-in-flight reservations for selected mailbox records.
+     *
+     * <p>Cancellation is serialized with worker publication. If publication won the race, its
+     * staging value remains available. If cancellation won, the worker's pre-read or pre-publish
+     * identity check rejects the old task. The worker itself is never interrupted.
+     */
+    public int cancelPrefetchForDispatch(Iterable<? extends K> keys) {
+        if (closed
+                || keys == null
+                || currentNamespace == null
+                || !supportsDispatchPrefetchCancellation()) {
+            return 0;
+        }
+        final N namespace = currentNamespace;
+        int cancelled = 0;
+        for (K key : keys) {
+            if (key == null) {
+                continue;
+            }
+            prefetchDispatchKeysExamined++;
+            setLookupKey(key, namespace);
+            synchronized (staging) {
+                // A completed speculative read is useful to the record now being dispatched.
+                // Never turn a staging hit back into an authoritative RocksDB point read.
+                if (staging.containsKey(lookupKey)) {
+                    prefetchDispatchAlreadyStaged++;
+                    continue;
+                }
+                PrefetchReservation reservation = inFlight.get(lookupKey);
+                if (reservation != null && inFlight.remove(lookupKey, reservation)) {
+                    prefetchDispatchCancellations++;
+                    cancelled++;
+                } else {
+                    prefetchDispatchNoReservation++;
+                }
+            }
+        }
+        return cancelled;
+    }
+
+    /**
      * Returns and clears whether this wrapper was read since the previous immediate-prefetch
      * decision.
      *
@@ -1461,6 +1519,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "keyScopedInFlightCancelled={} "
                             + "keyScopedStagedRemoved={} "
                             + "liveReadRacedInFlight={} liveReadCancellations={} "
+                            + "dispatchKeysExamined={} dispatchCancellations={} "
+                            + "dispatchAlreadyStaged={} dispatchNoReservation={} "
                             + "workerCancelledBeforeRead={} workerDiscardedAfterRead={} "
                             + "workerQueueAvgUs={} workerQueueMaxUs={} "
                             + "workerRunAvgUs={} workerRunMaxUs={} "
@@ -1535,6 +1595,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchKeyScopedStagedRemoved,
                     prefetchLiveReadRacedInFlight,
                     prefetchLiveReadCancellations,
+                    prefetchDispatchKeysExamined,
+                    prefetchDispatchCancellations,
+                    prefetchDispatchAlreadyStaged,
+                    prefetchDispatchNoReservation,
                     prefetchWorkerCancelledBeforeRead,
                     prefetchWorkerDiscardedAfterRead,
                     nanosAverageMicros(prefetchWorkerQueueNanos, prefetchTasksExecuted),
@@ -1747,6 +1811,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getPrefetchLiveReadCancellationsForTesting() {
         return prefetchLiveReadCancellations;
+    }
+
+    long getPrefetchDispatchKeysExaminedForTesting() {
+        return prefetchDispatchKeysExamined;
+    }
+
+    long getPrefetchDispatchCancellationsForTesting() {
+        return prefetchDispatchCancellations;
+    }
+
+    long getPrefetchDispatchAlreadyStagedForTesting() {
+        return prefetchDispatchAlreadyStaged;
+    }
+
+    long getPrefetchDispatchNoReservationForTesting() {
+        return prefetchDispatchNoReservation;
     }
 
     long getPrefetchWorkerCancelledBeforeReadForTesting() {

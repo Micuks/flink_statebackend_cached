@@ -72,6 +72,10 @@ public final class StatePrefetcher {
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             IMMEDIATE_PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Cache of optional exact dispatch-time reservation cancellation methods. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            DISPATCH_CANCEL_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
     /** Cache of optional {@code hasPrefetchableState()} {@link Method} per backend class. */
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             HAS_PREFETCHABLE_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
@@ -200,6 +204,79 @@ public final class StatePrefetcher {
             }
         }
         return true;
+    }
+
+    /**
+     * Revoke prepared-key prefetch ownership for the exact records selected for dispatch.
+     *
+     * <p>This runs before LocalPreagg or ordinary record replay. It deliberately does not cancel a
+     * worker thread or delete an already-published staging value. Backends without the optional
+     * exact cancellation hook are left unchanged.
+     *
+     * @return number of exact reservations revoked, or {@code -1} when unsupported/failed.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public static int cancelPrefetchForDispatch(
+            Input<?> headOperator, StreamRecord<?>[] buf, int fromIndex, int toIndex) {
+        if (headOperator == null
+                || buf == null
+                || fromIndex < 0
+                || toIndex > buf.length
+                || toIndex <= fromIndex
+                || !(headOperator instanceof AbstractStreamOperator)) {
+            return -1;
+        }
+        try {
+            AbstractStreamOperator<?> op = (AbstractStreamOperator<?>) headOperator;
+            KeyedStateBackend<?> backend = op.getKeyedStateBackend();
+            KeySelector selector = extractStateKeySelector1(op);
+            if (backend == null || selector == null) {
+                return -1;
+            }
+            java.util.LinkedHashSet keys =
+                    new java.util.LinkedHashSet(Math.max(2, toIndex - fromIndex));
+            if (!extractKeys(selector, buf, fromIndex, toIndex, keys) || keys.isEmpty()) {
+                return -1;
+            }
+            return cancelPrefetchForDispatch(backend, keys);
+        } catch (Throwable failure) {
+            return -1;
+        }
+    }
+
+    static int cancelPrefetchForDispatch(
+            KeyedStateBackend<?> backend, java.util.Collection<?> keys) {
+        if (backend == null || keys == null || keys.isEmpty()) {
+            return -1;
+        }
+        try {
+            Method method =
+                    DISPATCH_CANCEL_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(), StatePrefetcher::lookupDispatchCancelMethod);
+            if (method == NO_METHOD) {
+                return -1;
+            }
+            Object result = method.invoke(backend, keys);
+            return result instanceof Number ? ((Number) result).intValue() : -1;
+        } catch (Throwable failure) {
+            return -1;
+        }
+    }
+
+    private static Method lookupDispatchCancelMethod(Class<?> backendClass) {
+        Class<?> current = backendClass;
+        while (current != null && current != Object.class) {
+            try {
+                Method method =
+                        current.getDeclaredMethod(
+                                "cancelPrefetchForDispatch", java.util.Collection.class);
+                method.setAccessible(true);
+                return method;
+            } catch (NoSuchMethodException ignored) {
+                current = current.getSuperclass();
+            }
+        }
+        return NO_METHOD;
     }
 
     /**

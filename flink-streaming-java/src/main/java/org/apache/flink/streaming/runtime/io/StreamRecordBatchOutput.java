@@ -79,6 +79,8 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
      * mailbox consumes only the head and then refills the window from the network input.
      */
     private final int asyncPrefetchSlidingDrainRecords;
+    /** Revoke still-speculative prepared-key ownership for records selected for dispatch. */
+    private final boolean cancelPrefetchOnDispatch;
 
     // Reusable record buffer. Sized at construction.
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -185,7 +187,8 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 asyncPrefetchChunks,
                 asyncPrefetchChunkSize,
                 0,
-                0);
+                0,
+                false);
     }
 
     /** Full constructor including a sliding consumer-head guard for speculative prefetch. */
@@ -217,7 +220,8 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 asyncPrefetchChunks,
                 asyncPrefetchChunkSize,
                 asyncPrefetchHeadGuardRecords,
-                0);
+                0,
+                false);
     }
 
     /** Full constructor including bounded rolling-window consumption. */
@@ -236,6 +240,41 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
             int asyncPrefetchChunkSize,
             int asyncPrefetchHeadGuardRecords,
             int asyncPrefetchSlidingDrainRecords) {
+        this(
+                wrapped,
+                headOperator,
+                enabled,
+                commutativeKeySort,
+                batchSize,
+                batchTimeoutNanos,
+                numRecordsIn,
+                prefetchMode,
+                backpressured,
+                backpressureGated,
+                asyncPrefetchChunks,
+                asyncPrefetchChunkSize,
+                asyncPrefetchHeadGuardRecords,
+                asyncPrefetchSlidingDrainRecords,
+                false);
+    }
+
+    /** Full constructor including exact dispatch-time prepared-prefetch cancellation. */
+    public StreamRecordBatchOutput(
+            DataOutput<T> wrapped,
+            Input<T> headOperator,
+            boolean enabled,
+            boolean commutativeKeySort,
+            int batchSize,
+            long batchTimeoutNanos,
+            Counter numRecordsIn,
+            boolean prefetchMode,
+            java.util.function.BooleanSupplier backpressured,
+            boolean backpressureGated,
+            boolean asyncPrefetchChunks,
+            int asyncPrefetchChunkSize,
+            int asyncPrefetchHeadGuardRecords,
+            int asyncPrefetchSlidingDrainRecords,
+            boolean cancelPrefetchOnDispatch) {
         this.wrapped = wrapped;
         this.headOperator = headOperator;
         this.enabled = enabled && batchSize > 1;
@@ -258,6 +297,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                                 Math.min(
                                         this.batchSize - 1,
                                         asyncPrefetchSlidingDrainRecords));
+        this.cancelPrefetchOnDispatch = cancelPrefetchOnDispatch && this.asyncPrefetchChunks;
         @SuppressWarnings({"unchecked", "rawtypes"})
         StreamRecord<T>[] tmp = new StreamRecord[this.batchSize];
         this.buf = tmp;
@@ -387,6 +427,13 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
 
     /** Dispatch a prefix without changing buffer ownership or queue indices. */
     private void dispatchPrefix(int n) throws Exception {
+        // Selection is the exact point where a lookahead key stops being speculative. Revoke only
+        // the matching prepared-MultiGet reservation before LocalPreagg or ordinary per-record
+        // execution can race the worker. Already-published staging remains usable; unsupported
+        // backends fail closed inside StatePrefetcher.
+        if (cancelPrefetchOnDispatch) {
+            cancelPrefetchForDispatch(n);
+        }
         if (LocalPreagg.dispatch(headOperator, buf, n, numRecordsIn)) {
             return;
         }
@@ -418,6 +465,12 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 wrapped.emitRecord(buf[i]);
             }
         }
+    }
+
+    /** Test seam for proving that revocation precedes any state-consuming dispatch path. */
+    int cancelPrefetchForDispatch(int n) {
+        return org.apache.flink.streaming.runtime.tasks.StatePrefetcher
+                .cancelPrefetchForDispatch(headOperator, buf, 0, n);
     }
 
     /** Remove a dispatched prefix while preserving arrival order and scheduled-tail ownership. */

@@ -1248,6 +1248,32 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
         }
     }
 
+    /**
+     * Revokes still-speculative prepared-key reservations for records selected by the mailbox.
+     *
+     * <p>Only wrappers that can prove exact record-key prepared-MultiGet ownership participate.
+     * Generic query-wire prefetch and namespaced state fail closed. Published staging values are
+     * intentionally retained for the selected record to consume.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public int cancelPrefetchForDispatch(Collection<? extends K> keys) {
+        synchronized (lifecycleLock) {
+            if (closed || disposed || keys == null || keys.isEmpty()) {
+                return 0;
+            }
+            int cancelled = 0;
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                if (wrapper instanceof CachedInternalValueState) {
+                    CachedInternalValueState valueState = (CachedInternalValueState) wrapper;
+                    if (valueState.supportsDispatchPrefetchCancellation()) {
+                        cancelled += valueState.cancelPrefetchForDispatch(keys);
+                    }
+                }
+            }
+            return cancelled;
+        }
+    }
+
     @Override
     public void close() throws IOException {
         synchronized (lifecycleLock) {

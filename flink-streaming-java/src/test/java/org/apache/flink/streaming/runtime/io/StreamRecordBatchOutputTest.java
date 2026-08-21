@@ -28,6 +28,10 @@ import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.Mockito.inOrder;
@@ -36,6 +40,51 @@ import static org.mockito.Mockito.verifyNoInteractions;
 
 /** Ordering tests for the mailbox-owned lookahead buffer. */
 class StreamRecordBatchOutputTest {
+
+    @Test
+    void testDispatchCancellationRunsBeforeOrdinaryRecordReplay() throws Exception {
+        List<String> events = new ArrayList<>();
+        @SuppressWarnings("unchecked")
+        DataOutput<String> wrapped = mock(DataOutput.class);
+        org.mockito.Mockito.doAnswer(
+                        invocation -> {
+                            StreamRecord<String> record = invocation.getArgument(0);
+                            events.add("emit:" + record.getValue());
+                            return null;
+                        })
+                .when(wrapped)
+                .emitRecord(org.mockito.ArgumentMatchers.any());
+        @SuppressWarnings("unchecked")
+        Input<String> input = mock(Input.class);
+        StreamRecordBatchOutput<String> output =
+                new StreamRecordBatchOutput<String>(
+                        wrapped,
+                        input,
+                        true,
+                        false,
+                        2,
+                        0,
+                        null,
+                        true,
+                        () -> false,
+                        false,
+                        true,
+                        2,
+                        0,
+                        0,
+                        true) {
+                    @Override
+                    int cancelPrefetchForDispatch(int n) {
+                        events.add("cancel:" + n);
+                        return n;
+                    }
+                };
+
+        output.emitRecord(new StreamRecord<>("first"));
+        output.emitRecord(new StreamRecord<>("second"));
+
+        assertEquals(Arrays.asList("cancel:2", "emit:first", "emit:second"), events);
+    }
 
     @Test
     void testWatermarkFlushesAllPriorRecordsInArrivalOrder() throws Exception {

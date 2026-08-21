@@ -91,6 +91,25 @@ class StatePrefetcherTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testDispatchCancellationInvokesOnlyOptionalExactBackendHook() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(DispatchCancelHook.class));
+        Collection<Integer> keys = Arrays.asList(1, 2, 3);
+        org.mockito.Mockito.when(
+                        ((DispatchCancelHook) backend).cancelPrefetchForDispatch(keys))
+                .thenReturn(2);
+
+        assertEquals(2, StatePrefetcher.cancelPrefetchForDispatch(backend, keys));
+        verify((DispatchCancelHook) backend).cancelPrefetchForDispatch(keys);
+
+        KeyedStateBackend<Object> unsupported = mock(KeyedStateBackend.class);
+        assertEquals(-1, StatePrefetcher.cancelPrefetchForDispatch(unsupported, keys));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testNativeMailboxPreservesDuplicateArrivalKeysForJniCompaction() {
         KeyedStateBackend<Object> backend =
                 mock(
@@ -158,6 +177,10 @@ class StatePrefetcherTest {
 
     public interface ImmediatePrefetchHook {
         void prefetchForImmediateUse(Collection<?> keys);
+    }
+
+    public interface DispatchCancelHook {
+        int cancelPrefetchForDispatch(Collection<?> keys);
     }
 
     public interface NativeMailboxHook {

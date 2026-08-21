@@ -328,6 +328,16 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Use the runtime-selected native kernel to compact exact duplicate keys "
                                                                         + "from Mailbox lookahead batches before reservation and MultiGet.");
 
+        public static final ConfigOption<Boolean> BP_PREFETCH_CANCEL_ON_DISPATCH_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.bp-prefetch.cancel-on-dispatch.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Revoke exact prepared-MultiGet reservations when their records are selected "
+                                                                        + "for mailbox dispatch. Published staging values are retained and "
+                                                                        + "unsupported prefetch paths fail closed.");
+
         public static final ConfigOption<Boolean> NATIVE_PREFETCH_ENABLED =
                         ConfigOptions.key("state.backend.cachekit.native.prefetch.enabled")
                                         .booleanType()
