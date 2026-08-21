@@ -2599,6 +2599,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      */
     @SuppressWarnings("unchecked")
     public void prefetchForImmediateUse(Iterable<? extends K> keys) {
+        prefetchForImmediateUse(keys, false);
+    }
+
+    /**
+     * Immediate prefetch with optional exact in-flight revocation fused into its existing key scan.
+     */
+    @SuppressWarnings("unchecked")
+    public void prefetchForImmediateUse(
+            Iterable<? extends K> keys, boolean cancelPrefetchOnDispatch) {
         if (closed
                 || keys == null
                 || currentNamespace == null
@@ -2613,11 +2622,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         final java.util.ArrayList<byte[]> rocksDBKeys = new java.util.ArrayList<>();
         final java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys =
                 new java.util.ArrayList<>();
+        final boolean cancelInFlight =
+                cancelPrefetchOnDispatch && supportsDispatchPrefetchCancellation();
         try {
             for (K key : keys) {
                 if (key == null
                         || findCachedValueFor(key, namespace) != null
-                        || hasStagedOrInFlightValue(key, namespace, gen)) {
+                        || hasStagedOrInFlightValue(key, namespace, gen, cancelInFlight)) {
                     continue;
                 }
                 KeyNamespaceKey<K, N> storageKey =
@@ -2726,10 +2737,21 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     private boolean hasStagedOrInFlightValue(K key, N namespace, long gen) {
+        return hasStagedOrInFlightValue(key, namespace, gen, false);
+    }
+
+    private boolean hasStagedOrInFlightValue(
+            K key, N namespace, long gen, boolean cancelInFlight) {
         setLookupKey(key, namespace);
+        if (cancelInFlight) {
+            prefetchDispatchKeysExamined++;
+        }
         StagedValue<V> staged = staging.get(lookupKey);
         if (staged != null) {
             if (staged.gen == gen) {
+                if (cancelInFlight) {
+                    prefetchDispatchAlreadyStaged++;
+                }
                 prefetchKeysDeduplicated++;
                 return true;
             }
@@ -2738,10 +2760,29 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         PrefetchReservation reservation = inFlight.get(lookupKey);
         if (reservation != null) {
             if (reservation.generation == gen) {
+                if (cancelInFlight) {
+                    synchronized (staging) {
+                        staged = staging.get(lookupKey);
+                        if (staged != null && staged.gen == gen) {
+                            prefetchDispatchAlreadyStaged++;
+                            prefetchKeysDeduplicated++;
+                            return true;
+                        }
+                        if (inFlight.remove(lookupKey, reservation)) {
+                            prefetchDispatchCancellations++;
+                            return false;
+                        }
+                        prefetchDispatchNoReservation++;
+                        return false;
+                    }
+                }
                 prefetchKeysDeduplicated++;
                 return true;
             }
             inFlight.remove(lookupKey, reservation);
+        }
+        if (cancelInFlight) {
+            prefetchDispatchNoReservation++;
         }
         return false;
     }

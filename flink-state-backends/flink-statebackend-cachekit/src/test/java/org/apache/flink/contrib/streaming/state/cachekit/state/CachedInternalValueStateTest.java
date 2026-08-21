@@ -1347,6 +1347,58 @@ class CachedInternalValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testImmediatePrefetchAfterDispatchRevokesSpeculationAndReadsOnce() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
+        stubPreparedKeySerialization(batchReader);
+        when(batchReader.getSerializedValueByRocksDBKey(any()))
+                .thenReturn(KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE));
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        2,
+                        2,
+                        false,
+                        true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Runnable unfinished =
+                state.buildAsyncPrefetchTask(Collections.singletonList("k1"));
+        assertTrue(unfinished != null);
+        state.prefetchForImmediateUse(Collections.singletonList("k1"), true);
+        unfinished.run();
+
+        assertEquals(1, state.getPrefetchDispatchKeysExaminedForTesting());
+        assertEquals(1, state.getPrefetchDispatchCancellationsForTesting());
+        assertEquals(1, state.getPrefetchWorkerCancelledBeforeReadForTesting());
+        currentKey.set("k1");
+        assertEquals(11, state.value());
+        verify(batchReader, times(1)).getSerializedValueByRocksDBKey(any());
+        verify(batchReader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+        verify(delegate, never()).value();
+        state.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testStagingPromotionReusesReservedStorageKey() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =

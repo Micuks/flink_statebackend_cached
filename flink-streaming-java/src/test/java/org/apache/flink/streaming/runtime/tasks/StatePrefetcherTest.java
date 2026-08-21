@@ -93,6 +93,35 @@ class StatePrefetcherTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testImmediatePrefetchAfterDispatchInvokesFusedBackendHook() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings()
+                                .extraInterfaces(
+                                        ImmediatePrefetchAfterDispatchHook.class));
+        Collection<Integer> keys = Arrays.asList(1, 2, 3);
+
+        assertTrue(StatePrefetcher.prefetchKeysImmediately(backend, keys, true));
+        verify((ImmediatePrefetchAfterDispatchHook) backend)
+                .prefetchForImmediateUseAfterDispatch(keys);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testImmediatePrefetchAfterDispatchFallsBackToEstablishedHook() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(ImmediatePrefetchHook.class));
+        Collection<Integer> keys = Arrays.asList(1, 2, 3);
+
+        assertTrue(StatePrefetcher.prefetchKeysImmediately(backend, keys, true));
+        verify((ImmediatePrefetchHook) backend).prefetchForImmediateUse(keys);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testDispatchCancellationInvokesOnlyOptionalExactBackendHook() {
         KeyedStateBackend<Object> backend =
                 mock(
@@ -201,6 +230,10 @@ class StatePrefetcherTest {
 
     public interface ImmediatePrefetchHook {
         void prefetchForImmediateUse(Collection<?> keys);
+    }
+
+    public interface ImmediatePrefetchAfterDispatchHook {
+        void prefetchForImmediateUseAfterDispatch(Collection<?> keys);
     }
 
     public interface DispatchCancelHook {

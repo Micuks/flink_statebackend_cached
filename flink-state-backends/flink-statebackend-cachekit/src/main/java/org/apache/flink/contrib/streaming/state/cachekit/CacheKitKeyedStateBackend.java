@@ -1232,6 +1232,20 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
     public void prefetchForImmediateUse(Collection<? extends K> keys) {
+        prefetchForImmediateUse(keys, false);
+    }
+
+    /**
+     * Immediate prefetch for a dispatched LocalPreagg batch. Exact cancellation is fused into the
+     * per-wrapper scan that immediate prefetch already has to perform.
+     */
+    public void prefetchForImmediateUseAfterDispatch(Collection<? extends K> keys) {
+        prefetchForImmediateUse(keys, true);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private void prefetchForImmediateUse(
+            Collection<? extends K> keys, boolean cancelPrefetchOnDispatch) {
         synchronized (lifecycleLock) {
             if (closed || disposed || keys == null || keys.isEmpty()) {
                 return;
@@ -1241,7 +1255,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                     CachedInternalValueState<?, ?, ?> valueState =
                             (CachedInternalValueState<?, ?, ?>) wrapper;
                     if (valueState.consumeImmediatePrefetchAccessObserved()) {
-                        ((CachedInternalValueState) valueState).prefetchForImmediateUse(keys);
+                        ((CachedInternalValueState) valueState)
+                                .prefetchForImmediateUse(keys, cancelPrefetchOnDispatch);
                     }
                 }
             }

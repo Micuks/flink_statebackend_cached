@@ -72,6 +72,11 @@ public final class StatePrefetcher {
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             IMMEDIATE_PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Cache of optional immediate-prefetch hooks that fuse exact reservation revocation. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            IMMEDIATE_PREFETCH_AFTER_DISPATCH_METHOD_CACHE =
+                    new java.util.concurrent.ConcurrentHashMap<>();
+
     /** Cache of optional exact dispatch-time reservation cancellation methods. */
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             DISPATCH_CANCEL_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
@@ -312,6 +317,17 @@ public final class StatePrefetcher {
     @SuppressWarnings({"rawtypes", "unchecked"})
     public static boolean prefetchKeysImmediately(
             Input<?> headOperator, java.util.Collection<?> keys) {
+        return prefetchKeysImmediately(headOperator, keys, false);
+    }
+
+    /**
+     * Bulk-load grouped keys, optionally fusing exact reservation revocation into that same scan.
+     */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public static boolean prefetchKeysImmediately(
+            Input<?> headOperator,
+            java.util.Collection<?> keys,
+            boolean cancelPrefetchOnDispatch) {
         if (headOperator == null
                 || keys == null
                 || keys.isEmpty()
@@ -321,7 +337,7 @@ public final class StatePrefetcher {
         try {
             KeyedStateBackend<?> backend =
                     ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
-            return prefetchKeysImmediately(backend, keys);
+            return prefetchKeysImmediately(backend, keys, cancelPrefetchOnDispatch);
         } catch (Throwable t) {
             return false;
         }
@@ -329,13 +345,37 @@ public final class StatePrefetcher {
 
     static boolean prefetchKeysImmediately(
             KeyedStateBackend<?> backend, java.util.Collection<?> keys) {
+        return prefetchKeysImmediately(backend, keys, false);
+    }
+
+    static boolean prefetchKeysImmediately(
+            KeyedStateBackend<?> backend,
+            java.util.Collection<?> keys,
+            boolean cancelPrefetchOnDispatch) {
         if (backend == null || keys == null || keys.isEmpty() || !hasPrefetchableState(backend)) {
             return false;
         }
         try {
-            Method method =
-                    IMMEDIATE_PREFETCH_METHOD_CACHE.computeIfAbsent(
-                            backend.getClass(), StatePrefetcher::lookupImmediatePrefetchMethod);
+            Method method;
+            if (cancelPrefetchOnDispatch) {
+                method =
+                        IMMEDIATE_PREFETCH_AFTER_DISPATCH_METHOD_CACHE.computeIfAbsent(
+                                backend.getClass(),
+                                StatePrefetcher::lookupImmediatePrefetchAfterDispatchMethod);
+                if (method == NO_METHOD) {
+                    // Keep older/foreign backends on the established immediate-prefetch path.
+                    // Exact cancellation is an optional CacheKit capability, not a reason to
+                    // suppress a correct synchronous prefetch when that capability is absent.
+                    method =
+                            IMMEDIATE_PREFETCH_METHOD_CACHE.computeIfAbsent(
+                                    backend.getClass(),
+                                    StatePrefetcher::lookupImmediatePrefetchMethod);
+                }
+            } else {
+                method =
+                        IMMEDIATE_PREFETCH_METHOD_CACHE.computeIfAbsent(
+                                backend.getClass(), StatePrefetcher::lookupImmediatePrefetchMethod);
+            }
             if (method == NO_METHOD) {
                 return false;
             }
@@ -457,6 +497,18 @@ public final class StatePrefetcher {
         try {
             Method method =
                     backendClass.getMethod("prefetchForImmediateUse", java.util.Collection.class);
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
+    }
+
+    private static Method lookupImmediatePrefetchAfterDispatchMethod(Class<?> backendClass) {
+        try {
+            Method method =
+                    backendClass.getMethod(
+                            "prefetchForImmediateUseAfterDispatch", java.util.Collection.class);
             method.setAccessible(true);
             return method;
         } catch (NoSuchMethodException ignored) {

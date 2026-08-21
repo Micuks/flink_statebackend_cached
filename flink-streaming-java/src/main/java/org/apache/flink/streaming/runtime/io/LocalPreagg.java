@@ -278,10 +278,8 @@ public final class LocalPreagg {
             // The exact set of state keys is now known and deduplicated. CacheKit can issue one
             // synchronous MultiGet so processBatchForKey observes warm ValueState, without the
             // wasted per-record speculation that used to run before grouping.
-            if (cancelPrefetchOnDispatch) {
-                StatePrefetcher.cancelPrefetchKeysForDispatch(headOperator, groups.keys);
-            }
-            StatePrefetcher.prefetchKeysImmediately(headOperator, groups.keys);
+            StatePrefetcher.prefetchKeysImmediately(
+                    headOperator, groups.keys, cancelPrefetchOnDispatch);
             // Preserve the batch's timestamp context for emitted rows (agg results are not
             // event-time keyed downstream, but keep parity with the per-record path).
             if (lastRec != null && lastRec.hasTimestamp()) {
@@ -369,10 +367,8 @@ public final class LocalPreagg {
                 return false;
             }
 
-            if (cancelPrefetchOnDispatch) {
-                StatePrefetcher.cancelPrefetchKeysForDispatch(headOperator, groups.keys);
-            }
-            StatePrefetcher.prefetchKeysImmediately(headOperator, groups.keys);
+            StatePrefetcher.prefetchKeysImmediately(
+                    headOperator, groups.keys, cancelPrefetchOnDispatch);
             if (lastRecord != null && lastRecord.hasTimestamp()) {
                 collector.setAbsoluteTimestamp(lastRecord.getTimestamp());
             } else {
