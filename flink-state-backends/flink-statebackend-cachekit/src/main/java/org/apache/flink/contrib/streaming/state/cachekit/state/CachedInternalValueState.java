@@ -331,6 +331,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeMutationAttempts;
     private volatile long nativeMutationWriteThroughSkipped;
     private volatile long nativeMutationReadInactiveSkipped;
+    private volatile long nativeMutationResidentMissSkipped;
     private volatile long nativeValueReadActivations;
     private volatile long nativeMutationApplied;
     private volatile long nativeMutationSuperseded;
@@ -1580,7 +1581,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "nativeRuntimeFailures={} nativeGenerationAdvances={} "
                             + "nativeMutationAttempts={} nativeMutationApplied={} "
                             + "nativeMutationWriteThroughSkipped={} "
-                            + "nativeMutationReadInactiveSkipped={} nativeValueReadActivations={} "
+                            + "nativeMutationReadInactiveSkipped={} "
+                            + "nativeMutationResidentMissSkipped={} nativeValueReadActivations={} "
                             + "nativeMutationSuperseded={} nativeMutationFailures={} "
                             + "nativeMutationTombstonesApplied={} nativeActive={} "
                             + "nativeKernel={} nativeFeatureBits={} nativeFeatures={} "
@@ -1679,6 +1681,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeMutationApplied,
                     nativeMutationWriteThroughSkipped,
                     nativeMutationReadInactiveSkipped,
+                    nativeMutationResidentMissSkipped,
                     nativeValueReadActivations,
                     nativeMutationSuperseded,
                     nativeMutationFailures,
@@ -2098,6 +2101,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getNativeMutationReadInactiveSkippedForTesting() {
         return nativeMutationReadInactiveSkipped;
+    }
+
+    long getNativeMutationResidentMissSkippedForTesting() {
+        return nativeMutationResidentMissSkipped;
     }
 
     long getNativeValueReadActivationsForTesting() {
@@ -4286,27 +4293,62 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeMutationWriteThroughSkipped++;
             return;
         }
-        if (nativeValueReadActivation != null && !nativeValueReadActivation.isActive()) {
+        boolean residentOnly =
+                nativeRequestPlaneCoordinator.options().readActivatedWriteThrough();
+        if (residentOnly
+                && nativeValueReadActivation != null
+                && !nativeValueReadActivation.isActive()) {
             nativeMutationReadInactiveSkipped++;
             return;
         }
         RocksDBBatchValueReader<K, N, V> batchReader =
                 (RocksDBBatchValueReader<K, N, V>) delegate;
         try {
-            byte[] preparedKey =
-                    batchReader.serializeBatchKeyAndNamespace(
-                            key,
-                            namespace,
-                            nativeMutationKeySerializer,
-                            nativeMutationNamespaceSerializer);
-            byte[] serializedValue =
-                    KvStateSerializer.serializeValue(
-                            value, nativeMutationValueSerializer);
-            int status =
-                    nativeRequestPlaneCoordinator.updateExactKey(
-                            nativeStateId, nativeEpoch, preparedKey, serializedValue);
+            int status;
+            if (residentOnly) {
+                status =
+                        nativeRequestPlaneCoordinator.updateExactKeyIfPresent(
+                                nativeStateId,
+                                nativeEpoch,
+                                output -> {
+                                    try {
+                                        batchReader.serializeBatchKeyAndNamespace(
+                                                key,
+                                                namespace,
+                                                nativeMutationKeySerializer,
+                                                nativeMutationNamespaceSerializer,
+                                                output);
+                                    } catch (IOException failure) {
+                                        throw failure;
+                                    } catch (Exception failure) {
+                                        throw new IOException(
+                                                "Failed to serialize a native mutation key.",
+                                                failure);
+                                    }
+                                },
+                                value == null
+                                        ? null
+                                        : output ->
+                                                nativeMutationValueSerializer.serialize(
+                                                        value, output));
+            } else {
+                byte[] preparedKey =
+                        batchReader.serializeBatchKeyAndNamespace(
+                                key,
+                                namespace,
+                                nativeMutationKeySerializer,
+                                nativeMutationNamespaceSerializer);
+                byte[] serializedValue =
+                        KvStateSerializer.serializeValue(
+                                value, nativeMutationValueSerializer);
+                status =
+                        nativeRequestPlaneCoordinator.updateExactKey(
+                                nativeStateId, nativeEpoch, preparedKey, serializedValue);
+            }
             if (status == NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION) {
                 nativeMutationSuperseded++;
+            } else if (status == NativeRequestPlaneBridge.FILL_NOT_PRESENT) {
+                nativeMutationResidentMissSkipped++;
             } else {
                 nativeMutationApplied++;
                 if (value == null) {

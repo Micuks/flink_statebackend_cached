@@ -288,6 +288,84 @@ class NativeRequestPlaneBridgeTest {
 
     @Test
     @EnabledIfSystemProperty(named = NativeRequestPlaneBridge.LIBRARY_PATH_PROPERTY, matches = ".+")
+    void testResidentOnlyMutationControlFlagsCrossJniBoundary() throws Exception {
+        try (NativeRequestPlaneBridge bridge = openScalarBridge()) {
+            SerializedKeyBatch<Integer, String> keys = newBatch(1);
+            ByteBuffer valueArena = directNative(8);
+            ByteBuffer valueMetadata =
+                    directNative(NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES);
+            ByteBuffer fillResults =
+                    directNative(NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES);
+
+            keys.append(73, 1L, 7, "resident");
+            putValueRecord(
+                    valueMetadata,
+                    0,
+                    0,
+                    0,
+                    true,
+                    NativeRequestPlaneBridge.FILL_VALUE_CHECK_ONLY_FLAG);
+            assertEquals(1, bridge.fillBatch(keys, valueArena, valueMetadata, fillResults));
+            assertEquals(NativeRequestPlaneBridge.FILL_NOT_PRESENT, fillStatus(fillResults, 0));
+
+            keys.clear();
+            keys.append(73, 2L, 7, "resident");
+            valueArena.clear();
+            valueArena.put(new byte[] {'o', 'l', 'd'}).flip();
+            putValueRecord(valueMetadata, 0, 0, 3, false);
+            assertEquals(1, bridge.fillBatch(keys, valueArena, valueMetadata, fillResults));
+            assertEquals(NativeRequestPlaneBridge.FILL_INSERTED, fillStatus(fillResults, 0));
+
+            keys.clear();
+            keys.append(73, 3L, 7, "resident");
+            valueArena.clear();
+            valueArena.put(new byte[] {'n', 'e', 'w'}).flip();
+            putValueRecord(
+                    valueMetadata,
+                    0,
+                    0,
+                    3,
+                    false,
+                    NativeRequestPlaneBridge.FILL_VALUE_UPDATE_ONLY_FLAG);
+            assertEquals(1, bridge.fillBatch(keys, valueArena, valueMetadata, fillResults));
+            assertEquals(NativeRequestPlaneBridge.FILL_UPDATED, fillStatus(fillResults, 0));
+
+            keys.clear();
+            keys.append(
+                    73,
+                    NativeRequestPlaneBridge.PROBE_LATEST_GENERATION,
+                    7,
+                    "resident");
+            ByteBuffer probeOutput = directNative(8);
+            ByteBuffer probeResults =
+                    directNative(NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
+            assertEquals(1, bridge.probeBatch(keys, probeOutput, probeResults));
+            assertEquals(NativeRequestPlaneBridge.PROBE_HIT, probeStatus(probeResults, 0));
+            assertEquals(
+                    "new",
+                    readAscii(
+                            probeOutput,
+                            probeValueOffset(probeResults, 0),
+                            probeValueLength(probeResults, 0)));
+
+            keys.clear();
+            keys.append(73, 4L, 7, "resident");
+            putValueRecord(
+                    valueMetadata,
+                    0,
+                    0,
+                    0,
+                    true,
+                    NativeRequestPlaneBridge.FILL_VALUE_CHECK_ONLY_FLAG
+                            | NativeRequestPlaneBridge.FILL_VALUE_UPDATE_ONLY_FLAG);
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> bridge.fillBatch(keys, valueArena, valueMetadata, fillResults));
+        }
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = NativeRequestPlaneBridge.LIBRARY_PATH_PROPERTY, matches = ".+")
     void testMalformedBatchFailsClosedAndCloseIsTerminal() throws Exception {
         NativeRequestPlaneBridge bridge = openScalarBridge();
         SerializedKeyBatch<Integer, String> keys = newBatch(1);
@@ -332,13 +410,24 @@ class NativeRequestPlaneBridgeTest {
 
     private static void putValueRecord(
             ByteBuffer metadata, int index, int arenaOffset, int length, boolean negative) {
+        putValueRecord(metadata, index, arenaOffset, length, negative, 0);
+    }
+
+    private static void putValueRecord(
+            ByteBuffer metadata,
+            int index,
+            int arenaOffset,
+            int length,
+            boolean negative,
+            int controlFlags) {
         int base = index * NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES;
         metadata.putInt(base + NativeRequestPlaneBridge.FILL_VALUE_ARENA_OFFSET, arenaOffset);
         metadata.putInt(base + NativeRequestPlaneBridge.FILL_VALUE_LENGTH_OFFSET, length);
         metadata.putInt(
                 base + NativeRequestPlaneBridge.FILL_VALUE_FLAGS_OFFSET,
                 negative ? NativeRequestPlaneBridge.FILL_VALUE_NEGATIVE_FLAG : 0);
-        metadata.putInt(base + NativeRequestPlaneBridge.FILL_VALUE_RESERVED_OFFSET, 0);
+        metadata.putInt(
+                base + NativeRequestPlaneBridge.FILL_VALUE_RESERVED_OFFSET, controlFlags);
     }
 
     private static int fillStatus(ByteBuffer results, int index) {

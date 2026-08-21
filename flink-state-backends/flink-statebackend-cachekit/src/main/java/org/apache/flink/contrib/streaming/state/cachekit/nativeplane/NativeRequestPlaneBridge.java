@@ -65,6 +65,8 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
     public static final int FILL_VALUE_RESERVED_OFFSET = 12;
     public static final int FILL_VALUE_RECORD_BYTES = 16;
     public static final int FILL_VALUE_NEGATIVE_FLAG = 1;
+    public static final int FILL_VALUE_UPDATE_ONLY_FLAG = 1;
+    public static final int FILL_VALUE_CHECK_ONLY_FLAG = 1 << 1;
 
     public static final int FILL_RESULT_STATUS_OFFSET = 0;
     public static final int FILL_RESULT_ERROR_OFFSET = 4;
@@ -75,6 +77,7 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
     public static final int FILL_REJECTED_CAPACITY = 3;
     public static final int FILL_INVALID_ARGUMENT = 4;
     public static final int FILL_INTERNAL_ERROR = 5;
+    public static final int FILL_NOT_PRESENT = 6;
 
     public static final int ERROR_OK = 0;
     public static final int ERROR_INVALID_ARGUMENT = 1;
@@ -99,7 +102,7 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
     // Deliberately no SVE2 bit: the native runtime currently proves SVE and vector length only.
 
     private static final String LIBRARY_NAME = "cachekit_native_request_plane_jni";
-    private static final int EXPECTED_JNI_ABI_VERSION = 3;
+    private static final int EXPECTED_JNI_ABI_VERSION = 4;
     private static final Object LIBRARY_LOAD_LOCK = new Object();
 
     private static volatile boolean libraryLoaded;
@@ -202,9 +205,11 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
     /**
      * Fills clean positive/negative entries from direct buffers in one JNI call.
      *
-     * <p>{@code valueMetadata} has one 16-byte record per key: arena offset, length, flags, and a
-     * zero reserved field. A negative entry uses flag {@link #FILL_VALUE_NEGATIVE_FLAG} and must
-     * have zero offset and length. {@code fillResults} receives status and error integers.
+     * <p>{@code valueMetadata} has one 16-byte record per key: arena offset, length, value flags,
+     * and ABI4 mutation-control flags. A negative entry uses flag {@link
+     * #FILL_VALUE_NEGATIVE_FLAG} and must have zero offset and length. The control field accepts
+     * either {@link #FILL_VALUE_CHECK_ONLY_FLAG} or {@link #FILL_VALUE_UPDATE_ONLY_FLAG}; ordinary
+     * fills use zero. {@code fillResults} receives status and error integers.
      */
     public int fillBatch(
             SerializedKeyBatch<?, ?> keys,

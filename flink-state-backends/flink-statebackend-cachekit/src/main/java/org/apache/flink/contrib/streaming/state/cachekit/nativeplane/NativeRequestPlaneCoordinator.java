@@ -346,19 +346,43 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         }
     }
 
-    private int fillPreparedMutation() {
-        int processed =
-                plane.fillBatch(
-                        mutationSlot.missKeys,
-                        mutationSlot.fillValueArena(),
-                        mutationSlot.fillValueMetadata(),
-                        mutationSlot.fillResults());
-        fillCalls++;
-        if (processed != 1) {
-            throw new IllegalStateException(
-                    "Native exact-key update processed " + processed + " of 1 entry.");
+    /**
+     * Advances the state watermark and updates one exact key only when it is already resident.
+     *
+     * <p>The membership check, conditional value serialization, and update are serialized under
+     * the plane lock, so no native probe can interleave between the check and update. The earlier
+     * interval from the authoritative RocksDB mutation to this method is protected by mailbox
+     * serialization and by the generation revalidation on asynchronous reads.
+     */
+    public int updateExactKeyIfPresent(
+            int stateId,
+            long generation,
+            SerializedKeyBatch.DirectKeyWriter directKeyWriter,
+            DirectValueWriter directValueWriter)
+            throws IOException {
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                mutationSlot.prepareSingleMutationCheck(
+                        stateId, generation, directKeyWriter);
+                int checkStatus = fillPreparedMutationControl();
+                if (checkStatus != NativeRequestPlaneBridge.FILL_UPDATED) {
+                    return checkStatus;
+                }
+                mutationSlot.prepareConditionalUpdateForPreparedKey(directValueWriter);
+                return fillPreparedConditionalMutation();
+            } catch (IOException failure) {
+                disableLocked(failure);
+                throw failure;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
         }
-        int status = mutationSlot.fillStatus(0);
+    }
+
+    private int fillPreparedMutation() {
+        int status = fillPreparedMutationRaw();
         int error = mutationSlot.fillError(0);
         boolean applied =
                 error == NativeRequestPlaneBridge.ERROR_OK
@@ -372,6 +396,55 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                     "Native exact-key update returned status=" + status + ", error=" + error + ".");
         }
         return status;
+    }
+
+    private int fillPreparedMutationControl() {
+        int status = fillPreparedMutationRaw();
+        int error = mutationSlot.fillError(0);
+        boolean valid =
+                error == NativeRequestPlaneBridge.ERROR_OK
+                        && (status == NativeRequestPlaneBridge.FILL_UPDATED
+                                || status == NativeRequestPlaneBridge.FILL_NOT_PRESENT
+                                || status
+                                        == NativeRequestPlaneBridge
+                                                .FILL_REJECTED_STALE_GENERATION);
+        if (!valid) {
+            throw new IllegalStateException(
+                    "Native resident check returned status=" + status + ", error=" + error + ".");
+        }
+        return status;
+    }
+
+    private int fillPreparedConditionalMutation() {
+        int status = fillPreparedMutationRaw();
+        int error = mutationSlot.fillError(0);
+        boolean valid =
+                error == NativeRequestPlaneBridge.ERROR_OK
+                        && (status == NativeRequestPlaneBridge.FILL_UPDATED
+                                || status == NativeRequestPlaneBridge.FILL_NOT_PRESENT
+                                || status
+                                        == NativeRequestPlaneBridge
+                                                .FILL_REJECTED_STALE_GENERATION);
+        if (!valid) {
+            throw new IllegalStateException(
+                    "Native resident update returned status=" + status + ", error=" + error + ".");
+        }
+        return status;
+    }
+
+    private int fillPreparedMutationRaw() {
+        int processed =
+                plane.fillBatch(
+                        mutationSlot.missKeys,
+                        mutationSlot.fillValueArena(),
+                        mutationSlot.fillValueMetadata(),
+                        mutationSlot.fillResults());
+        fillCalls++;
+        if (processed != 1) {
+            throw new IllegalStateException(
+                    "Native exact-key update processed " + processed + " of 1 entry.");
+        }
+        return mutationSlot.fillStatus(0);
     }
 
     public boolean isActive() {
@@ -1201,6 +1274,39 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             putFillValueMetadata(0, directValueWriter);
         }
 
+        private void prepareSingleMutationCheck(
+                int stateId,
+                long generation,
+                SerializedKeyBatch.DirectKeyWriter directKeyWriter)
+                throws IOException {
+            requireLeased();
+            missKeys.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            fillValueBytes = 0;
+            missKeys.appendSerialized(stateId, generation, directKeyWriter);
+            putFillValueMetadata(
+                    0,
+                    (DirectValueWriter) null,
+                    NativeRequestPlaneBridge.FILL_VALUE_CHECK_ONLY_FLAG);
+        }
+
+        private void prepareConditionalUpdateForPreparedKey(DirectValueWriter directValueWriter)
+                throws IOException {
+            requireLeased();
+            if (missKeys.entryCount() != 1) {
+                throw new IllegalStateException(
+                        "Conditional native mutation requires exactly one prepared key.");
+            }
+            valueArena.clear();
+            valueArenaOutput.reset();
+            fillValueBytes = 0;
+            putFillValueMetadata(
+                    0,
+                    directValueWriter,
+                    NativeRequestPlaneBridge.FILL_VALUE_UPDATE_ONLY_FLAG);
+        }
+
         private void putFillValueMetadata(int index, byte[] value) throws IOException {
             int metadataBase = index * NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES;
             if (value == null) {
@@ -1232,6 +1338,11 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         }
 
         private void putFillValueMetadata(int index, DirectValueWriter writer) throws IOException {
+            putFillValueMetadata(index, writer, 0);
+        }
+
+        private void putFillValueMetadata(
+                int index, DirectValueWriter writer, int controlFlags) throws IOException {
             int metadataBase = index * NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES;
             if (writer == null) {
                 valueMetadata.putInt(
@@ -1260,7 +1371,8 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 fillValueBytes = valueArenaOutput.position();
             }
             valueMetadata.putInt(
-                    metadataBase + NativeRequestPlaneBridge.FILL_VALUE_RESERVED_OFFSET, 0);
+                    metadataBase + NativeRequestPlaneBridge.FILL_VALUE_RESERVED_OFFSET,
+                    controlFlags);
         }
 
         private void reset() {

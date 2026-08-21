@@ -664,7 +664,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
         this.writeThroughMutations = writeThroughMutations;
         if (readActivatedWriteThrough && (!writeThroughMutations || !valueCacheEnabled)) {
             throw new IllegalArgumentException(
-                    "Read-activated native mutation write-through requires both write-through-mutations and native ValueState cache.");
+                    "Resident-only native mutation write-through requires both write-through-mutations and native ValueState cache.");
         }
         this.readActivatedWriteThrough = readActivatedWriteThrough;
         if (valueCacheEnabled && !enabled) {
@@ -821,8 +821,8 @@ public final class NativeRequestPlaneOptions implements Serializable {
     }
 
     /**
-     * Whether native mutation publication remains dormant until this state id performs a native
-     * value-cache read. Activation is permanent and shared across wrappers.
+     * Whether native mutation publication is dormant until a state read activates it, then updates
+     * only exact keys already resident in the native ValueState cache.
      */
     public boolean readActivatedWriteThrough() {
         return readActivatedWriteThrough;

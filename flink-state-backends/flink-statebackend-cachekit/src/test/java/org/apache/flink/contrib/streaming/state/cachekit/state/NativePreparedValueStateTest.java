@@ -36,6 +36,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
@@ -43,6 +44,9 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -1769,7 +1773,7 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void testReadActivatedWriteThroughSkipsPureWritesThenPreservesCoherence()
+    void testReadActivatedResidentOnlyWriteThroughSkipsPureWritesThenUpdatesResidentKey()
             throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("write-only");
         InternalValueState<String, String, Integer> delegate =
@@ -1792,6 +1796,7 @@ class NativePreparedValueStateTest {
                                         StringSerializer.INSTANCE,
                                         invocation.getArgument(1),
                                         StringSerializer.INSTANCE));
+        stubDirectPreparedSerialization(reader);
 
         FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
         NativeRequestPlaneCoordinator coordinator =
@@ -1832,11 +1837,12 @@ class NativePreparedValueStateTest {
         assertEquals(1, state.getNativeValueReadActivationsForTesting());
         assertTrue(coordinator.valueReadActivation(52).isActive());
 
-        currentKey.set("write-only");
+        currentKey.set("read-key");
         state.update(2);
         state.flush();
         assertEquals(2, state.getNativeMutationAttemptsForTesting());
         assertEquals(1, state.getNativeMutationReadInactiveSkippedForTesting());
+        assertEquals(0, state.getNativeMutationResidentMissSkippedForTesting());
         assertEquals(1, state.getNativeMutationAppliedForTesting());
 
         CachedInternalValueState<String, String, Integer> readerState =
@@ -1893,6 +1899,7 @@ class NativePreparedValueStateTest {
                                         StringSerializer.INSTANCE,
                                         invocation.getArgument(1),
                                         StringSerializer.INSTANCE));
+        stubDirectPreparedSerialization(batchReader);
 
         NativeRequestPlaneCoordinator coordinator =
                 NativeRequestPlaneCoordinator.forTesting(
@@ -1953,6 +1960,7 @@ class NativePreparedValueStateTest {
                                         StringSerializer.INSTANCE,
                                         invocation.getArgument(1),
                                         StringSerializer.INSTANCE));
+        stubDirectPreparedSerialization(reader);
 
         NativeRequestPlaneCoordinator coordinator =
                 NativeRequestPlaneCoordinator.forTesting(
@@ -1996,6 +2004,7 @@ class NativePreparedValueStateTest {
                                         StringSerializer.INSTANCE,
                                         invocation.getArgument(1),
                                         StringSerializer.INSTANCE));
+        stubDirectPreparedSerialization(batchReader);
 
         NativeRequestPlaneCoordinator coordinator =
                 NativeRequestPlaneCoordinator.forTesting(
@@ -2050,6 +2059,7 @@ class NativePreparedValueStateTest {
         when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
         when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
         when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(99);
         RocksDBBatchValueReader<String, String, Integer> batchReader =
                 (RocksDBBatchValueReader<String, String, Integer>) delegate;
         when(batchReader.getBatchDefaultValue()).thenReturn(null);
@@ -2061,6 +2071,7 @@ class NativePreparedValueStateTest {
                                         StringSerializer.INSTANCE,
                                         invocation.getArgument(1),
                                         StringSerializer.INSTANCE));
+        stubDirectPreparedSerialization(batchReader);
 
         NativeRequestPlaneCoordinator coordinator =
                 NativeRequestPlaneCoordinator.forTesting(
@@ -2091,7 +2102,8 @@ class NativePreparedValueStateTest {
 
         state.update(99);
         state.flush();
-        assertEquals(1, state.getNativeMutationAppliedForTesting());
+        assertEquals(0, state.getNativeMutationAppliedForTesting());
+        assertEquals(1, state.getNativeMutationResidentMissSkippedForTesting());
         assertEquals(1, coordinator.fill(delayedFill));
         assertEquals(
                 NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION,
@@ -2103,8 +2115,9 @@ class NativePreparedValueStateTest {
                 newReadActivatedValueState(delegate, currentKey, coordinator, 55);
         reader.setCurrentNamespace("read-activated-race");
         assertEquals(99, reader.value());
-        assertEquals(1, reader.getNativeHitsForTesting());
-        verify(delegate, never()).value();
+        assertEquals(0, reader.getNativeHitsForTesting());
+        assertEquals(1, reader.getNativeMissesForTesting());
+        verify(delegate, times(1)).value();
 
         state.close();
         reader.close();
@@ -2146,6 +2159,123 @@ class NativePreparedValueStateTest {
             assertEquals(NativeRequestPlaneBridge.PROBE_MISS, probe.probeStatus(0));
         }
         coordinator.close();
+    }
+
+    @Test
+    void testResidentOnlyMutationSkipsAbsentSerializationAndUpdatesResidentKey()
+            throws Exception {
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        readActivatedWriteThroughOptions(), new FakeNativeRequestPlane());
+        byte[] key = new byte[] {7};
+        AtomicInteger valueSerializations = new AtomicInteger();
+
+        assertEquals(
+                NativeRequestPlaneBridge.FILL_NOT_PRESENT,
+                coordinator.updateExactKeyIfPresent(
+                        61,
+                        1,
+                        output -> output.write(key),
+                        output -> {
+                            valueSerializations.incrementAndGet();
+                            output.writeByte(1);
+                        }));
+        assertEquals(0, valueSerializations.get());
+
+        assertEquals(
+                NativeRequestPlaneBridge.FILL_INSERTED,
+                coordinator.updateExactKey(61, 2, key, new byte[] {1}));
+        assertEquals(
+                NativeRequestPlaneBridge.FILL_UPDATED,
+                coordinator.updateExactKeyIfPresent(
+                        61,
+                        3,
+                        output -> output.write(key),
+                        output -> {
+                            valueSerializations.incrementAndGet();
+                            output.writeByte(9);
+                        }));
+        assertEquals(1, valueSerializations.get());
+
+        try (NativeRequestPlaneCoordinator.BatchSlot probe =
+                coordinator.tryAcquireBatchSlot()) {
+            assertNotNull(probe);
+            probe.prepareLatest(61, 3, java.util.Collections.singletonList(key));
+            assertEquals(1, coordinator.probe(probe));
+            assertEquals(NativeRequestPlaneBridge.PROBE_HIT, probe.probeStatus(0));
+            assertArrayEquals(new byte[] {9}, probe.copyProbeValue(0));
+        }
+        coordinator.close();
+    }
+
+    @Test
+    void testResidentOnlyCheckAndUpdateExcludeConcurrentNativeProbe() throws Exception {
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        readActivatedWriteThroughOptions(), fakePlane);
+        byte[] key = new byte[] {8};
+        assertEquals(
+                NativeRequestPlaneBridge.FILL_INSERTED,
+                coordinator.updateExactKey(62, 1, key, new byte[] {1}));
+
+        CountDownLatch valueWriterEntered = new CountDownLatch(1);
+        CountDownLatch releaseValueWriter = new CountDownLatch(1);
+        CountDownLatch probeCallStarted = new CountDownLatch(1);
+        CountDownLatch probeEntered = new CountDownLatch(1);
+        CountDownLatch releaseProbe = new CountDownLatch(1);
+        fakePlane.blockNextProbe(probeEntered, releaseProbe);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try (NativeRequestPlaneCoordinator.BatchSlot probe =
+                coordinator.tryAcquireBatchSlot()) {
+            assertNotNull(probe);
+            probe.prepareLatest(62, 2, java.util.Collections.singletonList(key));
+            Future<Integer> mutation =
+                    executor.submit(
+                            () ->
+                                    coordinator.updateExactKeyIfPresent(
+                                            62,
+                                            2,
+                                            output -> output.write(key),
+                                            output -> {
+                                                valueWriterEntered.countDown();
+                                                try {
+                                                    if (!releaseValueWriter.await(
+                                                            5, TimeUnit.SECONDS)) {
+                                                        throw new IOException(
+                                                                "Timed out waiting to release value writer");
+                                                    }
+                                                } catch (InterruptedException interrupted) {
+                                                    Thread.currentThread().interrupt();
+                                                    throw new IOException(
+                                                            "Interrupted while blocking value writer",
+                                                            interrupted);
+                                                }
+                                                output.writeByte(2);
+                                            }));
+            assertTrue(valueWriterEntered.await(5, TimeUnit.SECONDS));
+            Future<Integer> concurrentProbe =
+                    executor.submit(
+                            () -> {
+                                probeCallStarted.countDown();
+                                return coordinator.probe(probe);
+                            });
+            assertTrue(probeCallStarted.await(5, TimeUnit.SECONDS));
+            assertFalse(probeEntered.await(100, TimeUnit.MILLISECONDS));
+
+            releaseValueWriter.countDown();
+            assertEquals(NativeRequestPlaneBridge.FILL_UPDATED, mutation.get().intValue());
+            assertTrue(probeEntered.await(5, TimeUnit.SECONDS));
+            releaseProbe.countDown();
+            assertEquals(1, concurrentProbe.get().intValue());
+            assertEquals(NativeRequestPlaneBridge.PROBE_HIT, probe.probeStatus(0));
+            assertArrayEquals(new byte[] {2}, probe.copyProbeValue(0));
+        } finally {
+            releaseValueWriter.countDown();
+            releaseProbe.countDown();
+            executor.shutdownNow();
+            coordinator.close();
+        }
     }
 
     @Test
@@ -2573,7 +2703,13 @@ class NativePreparedValueStateTest {
                         metadata.getInt(base + NativeRequestPlaneBridge.FILL_VALUE_LENGTH_OFFSET);
                 int flags =
                         metadata.getInt(base + NativeRequestPlaneBridge.FILL_VALUE_FLAGS_OFFSET);
+                int controlFlags =
+                        metadata.getInt(base + NativeRequestPlaneBridge.FILL_VALUE_RESERVED_OFFSET);
                 boolean negative = (flags & NativeRequestPlaneBridge.FILL_VALUE_NEGATIVE_FLAG) != 0;
+                boolean updateOnly =
+                        (controlFlags & NativeRequestPlaneBridge.FILL_VALUE_UPDATE_ONLY_FLAG) != 0;
+                boolean checkOnly =
+                        (controlFlags & NativeRequestPlaneBridge.FILL_VALUE_CHECK_ONLY_FLAG) != 0;
                 byte[] value = null;
                 if (!negative) {
                     value = new byte[length];
@@ -2611,16 +2747,28 @@ class NativePreparedValueStateTest {
                         if (stateWatermark == null || key.generation > stateWatermark) {
                             stateGenerationWatermarks.put(key.stateId, key.generation);
                         }
-                        if (existing == null && values.size() >= maxEntries) {
-                            NativeKey oldest = values.keySet().iterator().next();
-                            values.remove(oldest);
+                        int status;
+                        if (checkOnly) {
+                            status =
+                                    existing == null
+                                            ? NativeRequestPlaneBridge.FILL_NOT_PRESENT
+                                            : NativeRequestPlaneBridge.FILL_UPDATED;
+                        } else if (updateOnly && existing == null) {
+                            status = NativeRequestPlaneBridge.FILL_NOT_PRESENT;
+                        } else {
+                            if (existing == null && values.size() >= maxEntries) {
+                                NativeKey oldest = values.keySet().iterator().next();
+                                values.remove(oldest);
+                            }
+                            values.put(key, new StoredValue(key.generation, negative, value));
+                            status =
+                                    existing == null
+                                            ? NativeRequestPlaneBridge.FILL_INSERTED
+                                            : NativeRequestPlaneBridge.FILL_UPDATED;
                         }
-                        values.put(key, new StoredValue(key.generation, negative, value));
                         results.putInt(
                                 resultBase + NativeRequestPlaneBridge.FILL_RESULT_STATUS_OFFSET,
-                                existing == null
-                                        ? NativeRequestPlaneBridge.FILL_INSERTED
-                                        : NativeRequestPlaneBridge.FILL_UPDATED);
+                                status);
                         results.putInt(
                                 resultBase + NativeRequestPlaneBridge.FILL_RESULT_ERROR_OFFSET,
                                 NativeRequestPlaneBridge.ERROR_OK);

@@ -49,7 +49,7 @@ using cachekit::native::bridge::ProbeDirectBatch;
 constexpr const char* kIllegalArgument = "java/lang/IllegalArgumentException";
 constexpr const char* kIllegalState = "java/lang/IllegalStateException";
 constexpr const char* kOutOfMemory = "java/lang/OutOfMemoryError";
-constexpr jint kJniAbiVersion = 3;
+constexpr jint kJniAbiVersion = 4;
 
 struct BridgeHandle final {
     BridgeHandle(

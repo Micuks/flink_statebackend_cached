@@ -268,8 +268,9 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         .booleanType()
                                                         .defaultValue(false)
                                                         .withDescription(
-                                                                        "Skip native ValueState mutation publication until the native cache for that state id is first probed. "
-                                                                                        + "Activation is permanent for the backend lifetime, preserving write-through coherence after first use.");
+                                                                        "Selective native ValueState mutation mode: skip publication until the state is first probed; afterwards advance the generation fence for every mutation, "
+                                                                                        + "but serialize and publish the value only when that exact key is already resident. "
+                                                                                        + "The check and conditional update are atomic with respect to native probes.");
 
         public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_ENABLED =
                         ConfigOptions.key("state.backend.cachekit.native.value-cache.enabled")

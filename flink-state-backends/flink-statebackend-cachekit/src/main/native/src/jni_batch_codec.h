@@ -42,6 +42,8 @@ constexpr std::size_t kFillValueLengthOffset = 4;
 constexpr std::size_t kFillValueFlagsOffset = 8;
 constexpr std::size_t kFillValueReservedOffset = 12;
 constexpr std::uint32_t kFillValueNegativeFlag = 1U;
+constexpr std::uint32_t kFillValueUpdateOnlyFlag = 1U;
+constexpr std::uint32_t kFillValueCheckOnlyFlag = 1U << 1U;
 
 constexpr std::size_t kFillResultRecordBytes = 8;
 constexpr std::size_t kFillResultStatusOffset = 0;

@@ -18,6 +18,7 @@
 
 #include "jni_batch_codec.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -29,6 +30,7 @@
 namespace {
 
 using cachekit::native::ErrorCode;
+using cachekit::native::FillStatus;
 using cachekit::native::KernelPreference;
 using cachekit::native::Options;
 using cachekit::native::RequestPlane;
@@ -90,12 +92,13 @@ void WriteValueRecord(
         std::size_t index,
         std::int32_t arena_offset,
         std::int32_t length,
-        std::uint32_t flags) {
+        std::uint32_t flags,
+        std::uint32_t control_flags = 0) {
     const std::size_t base = index * kFillValueRecordBytes;
     Write(metadata, base + kFillValueArenaOffsetOffset, arena_offset);
     Write(metadata, base + kFillValueLengthOffset, length);
     Write(metadata, base + kFillValueFlagsOffset, flags);
-    Write(metadata, base + kFillValueReservedOffset, std::uint32_t{0});
+    Write(metadata, base + kFillValueReservedOffset, control_flags);
 }
 
 void TestFillAndProbeRoundTrip() {
@@ -200,6 +203,70 @@ void TestMalformedFillIsRejectedBeforeMutation() {
                   1,
                   {results.data(), results.size()}) ==
           BatchBridgeCode::kInputOutOfBounds);
+    CHECK(plane->size() == 0);
+}
+
+void TestMutationControlFlagsAndNotPresentStatus() {
+    std::unique_ptr<RequestPlane> plane = MakePlane();
+    const std::string key_arena = "key";
+    std::vector<std::uint8_t> key_metadata(kKeyMetadataRecordBytes);
+    WriteKeyRecord(&key_metadata, 0, 5, 2, 0, 3);
+    std::vector<std::uint8_t> value_metadata(kFillValueRecordBytes);
+    std::vector<std::uint8_t> results(kFillResultRecordBytes, 0xa5);
+
+    WriteValueRecord(
+            &value_metadata,
+            0,
+            0,
+            0,
+            kFillValueNegativeFlag,
+            kFillValueCheckOnlyFlag);
+    CHECK(FillDirectBatch(
+                  plane.get(),
+                  {reinterpret_cast<const std::uint8_t*>(key_arena.data()),
+                   key_arena.size()},
+                  {key_metadata.data(), key_metadata.size()},
+                  {nullptr, 0},
+                  {value_metadata.data(), value_metadata.size()},
+                  1,
+                  {results.data(), results.size()}) == BatchBridgeCode::kOk);
+    CHECK(Read<std::uint32_t>(results, kFillResultStatusOffset) ==
+          static_cast<std::uint32_t>(FillStatus::kNotPresent));
+    CHECK(plane->size() == 0);
+
+    std::fill(results.begin(), results.end(), 0xa5);
+    WriteValueRecord(&value_metadata, 0, 0, 0, 0, 1U << 7U);
+    CHECK(FillDirectBatch(
+                  plane.get(),
+                  {reinterpret_cast<const std::uint8_t*>(key_arena.data()),
+                   key_arena.size()},
+                  {key_metadata.data(), key_metadata.size()},
+                  {nullptr, 0},
+                  {value_metadata.data(), value_metadata.size()},
+                  1,
+                  {results.data(), results.size()}) ==
+          BatchBridgeCode::kInvalidMetadata);
+    for (std::uint8_t byte : results) {
+        CHECK(byte == 0xa5);
+    }
+
+    WriteValueRecord(
+            &value_metadata,
+            0,
+            0,
+            0,
+            kFillValueNegativeFlag,
+            kFillValueUpdateOnlyFlag | kFillValueCheckOnlyFlag);
+    CHECK(FillDirectBatch(
+                  plane.get(),
+                  {reinterpret_cast<const std::uint8_t*>(key_arena.data()),
+                   key_arena.size()},
+                  {key_metadata.data(), key_metadata.size()},
+                  {nullptr, 0},
+                  {value_metadata.data(), value_metadata.size()},
+                  1,
+                  {results.data(), results.size()}) ==
+          BatchBridgeCode::kInvalidMetadata);
     CHECK(plane->size() == 0);
 }
 
@@ -513,6 +580,7 @@ void TestGroupTokenPlanReusesScratchCapacity() {
 int main() {
     TestFillAndProbeRoundTrip();
     TestMalformedFillIsRejectedBeforeMutation();
+    TestMutationControlFlagsAndNotPresentStatus();
     TestProbeOutputTooSmallDoesNotWritePartialRecords();
     TestGenerationMismatchLatestProbeAndZeroCount();
     TestScratchCapacityIsReusedAcrossFillAndProbe();

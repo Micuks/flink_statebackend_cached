@@ -703,6 +703,7 @@ struct RequestPlane::Impl {
     FillResult FillOne(const FillView& fill) noexcept {
         if (!IsValidBytes(fill.key.data, fill.key.size) ||
             (!fill.negative && !IsValidBytes(fill.value, fill.value_size)) ||
+            (fill.update_only && fill.check_only) ||
             fill.key.generation == kLatestGeneration) {
             return FillResult{
                     FillStatus::kInvalidArgument, ErrorCode::kInvalidArgument};
@@ -750,6 +751,14 @@ struct RequestPlane::Impl {
         std::uint32_t existing_id = 0;
         const bool existing =
                 FindExact(fill.key, tag, nullptr, &existing_id);
+        if (fill.check_only) {
+            return FillResult{
+                    existing ? FillStatus::kUpdated : FillStatus::kNotPresent,
+                    ErrorCode::kOk};
+        }
+        if (fill.update_only && !existing) {
+            return FillResult{FillStatus::kNotPresent, ErrorCode::kOk};
+        }
         if (!fill.negative && fill.value_size > value_arena.capacity()) {
             // The authoritative value no longer matches this exact resident
             // key. Preserve other keys in the state, but never leave the old

@@ -420,7 +420,11 @@ BatchBridgeCode FillDirectBatch(
                     ReadNative<std::uint32_t>(record + kFillValueFlagsOffset);
             const std::uint32_t reserved =
                     ReadNative<std::uint32_t>(record + kFillValueReservedOffset);
-            if (reserved != 0 || (flags & ~kFillValueNegativeFlag) != 0) {
+            if ((reserved
+                 & ~(kFillValueUpdateOnlyFlag | kFillValueCheckOnlyFlag)) != 0
+                || ((reserved & kFillValueUpdateOnlyFlag) != 0
+                    && (reserved & kFillValueCheckOnlyFlag) != 0)
+                || (flags & ~kFillValueNegativeFlag) != 0) {
                 return BatchBridgeCode::kInvalidMetadata;
             }
             const bool negative = (flags & kFillValueNegativeFlag) != 0;
@@ -435,7 +439,9 @@ BatchBridgeCode FillDirectBatch(
                             : value_arena.data +
                                       static_cast<std::size_t>(arena_offset),
                     static_cast<std::size_t>(length),
-                    negative});
+                    negative,
+                    (reserved & kFillValueUpdateOnlyFlag) != 0,
+                    (reserved & kFillValueCheckOnlyFlag) != 0});
         }
 
         scratch->fill_results_.resize(count);

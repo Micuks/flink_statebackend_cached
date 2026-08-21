@@ -88,15 +88,105 @@ FillResult Fill(
         RequestPlane& plane,
         const KeyView& key,
         const std::string& value,
-        bool negative = false) {
+        bool negative = false,
+        bool update_only = false,
+        bool check_only = false) {
     const FillView fill{
             key,
             reinterpret_cast<const std::uint8_t*>(value.data()),
             value.size(),
-            negative};
+            negative,
+            update_only,
+            check_only};
     FillResult result;
     CHECK(plane.FillBatch(&fill, &result, 1) == ErrorCode::kOk);
     return result;
+}
+
+ProbeResult Probe(RequestPlane& plane, const KeyView& key);
+std::string ResultValue(const ProbeResult& result);
+
+void TestResidentOnlyMutationControls() {
+    Options options;
+    options.capacity_entries = 1;
+    options.key_arena_bytes = 64;
+    options.value_arena_bytes = 64;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+    const std::string key = "resident";
+    const std::string other = "other";
+
+    CHECK(Fill(*plane, Key(41, 2, key), std::string(), true, false, true).status ==
+          FillStatus::kNotPresent);
+    CHECK(plane->size() == 0);
+    CHECK(Fill(*plane, Key(41, 1, key), std::string("delayed")).status ==
+          FillStatus::kRejectedStaleGeneration);
+
+    CHECK(Fill(*plane, Key(41, 2, key), std::string("v2")).status ==
+          FillStatus::kInserted);
+    CHECK(Fill(*plane, Key(41, 3, key), std::string(), true, false, true).status ==
+          FillStatus::kUpdated);
+    CHECK(Fill(*plane, Key(41, 3, key), std::string("v3"), false, true).status ==
+          FillStatus::kUpdated);
+    CHECK(ResultValue(
+                  Probe(*plane,
+                        Key(41, cachekit::native::kLatestGeneration, key))) ==
+          "v3");
+
+    CHECK(Fill(*plane, Key(41, 4, key), std::string(), true, true).status ==
+          FillStatus::kUpdated);
+    CHECK(Probe(*plane, Key(41, cachekit::native::kLatestGeneration, key)).status ==
+          ProbeStatus::kNegative);
+    CHECK(Fill(*plane, Key(41, 5, key), std::string("v5"), false, true).status ==
+          FillStatus::kUpdated);
+    CHECK(ResultValue(
+                  Probe(*plane,
+                        Key(41, cachekit::native::kLatestGeneration, key))) ==
+          "v5");
+
+    // An absent update-only operation must not evict or insert.
+    CHECK(Fill(*plane, Key(41, 6, other), std::string("bad"), false, true).status ==
+          FillStatus::kNotPresent);
+    CHECK(plane->size() == 1);
+    CHECK(ResultValue(
+                  Probe(*plane,
+                        Key(41, cachekit::native::kLatestGeneration, key))) ==
+          "v5");
+
+    // Simulate eviction between check-only and update-only. The conditional
+    // update must not resurrect the evicted key.
+    CHECK(Fill(*plane, Key(41, 7, key), std::string(), true, false, true).status ==
+          FillStatus::kUpdated);
+    CHECK(Fill(*plane, Key(41, 7, other), std::string("other-v7")).status ==
+          FillStatus::kInserted);
+    CHECK(Fill(*plane, Key(41, 7, key), std::string("resurrect"), false, true).status ==
+          FillStatus::kNotPresent);
+    CHECK(Probe(*plane, Key(41, cachekit::native::kLatestGeneration, key)).status ==
+          ProbeStatus::kMiss);
+    CHECK(ResultValue(
+                  Probe(*plane,
+                        Key(41, cachekit::native::kLatestGeneration, other))) ==
+          "other-v7");
+
+    // A newer mutation wins if a stale conditional update is attempted.
+    CHECK(Fill(*plane, Key(41, 8, other), std::string(), true, false, true).status ==
+          FillStatus::kUpdated);
+    CHECK(Fill(*plane, Key(41, 9, other), std::string("newer")).status ==
+          FillStatus::kUpdated);
+    CHECK(Fill(*plane, Key(41, 8, other), std::string("older"), false, true).status ==
+          FillStatus::kRejectedStaleGeneration);
+    CHECK(ResultValue(
+                  Probe(*plane,
+                        Key(41, cachekit::native::kLatestGeneration, other))) ==
+          "newer");
+
+    CHECK(Fill(*plane,
+               Key(41, 10, other),
+               std::string("invalid"),
+               false,
+               true,
+               true)
+                  .status == FillStatus::kInvalidArgument);
 }
 
 ProbeResult Probe(RequestPlane& plane, const KeyView& key) {
@@ -1096,6 +1186,7 @@ int main() {
     TestCollisionRequiresExactCompare();
     TestGenerationAndNegativeEntries();
     TestStateGenerationWatermarkSurvivesEvictionAndAdmissionFailure();
+    TestResidentOnlyMutationControls();
     TestEvictionAndArenaReuse();
     TestIntrusiveLruOrderAndSustainedCapacityChurn();
     TestUpdateCanReclaimFragmentedArena();

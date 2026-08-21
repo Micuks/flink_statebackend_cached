@@ -73,6 +73,7 @@ enum class FillStatus : std::uint8_t {
     kRejectedCapacity = 3,
     kInvalidArgument = 4,
     kInternalError = 5,
+    kNotPresent = 6,
 };
 
 struct Options {
@@ -112,6 +113,11 @@ struct FillView {
     const std::uint8_t* value = nullptr;
     std::size_t value_size = 0;
     bool negative = false;
+    // Mutation-only controls. check_only advances the state generation watermark and reports
+    // exact-key residency without changing the entry. update_only updates an exact resident key
+    // but must never insert. Production fill callers leave both false.
+    bool update_only = false;
+    bool check_only = false;
 };
 
 struct ProbeResult {
