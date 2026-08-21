@@ -37,6 +37,7 @@ class NativeRequestPlaneConfigurationTest {
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(new Configuration());
 
         assertFalse(options.enabled());
+        assertFalse(options.indexedFoldEnabled());
         assertEquals("auto", options.kernel());
         assertEquals(NativeRequestPlaneBridge.KERNEL_AUTO, options.kernelPreference());
         assertEquals(64, options.minBatchSize());
@@ -325,6 +326,23 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(prefetch)
                         .requiresValueCache());
+    }
+
+    @Test
+    void testIndexedFoldRequiresNativeLocalPreagg() {
+        Configuration invalid = new Configuration();
+        invalid.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        invalid.set(
+                CacheKitStateBackendFactory.NATIVE_LOCAL_PREAGG_INDEXED_FOLD_ENABLED, true);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalid));
+
+        invalid.set(CacheKitStateBackendFactory.NATIVE_LOCAL_PREAGG_ENABLED, true);
+        NativeRequestPlaneOptions options =
+                CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalid);
+        assertTrue(options.preaggEnabled());
+        assertTrue(options.indexedFoldEnabled());
     }
 
     @Test

@@ -35,7 +35,8 @@ public final class NativeRequestPlaneOptions implements Serializable {
 
     private static final NativeRequestPlaneOptions DISABLED =
             new NativeRequestPlaneOptions(
-                    false, "", "auto", 16_384, 4L << 20, 16L << 20, 1024, 256 << 10, 4 << 20, 64, 2);
+                    false, "", "auto", 16_384, 4L << 20, 16L << 20, 1024, 256 << 10, 4 << 20, 64,
+                    2);
 
     private final boolean enabled;
     private final String libraryPath;
@@ -56,6 +57,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final boolean prefetchEnabled;
     private final boolean mailboxBatchEnabled;
     private final boolean preaggEnabled;
+    private final boolean indexedFoldEnabled;
     private final boolean compactSelectedProbeEnabled;
     private final boolean directArenaMultiGetEnabled;
     private final boolean mapSnapshotAdaptiveBypassEnabled;
@@ -512,6 +514,62 @@ public final class NativeRequestPlaneOptions implements Serializable {
             int mapSnapshotAdaptiveWindowProbes,
             double mapSnapshotAdaptiveMinUsefulHitRate,
             int mapSnapshotAdaptiveResampleIntervalProbes) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                aarch64Only,
+                writeThroughMutations,
+                valueCacheEnabled,
+                mapCacheEnabled,
+                mapSnapshotEnabled,
+                prefetchEnabled,
+                mailboxBatchEnabled,
+                preaggEnabled,
+                compactSelectedProbeEnabled,
+                directArenaMultiGetEnabled,
+                mapSnapshotAdaptiveBypassEnabled,
+                mapSnapshotAdaptiveWindowProbes,
+                mapSnapshotAdaptiveMinUsefulHitRate,
+                mapSnapshotAdaptiveResampleIntervalProbes,
+                false);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only,
+            boolean writeThroughMutations,
+            boolean valueCacheEnabled,
+            boolean mapCacheEnabled,
+            boolean mapSnapshotEnabled,
+            boolean prefetchEnabled,
+            boolean mailboxBatchEnabled,
+            boolean preaggEnabled,
+            boolean compactSelectedProbeEnabled,
+            boolean directArenaMultiGetEnabled,
+            boolean mapSnapshotAdaptiveBypassEnabled,
+            int mapSnapshotAdaptiveWindowProbes,
+            double mapSnapshotAdaptiveMinUsefulHitRate,
+            int mapSnapshotAdaptiveResampleIntervalProbes,
+            boolean indexedFoldEnabled) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
         this.kernel = normalizeKernel(kernel);
@@ -575,8 +633,12 @@ public final class NativeRequestPlaneOptions implements Serializable {
                     "Native LocalPreAgg grouping requires the native request plane to be enabled.");
         }
         this.preaggEnabled = preaggEnabled;
-        if (compactSelectedProbeEnabled
-                && (!enabled || !prefetchEnabled || !mailboxBatchEnabled)) {
+        if (indexedFoldEnabled && !preaggEnabled) {
+            throw new IllegalArgumentException(
+                    "Indexed LocalPreAgg fold requires native LocalPreAgg grouping.");
+        }
+        this.indexedFoldEnabled = indexedFoldEnabled;
+        if (compactSelectedProbeEnabled && (!enabled || !prefetchEnabled || !mailboxBatchEnabled)) {
             throw new IllegalArgumentException(
                     "Compact-selected probe requires native request plane, prefetch, and mailbox batch.");
         }
@@ -609,8 +671,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
         this.mapSnapshotAdaptiveBypassEnabled = mapSnapshotAdaptiveBypassEnabled;
         this.mapSnapshotAdaptiveWindowProbes = mapSnapshotAdaptiveWindowProbes;
         this.mapSnapshotAdaptiveMinUsefulHitRate = mapSnapshotAdaptiveMinUsefulHitRate;
-        this.mapSnapshotAdaptiveResampleIntervalProbes =
-                mapSnapshotAdaptiveResampleIntervalProbes;
+        this.mapSnapshotAdaptiveResampleIntervalProbes = mapSnapshotAdaptiveResampleIntervalProbes;
     }
 
     public static NativeRequestPlaneOptions disabled() {
@@ -735,6 +796,10 @@ public final class NativeRequestPlaneOptions implements Serializable {
 
     public boolean preaggEnabled() {
         return preaggEnabled;
+    }
+
+    public boolean indexedFoldEnabled() {
+        return indexedFoldEnabled;
     }
 
     /** Whether compacted mailbox keys are probed directly from their original prepared arena. */

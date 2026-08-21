@@ -27,6 +27,7 @@ import org.apache.flink.streaming.api.operators.AbstractUdfStreamOperator;
 import org.apache.flink.streaming.api.operators.BatchableKeyedFunction;
 import org.apache.flink.streaming.api.operators.Input;
 import org.apache.flink.streaming.api.operators.Output;
+import org.apache.flink.streaming.api.operators.ReusableBatchableKeyedFunction;
 import org.apache.flink.streaming.api.operators.TimestampedCollector;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.StatePrefetcher;
@@ -85,6 +86,10 @@ public final class LocalPreagg {
     private static final AtomicLong DISPATCH_COUNT = new AtomicLong();
     private static final AtomicLong RECORDS_BUNDLED = new AtomicLong();
     private static final AtomicLong GROUPS_EMITTED = new AtomicLong();
+    private static final AtomicLong INDEXED_FOLD_DISPATCH_COUNT = new AtomicLong();
+    private static final AtomicLong INDEXED_FOLD_RECORDS = new AtomicLong();
+    private static final AtomicLong INDEXED_FOLD_GROUPS = new AtomicLong();
+    private static final AtomicLong INDEXED_FOLD_PLAN_FALLBACKS = new AtomicLong();
     private static final Field NO_FIELD;
 
     static {
@@ -169,6 +174,31 @@ public final class LocalPreagg {
         final TimestampedCollector collector = collectorFor(op);
         if (collector == null) {
             return false;
+        }
+
+        if (batchable instanceof ReusableBatchableKeyedFunction
+                && StatePrefetcher.indexedBatchFoldEnabled(headOperator)) {
+            final NativeGroupingWorkspace workspace = NATIVE_GROUPING_WORKSPACE.get();
+            try {
+                if (dispatchIndexed(
+                        headOperator,
+                        op,
+                        batchable,
+                        selector,
+                        collector,
+                        buf,
+                        n,
+                        numRecordsIn,
+                        workspace)) {
+                    return true;
+                }
+            } catch (Throwable t) {
+                // The indexed path may have started processing groups. It therefore follows the
+                // same fail-loud rule as the established materialized path and must never replay
+                // the batch after an exception.
+                throw new RuntimeException("local-preagg indexed dispatch failed", t);
+            }
+            INDEXED_FOLD_PLAN_FALLBACKS.incrementAndGet();
         }
 
         final ExtractionBuffers extractionBuffers =
@@ -267,6 +297,104 @@ public final class LocalPreagg {
         }
     }
 
+    /**
+     * Executes a validated native grouping plan without materializing a value vector, dense value
+     * copy, or one List instance per group.
+     *
+     * <p>The native plan remains only a scheduling hint. This method validates first-seen group ids
+     * and every Java key equality before processing any record. A malformed plan or a hash
+     * collision returns {@code false}, allowing the untouched batch to take the established Java
+     * grouping path.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static boolean dispatchIndexed(
+            Input<?> headOperator,
+            AbstractStreamOperator<?> op,
+            BatchableKeyedFunction batchable,
+            KeySelector selector,
+            TimestampedCollector collector,
+            StreamRecord<?>[] buf,
+            int n,
+            Counter numRecordsIn,
+            NativeGroupingWorkspace workspace)
+            throws Exception {
+        workspace.prepare(n);
+        StreamRecord<?> lastRecord = null;
+        int sourceCount = 0;
+        int groupCount = 0;
+        try {
+            for (int bufferIndex = 0; bufferIndex < n; bufferIndex++) {
+                StreamRecord<?> record = buf[bufferIndex];
+                if (record == null) {
+                    continue;
+                }
+                lastRecord = record;
+                Object key = selector.getKey(record.getValue());
+                workspace.putIndexedSource(sourceCount, bufferIndex, key, Objects.hashCode(key));
+                sourceCount++;
+            }
+            if (sourceCount == 0) {
+                return false;
+            }
+
+            groupCount =
+                    StatePrefetcher.groupHashTokensNatively(
+                            headOperator, workspace.tokens, sourceCount, workspace.plan);
+            IndexedGroups groups = validatePackedIndexedGroups(workspace, sourceCount, groupCount);
+            if (groups == null) {
+                return false;
+            }
+
+            StatePrefetcher.prefetchKeysImmediately(headOperator, groups.keys);
+            if (lastRecord != null && lastRecord.hasTimestamp()) {
+                collector.setAbsoluteTimestamp(lastRecord.getTimestamp());
+            } else {
+                collector.eraseTimestamp();
+            }
+
+            IndexedRecordValueList values = workspace.indexedValues;
+            for (int group = 0; group < groups.groupCount; group++) {
+                Object key = groups.groupKeys[group];
+                op.setCurrentKey(key);
+                values.reset(
+                        buf,
+                        groups.bufferIndexesByGroup,
+                        groups.groupOffsets[group],
+                        groups.groupOffsets[group + 1]);
+                batchable.processBatchForKey(key, values, collector);
+            }
+
+            if (numRecordsIn != null) {
+                numRecordsIn.inc(n);
+            }
+            long dispatches = INDEXED_FOLD_DISPATCH_COUNT.incrementAndGet();
+            long records = INDEXED_FOLD_RECORDS.addAndGet(sourceCount);
+            long groupTotal = INDEXED_FOLD_GROUPS.addAndGet(groups.groupCount);
+            long allDispatches = DISPATCH_COUNT.incrementAndGet();
+            long allRecords = RECORDS_BUNDLED.addAndGet(n);
+            long allGroups = GROUPS_EMITTED.addAndGet(groups.groupCount);
+            if (dispatches % 5000L == 1L) {
+                double collapse = groupTotal == 0 ? 0 : (double) records / groupTotal;
+                System.err.println(
+                        String.format(
+                                "[LOCAL-PREAGG INDEXED] op=%s dispatches=%d records=%d groups=%d collapse=%.2fx planFallbacks=%d materializedValueCopiesAvoided=%d allDispatches=%d allRecords=%d allGroups=%d",
+                                op.getClass().getSimpleName(),
+                                dispatches,
+                                records,
+                                groupTotal,
+                                collapse,
+                                INDEXED_FOLD_PLAN_FALLBACKS.get(),
+                                records,
+                                allDispatches,
+                                allRecords,
+                                allGroups));
+            }
+            return true;
+        } finally {
+            workspace.clearIndexed(sourceCount, groupCount);
+        }
+    }
+
     private static final class ExtractionBuffers {
         private final ArrayList<Object> keys = new ArrayList<>();
         private final ArrayList<Object> values = new ArrayList<>();
@@ -276,6 +404,14 @@ public final class LocalPreagg {
         private ByteBuffer tokens = directBuffer(Integer.BYTES);
         private ByteBuffer plan = directBuffer(BatchKeyGroupingSupport.requiredPackedPlanBytes(1));
         private int[] positions = new int[1];
+        private Object[] indexedSourceKeys = new Object[1];
+        private int[] indexedSourceBufferIndexes = new int[1];
+        private Object[] indexedGroupKeys = new Object[1];
+        private int[] indexedGroupOffsets = new int[2];
+        private int[] indexedBufferIndexesByGroup = new int[1];
+        private final KeyArrayView indexedGroupKeyView = new KeyArrayView();
+        private final IndexedRecordValueList indexedValues = new IndexedRecordValueList();
+        private final IndexedGroups indexedGroups = new IndexedGroups();
 
         void prepare(int sourceCapacity) {
             if (sourceCapacity <= 0) {
@@ -292,6 +428,14 @@ public final class LocalPreagg {
             if (positions.length < sourceCapacity) {
                 positions = new int[grownCapacity(positions.length, sourceCapacity)];
             }
+            if (indexedSourceKeys.length < sourceCapacity) {
+                int capacity = grownCapacity(indexedSourceKeys.length, sourceCapacity);
+                indexedSourceKeys = new Object[capacity];
+                indexedSourceBufferIndexes = new int[capacity];
+                indexedGroupKeys = new Object[capacity];
+                indexedGroupOffsets = new int[capacity + 1];
+                indexedBufferIndexesByGroup = new int[capacity];
+            }
             tokens.clear();
             plan.clear();
             plan.putInt(0, 0);
@@ -299,6 +443,26 @@ public final class LocalPreagg {
 
         private void putToken(int source, int token) {
             tokens.putInt(source * Integer.BYTES, token);
+        }
+
+        void putIndexedSource(int source, int bufferIndex, Object key, int token) {
+            indexedSourceKeys[source] = key;
+            indexedSourceBufferIndexes[source] = bufferIndex;
+            putToken(source, token);
+        }
+
+        private void clearIndexed(int sourceCount, int groupCount) {
+            for (int source = 0;
+                    source < sourceCount && source < indexedSourceKeys.length;
+                    source++) {
+                indexedSourceKeys[source] = null;
+            }
+            int boundedGroups = Math.max(0, Math.min(groupCount, indexedGroupKeys.length));
+            for (int group = 0; group < boundedGroups; group++) {
+                indexedGroupKeys[group] = null;
+            }
+            indexedGroupKeyView.reset(indexedGroupKeys, 0);
+            indexedValues.clearReferences();
         }
 
         ByteBuffer planBuffer() {
@@ -318,6 +482,212 @@ public final class LocalPreagg {
                 capacity *= 2;
             }
             return capacity;
+        }
+    }
+
+    /** Validated, reusable view of a packed native source-to-group plan. */
+    static final class IndexedGroups {
+        Object[] groupKeys;
+        int[] groupOffsets;
+        int[] bufferIndexesByGroup;
+        List<Object> keys;
+        int groupCount;
+
+        private IndexedGroups() {}
+
+        private void reset(
+                Object[] groupKeys,
+                int[] groupOffsets,
+                int[] bufferIndexesByGroup,
+                List<Object> keys,
+                int groupCount) {
+            this.groupKeys = groupKeys;
+            this.groupOffsets = groupOffsets;
+            this.bufferIndexesByGroup = bufferIndexesByGroup;
+            this.keys = keys;
+            this.groupCount = groupCount;
+        }
+    }
+
+    /**
+     * Validates a packed plan and scatters only primitive source indexes.
+     *
+     * <p>No user record reference is copied. The returned arrays belong to {@code workspace} and
+     * remain valid only until its next {@link NativeGroupingWorkspace#prepare(int)} call.
+     */
+    static IndexedGroups validatePackedIndexedGroups(
+            NativeGroupingWorkspace workspace, int sourceCount, int returnedGroupCount) {
+        if (sourceCount <= 0 || returnedGroupCount <= 0 || returnedGroupCount > sourceCount) {
+            return null;
+        }
+        final ByteBuffer plan = workspace.plan;
+        if (plan.getInt(0) != BatchKeyGroupingSupport.PACKED_PLAN_MAGIC
+                || plan.getInt(Integer.BYTES) != BatchKeyGroupingSupport.PACKED_PLAN_VERSION
+                || plan.getInt(2 * Integer.BYTES) != sourceCount
+                || plan.getInt(3 * Integer.BYTES) != returnedGroupCount) {
+            return null;
+        }
+        final int groupCount = returnedGroupCount;
+        final int firstSourceBase = BatchKeyGroupingSupport.PACKED_PLAN_HEADER_BYTES;
+        final int offsetsBase = firstSourceBase + groupCount * Integer.BYTES;
+        final int sourceGroupBase = offsetsBase + (groupCount + 1) * Integer.BYTES;
+        final int requiredBytes = sourceGroupBase + sourceCount * Integer.BYTES;
+        if (requiredBytes > plan.capacity()) {
+            return null;
+        }
+
+        for (int group = 0; group < groupCount; group++) {
+            int firstSource = plan.getInt(firstSourceBase + group * Integer.BYTES);
+            if (firstSource < 0
+                    || firstSource >= sourceCount
+                    || (group == 0 && firstSource != 0)
+                    || (group > 0
+                            && firstSource
+                                    <= plan.getInt(
+                                            firstSourceBase + (group - 1) * Integer.BYTES))) {
+                return null;
+            }
+            workspace.indexedGroupKeys[group] = workspace.indexedSourceKeys[firstSource];
+        }
+        if (plan.getInt(offsetsBase) != 0
+                || plan.getInt(offsetsBase + groupCount * Integer.BYTES) != sourceCount) {
+            return null;
+        }
+        for (int group = 0; group < groupCount; group++) {
+            int begin = plan.getInt(offsetsBase + group * Integer.BYTES);
+            int end = plan.getInt(offsetsBase + (group + 1) * Integer.BYTES);
+            if (begin < 0 || begin >= end || end > sourceCount) {
+                return null;
+            }
+            workspace.indexedGroupOffsets[group] = begin;
+            workspace.positions[group] = begin;
+        }
+        workspace.indexedGroupOffsets[groupCount] = sourceCount;
+
+        int nextGroup = 0;
+        for (int source = 0; source < sourceCount; source++) {
+            int group = plan.getInt(sourceGroupBase + source * Integer.BYTES);
+            if (group < 0 || group >= groupCount) {
+                return null;
+            }
+            int firstSource = plan.getInt(firstSourceBase + group * Integer.BYTES);
+            Object key = workspace.indexedSourceKeys[source];
+            if (source == firstSource) {
+                if (group != nextGroup) {
+                    return null;
+                }
+                nextGroup++;
+            } else if (source < firstSource
+                    || group >= nextGroup
+                    || !Objects.equals(workspace.indexedGroupKeys[group], key)) {
+                return null;
+            }
+            int position = workspace.positions[group]++;
+            int groupEnd = plan.getInt(offsetsBase + (group + 1) * Integer.BYTES);
+            if (position >= groupEnd) {
+                return null;
+            }
+            workspace.indexedBufferIndexesByGroup[position] =
+                    workspace.indexedSourceBufferIndexes[source];
+        }
+        if (nextGroup != groupCount) {
+            return null;
+        }
+        for (int group = 0; group < groupCount; group++) {
+            if (workspace.positions[group]
+                    != plan.getInt(offsetsBase + (group + 1) * Integer.BYTES)) {
+                return null;
+            }
+        }
+        workspace.indexedGroupKeyView.reset(workspace.indexedGroupKeys, groupCount);
+        workspace.indexedGroups.reset(
+                workspace.indexedGroupKeys,
+                workspace.indexedGroupOffsets,
+                workspace.indexedBufferIndexesByGroup,
+                workspace.indexedGroupKeyView,
+                groupCount);
+        return workspace.indexedGroups;
+    }
+
+    /** Read-only reusable list view over first-seen group keys. */
+    private static final class KeyArrayView extends AbstractList<Object> implements RandomAccess {
+        private Object[] keys;
+        private int size;
+
+        void reset(Object[] keys, int size) {
+            this.keys = keys;
+            this.size = size;
+        }
+
+        @Override
+        public Object get(int index) {
+            if (index < 0 || index >= size) {
+                throw new IndexOutOfBoundsException("index=" + index + ", size=" + size);
+            }
+            return keys[index];
+        }
+
+        @Override
+        public int size() {
+            return size;
+        }
+    }
+
+    /**
+     * Reusable mutable List view over original mailbox records in one group's arrival order.
+     * Iterator removal shifts only primitive source indexes inside the current group.
+     */
+    static final class IndexedRecordValueList extends AbstractList<Object> implements RandomAccess {
+        private StreamRecord<?>[] records;
+        private int[] bufferIndexes;
+        private int start;
+        private int size;
+
+        void reset(StreamRecord<?>[] records, int[] bufferIndexes, int start, int end) {
+            this.records = records;
+            this.bufferIndexes = bufferIndexes;
+            this.start = start;
+            this.size = end - start;
+            this.modCount++;
+        }
+
+        void clearReferences() {
+            records = null;
+            bufferIndexes = null;
+            start = 0;
+            size = 0;
+            modCount++;
+        }
+
+        @Override
+        public Object get(int index) {
+            checkElementIndex(index);
+            return records[bufferIndexes[start + index]].getValue();
+        }
+
+        @Override
+        public int size() {
+            return size;
+        }
+
+        @Override
+        public Object remove(int index) {
+            checkElementIndex(index);
+            Object previous = get(index);
+            int moved = size - index - 1;
+            if (moved > 0) {
+                System.arraycopy(
+                        bufferIndexes, start + index + 1, bufferIndexes, start + index, moved);
+            }
+            size--;
+            modCount++;
+            return previous;
+        }
+
+        private void checkElementIndex(int index) {
+            if (index < 0 || index >= size) {
+                throw new IndexOutOfBoundsException("index=" + index + ", size=" + size);
+            }
         }
     }
 

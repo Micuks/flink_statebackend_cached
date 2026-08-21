@@ -414,6 +414,16 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Group serialized keyed records in the native runtime using stable first-seen "
                                                                         + "group ids; Java retains accumulator, emission, and ordering semantics.");
 
+        public static final ConfigOption<Boolean> NATIVE_LOCAL_PREAGG_INDEXED_FOLD_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.local-preagg.indexed-fold.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Consume a validated native LocalPreAgg packed plan directly over the mailbox "
+                                                                        + "record buffer, avoiding materialized value vectors and per-group lists. "
+                                                                        + "Requires native LocalPreAgg and is disabled by default.");
+
 	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
 			.noDefaultValue()
@@ -567,6 +577,11 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 	}
 
         static NativeRequestPlaneOptions nativeRequestPlaneOptions(ReadableConfig config) {
+                if (config.get(NATIVE_LOCAL_PREAGG_INDEXED_FOLD_ENABLED)
+                                && !config.get(NATIVE_LOCAL_PREAGG_ENABLED)) {
+                        throw new IllegalArgumentException(
+                                        "Native LocalPreAgg indexed fold requires native LocalPreAgg grouping to be enabled.");
+                }
                 return new NativeRequestPlaneOptions(
                                 config.get(NATIVE_REQUEST_PLANE_ENABLED),
                                 config.get(NATIVE_REQUEST_PLANE_LIBRARY),
@@ -592,7 +607,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_BYPASS_ENABLED),
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_WINDOW_PROBES),
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_MIN_USEFUL_HIT_RATE),
-                                config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_RESAMPLE_INTERVAL_PROBES));
+                                config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_RESAMPLE_INTERVAL_PROBES),
+                                config.get(NATIVE_LOCAL_PREAGG_INDEXED_FOLD_ENABLED));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

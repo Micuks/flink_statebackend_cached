@@ -19,7 +19,7 @@
 package org.apache.flink.table.runtime.operators.deduplicate;
 
 import org.apache.flink.api.common.state.ValueState;
-import org.apache.flink.streaming.api.operators.BatchableKeyedFunction;
+import org.apache.flink.streaming.api.operators.ReusableBatchableKeyedFunction;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.util.Collector;
@@ -33,7 +33,7 @@ import static org.apache.flink.table.runtime.operators.deduplicate.DeduplicateFu
 /** This function is used to deduplicate on keys and keeps only first or last row on row time. */
 public class RowTimeDeduplicateFunction
         extends DeduplicateFunctionBase<RowData, RowData, RowData, RowData>
-        implements BatchableKeyedFunction<RowData, RowData> {
+        implements ReusableBatchableKeyedFunction<RowData, RowData> {
 
     private static final long serialVersionUID = 1L;
 

@@ -142,6 +142,20 @@ class StatePrefetcherTest {
         verify(grouping).groupHashTokens(tokens, 3, plan);
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void testIndexedBatchFoldUsesJobScopedBackendCapability() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(BatchKeyGroupingSupport.class));
+        BatchKeyGroupingSupport grouping = (BatchKeyGroupingSupport) backend;
+        org.mockito.Mockito.when(grouping.indexedBatchFoldEnabled()).thenReturn(true);
+
+        assertTrue(StatePrefetcher.indexedBatchFoldEnabled(backend));
+        verify(grouping).indexedBatchFoldEnabled();
+    }
+
     public interface ImmediatePrefetchHook {
         void prefetchForImmediateUse(Collection<?> keys);
     }

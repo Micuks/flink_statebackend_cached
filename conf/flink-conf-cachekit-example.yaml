@@ -100,6 +100,8 @@ state.backend.cachekit.native.map-snapshot.enabled: false
 state.backend.cachekit.native.mailbox-batch.enabled: false
 state.backend.cachekit.native.prefetch.enabled: false
 state.backend.cachekit.native.local-preagg.enabled: false
+# Experimental low-allocation consumer for the validated native packed grouping plan.
+state.backend.cachekit.native.local-preagg.indexed-fold.enabled: false
 # state.backend.cachekit.native.request-plane.library: /absolute/path/libcachekit_native_request_plane_jni.so
 # state.backend.cachekit.native.request-plane.kernel: auto
 # state.backend.cachekit.native.request-plane.min-batch-size: 64

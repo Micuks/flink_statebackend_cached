@@ -308,6 +308,25 @@ public final class StatePrefetcher {
         }
     }
 
+    /** Returns the job-scoped backend capability for the reusable indexed batch consumer. */
+    public static boolean indexedBatchFoldEnabled(Input<?> headOperator) {
+        if (!(headOperator instanceof AbstractStreamOperator)) {
+            return false;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            return indexedBatchFoldEnabled(backend);
+        } catch (Throwable failure) {
+            return false;
+        }
+    }
+
+    static boolean indexedBatchFoldEnabled(KeyedStateBackend<?> backend) {
+        return backend instanceof BatchKeyGroupingSupport
+                && ((BatchKeyGroupingSupport) backend).indexedBatchFoldEnabled();
+    }
+
     static int groupHashTokensNatively(
             KeyedStateBackend<?> backend, ByteBuffer tokens, int count, ByteBuffer packedPlan) {
         if (!(backend instanceof BatchKeyGroupingSupport)) {

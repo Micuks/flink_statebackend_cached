@@ -31,9 +31,13 @@ import org.apache.flink.util.Collector;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -183,6 +187,172 @@ class LocalPreaggTest {
         assertNull(
                 LocalPreagg.groupInputsPacked(
                         Arrays.asList("a", "b"), Arrays.asList(1, 2), badOffsets, 2));
+    }
+
+    @Test
+    void testIndexedPackedPlanConsumesOriginalRecordsInGroupArrivalOrder() {
+        LocalPreagg.NativeGroupingWorkspace workspace =
+                packedWorkspace(
+                        5,
+                        3,
+                        new int[] {0, 1, 3},
+                        new int[] {0, 2, 4, 5},
+                        new int[] {0, 1, 0, 2, 1});
+        List<String> keys = Arrays.asList("a", "b", "a", "c", "b");
+        for (int source = 0; source < keys.size(); source++) {
+            workspace.putIndexedSource(
+                    source, source, keys.get(source), keys.get(source).hashCode());
+        }
+
+        LocalPreagg.IndexedGroups groups = LocalPreagg.validatePackedIndexedGroups(workspace, 5, 3);
+
+        assertEquals(Arrays.asList("a", "b", "c"), groups.keys);
+        assertEquals(3, groups.groupCount);
+        StreamRecord<?>[] records =
+                new StreamRecord<?>[] {
+                    new StreamRecord<>(1),
+                    new StreamRecord<>(2),
+                    new StreamRecord<>(3),
+                    new StreamRecord<>(4),
+                    new StreamRecord<>(5)
+                };
+        LocalPreagg.IndexedRecordValueList values = new LocalPreagg.IndexedRecordValueList();
+        values.reset(
+                records,
+                groups.bufferIndexesByGroup,
+                groups.groupOffsets[0],
+                groups.groupOffsets[1]);
+        assertEquals(Arrays.asList(1, 3), values);
+        values.reset(
+                records,
+                groups.bufferIndexesByGroup,
+                groups.groupOffsets[1],
+                groups.groupOffsets[2]);
+        assertEquals(Arrays.asList(2, 5), values);
+        values.reset(
+                records,
+                groups.bufferIndexesByGroup,
+                groups.groupOffsets[2],
+                groups.groupOffsets[3]);
+        assertEquals(Arrays.asList(4), values);
+    }
+
+    @Test
+    void testIndexedValueRemovalDoesNotChangeFollowingGroup() {
+        LocalPreagg.NativeGroupingWorkspace workspace =
+                packedWorkspace(
+                        4, 2, new int[] {0, 1}, new int[] {0, 2, 4}, new int[] {0, 1, 0, 1});
+        List<String> keys = Arrays.asList("a", "b", "a", "b");
+        for (int source = 0; source < keys.size(); source++) {
+            workspace.putIndexedSource(
+                    source, source, keys.get(source), keys.get(source).hashCode());
+        }
+        LocalPreagg.IndexedGroups groups = LocalPreagg.validatePackedIndexedGroups(workspace, 4, 2);
+        StreamRecord<?>[] records =
+                new StreamRecord<?>[] {
+                    new StreamRecord<>(1),
+                    new StreamRecord<>(2),
+                    new StreamRecord<>(3),
+                    new StreamRecord<>(4)
+                };
+        LocalPreagg.IndexedRecordValueList values = new LocalPreagg.IndexedRecordValueList();
+        values.reset(
+                records,
+                groups.bufferIndexesByGroup,
+                groups.groupOffsets[0],
+                groups.groupOffsets[1]);
+        Iterator<Object> firstGroup = values.iterator();
+        assertEquals(1, firstGroup.next());
+        firstGroup.remove();
+        assertEquals(Arrays.asList(3), values);
+
+        values.reset(
+                records,
+                groups.bufferIndexesByGroup,
+                groups.groupOffsets[1],
+                groups.groupOffsets[2]);
+        assertEquals(Arrays.asList(2, 4), values);
+    }
+
+    @Test
+    void testIndexedPackedPlanRejectsHashCollisionBeforeProcessing() {
+        CollisionKey left = new CollisionKey("left");
+        CollisionKey right = new CollisionKey("right");
+        LocalPreagg.NativeGroupingWorkspace workspace =
+                packedWorkspace(2, 1, new int[] {0}, new int[] {0, 2}, new int[] {0, 0});
+        workspace.putIndexedSource(0, 0, left, left.hashCode());
+        workspace.putIndexedSource(1, 1, right, right.hashCode());
+
+        assertNull(LocalPreagg.validatePackedIndexedGroups(workspace, 2, 1));
+    }
+
+    @Test
+    void testIndexedPackedPlanMatchesJavaGroupingAcrossRandomBatchesAndBufferHoles() {
+        Random random = new Random(0x4b554e50454e47L);
+        for (int trial = 0; trial < 250; trial++) {
+            int sourceCount = 1 + random.nextInt(64);
+            int distinctKeyBound = 1 + random.nextInt(Math.min(12, sourceCount));
+            List<Object> keys = new ArrayList<>(sourceCount);
+            List<Object> expectedValues = new ArrayList<>(sourceCount);
+            LinkedHashMap<Object, Integer> groupIds = new LinkedHashMap<>();
+            int[] sourceGroups = new int[sourceCount];
+            int[] firstSources = new int[distinctKeyBound];
+            int[] counts = new int[distinctKeyBound];
+            Arrays.fill(firstSources, -1);
+            for (int source = 0; source < sourceCount; source++) {
+                String key = "key-" + random.nextInt(distinctKeyBound);
+                Integer group = groupIds.get(key);
+                if (group == null) {
+                    group = groupIds.size();
+                    groupIds.put(key, group);
+                    firstSources[group] = source;
+                }
+                keys.add(key);
+                expectedValues.add(trial * 1000 + source);
+                sourceGroups[source] = group;
+                counts[group]++;
+            }
+            int groupCount = groupIds.size();
+            int[] offsets = new int[groupCount + 1];
+            for (int group = 0; group < groupCount; group++) {
+                offsets[group + 1] = offsets[group] + counts[group];
+            }
+            firstSources = Arrays.copyOf(firstSources, groupCount);
+
+            LocalPreagg.NativeGroupingWorkspace workspace =
+                    packedWorkspace(sourceCount, groupCount, firstSources, offsets, sourceGroups);
+            StreamRecord<?>[] records = new StreamRecord<?>[sourceCount * 2 + 3];
+            int bufferIndex = random.nextInt(3);
+            for (int source = 0; source < sourceCount; source++) {
+                records[bufferIndex] = new StreamRecord<>(expectedValues.get(source));
+                workspace.putIndexedSource(
+                        source, bufferIndex, keys.get(source), keys.get(source).hashCode());
+                bufferIndex += 1 + random.nextInt(2);
+            }
+
+            LocalPreagg.IndexedGroups actual =
+                    LocalPreagg.validatePackedIndexedGroups(workspace, sourceCount, groupCount);
+            assertEquals(new ArrayList<>(groupIds.keySet()), actual.keys, "trial=" + trial);
+
+            LinkedHashMap<Object, List<Object>> expectedGroups = new LinkedHashMap<>();
+            for (int source = 0; source < sourceCount; source++) {
+                expectedGroups
+                        .computeIfAbsent(keys.get(source), ignored -> new ArrayList<>())
+                        .add(expectedValues.get(source));
+            }
+            LocalPreagg.IndexedRecordValueList actualValues =
+                    new LocalPreagg.IndexedRecordValueList();
+            int group = 0;
+            for (Map.Entry<Object, List<Object>> expected : expectedGroups.entrySet()) {
+                actualValues.reset(
+                        records,
+                        actual.bufferIndexesByGroup,
+                        actual.groupOffsets[group],
+                        actual.groupOffsets[group + 1]);
+                assertEquals(expected.getValue(), actualValues, "trial=" + trial);
+                group++;
+            }
+        }
     }
 
     private static LocalPreagg.NativeGroupingWorkspace packedWorkspace(

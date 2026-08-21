@@ -23,7 +23,7 @@ import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
-import org.apache.flink.streaming.api.operators.BatchableKeyedFunction;
+import org.apache.flink.streaming.api.operators.ReusableBatchableKeyedFunction;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.utils.JoinedRowData;
 import org.apache.flink.table.runtime.dataview.PerKeyStateDataViewStore;
@@ -45,7 +45,7 @@ import static org.apache.flink.table.runtime.util.StateConfigUtil.createTtlConfi
 
 /** Aggregate Function used for the groupby (without window) aggregate. */
 public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, RowData>
-        implements BatchableKeyedFunction<RowData, RowData> {
+        implements ReusableBatchableKeyedFunction<RowData, RowData> {
 
     private static final long serialVersionUID = -4767158666069797704L;
 

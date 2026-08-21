@@ -43,6 +43,11 @@ public interface BatchKeyGroupingSupport {
     /** Maximum source entries accepted by {@link #groupHashTokens}. */
     int maxGroupingEntries();
 
+    /** Whether this backend enables the reusable indexed LocalPreAgg consumer for this job. */
+    default boolean indexedBatchFoldEnabled() {
+        return false;
+    }
+
     /**
      * Groups {@code count} native-order 32-bit tokens and writes a packed plan.
      *

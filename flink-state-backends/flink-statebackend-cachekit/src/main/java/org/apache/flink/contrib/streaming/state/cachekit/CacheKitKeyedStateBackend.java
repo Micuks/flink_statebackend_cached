@@ -1024,6 +1024,15 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 : 0;
     }
 
+    @Override
+    public boolean indexedBatchFoldEnabled() {
+        NativeRequestPlaneCoordinator coordinator = nativeRequestPlaneCoordinator;
+        return coordinator != null
+                && coordinator.isActive()
+                && coordinator.options().preaggEnabled()
+                && coordinator.options().indexedFoldEnabled();
+    }
+
     /**
      * Groups caller-owned Java hash tokens directly into a caller-owned packed plan.
      *
