@@ -32,6 +32,7 @@ import org.apache.flink.streaming.api.operators.TimestampedCollector;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.StatePrefetcher;
 
+import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -90,6 +91,7 @@ public final class LocalPreagg {
     private static final AtomicLong INDEXED_FOLD_RECORDS = new AtomicLong();
     private static final AtomicLong INDEXED_FOLD_GROUPS = new AtomicLong();
     private static final AtomicLong INDEXED_FOLD_PLAN_FALLBACKS = new AtomicLong();
+    private static final String JVM_ID = ManagementFactory.getRuntimeMXBean().getName();
     private static final Field NO_FIELD;
 
     static {
@@ -377,7 +379,8 @@ public final class LocalPreagg {
                 double collapse = groupTotal == 0 ? 0 : (double) records / groupTotal;
                 System.err.println(
                         String.format(
-                                "[LOCAL-PREAGG INDEXED] op=%s dispatches=%d records=%d groups=%d collapse=%.2fx planFallbacks=%d materializedValueCopiesAvoided=%d allDispatches=%d allRecords=%d allGroups=%d",
+                                "[LOCAL-PREAGG INDEXED] jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx planFallbacks=%d materializedValueCopiesAvoided=%d allDispatches=%d allRecords=%d allGroups=%d",
+                                JVM_ID,
                                 op.getClass().getSimpleName(),
                                 dispatches,
                                 records,
