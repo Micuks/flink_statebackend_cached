@@ -311,6 +311,48 @@ class NativeRequestPlaneCoordinatorTest {
     }
 
     @Test
+    void testDirectArenaDescriptorsReferencePreparedKeysAndFillKeepsSelectionOrder()
+            throws Exception {
+        FakePlane plane = new FakePlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(1), plane);
+        assertEquals(6_528, coordinator.regularSlotDirectBytesForTesting());
+
+        try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
+            slot.prepareLatest(
+                    7,
+                    23L,
+                    java.util.Arrays.asList(
+                            new byte[] {10, 11}, new byte[] {20}, new byte[] {30, 31, 32}));
+            int[] selection = new int[] {2, 0};
+            slot.prepareDirectArenaMultiGet(selection, 0, 2);
+
+            ByteBuffer descriptors =
+                    slot.directMultiGetDescriptors().order(ByteOrder.nativeOrder());
+            assertEquals(7, descriptors.getInt(0));
+            assertEquals(2, descriptors.getInt(4));
+            assertEquals(23L, descriptors.getLong(8));
+            assertEquals(3, descriptors.getInt(20));
+            int second = org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader
+                    .DIRECT_ARENA_DESCRIPTOR_BYTES;
+            assertEquals(0, descriptors.getInt(second + 4));
+            assertEquals(2, descriptors.getInt(second + 20));
+
+            slot.prepareFillFromPreparedIndices(
+                    7,
+                    23L,
+                    selection,
+                    2,
+                    java.util.Arrays.asList(new byte[] {1, 2, 3, 4}, null));
+            assertEquals(2, coordinator.fill(slot));
+            assertArrayEquals(new byte[] {30, 31, 32}, plane.fillKey);
+            assertArrayEquals(new byte[] {1, 2, 3, 4}, plane.fillValue);
+            assertEquals(23L, plane.fillGeneration);
+        }
+        coordinator.close();
+    }
+
+    @Test
     void testGrouperPublishesOneStableGroupPerSource() throws Exception {
         FakePlane plane = new FakePlane();
         NativeRequestPlaneCoordinator coordinator =
@@ -381,6 +423,35 @@ class NativeRequestPlaneCoordinatorTest {
     private static NativeRequestPlaneOptions options(int slots) {
         return new NativeRequestPlaneOptions(
                 true, "", "auto", 16, 1024, 1024, 4, 1024, 1024, 1, slots, false);
+    }
+
+    private static NativeRequestPlaneOptions directArenaOptions(int slots) {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                16,
+                1024,
+                1024,
+                4,
+                1024,
+                1024,
+                1,
+                slots,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                true,
+                false,
+                true,
+                true,
+                false,
+                8192,
+                0.02,
+                262144);
     }
 
     private static final class FakePlane implements NativeRequestPlane {

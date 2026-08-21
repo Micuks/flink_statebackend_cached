@@ -53,6 +53,7 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(options.prefetchEnabled());
         assertFalse(options.preaggEnabled());
         assertFalse(options.compactSelectedProbeEnabled());
+        assertFalse(options.directArenaMultiGetEnabled());
         assertFalse(options.requiresValueCache());
     }
 
@@ -84,6 +85,7 @@ class NativeRequestPlaneConfigurationTest {
         config.set(CacheKitStateBackendFactory.NATIVE_MAILBOX_BATCH_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_LOCAL_PREAGG_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_COMPACT_SELECTED_PROBE_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_DIRECT_ARENA_MULTIGET_ENABLED, true);
 
         NativeRequestPlaneOptions options =
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(config);
@@ -109,6 +111,7 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(options.prefetchEnabled());
         assertTrue(options.preaggEnabled());
         assertTrue(options.compactSelectedProbeEnabled());
+        assertTrue(options.directArenaMultiGetEnabled());
         assertTrue(options.requiresValueCache());
     }
 
@@ -144,6 +147,72 @@ class NativeRequestPlaneConfigurationTest {
                                 1,
                                 1,
                                 1));
+    }
+
+    @Test
+    void testDirectArenaRequiresCompactSelectedProbe() {
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        new NativeRequestPlaneOptions(
+                                true,
+                                "",
+                                "auto",
+                                128,
+                                4096,
+                                4096,
+                                16,
+                                4096,
+                                4096,
+                                1,
+                                2,
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                true,
+                                true,
+                                false,
+                                false,
+                                true,
+                                false,
+                                8192,
+                                0.02,
+                                262144));
+    }
+
+    @Test
+    void testDirectArenaRequiresAtLeastOneBytePerMaximumBatchEntry() {
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        new NativeRequestPlaneOptions(
+                                true,
+                                "",
+                                "auto",
+                                128,
+                                4096,
+                                4096,
+                                16,
+                                4096,
+                                63,
+                                1,
+                                2,
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                true,
+                                true,
+                                false,
+                                true,
+                                true,
+                                false,
+                                8192,
+                                0.02,
+                                262144));
     }
 
     @Test

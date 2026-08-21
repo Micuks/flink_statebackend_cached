@@ -21,6 +21,7 @@ package org.apache.flink.contrib.streaming.state;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 
+import java.nio.ByteBuffer;
 import java.util.List;
 
 /**
@@ -33,6 +34,18 @@ import java.util.List;
  */
 @Internal
 public interface RocksDBBatchValueReader<K, N, V> {
+
+    int DIRECT_ARENA_DESCRIPTOR_BYTES = 32;
+    int DIRECT_ARENA_MAX_BATCH = 64;
+    int DIRECT_ARENA_STATE_ID_OFFSET = 0;
+    int DIRECT_ARENA_ORIGINAL_INDEX_OFFSET = 4;
+    int DIRECT_ARENA_GENERATION_OFFSET = 8;
+    int DIRECT_ARENA_KEY_OFFSET = 16;
+    int DIRECT_ARENA_KEY_LENGTH_OFFSET = 20;
+    int DIRECT_ARENA_VALUE_OFFSET = 24;
+    int DIRECT_ARENA_RESULT_OFFSET = 28;
+    int DIRECT_ARENA_NOT_FOUND = -1;
+    int DIRECT_ARENA_OVERFLOW = -2;
 
     /**
      * Returns the state default value. Batch readers use this when RocksDB reports a missing key so
@@ -70,6 +83,38 @@ public interface RocksDBBatchValueReader<K, N, V> {
 
     List<byte[]> getSerializedValuesByRocksDBKeys(
             List<byte[]> rocksDBKeys, int fromIndex, int toIndex) throws Exception;
+
+    /**
+     * Whether this reader can execute one RocksDB MultiGet directly from caller-owned arenas.
+     *
+     * <p>A true return only advertises the Java API. A missing native symbol may still surface as a
+     * {@link LinkageError}; callers must then disable only this optional path and use the ordinary
+     * authoritative reader.
+     */
+    default boolean supportsDirectArenaMultiGet() {
+        return false;
+    }
+
+    /**
+     * Executes one ordered RocksDB MultiGet using the 32-byte native-order descriptor ABI.
+     *
+     * <p>The first three descriptor fields are caller-owned. The final field is overwritten with
+     * an exact value length, {@link #DIRECT_ARENA_NOT_FOUND}, or {@link #DIRECT_ARENA_OVERFLOW}.
+     * If any entry overflows its fixed-size value slot, the implementation must leave the complete
+     * value arena unchanged. Callers must therefore discard the entire direct result and fall back
+     * for that chunk; consuming only non-overflow slots is forbidden.
+     *
+     * @return the number of present keys, including overflowed present values
+     */
+    default int getSerializedValuesByRocksDBKeyArena(
+            ByteBuffer keyArena,
+            ByteBuffer descriptors,
+            int count,
+            ByteBuffer valueArena,
+            int valueStride)
+            throws Exception {
+        throw new UnsupportedOperationException("Direct-arena MultiGet is unavailable.");
+    }
 
     List<byte[]> getSerializedValues(
             List<byte[]> serializedKeyAndNamespaces,

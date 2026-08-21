@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 
 /**
  * Keyed-backend owner for one native request plane and a bounded set of direct batch slots.
@@ -530,6 +531,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         private final DirectBufferDataOutputView valueArenaOutput;
         private final ByteBuffer valueMetadata;
         private final ByteBuffer fillResults;
+        private final ByteBuffer directMultiGetDescriptors;
         private final ByteBuffer uniqueSourceIndexes;
         private final ByteBuffer sourceGroupIndexes;
         private final long allocatedDirectBytes;
@@ -538,6 +540,8 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         private int fillValueBytes;
         private long preparedFillGeneration;
         private int compactedEntryCount;
+        private int directMultiGetCount;
+        private int directMultiGetValueStride;
 
         private BatchSlot(NativeRequestPlaneCoordinator owner, NativeRequestPlaneOptions options) {
             this(owner, options, false);
@@ -568,6 +572,12 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                     Math.multiplyExact(entries, NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES);
             int fillResultBytes =
                     Math.multiplyExact(entries, NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES);
+            int directMultiGetDescriptorBytes =
+                    mutationOnly || !options.directArenaMultiGetEnabled()
+                            ? 0
+                            : Math.multiplyExact(
+                                    RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
+                                    RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES);
             int uniqueIndexBytes = mutationOnly ? 0 : Math.multiplyExact(entries, Integer.BYTES);
             int groupIndexBytes = uniqueIndexBytes;
 
@@ -588,6 +598,9 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                     ByteBuffer.allocateDirect(valueMetadataBytes).order(ByteOrder.nativeOrder());
             this.fillResults =
                     ByteBuffer.allocateDirect(fillResultBytes).order(ByteOrder.nativeOrder());
+            this.directMultiGetDescriptors =
+                    ByteBuffer.allocateDirect(directMultiGetDescriptorBytes)
+                            .order(ByteOrder.nativeOrder());
             this.uniqueSourceIndexes =
                     ByteBuffer.allocateDirect(uniqueIndexBytes).order(ByteOrder.nativeOrder());
             this.sourceGroupIndexes =
@@ -602,6 +615,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                             + valueArenaBytes
                             + valueMetadataBytes
                             + fillResultBytes
+                            + directMultiGetDescriptorBytes
                             + uniqueIndexBytes
                             + groupIndexBytes;
         }
@@ -714,6 +728,112 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             return copy;
         }
 
+        /**
+         * Builds one bounded direct-arena MultiGet descriptor chunk over prepared keys.
+         *
+         * <p>The prepared key arena remains immutable. The value arena is divided into 64 fixed
+         * slots regardless of the current chunk size, so changing the final chunk length cannot
+         * change the overflow boundary.
+         */
+        public void prepareDirectArenaMultiGet(
+                int[] preparedIndices, int fromIndex, int count) {
+            requireLeased();
+            Objects.requireNonNull(preparedIndices, "preparedIndices");
+            if (fromIndex < 0
+                    || count <= 0
+                    || count > RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH
+                    || fromIndex > preparedIndices.length - count) {
+                throw new IllegalArgumentException("Invalid direct-arena MultiGet chunk.");
+            }
+            int stride =
+                    valueArena.capacity() / RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH;
+            if (stride <= 0) {
+                throw new IllegalStateException(
+                        "Native batch value arena is too small for direct MultiGet slots.");
+            }
+            directMultiGetDescriptors.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            for (int target = 0; target < count; target++) {
+                int source = preparedIndices[fromIndex + target];
+                checkPreparedIndex(source);
+                int base = target * RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES;
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_STATE_ID_OFFSET,
+                        preparedKeys.stateId(source));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_ORIGINAL_INDEX_OFFSET, source);
+                directMultiGetDescriptors.putLong(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_GENERATION_OFFSET,
+                        preparedKeys.generation(source));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_KEY_OFFSET,
+                        preparedKeys.arenaOffset(source));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_KEY_LENGTH_OFFSET,
+                        preparedKeys.serializedLength(source));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_VALUE_OFFSET,
+                        target * stride);
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET,
+                        Integer.MIN_VALUE);
+            }
+            directMultiGetCount = count;
+            directMultiGetValueStride = stride;
+        }
+
+        public ByteBuffer directMultiGetKeyArena() {
+            requireDirectMultiGetPrepared();
+            return preparedKeys.arenaSlice();
+        }
+
+        public ByteBuffer directMultiGetDescriptors() {
+            requireDirectMultiGetPrepared();
+            ByteBuffer descriptors =
+                    directMultiGetDescriptors.duplicate().order(ByteOrder.nativeOrder());
+            descriptors.position(0);
+            descriptors.limit(
+                    directMultiGetCount
+                            * RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES);
+            return descriptors.slice().order(ByteOrder.nativeOrder());
+        }
+
+        public ByteBuffer directMultiGetValueArena() {
+            requireDirectMultiGetPrepared();
+            ByteBuffer values = valueArena.duplicate();
+            values.position(0);
+            values.limit(directMultiGetCount * directMultiGetValueStride);
+            return values.slice();
+        }
+
+        public int directMultiGetValueStride() {
+            requireDirectMultiGetPrepared();
+            return directMultiGetValueStride;
+        }
+
+        public int directMultiGetResult(int index) {
+            requireDirectMultiGetIndex(index);
+            return directMultiGetDescriptors.getInt(
+                    index * RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES
+                            + RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET);
+        }
+
+        public byte[] copyDirectMultiGetValue(int index) {
+            int length = directMultiGetResult(index);
+            if (length < 0 || length > directMultiGetValueStride) {
+                throw new IllegalStateException(
+                        "Direct-arena result at " + index + " is not a present in-slot value.");
+            }
+            byte[] copy = new byte[length];
+            if (length != 0) {
+                ByteBuffer source = valueArena.duplicate();
+                source.position(index * directMultiGetValueStride);
+                source.get(copy);
+            }
+            return copy;
+        }
+
         public void prepareFill(
                 int stateId,
                 long generation,
@@ -759,6 +879,40 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 }
                 valueMetadata.putInt(
                         metadataBase + NativeRequestPlaneBridge.FILL_VALUE_RESERVED_OFFSET, 0);
+            }
+        }
+
+        /** Prepares native fill while copying miss keys direct-to-direct from the prepared arena. */
+        public void prepareFillFromPreparedIndices(
+                int stateId,
+                long generation,
+                int[] preparedIndices,
+                int count,
+                List<byte[]> compactMissValues)
+                throws IOException {
+            requireLeased();
+            Objects.requireNonNull(preparedIndices, "preparedIndices");
+            Objects.requireNonNull(compactMissValues, "compactMissValues");
+            if (count < 0
+                    || count > preparedIndices.length
+                    || count != compactMissValues.size()) {
+                throw new IllegalArgumentException("Prepared miss key/value counts differ.");
+            }
+            missKeys.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            fillValueBytes = 0;
+            ByteBuffer preparedArena = preparedKeys.arenaSlice();
+            for (int index = 0; index < count; index++) {
+                int source = preparedIndices[index];
+                checkPreparedIndex(source);
+                missKeys.appendSerialized(
+                        stateId,
+                        generation,
+                        preparedArena,
+                        preparedKeys.arenaOffset(source),
+                        preparedKeys.serializedLength(source));
+                putFillValueMetadata(index, compactMissValues.get(index));
             }
         }
 
@@ -1082,6 +1236,22 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             fillValueBytes = 0;
             preparedFillGeneration = 0;
             compactedEntryCount = 0;
+            directMultiGetCount = 0;
+            directMultiGetValueStride = 0;
+        }
+
+        private void requireDirectMultiGetPrepared() {
+            requireLeased();
+            if (directMultiGetCount <= 0 || directMultiGetValueStride <= 0) {
+                throw new IllegalStateException("Direct-arena MultiGet chunk is not prepared.");
+            }
+        }
+
+        private void requireDirectMultiGetIndex(int index) {
+            requireDirectMultiGetPrepared();
+            if (index < 0 || index >= directMultiGetCount) {
+                throw new IndexOutOfBoundsException("Direct-arena result index: " + index);
+            }
         }
 
         private void requireLeased() {

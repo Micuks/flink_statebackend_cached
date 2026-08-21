@@ -148,6 +148,34 @@ public final class SerializedKeyBatch<K, N> {
     }
 
     /**
+     * Appends an exact prepared-key region from direct memory without a heap intermediate.
+     *
+     * <p>The copy is transactional: capacity or bounds failure leaves both the arena position and
+     * visible metadata unchanged.
+     */
+    int appendSerialized(
+            int stateId,
+            long generation,
+            ByteBuffer source,
+            int sourceOffset,
+            int serializedLength)
+            throws IOException {
+        Objects.requireNonNull(source, "source");
+        if (entryCount >= maxEntries) {
+            throw new EOFException(
+                    "Direct metadata capacity is exhausted at " + entryCount + " entries.");
+        }
+        int arenaCheckpoint = arenaOutput.checkpoint();
+        try {
+            arenaOutput.write(source, sourceOffset, serializedLength);
+            return commitMetadata(stateId, generation, arenaCheckpoint, serializedLength);
+        } catch (IOException | RuntimeException failure) {
+            arenaOutput.truncateTo(arenaCheckpoint);
+            throw failure;
+        }
+    }
+
+    /**
      * Appends one exact key without first materializing a heap {@code byte[]}.
      *
      * <p>The writer must emit the complete authoritative identity, including any key-group,

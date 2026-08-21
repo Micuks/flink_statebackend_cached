@@ -345,6 +345,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Probe mailbox-compacted prepared keys in their original direct arena. "
                                                                         + "Only RocksDB misses materialize heap key arrays; requires native mailbox and prefetch.");
 
+        public static final ConfigOption<Boolean> NATIVE_DIRECT_ARENA_MULTIGET_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.direct-arena-multiget.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Read compact-selected RocksDB misses directly from the prepared-key arena through one bounded MultiGet JNI call. "
+                                                                        + "Any value-slot overflow falls back for the complete direct chunk.");
+
         public static final ConfigOption<Boolean>
                         NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_BYPASS_ENABLED =
                         ConfigOptions.key(
@@ -579,6 +588,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_MAILBOX_BATCH_ENABLED),
                                 config.get(NATIVE_LOCAL_PREAGG_ENABLED),
                                 config.get(NATIVE_COMPACT_SELECTED_PROBE_ENABLED),
+                                config.get(NATIVE_DIRECT_ARENA_MULTIGET_ENABLED),
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_BYPASS_ENABLED),
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_WINDOW_PROBES),
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_MIN_USEFUL_HIT_RATE),

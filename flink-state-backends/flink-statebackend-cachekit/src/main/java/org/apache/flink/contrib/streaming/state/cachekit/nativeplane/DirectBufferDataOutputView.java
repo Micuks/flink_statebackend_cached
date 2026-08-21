@@ -135,6 +135,20 @@ public final class DirectBufferDataOutputView implements PositionedDataOutputVie
         buffer.put(source, offset, length);
     }
 
+    /** Copies one bounded region from a ByteBuffer without changing the source view. */
+    void write(ByteBuffer source, int offset, int length) throws IOException {
+        Objects.requireNonNull(source, "source");
+        if ((offset | length) < 0 || offset > source.limit() - length) {
+            throw new IndexOutOfBoundsException(
+                    "offset=" + offset + ", length=" + length + ", limit=" + source.limit());
+        }
+        ensureWritable(length);
+        ByteBuffer copy = source.duplicate();
+        copy.position(offset);
+        copy.limit(offset + length);
+        buffer.put(copy);
+    }
+
     @Override
     public void writeBoolean(boolean value) throws IOException {
         write(value ? 1 : 0);

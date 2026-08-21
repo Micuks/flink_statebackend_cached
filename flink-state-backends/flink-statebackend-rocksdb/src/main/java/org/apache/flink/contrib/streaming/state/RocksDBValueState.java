@@ -33,6 +33,7 @@ import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.RocksDBException;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -164,6 +165,29 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
         List<byte[]> keyRange = rocksDBKeys.subList(fromIndex, toIndex);
         return backend.db.multiGetAsList(
                 Collections.nCopies(keyRange.size(), columnFamily), keyRange);
+    }
+
+    @Override
+    public boolean supportsDirectArenaMultiGet() {
+        return true;
+    }
+
+    @Override
+    public int getSerializedValuesByRocksDBKeyArena(
+            ByteBuffer keyArena,
+            ByteBuffer descriptors,
+            int count,
+            ByteBuffer valueArena,
+            int valueStride)
+            throws RocksDBException {
+        return backend.db.multiGetDirectArena(
+                columnFamily,
+                backend.getReadOptions(),
+                keyArena,
+                descriptors,
+                count,
+                valueArena,
+                valueStride);
     }
 
     @Override

@@ -19,6 +19,7 @@
 package org.apache.flink.contrib.streaming.state.cachekit.nativeplane;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 
 import java.io.Serializable;
 import java.nio.file.Path;
@@ -56,6 +57,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final boolean mailboxBatchEnabled;
     private final boolean preaggEnabled;
     private final boolean compactSelectedProbeEnabled;
+    private final boolean directArenaMultiGetEnabled;
     private final boolean mapSnapshotAdaptiveBypassEnabled;
     private final int mapSnapshotAdaptiveWindowProbes;
     private final double mapSnapshotAdaptiveMinUsefulHitRate;
@@ -456,6 +458,60 @@ public final class NativeRequestPlaneOptions implements Serializable {
             int mapSnapshotAdaptiveWindowProbes,
             double mapSnapshotAdaptiveMinUsefulHitRate,
             int mapSnapshotAdaptiveResampleIntervalProbes) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                aarch64Only,
+                writeThroughMutations,
+                valueCacheEnabled,
+                mapCacheEnabled,
+                mapSnapshotEnabled,
+                prefetchEnabled,
+                mailboxBatchEnabled,
+                preaggEnabled,
+                compactSelectedProbeEnabled,
+                false,
+                mapSnapshotAdaptiveBypassEnabled,
+                mapSnapshotAdaptiveWindowProbes,
+                mapSnapshotAdaptiveMinUsefulHitRate,
+                mapSnapshotAdaptiveResampleIntervalProbes);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only,
+            boolean writeThroughMutations,
+            boolean valueCacheEnabled,
+            boolean mapCacheEnabled,
+            boolean mapSnapshotEnabled,
+            boolean prefetchEnabled,
+            boolean mailboxBatchEnabled,
+            boolean preaggEnabled,
+            boolean compactSelectedProbeEnabled,
+            boolean directArenaMultiGetEnabled,
+            boolean mapSnapshotAdaptiveBypassEnabled,
+            int mapSnapshotAdaptiveWindowProbes,
+            double mapSnapshotAdaptiveMinUsefulHitRate,
+            int mapSnapshotAdaptiveResampleIntervalProbes) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
         this.kernel = normalizeKernel(kernel);
@@ -525,6 +581,18 @@ public final class NativeRequestPlaneOptions implements Serializable {
                     "Compact-selected probe requires native request plane, prefetch, and mailbox batch.");
         }
         this.compactSelectedProbeEnabled = compactSelectedProbeEnabled;
+        if (directArenaMultiGetEnabled && !compactSelectedProbeEnabled) {
+            throw new IllegalArgumentException(
+                    "Direct-arena MultiGet requires compact-selected prepared-key probe.");
+        }
+        if (directArenaMultiGetEnabled
+                && batchValueArenaBytes < RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
+            throw new IllegalArgumentException(
+                    "Direct-arena MultiGet requires batch-value-arena-bytes to be at least "
+                            + RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH
+                            + ".");
+        }
+        this.directArenaMultiGetEnabled = directArenaMultiGetEnabled;
         if (mapSnapshotAdaptiveBypassEnabled && !mapSnapshotEnabled) {
             throw new IllegalArgumentException(
                     "Native MapSnapshot adaptive bypass requires native MapSnapshot to be enabled.");
@@ -672,6 +740,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
     /** Whether compacted mailbox keys are probed directly from their original prepared arena. */
     public boolean compactSelectedProbeEnabled() {
         return compactSelectedProbeEnabled;
+    }
+
+    /** Whether compacted RocksDB misses are read from the original prepared-key direct arena. */
+    public boolean directArenaMultiGetEnabled() {
+        return directArenaMultiGetEnabled;
     }
 
     /** Whether this treatment consumes the bounded Java ValueState cache. */
