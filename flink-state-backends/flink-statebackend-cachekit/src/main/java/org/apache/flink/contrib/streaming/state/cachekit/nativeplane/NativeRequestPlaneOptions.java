@@ -758,6 +758,8 @@ public final class NativeRequestPlaneOptions implements Serializable {
         switch (kernel) {
             case "auto":
                 return NativeRequestPlaneBridge.KERNEL_AUTO;
+            case "scalar":
+                return NativeRequestPlaneBridge.KERNEL_SCALAR;
             case "neon":
                 return NativeRequestPlaneBridge.KERNEL_NEON_CRC;
             case "sve256":
@@ -893,10 +895,12 @@ public final class NativeRequestPlaneOptions implements Serializable {
         String normalized =
                 Objects.requireNonNull(kernel, "kernel").trim().toLowerCase(Locale.ROOT);
         if (!normalized.equals("auto")
+                && !normalized.equals("scalar")
                 && !normalized.equals("neon")
                 && !normalized.equals("sve256")) {
             throw new IllegalArgumentException(
-                    "Native request-plane kernel must be auto, neon, or sve256: " + kernel);
+                    "Native request-plane kernel must be auto, scalar, neon, or sve256: "
+                            + kernel);
         }
         return normalized;
     }

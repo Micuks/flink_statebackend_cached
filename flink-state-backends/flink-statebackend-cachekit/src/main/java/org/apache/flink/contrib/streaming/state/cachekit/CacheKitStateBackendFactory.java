@@ -189,7 +189,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         .stringType()
                                         .defaultValue("auto")
                                         .withDescription(
-                                                        "Native fingerprint kernel: auto, neon, or sve256. "
+                                                        "Native fingerprint kernel: auto, scalar, neon, or sve256. "
                                                                         + "Kunpeng SVE-256 does not imply SVE2.");
 
         public static final ConfigOption<Integer> NATIVE_REQUEST_PLANE_CAPACITY_ENTRIES =

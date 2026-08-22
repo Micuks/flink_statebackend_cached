@@ -122,6 +122,19 @@ class NativeRequestPlaneConfigurationTest {
     }
 
     @Test
+    void testFlinkConfigurationCarriesExplicitScalarKernel() {
+        Configuration config = new Configuration();
+        config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_KERNEL, "scalar");
+
+        NativeRequestPlaneOptions options =
+                CacheKitStateBackendFactory.nativeRequestPlaneOptions(config);
+
+        assertEquals("scalar", options.kernel());
+        assertEquals(NativeRequestPlaneBridge.KERNEL_SCALAR, options.kernelPreference());
+    }
+
+    @Test
     void testSVE2AndRelativeLibraryAreRejected() {
         assertThrows(
                 IllegalArgumentException.class,
