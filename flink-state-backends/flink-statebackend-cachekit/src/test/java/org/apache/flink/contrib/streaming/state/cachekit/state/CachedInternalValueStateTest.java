@@ -2281,6 +2281,29 @@ class CachedInternalValueStateTest {
         verify(delegate, times(1)).value();
     }
 
+    @Test
+    void testResidentMutationAdaptiveGateWarmsUpAndKeepsProfitableQ18Shape() {
+        assertTrue(
+                CachedInternalValueState.isResidentMutationBatchProfitable(
+                        4095, 0, 0, 4096, 8.0, 0.10));
+        assertTrue(
+                CachedInternalValueState.isResidentMutationBatchProfitable(
+                        4096, 83_558, 3_234, 4096, 8.0, 0.10));
+    }
+
+    @Test
+    void testResidentMutationAdaptiveGateRejectsSparseOrPositiveHeavyShapes() {
+        assertFalse(
+                CachedInternalValueState.isResidentMutationBatchProfitable(
+                        4096, 16_711, 59, 4096, 8.0, 0.10));
+        assertFalse(
+                CachedInternalValueState.isResidentMutationBatchProfitable(
+                        4096, 26_132, 5_753, 4096, 8.0, 0.10));
+        assertFalse(
+                CachedInternalValueState.isResidentMutationBatchProfitable(
+                        4096, 0, 0, 4096, 8.0, 0.10));
+    }
+
     // Adding a test for BinaryRowData specifically would be better if we can
     // instantiate it.
     // Assuming we can't easily instantiate Flink internal classes without

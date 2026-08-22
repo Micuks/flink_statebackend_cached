@@ -282,6 +282,43 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "The batch advances the native generation fence before dispatch, bypasses native reads for pending dirty keys, "
                                                                         + "and publishes only prechecked resident keys in one bounded JNI fill at batch end.");
 
+        public static final ConfigOption<Boolean>
+                        NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH_ADAPTIVE =
+                                        ConfigOptions.key(
+                                                                        "state.backend.cachekit.native.value-cache.resident-mutation-batch.adaptive.enabled")
+                                                        .booleanType()
+                                                        .defaultValue(false)
+                                                        .withDescription(
+                                                                        "Adaptively use resident mutation batching only after a state demonstrates enough mutations per mailbox scope and a low enough resident-hint positive rate. "
+                                                                                        + "Unprofitable states fall back to the established exact per-mutation path.");
+
+        public static final ConfigOption<Integer>
+                        NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH_ADAPTIVE_MIN_SCOPES =
+                                        ConfigOptions.key(
+                                                                        "state.backend.cachekit.native.value-cache.resident-mutation-batch.adaptive.min-scopes")
+                                                        .intType()
+                                                        .defaultValue(4096)
+                                                        .withDescription(
+                                                                        "Mailbox scopes observed before adaptive resident mutation batching may bypass an unprofitable state.");
+
+        public static final ConfigOption<Double>
+                        NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH_ADAPTIVE_MIN_MUTATIONS_PER_SCOPE =
+                                        ConfigOptions.key(
+                                                                        "state.backend.cachekit.native.value-cache.resident-mutation-batch.adaptive.min-mutations-per-scope")
+                                                        .doubleType()
+                                                        .defaultValue(8.0)
+                                                        .withDescription(
+                                                                        "Minimum observed native mutation attempts per mailbox scope required to keep resident mutation batching active.");
+
+        public static final ConfigOption<Double>
+                        NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH_ADAPTIVE_MAX_HINT_POSITIVE_RATE =
+                                        ConfigOptions.key(
+                                                                        "state.backend.cachekit.native.value-cache.resident-mutation-batch.adaptive.max-hint-positive-rate")
+                                                        .doubleType()
+                                                        .defaultValue(0.10)
+                                                        .withDescription(
+                                                                        "Maximum observed resident-hint positive fraction allowed for adaptive mutation batching; higher fractions retain too much copy and exact-check work.");
+
         public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_ENABLED =
                         ConfigOptions.key("state.backend.cachekit.native.value-cache.enabled")
                                         .booleanType()

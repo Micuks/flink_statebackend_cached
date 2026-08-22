@@ -145,6 +145,28 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             loadBooleanConfig(
                     "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.enabled",
                     false);
+    private static final boolean NATIVE_RESIDENT_MUTATION_ADAPTIVE_ENABLED =
+            loadBooleanConfig(
+                    "state.backend.cachekit.native.value-cache.resident-mutation-batch.adaptive.enabled",
+                    false);
+    private static final int NATIVE_RESIDENT_MUTATION_ADAPTIVE_MIN_SCOPES =
+            loadIntConfig(
+                    "state.backend.cachekit.native.value-cache.resident-mutation-batch.adaptive.min-scopes",
+                    4096,
+                    1,
+                    1_000_000);
+    private static final double NATIVE_RESIDENT_MUTATION_ADAPTIVE_MIN_MUTATIONS_PER_SCOPE =
+            loadDoubleConfig(
+                    "state.backend.cachekit.native.value-cache.resident-mutation-batch.adaptive.min-mutations-per-scope",
+                    8.0,
+                    0.0,
+                    1_000_000.0);
+    private static final double NATIVE_RESIDENT_MUTATION_ADAPTIVE_MAX_HINT_POSITIVE_RATE =
+            loadDoubleConfig(
+                    "state.backend.cachekit.native.value-cache.resident-mutation-batch.adaptive.max-hint-positive-rate",
+                    0.10,
+                    0.0,
+                    1.0);
     private static final int NATIVE_ADAPTIVE_PROBE_WINDOW_KEYS =
             loadIntConfig(
                     "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.window-keys",
@@ -346,6 +368,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeMutationResidentHintPositives;
     private volatile long nativeMutationResidentHintNegatives;
     private volatile long nativeMutationFenceOnlyFlushes;
+    private volatile long nativeMutationAdaptiveBatchObservedScopes;
+    private volatile long nativeMutationAdaptiveBatchBypassedScopes;
+    private volatile long nativeMutationAdaptiveBatchAttempts;
+    private long nativeMutationAdaptiveBatchStartAttempts;
     private boolean nativeResidentMutationBatchActive;
     private long nativeResidentMutationBatchEpoch;
     private byte[] nativeResidentMutationBatchFenceKey;
@@ -1613,7 +1639,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "nativeMutationResidentHintChecks={} "
                             + "nativeMutationResidentHintPositives={} "
                             + "nativeMutationResidentHintNegatives={} "
-                            + "nativeMutationFenceOnlyFlushes={} nativeActive={} "
+                            + "nativeMutationFenceOnlyFlushes={} "
+                            + "nativeMutationAdaptiveBatchObservedScopes={} "
+                            + "nativeMutationAdaptiveBatchBypassedScopes={} "
+                            + "nativeMutationAdaptiveBatchAttempts={} "
+                            + "nativeMutationAdaptiveBatchEnabled={} nativeActive={} "
                             + "nativeKernel={} nativeFeatureBits={} nativeFeatures={} "
                             + "nativeDisableCause={} coordinatorProbeCalls={} "
                             + "coordinatorFillCalls={} coordinatorLeaseMisses={}",
@@ -1724,6 +1754,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeMutationResidentHintPositives,
                     nativeMutationResidentHintNegatives,
                     nativeMutationFenceOnlyFlushes,
+                    nativeMutationAdaptiveBatchObservedScopes,
+                    nativeMutationAdaptiveBatchBypassedScopes,
+                    nativeMutationAdaptiveBatchAttempts,
+                    NATIVE_RESIDENT_MUTATION_ADAPTIVE_ENABLED,
                     nativeRequestPlaneCoordinator != null
                             && nativeRequestPlaneCoordinator.isActive(),
                     nativeRequestPlaneCoordinator == null
@@ -2171,6 +2205,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getNativeMutationFenceOnlyFlushesForTesting() {
         return nativeMutationFenceOnlyFlushes;
+    }
+
+    long getNativeMutationAdaptiveBatchObservedScopesForTesting() {
+        return nativeMutationAdaptiveBatchObservedScopes;
+    }
+
+    long getNativeMutationAdaptiveBatchBypassedScopesForTesting() {
+        return nativeMutationAdaptiveBatchBypassedScopes;
+    }
+
+    long getNativeMutationAdaptiveBatchAttemptsForTesting() {
+        return nativeMutationAdaptiveBatchAttempts;
     }
 
     long getNativeWriteEpochForTesting() {
@@ -4465,6 +4511,17 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 || !(delegate instanceof RocksDBBatchValueReader<?, ?, ?>)) {
             return false;
         }
+        if (NATIVE_RESIDENT_MUTATION_ADAPTIVE_ENABLED
+                && !isResidentMutationBatchProfitable(
+                        nativeMutationAdaptiveBatchObservedScopes,
+                        nativeMutationAdaptiveBatchAttempts,
+                        nativeMutationResidentHintPositives,
+                        NATIVE_RESIDENT_MUTATION_ADAPTIVE_MIN_SCOPES,
+                        NATIVE_RESIDENT_MUTATION_ADAPTIVE_MIN_MUTATIONS_PER_SCOPE,
+                        NATIVE_RESIDENT_MUTATION_ADAPTIVE_MAX_HINT_POSITIVE_RATE)) {
+            nativeMutationAdaptiveBatchBypassedScopes++;
+            return false;
+        }
         try {
             int scopeKeys = 0;
             for (K key : keys) {
@@ -4479,6 +4536,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             pendingNativeResidentMutations.clear();
             nativeResidentMutationBatchEpoch = 0L;
             nativeResidentMutationBatchFenceKey = null;
+            if (NATIVE_RESIDENT_MUTATION_ADAPTIVE_ENABLED) {
+                nativeMutationAdaptiveBatchStartAttempts = nativeMutationAttempts;
+            }
             nativeResidentMutationBatchActive = true;
             nativeMutationBatchScopes++;
             nativeMutationBatchScopeKeys += scopeKeys;
@@ -4490,9 +4550,29 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeResidentBatchDirtyKeys.clear();
             pendingNativeResidentMutations.clear();
             nativeResidentMutationBatchFenceKey = null;
+            nativeMutationAdaptiveBatchStartAttempts = 0L;
             nativeResidentMutationBatchActive = false;
             return false;
         }
+    }
+
+    static boolean isResidentMutationBatchProfitable(
+            long observedScopes,
+            long observedAttempts,
+            long observedHintPositives,
+            long minimumScopes,
+            double minimumMutationsPerScope,
+            double maximumHintPositiveRate) {
+        if (observedScopes < minimumScopes) {
+            return true;
+        }
+        if (observedScopes <= 0L || observedAttempts <= 0L) {
+            return false;
+        }
+        double mutationsPerScope = (double) observedAttempts / observedScopes;
+        double hintPositiveRate = (double) observedHintPositives / observedAttempts;
+        return mutationsPerScope >= minimumMutationsPerScope
+                && hintPositiveRate <= maximumHintPositiveRate;
     }
 
     /** Flushes and clears the mailbox-confined resident-only mutation batch, if active. */
@@ -4595,9 +4675,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeMutationFailures += pendingNativeResidentMutations.size();
             nativeRuntimeFailures++;
         } finally {
+            if (NATIVE_RESIDENT_MUTATION_ADAPTIVE_ENABLED) {
+                nativeMutationAdaptiveBatchObservedScopes++;
+                nativeMutationAdaptiveBatchAttempts +=
+                        Math.max(
+                                0L,
+                                nativeMutationAttempts
+                                        - nativeMutationAdaptiveBatchStartAttempts);
+            }
             nativeResidentMutationBatchActive = false;
             nativeResidentMutationBatchEpoch = 0L;
             nativeResidentMutationBatchFenceKey = null;
+            nativeMutationAdaptiveBatchStartAttempts = 0L;
             nativeResidentBatchDirtyKeys.clear();
             pendingNativeResidentMutations.clear();
         }
