@@ -344,11 +344,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeMutationBatchCoalesced;
     private boolean nativeResidentMutationBatchActive;
     private long nativeResidentMutationBatchEpoch;
-    private final java.util.HashMap<KeyNamespaceKey<K, N>, NativeBatchResidentKey<K, N>>
-            nativeResidentBatchKeys = new java.util.HashMap<>();
     private final java.util.HashSet<KeyNamespaceKey<K, N>> nativeResidentBatchDirtyKeys =
             new java.util.HashSet<>();
-    private final java.util.LinkedHashMap<KeyNamespaceKey<K, N>, PendingNativeMutation<K, N>>
+    private final java.util.LinkedHashMap<KeyNamespaceKey<K, N>, PendingNativeMutation<K, N, V>>
             pendingNativeResidentMutations = new java.util.LinkedHashMap<>();
     private final java.util.concurrent.atomic.AtomicLong nativeWriteEpoch =
             new java.util.concurrent.atomic.AtomicLong();
@@ -1174,12 +1172,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 V value = deserializeNativeProbeValue(slot, 0, true);
                 nativeHits++;
                 nativeHitBytesDirect += slot.probeValueLength(0);
-                markNativeResidentBatchKey(key, namespace, preparedKey);
                 return NativePointCacheResult.hit(value);
             }
             if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
                 nativeNegativeHits++;
-                markNativeResidentBatchKey(key, namespace, preparedKey);
                 V defaultValue = batchReader.getBatchDefaultValue();
                 return NativePointCacheResult.hit(
                         deserializeImmediateValueOrCopyDefault(null, defaultValue));
@@ -1235,7 +1231,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     || status == NativeRequestPlaneBridge.FILL_UPDATED) {
                 nativeFillBatches++;
                 nativeFillKeys++;
-                markNativeResidentBatchKey(key, namespace, preparedKey);
             } else {
                 nativeFillRejected++;
             }
@@ -4423,12 +4418,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     /**
      * Starts one mailbox-confined resident-only mutation batch for the incoming dispatch.
      *
-     * <p>Residency is learned lazily from real native hits or successful authoritative-read fills
-     * inside this dispatch. This matters for read-modify-write queries: a key is commonly absent at
-     * mailbox flush entry and becomes resident only after its record reads state. The first real
-     * mutation advances the epoch once; the update-only vector at dispatch exit both rechecks
-     * exact-key residency and publishes the coalesced last value. A read-only dispatch never moves
-     * the epoch.
+     * <p>Mutations are coalesced during the dispatch and exact residency is checked only at its
+     * exit. This matters for read-modify-write queries: a key is commonly absent at mailbox flush
+     * entry and becomes resident only after asynchronous prefetch finishes while records are being
+     * consumed. Values are retained with {@link TypeSerializer#copy(Object)} so delaying their
+     * native serialization cannot observe a later mutation of a user object. The first real
+     * delegate mutation advances the epoch once; a read-only dispatch never moves the epoch.
      */
     @SuppressWarnings("unchecked")
     public boolean beginNativeResidentMutationBatch(Iterable<? extends K> keys) {
@@ -4451,7 +4446,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (scopeKeys == 0) {
                 return false;
             }
-            nativeResidentBatchKeys.clear();
             nativeResidentBatchDirtyKeys.clear();
             pendingNativeResidentMutations.clear();
             nativeResidentMutationBatchEpoch = 0L;
@@ -4463,7 +4457,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeRequestPlaneCoordinator.disable(failure);
             nativeMutationFailures++;
             nativeRuntimeFailures++;
-            nativeResidentBatchKeys.clear();
             nativeResidentBatchDirtyKeys.clear();
             pendingNativeResidentMutations.clear();
             nativeResidentMutationBatchActive = false;
@@ -4477,40 +4470,84 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return;
         }
         try {
-            if (!pendingNativeResidentMutations.isEmpty()
-                    && nativeRequestPlaneCoordinator != null
-                    && nativeRequestPlaneCoordinator.isActive()) {
-                java.util.ArrayList<byte[]> keys =
-                        new java.util.ArrayList<>(pendingNativeResidentMutations.size());
-                java.util.ArrayList<byte[]> values =
-                        new java.util.ArrayList<>(pendingNativeResidentMutations.size());
-                java.util.ArrayList<Boolean> tombstones =
-                        new java.util.ArrayList<>(pendingNativeResidentMutations.size());
-                for (PendingNativeMutation<K, N> mutation :
-                        pendingNativeResidentMutations.values()) {
-                    keys.add(mutation.preparedKey);
-                    values.add(mutation.serializedValue);
-                    tombstones.add(mutation.tombstone);
+            if (!pendingNativeResidentMutations.isEmpty()) {
+                if (nativeRequestPlaneCoordinator == null
+                        || !nativeRequestPlaneCoordinator.isActive()) {
+                    nativeMutationFailures += pendingNativeResidentMutations.size();
+                    return;
                 }
-                int[] statuses =
-                        nativeRequestPlaneCoordinator.updateExactKeysIfPresent(
-                                nativeStateId,
-                                nativeResidentMutationBatchEpoch,
-                                keys,
-                                values);
+                RocksDBBatchValueReader<K, N, V> batchReader =
+                        (RocksDBBatchValueReader<K, N, V>) delegate;
+                java.util.ArrayList<PendingNativeMutation<K, N, V>> mutations =
+                        new java.util.ArrayList<>(pendingNativeResidentMutations.values());
+                java.util.ArrayList<byte[]> keys =
+                        new java.util.ArrayList<>(mutations.size());
+                for (PendingNativeMutation<K, N, V> mutation : mutations) {
+                    keys.add(
+                            batchReader.serializeBatchKeyAndNamespace(
+                                    mutation.storageKey.key,
+                                    mutation.storageKey.namespace,
+                                    nativeMutationKeySerializer,
+                                    nativeMutationNamespaceSerializer));
+                }
                 nativeMutationBatchFlushes++;
                 nativeMutationBatchFlushKeys += keys.size();
-                for (int index = 0; index < statuses.length; index++) {
-                    int status = statuses[index];
+
+                int[] present =
+                        nativeRequestPlaneCoordinator.tryCheckExactKeysPresent(
+                                nativeStateId, nativeResidentMutationBatchEpoch, keys);
+                if (present == null) {
+                    // A bounded prefetch slot is temporarily unavailable. Preserve the established
+                    // fail-closed semantics with the coordinator's reserved mutation slot; its
+                    // value writer is invoked only when the exact key is resident.
+                    for (int index = 0; index < mutations.size(); index++) {
+                        PendingNativeMutation<K, N, V> mutation = mutations.get(index);
+                        byte[] preparedKey = keys.get(index);
+                        int status =
+                                nativeRequestPlaneCoordinator.updateExactKeyIfPresent(
+                                        nativeStateId,
+                                        nativeResidentMutationBatchEpoch,
+                                        output -> output.write(preparedKey),
+                                        mutation.tombstone
+                                                ? null
+                                                : output ->
+                                                        nativeMutationValueSerializer.serialize(
+                                                                mutation.value, output));
+                        recordNativeResidentMutationStatus(status, mutation.tombstone);
+                    }
+                    return;
+                }
+
+                java.util.ArrayList<byte[]> residentKeys = new java.util.ArrayList<>();
+                java.util.ArrayList<byte[]> residentValues = new java.util.ArrayList<>();
+                java.util.ArrayList<Boolean> residentTombstones = new java.util.ArrayList<>();
+                for (int index = 0; index < present.length; index++) {
+                    int status = present[index];
+                    PendingNativeMutation<K, N, V> mutation = mutations.get(index);
                     if (status == NativeRequestPlaneBridge.FILL_UPDATED) {
-                        nativeMutationApplied++;
-                        if (tombstones.get(index)) {
-                            nativeMutationTombstonesApplied++;
-                        }
+                        residentKeys.add(keys.get(index));
+                        residentValues.add(
+                                mutation.tombstone
+                                        ? null
+                                        : KvStateSerializer.serializeValue(
+                                                mutation.value, nativeMutationValueSerializer));
+                        residentTombstones.add(mutation.tombstone);
                     } else if (status == NativeRequestPlaneBridge.FILL_NOT_PRESENT) {
                         nativeMutationResidentMissSkipped++;
                     } else {
                         nativeMutationSuperseded++;
+                    }
+                }
+                if (!residentKeys.isEmpty()) {
+                    int[] updates =
+                            nativeRequestPlaneCoordinator.updateExactKeysIfPresent(
+                                    nativeStateId,
+                                    nativeResidentMutationBatchEpoch,
+                                    residentKeys,
+                                    residentValues);
+                    for (int index = 0; index < updates.length; index++) {
+                        recordNativeResidentMutationStatus(
+                                updates[index], residentTombstones.get(index));
                     }
                 }
             }
@@ -4523,9 +4560,21 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         } finally {
             nativeResidentMutationBatchActive = false;
             nativeResidentMutationBatchEpoch = 0L;
-            nativeResidentBatchKeys.clear();
             nativeResidentBatchDirtyKeys.clear();
             pendingNativeResidentMutations.clear();
+        }
+    }
+
+    private void recordNativeResidentMutationStatus(int status, boolean tombstone) {
+        if (status == NativeRequestPlaneBridge.FILL_UPDATED) {
+            nativeMutationApplied++;
+            if (tombstone) {
+                nativeMutationTombstonesApplied++;
+            }
+        } else if (status == NativeRequestPlaneBridge.FILL_NOT_PRESENT) {
+            nativeMutationResidentMissSkipped++;
+        } else {
+            nativeMutationSuperseded++;
         }
     }
 
@@ -4533,61 +4582,31 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         KeyNamespaceKey<K, N> dirtyKey =
                 new KeyNamespaceKey<>(key, namespace, keySerializer, namespaceSerializer);
         nativeResidentBatchDirtyKeys.add(dirtyKey);
-        NativeBatchResidentKey<K, N> resident = nativeResidentBatchKeys.get(dirtyKey);
-        if (resident == null) {
-            nativeMutationResidentMissSkipped++;
-            return;
-        }
         try {
-            byte[] serializedValue =
-                    value == null
-                            ? null
-                            : KvStateSerializer.serializeValue(
-                                    value, nativeMutationValueSerializer);
-            PendingNativeMutation<K, N> previous =
+            V valueCopy = value == null ? null : nativeMutationValueSerializer.copy(value);
+            PendingNativeMutation<K, N, V> previous =
                     pendingNativeResidentMutations.put(
-                            resident.storageKey,
-                            new PendingNativeMutation<>(
-                                    resident.preparedKey, serializedValue, value == null));
+                            dirtyKey,
+                            new PendingNativeMutation<>(dirtyKey, valueCopy, value == null));
             if (previous != null) {
                 nativeMutationBatchCoalesced++;
             }
-        } catch (IOException | RuntimeException failure) {
-            nativeMutationFailures++;
+        } catch (RuntimeException failure) {
+            nativeMutationFailures += pendingNativeResidentMutations.size() + 1L;
             nativeRuntimeFailures++;
             nativeRequestPlaneCoordinator.disable(failure);
+            pendingNativeResidentMutations.clear();
         }
     }
 
-    private void markNativeResidentBatchKey(K key, N namespace, byte[] preparedKey) {
-        if (!nativeResidentMutationBatchActive || key == null || namespace == null) {
-            return;
-        }
-        KeyNamespaceKey<K, N> storageKey =
-                new KeyNamespaceKey<>(key, namespace, keySerializer, namespaceSerializer);
-        nativeResidentBatchKeys.put(
-                storageKey, new NativeBatchResidentKey<>(storageKey, preparedKey));
-    }
-
-    private static final class NativeBatchResidentKey<K, N> {
+    private static final class PendingNativeMutation<K, N, V> {
         private final KeyNamespaceKey<K, N> storageKey;
-        private final byte[] preparedKey;
-
-        private NativeBatchResidentKey(KeyNamespaceKey<K, N> storageKey, byte[] preparedKey) {
-            this.storageKey = storageKey;
-            this.preparedKey = preparedKey;
-        }
-    }
-
-    private static final class PendingNativeMutation<K, N> {
-        private final byte[] preparedKey;
-        private final byte[] serializedValue;
+        private final V value;
         private final boolean tombstone;
 
-        private PendingNativeMutation(
-                byte[] preparedKey, byte[] serializedValue, boolean tombstone) {
-            this.preparedKey = preparedKey;
-            this.serializedValue = serializedValue;
+        private PendingNativeMutation(KeyNamespaceKey<K, N> storageKey, V value, boolean tombstone) {
+            this.storageKey = storageKey;
+            this.value = value;
             this.tombstone = tombstone;
         }
     }

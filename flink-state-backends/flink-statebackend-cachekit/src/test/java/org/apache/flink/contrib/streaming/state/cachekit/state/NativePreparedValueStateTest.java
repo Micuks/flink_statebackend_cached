@@ -2282,6 +2282,86 @@ class NativePreparedValueStateTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void testResidentMutationBatchChecksResidencyAtDispatchExitWithoutAValueRead()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("resident");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(null);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+        stubDirectPreparedSerialization(reader);
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        residentMutationBatchOptions(), new FakeNativeRequestPlane());
+        byte[] residentKey =
+                KvStateSerializer.serializeKeyAndNamespace(
+                        "resident",
+                        StringSerializer.INSTANCE,
+                        "batch-ns",
+                        StringSerializer.INSTANCE);
+        byte[] residentValue = KvStateSerializer.serializeValue(7, IntSerializer.INSTANCE);
+        assertEquals(
+                NativeRequestPlaneBridge.FILL_INSERTED,
+                coordinator.updateExactKey(64, 0L, residentKey, residentValue));
+
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 64, 8, 1);
+        state.setCurrentNamespace("batch-ns");
+        // Activate read-gated mutation publication before the dispatch. The dispatch itself has no
+        // ValueState read, matching a key made resident by an earlier read or async prefetch.
+        assertEquals(7, state.value());
+        assertTrue(
+                state.beginNativeResidentMutationBatch(
+                        Arrays.asList("resident", "absent")));
+
+        state.update(8);
+        state.flush();
+        currentKey.set("absent");
+        state.update(9);
+        state.flush();
+        state.endNativeResidentMutationBatch();
+
+        assertEquals(2, state.getNativeMutationAttemptsForTesting());
+        assertEquals(0, state.getNativeMutationFailuresForTesting());
+        assertEquals(0, state.getNativeMutationSupersededForTesting());
+        assertEquals(1, state.getNativeMutationResidentMissSkippedForTesting());
+        assertEquals(1, state.getNativeMutationAppliedForTesting());
+        assertEquals(1, state.getNativeMutationBatchScopesForTesting());
+        assertEquals(1, state.getNativeMutationBatchFlushesForTesting());
+        assertEquals(0, state.getNativeMutationBatchCoalescedForTesting());
+
+        try (NativeRequestPlaneCoordinator.BatchSlot probe =
+                coordinator.tryAcquireBatchSlot()) {
+            assertNotNull(probe);
+            probe.prepareLatest(64, 1L, java.util.Collections.singletonList(residentKey));
+            assertEquals(1, coordinator.probe(probe));
+            assertEquals(NativeRequestPlaneBridge.PROBE_HIT, probe.probeStatus(0));
+            org.apache.flink.core.memory.DataInputDeserializer input =
+                    new org.apache.flink.core.memory.DataInputDeserializer(
+                            probe.copyProbeValue(0));
+            assertEquals(8, IntSerializer.INSTANCE.deserialize(input));
+        }
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
     void testResidentOnlyCheckAndUpdateExcludeConcurrentNativeProbe() throws Exception {
         FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
         NativeRequestPlaneCoordinator coordinator =
