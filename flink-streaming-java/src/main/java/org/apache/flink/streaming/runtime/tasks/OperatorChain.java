@@ -658,6 +658,11 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
                         input.getClass().getName());
             }
         } else {
+            if (cacheKitArmChainCopyElision.isActive()) {
+                LOG.info(
+                        "CacheKit ARM chain copy elision retained copying for chained-source downstream={}",
+                        input.getClass().getName());
+            }
             TypeSerializer<?> inSerializer =
                     sourceInputConfig.getTypeSerializerOut(userCodeClassloader);
             chainedSourceOutput =
@@ -825,6 +830,12 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
                         operatorConfig.getOperatorName());
             }
         } else {
+            if (cacheKitArmChainCopyElision.isActive()) {
+                LOG.info(
+                        "CacheKit ARM chain copy elision retained copying for downstream={} operator={}",
+                        operator.getClass().getName(),
+                        operatorConfig.getOperatorName());
+            }
             TypeSerializer<IN> inSerializer =
                     operatorConfig.getTypeSerializerIn1(userCodeClassloader);
             currentOperatorOutput = new CopyingChainingOutput<>(operator, inSerializer, outputTag);
