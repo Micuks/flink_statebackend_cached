@@ -447,7 +447,26 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 org.apache.flink.streaming.runtime.tasks.StatePrefetcher.prefetch(
                         headOperator, buf, n);
             }
-            if (commutativeKeySort) {
+        }
+        boolean nativeMutationBatchStarted =
+                org.apache.flink.streaming.runtime.tasks.StatePrefetcher
+                        .beginNativeResidentMutationBatch(headOperator, buf, 0, n);
+        try {
+            if (prefetchMode) {
+                if (commutativeKeySort) {
+                    org.apache.flink.streaming.runtime.tasks.BatchedKeyedOperatorAdapter
+                            .dispatchSorted(headOperator, buf, n, numRecordsIn);
+                } else {
+                    for (int i = 0; i < n; i++) {
+                        wrapped.emitRecord(buf[i]);
+                    }
+                }
+            } else if (batchOperator != null) {
+                if (numRecordsIn != null) {
+                    numRecordsIn.inc(n);
+                }
+                batchOperator.processElementBatch(buf, n);
+            } else if (commutativeKeySort) {
                 org.apache.flink.streaming.runtime.tasks.BatchedKeyedOperatorAdapter
                         .dispatchSorted(headOperator, buf, n, numRecordsIn);
             } else {
@@ -455,17 +474,10 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                     wrapped.emitRecord(buf[i]);
                 }
             }
-        } else if (batchOperator != null) {
-            if (numRecordsIn != null) {
-                numRecordsIn.inc(n);
-            }
-            batchOperator.processElementBatch(buf, n);
-        } else if (commutativeKeySort) {
-            org.apache.flink.streaming.runtime.tasks.BatchedKeyedOperatorAdapter.dispatchSorted(
-                    headOperator, buf, n, numRecordsIn);
-        } else {
-            for (int i = 0; i < n; i++) {
-                wrapped.emitRecord(buf[i]);
+        } finally {
+            if (nativeMutationBatchStarted) {
+                org.apache.flink.streaming.runtime.tasks.StatePrefetcher
+                        .endNativeResidentMutationBatch(headOperator);
             }
         }
     }

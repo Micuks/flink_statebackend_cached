@@ -236,6 +236,7 @@ public final class LocalPreagg {
         recordValues.clear();
         recordKeys.ensureCapacity(n);
         recordValues.ensureCapacity(n);
+        boolean nativeMutationBatchStarted = false;
         try {
             // Extract one aligned key/value vector. CacheKit may return stable first-seen group
             // ids from its native runtime; every unsupported/error case retains the existing Java
@@ -280,6 +281,9 @@ public final class LocalPreagg {
             // wasted per-record speculation that used to run before grouping.
             StatePrefetcher.prefetchKeysImmediately(
                     headOperator, groups.keys, cancelPrefetchOnDispatch);
+            nativeMutationBatchStarted =
+                    StatePrefetcher.beginNativeResidentMutationBatch(
+                            headOperator, groups.keys);
             // Preserve the batch's timestamp context for emitted rows (agg results are not
             // event-time keyed downstream, but keep parity with the per-record path).
             if (lastRec != null && lastRec.hasTimestamp()) {
@@ -311,6 +315,9 @@ public final class LocalPreagg {
             // it rather than silently double-processing.
             throw new RuntimeException("local-preagg dispatch failed", t);
         } finally {
+            if (nativeMutationBatchStarted) {
+                StatePrefetcher.endNativeResidentMutationBatch(headOperator);
+            }
             // A task thread may live for hours. Clear references after every dispatch so the
             // reusable arrays do not pin records or their backing byte segments.
             recordKeys.clear();
@@ -344,6 +351,7 @@ public final class LocalPreagg {
         StreamRecord<?> lastRecord = null;
         int sourceCount = 0;
         int groupCount = 0;
+        boolean nativeMutationBatchStarted = false;
         try {
             for (int bufferIndex = 0; bufferIndex < n; bufferIndex++) {
                 StreamRecord<?> record = buf[bufferIndex];
@@ -369,6 +377,9 @@ public final class LocalPreagg {
 
             StatePrefetcher.prefetchKeysImmediately(
                     headOperator, groups.keys, cancelPrefetchOnDispatch);
+            nativeMutationBatchStarted =
+                    StatePrefetcher.beginNativeResidentMutationBatch(
+                            headOperator, groups.keys);
             if (lastRecord != null && lastRecord.hasTimestamp()) {
                 collector.setAbsoluteTimestamp(lastRecord.getTimestamp());
             } else {
@@ -415,6 +426,9 @@ public final class LocalPreagg {
             }
             return true;
         } finally {
+            if (nativeMutationBatchStarted) {
+                StatePrefetcher.endNativeResidentMutationBatch(headOperator);
+            }
             workspace.clearIndexed(sourceCount, groupCount);
         }
     }

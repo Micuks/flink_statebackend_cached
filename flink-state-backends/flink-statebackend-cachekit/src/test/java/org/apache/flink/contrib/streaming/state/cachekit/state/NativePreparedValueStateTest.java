@@ -2209,6 +2209,76 @@ class NativePreparedValueStateTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void testResidentMutationBatchAdvancesFenceOnlyOnWriteAndFlushesLatestResidentValue()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("resident");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(7);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(null);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+        stubDirectPreparedSerialization(reader);
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        residentMutationBatchOptions(), new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 63, 8, 1);
+        state.setCurrentNamespace("batch-ns");
+
+        assertEquals(7, state.value());
+        assertTrue(
+                state.beginNativeResidentMutationBatch(
+                        Arrays.asList("resident", "absent")));
+        assertEquals(0, state.getNativeWriteEpochForTesting());
+        state.update(9);
+        assertEquals(0, state.getNativeWriteEpochForTesting());
+        state.flush();
+        assertEquals(1, state.getNativeWriteEpochForTesting());
+        state.endNativeResidentMutationBatch();
+
+        byte[] prepared =
+                KvStateSerializer.serializeKeyAndNamespace(
+                        "resident",
+                        StringSerializer.INSTANCE,
+                        "batch-ns",
+                        StringSerializer.INSTANCE);
+        try (NativeRequestPlaneCoordinator.BatchSlot probe =
+                coordinator.tryAcquireBatchSlot()) {
+            assertNotNull(probe);
+            probe.prepareLatest(63, 1L, java.util.Collections.singletonList(prepared));
+            assertEquals(1, coordinator.probe(probe));
+            assertEquals(NativeRequestPlaneBridge.PROBE_HIT, probe.probeStatus(0));
+            org.apache.flink.core.memory.DataInputDeserializer input =
+                    new org.apache.flink.core.memory.DataInputDeserializer(
+                            probe.copyProbeValue(0));
+            assertEquals(9, IntSerializer.INSTANCE.deserialize(input));
+        }
+        assertEquals(1, state.getNativeMutationAttemptsForTesting());
+        assertEquals(1, state.getNativeMutationAppliedForTesting());
+        assertEquals(0, state.getNativeMutationResidentMissSkippedForTesting());
+        assertEquals(1, state.getNativeMutationBatchChecksForTesting());
+        assertEquals(1, state.getNativeMutationBatchFlushesForTesting());
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
     void testResidentOnlyCheckAndUpdateExcludeConcurrentNativeProbe() throws Exception {
         FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
         NativeRequestPlaneCoordinator coordinator =
@@ -2576,6 +2646,38 @@ class NativePreparedValueStateTest {
                 0.02,
                 262144,
                 false,
+                true);
+    }
+
+    private static NativeRequestPlaneOptions residentMutationBatchOptions() {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                128,
+                4096,
+                4096,
+                16,
+                4096,
+                4096,
+                1,
+                2,
+                false,
+                true,
+                true,
+                false,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                8192,
+                0.02,
+                262144,
+                false,
+                true,
                 true);
     }
 

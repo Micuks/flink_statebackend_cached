@@ -28,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -420,6 +421,34 @@ class NativeRequestPlaneCoordinatorTest {
         coordinator.close();
     }
 
+    @Test
+    void testResidentMutationVectorsUseOneCheckAndOneUpdateFill() throws Exception {
+        FakePlane plane = new FakePlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(1), plane);
+
+        java.util.List<byte[]> keys =
+                Arrays.asList(new byte[] {1}, new byte[] {2}, new byte[] {3});
+        int[] checks = coordinator.tryCheckExactKeysPresent(17, 31L, keys);
+        assertArrayEquals(
+                new int[] {
+                    NativeRequestPlaneBridge.FILL_UPDATED,
+                    NativeRequestPlaneBridge.FILL_UPDATED,
+                    NativeRequestPlaneBridge.FILL_UPDATED
+                },
+                checks);
+
+        int[] updates =
+                coordinator.updateExactKeysIfPresent(
+                        17,
+                        31L,
+                        keys,
+                        Arrays.asList(new byte[] {4}, null, new byte[] {5, 6}));
+        assertArrayEquals(checks, updates);
+        assertEquals(2, coordinator.fillCalls());
+        coordinator.close();
+    }
+
     private static NativeRequestPlaneOptions options(int slots) {
         return new NativeRequestPlaneOptions(
                 true, "", "auto", 16, 1024, 1024, 4, 1024, 1024, 1, slots, false);
@@ -491,12 +520,23 @@ class NativeRequestPlaneCoordinatorTest {
                 values.get(fillValue);
             }
             ByteBuffer results = fillResults.duplicate().order(ByteOrder.nativeOrder());
-            results.putInt(
-                    NativeRequestPlaneBridge.FILL_RESULT_STATUS_OFFSET,
-                    NativeRequestPlaneBridge.FILL_INSERTED);
-            results.putInt(
-                    NativeRequestPlaneBridge.FILL_RESULT_ERROR_OFFSET,
-                    NativeRequestPlaneBridge.ERROR_OK);
+            for (int index = 0; index < keys.entryCount(); index++) {
+                int metadataBase =
+                        index * NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES;
+                int controlFlags =
+                        metadata.getInt(
+                                metadataBase
+                                        + NativeRequestPlaneBridge.FILL_VALUE_RESERVED_OFFSET);
+                int resultBase = index * NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES;
+                results.putInt(
+                        resultBase + NativeRequestPlaneBridge.FILL_RESULT_STATUS_OFFSET,
+                        controlFlags == 0
+                                ? NativeRequestPlaneBridge.FILL_INSERTED
+                                : NativeRequestPlaneBridge.FILL_UPDATED);
+                results.putInt(
+                        resultBase + NativeRequestPlaneBridge.FILL_RESULT_ERROR_OFFSET,
+                        NativeRequestPlaneBridge.ERROR_OK);
+            }
             return keys.entryCount();
         }
 

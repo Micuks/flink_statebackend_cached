@@ -272,6 +272,16 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                                         + "but serialize and publish the value only when that exact key is already resident. "
                                                                                         + "The check and conditional update are atomic with respect to native probes.");
 
+        public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.value-cache.resident-mutation-batch.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Batch resident-only ValueState mutation admission at the mailbox dispatch boundary. "
+                                                                        + "The batch advances the native generation fence before dispatch, bypasses native reads for pending dirty keys, "
+                                                                        + "and publishes only prechecked resident keys in one bounded JNI fill at batch end.");
+
         public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_ENABLED =
                         ConfigOptions.key("state.backend.cachekit.native.value-cache.enabled")
                                         .booleanType()
@@ -640,7 +650,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_MIN_USEFUL_HIT_RATE),
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_RESAMPLE_INTERVAL_PROBES),
                                 config.get(NATIVE_LOCAL_PREAGG_INDEXED_FOLD_ENABLED),
-                                config.get(NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH));
+                                config.get(NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH),
+                                config.get(NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

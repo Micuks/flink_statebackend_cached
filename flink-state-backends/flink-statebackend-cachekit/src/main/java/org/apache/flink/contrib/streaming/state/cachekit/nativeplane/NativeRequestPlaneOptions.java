@@ -52,6 +52,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final boolean aarch64Only;
     private final boolean writeThroughMutations;
     private final boolean readActivatedWriteThrough;
+    private final boolean residentMutationBatchEnabled;
     private final boolean valueCacheEnabled;
     private final boolean mapCacheEnabled;
     private final boolean mapSnapshotEnabled;
@@ -629,6 +630,66 @@ public final class NativeRequestPlaneOptions implements Serializable {
             int mapSnapshotAdaptiveResampleIntervalProbes,
             boolean indexedFoldEnabled,
             boolean readActivatedWriteThrough) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                aarch64Only,
+                writeThroughMutations,
+                valueCacheEnabled,
+                mapCacheEnabled,
+                mapSnapshotEnabled,
+                prefetchEnabled,
+                mailboxBatchEnabled,
+                preaggEnabled,
+                compactSelectedProbeEnabled,
+                directArenaMultiGetEnabled,
+                mapSnapshotAdaptiveBypassEnabled,
+                mapSnapshotAdaptiveWindowProbes,
+                mapSnapshotAdaptiveMinUsefulHitRate,
+                mapSnapshotAdaptiveResampleIntervalProbes,
+                indexedFoldEnabled,
+                readActivatedWriteThrough,
+                false);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only,
+            boolean writeThroughMutations,
+            boolean valueCacheEnabled,
+            boolean mapCacheEnabled,
+            boolean mapSnapshotEnabled,
+            boolean prefetchEnabled,
+            boolean mailboxBatchEnabled,
+            boolean preaggEnabled,
+            boolean compactSelectedProbeEnabled,
+            boolean directArenaMultiGetEnabled,
+            boolean mapSnapshotAdaptiveBypassEnabled,
+            int mapSnapshotAdaptiveWindowProbes,
+            double mapSnapshotAdaptiveMinUsefulHitRate,
+            int mapSnapshotAdaptiveResampleIntervalProbes,
+            boolean indexedFoldEnabled,
+            boolean readActivatedWriteThrough,
+            boolean residentMutationBatchEnabled) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
         this.kernel = normalizeKernel(kernel);
@@ -667,6 +728,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
                     "Resident-only native mutation write-through requires both write-through-mutations and native ValueState cache.");
         }
         this.readActivatedWriteThrough = readActivatedWriteThrough;
+        if (residentMutationBatchEnabled && !readActivatedWriteThrough) {
+            throw new IllegalArgumentException(
+                    "Resident mutation batching requires resident-only native mutation write-through.");
+        }
+        this.residentMutationBatchEnabled = residentMutationBatchEnabled;
         if (valueCacheEnabled && !enabled) {
             throw new IllegalArgumentException(
                     "Native ValueState cache requires the native request plane to be enabled.");
@@ -826,6 +892,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
      */
     public boolean readActivatedWriteThrough() {
         return readActivatedWriteThrough;
+    }
+
+    /** Whether resident-only mutation checks and updates are coalesced per mailbox dispatch. */
+    public boolean residentMutationBatchEnabled() {
+        return residentMutationBatchEnabled;
     }
 
     /** Whether the separately gated native ValueState point-cache path is enabled. */

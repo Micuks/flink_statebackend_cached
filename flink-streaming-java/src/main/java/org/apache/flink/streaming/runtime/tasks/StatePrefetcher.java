@@ -93,6 +93,21 @@ public final class StatePrefetcher {
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             NATIVE_PREAGG_GROUP_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Cache of optional resident-mutation batch begin hooks per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            NATIVE_MUTATION_BATCH_BEGIN_METHOD_CACHE =
+                    new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Cache of optional resident-mutation batch end hooks per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            NATIVE_MUTATION_BATCH_END_METHOD_CACHE =
+                    new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Cache of resident-mutation batch capability probes per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            NATIVE_MUTATION_BATCH_ENABLED_METHOD_CACHE =
+                    new java.util.concurrent.ConcurrentHashMap<>();
+
     /** Sentinel field used to mark "no stateKeySelector1 available" in the field cache. */
     private static final Field NO_FIELD;
 
@@ -288,6 +303,135 @@ public final class StatePrefetcher {
             return cancelPrefetchForDispatch(backend, keys);
         } catch (Throwable failure) {
             return -1;
+        }
+    }
+
+    /** Opens an optional native mutation batch for an already-deduplicated dispatch key set. */
+    public static boolean beginNativeResidentMutationBatch(
+            Input<?> headOperator, java.util.Collection<?> keys) {
+        if (!(headOperator instanceof AbstractStreamOperator)
+                || keys == null
+                || keys.isEmpty()) {
+            return false;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            if (!nativeResidentMutationBatchEnabled(backend)) {
+                return false;
+            }
+            Method method =
+                    NATIVE_MUTATION_BATCH_BEGIN_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(),
+                            StatePrefetcher::lookupNativeMutationBatchBeginMethod);
+            if (method == NO_METHOD) {
+                return false;
+            }
+            Object result = method.invoke(backend, keys);
+            return result instanceof Number && ((Number) result).intValue() > 0;
+        } catch (Throwable failure) {
+            return false;
+        }
+    }
+
+    /** Extracts and deduplicates record keys before opening an optional native mutation batch. */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public static boolean beginNativeResidentMutationBatch(
+            Input<?> headOperator, StreamRecord<?>[] buf, int fromIndex, int toIndex) {
+        if (!(headOperator instanceof AbstractStreamOperator)
+                || buf == null
+                || fromIndex < 0
+                || toIndex > buf.length
+                || toIndex <= fromIndex) {
+            return false;
+        }
+        try {
+            AbstractStreamOperator<?> operator = (AbstractStreamOperator<?>) headOperator;
+            if (!nativeResidentMutationBatchEnabled(operator.getKeyedStateBackend())) {
+                return false;
+            }
+            KeySelector selector = extractStateKeySelector1(operator);
+            if (selector == null) {
+                return false;
+            }
+            java.util.LinkedHashSet keys =
+                    new java.util.LinkedHashSet(Math.max(2, toIndex - fromIndex));
+            if (!extractKeys(selector, buf, fromIndex, toIndex, keys) || keys.isEmpty()) {
+                return false;
+            }
+            return beginNativeResidentMutationBatch(headOperator, keys);
+        } catch (Throwable failure) {
+            return false;
+        }
+    }
+
+    /** Ends an optional native mutation batch previously opened for this dispatch. */
+    public static void endNativeResidentMutationBatch(Input<?> headOperator) {
+        if (!(headOperator instanceof AbstractStreamOperator)) {
+            return;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            Method method =
+                    NATIVE_MUTATION_BATCH_END_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(), StatePrefetcher::lookupNativeMutationBatchEndMethod);
+            if (method != NO_METHOD) {
+                method.invoke(backend);
+            }
+        } catch (Throwable failure) {
+            // Optional performance path: the backend itself fails closed on native errors.
+        }
+    }
+
+    private static Method lookupNativeMutationBatchBeginMethod(Class<?> backendClass) {
+        try {
+            Method method =
+                    backendClass.getMethod(
+                            "beginNativeResidentMutationBatch", java.util.Collection.class);
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
+    }
+
+    private static Method lookupNativeMutationBatchEndMethod(Class<?> backendClass) {
+        try {
+            Method method = backendClass.getMethod("endNativeResidentMutationBatch");
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
+    }
+
+    private static boolean nativeResidentMutationBatchEnabled(KeyedStateBackend<?> backend) {
+        if (backend == null) {
+            return false;
+        }
+        try {
+            Method method =
+                    NATIVE_MUTATION_BATCH_ENABLED_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(),
+                            StatePrefetcher::lookupNativeMutationBatchEnabledMethod);
+            if (method == NO_METHOD) {
+                return false;
+            }
+            Object result = method.invoke(backend);
+            return result instanceof Boolean && (Boolean) result;
+        } catch (Throwable failure) {
+            return false;
+        }
+    }
+
+    private static Method lookupNativeMutationBatchEnabledMethod(Class<?> backendClass) {
+        try {
+            Method method = backendClass.getMethod("nativeResidentMutationBatchEnabled");
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
         }
     }
 

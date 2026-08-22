@@ -381,6 +381,183 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         }
     }
 
+    /**
+     * Advances one state's generation fence and checks a bounded exact-key vector in JNI batches.
+     *
+     * <p>The returned status vector is aligned with {@code preparedRocksDBKeys}. A {@code null}
+     * return means no bounded slot was available before any native call; callers may safely fall
+     * back to the established per-mutation path. Once a slot is acquired, every native error fails
+     * closed and disables the request plane.
+     */
+    public int[] tryCheckExactKeysPresent(
+            int stateId, long generation, List<byte[]> preparedRocksDBKeys) throws IOException {
+        Objects.requireNonNull(preparedRocksDBKeys, "preparedRocksDBKeys");
+        if (preparedRocksDBKeys.isEmpty()) {
+            return new int[0];
+        }
+        BatchSlot slot = tryAcquireBatchSlot();
+        if (slot == null) {
+            return null;
+        }
+        try (BatchSlot ignored = slot) {
+            int[] statuses = new int[preparedRocksDBKeys.size()];
+            int from = 0;
+            while (from < preparedRocksDBKeys.size()) {
+                int to = boundedMutationChunkEnd(preparedRocksDBKeys, null, from);
+                slot.prepareMutationChecks(
+                        stateId, generation, preparedRocksDBKeys, from, to);
+                fillAndCopyMutationStatuses(slot, statuses, from, to);
+                from = to;
+            }
+            return statuses;
+        } catch (IOException failure) {
+            disable(failure);
+            throw failure;
+        } catch (RuntimeException | LinkageError failure) {
+            disable(failure);
+            throw failure;
+        }
+    }
+
+    /**
+     * Publishes an aligned exact-key/value vector with update-only semantics.
+     *
+     * <p>Absent or concurrently evicted entries remain absent; this method never inserts or
+     * resurrects a cache entry. The generation fence must already have been advanced by {@link
+     * #tryCheckExactKeysPresent(int, long, List)}.
+     */
+    public int[] updateExactKeysIfPresent(
+            int stateId,
+            long generation,
+            List<byte[]> preparedRocksDBKeys,
+            List<byte[]> serializedValues)
+            throws IOException {
+        Objects.requireNonNull(preparedRocksDBKeys, "preparedRocksDBKeys");
+        Objects.requireNonNull(serializedValues, "serializedValues");
+        if (preparedRocksDBKeys.size() != serializedValues.size()) {
+            throw new IllegalArgumentException("Native mutation key/value vectors must align.");
+        }
+        if (preparedRocksDBKeys.isEmpty()) {
+            return new int[0];
+        }
+        BatchSlot slot = tryAcquireBatchSlot();
+        if (slot == null) {
+            int[] statuses = new int[preparedRocksDBKeys.size()];
+            for (int index = 0; index < statuses.length; index++) {
+                statuses[index] =
+                        updateExactKeyKnownPresent(
+                                stateId,
+                                generation,
+                                preparedRocksDBKeys.get(index),
+                                serializedValues.get(index));
+            }
+            return statuses;
+        }
+        try (BatchSlot ignored = slot) {
+            int[] statuses = new int[preparedRocksDBKeys.size()];
+            int from = 0;
+            while (from < preparedRocksDBKeys.size()) {
+                int to = boundedMutationChunkEnd(preparedRocksDBKeys, serializedValues, from);
+                slot.prepareConditionalMutationUpdates(
+                        stateId,
+                        generation,
+                        preparedRocksDBKeys,
+                        serializedValues,
+                        from,
+                        to);
+                fillAndCopyMutationStatuses(slot, statuses, from, to);
+                from = to;
+            }
+            return statuses;
+        } catch (IOException failure) {
+            disable(failure);
+            throw failure;
+        } catch (RuntimeException | LinkageError failure) {
+            disable(failure);
+            throw failure;
+        }
+    }
+
+    private int updateExactKeyKnownPresent(
+            int stateId, long generation, byte[] preparedRocksDBKey, byte[] serializedValue)
+            throws IOException {
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                mutationSlot.prepareSingleConditionalUpdate(
+                        stateId, generation, preparedRocksDBKey, serializedValue);
+                return fillPreparedConditionalMutation();
+            } catch (IOException failure) {
+                disableLocked(failure);
+                throw failure;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
+    private int boundedMutationChunkEnd(
+            List<byte[]> keys, List<byte[]> values, int fromIndex) throws IOException {
+        int maxEntries = Math.min(options.batchEntries(), keys.size() - fromIndex);
+        long keyBytes = 0;
+        long valueBytes = 0;
+        int count = 0;
+        while (count < maxEntries) {
+            byte[] key = Objects.requireNonNull(keys.get(fromIndex + count), "mutation key");
+            byte[] value = values == null ? null : values.get(fromIndex + count);
+            long nextKeyBytes = keyBytes + key.length;
+            long nextValueBytes = valueBytes + (value == null ? 0 : value.length);
+            if (count > 0
+                    && (nextKeyBytes > options.batchKeyArenaBytes()
+                            || nextValueBytes > options.batchValueArenaBytes())) {
+                break;
+            }
+            if (nextKeyBytes > options.batchKeyArenaBytes()
+                    || nextValueBytes > options.batchValueArenaBytes()) {
+                throw new IOException("One native mutation exceeds the bounded batch arena.");
+            }
+            keyBytes = nextKeyBytes;
+            valueBytes = nextValueBytes;
+            count++;
+        }
+        return fromIndex + count;
+    }
+
+    private void fillAndCopyMutationStatuses(
+            BatchSlot slot, int[] statuses, int fromIndex, int toIndex) {
+        int expected = toIndex - fromIndex;
+        int processed = fill(slot);
+        if (processed != expected) {
+            throw new IllegalStateException(
+                    "Native resident mutation batch processed "
+                            + processed
+                            + " of "
+                            + expected
+                            + " entries.");
+        }
+        for (int local = 0; local < expected; local++) {
+            int status = slot.fillStatus(local);
+            int error = slot.fillError(local);
+            boolean valid =
+                    error == NativeRequestPlaneBridge.ERROR_OK
+                            && (status == NativeRequestPlaneBridge.FILL_UPDATED
+                                    || status == NativeRequestPlaneBridge.FILL_NOT_PRESENT
+                                    || status
+                                            == NativeRequestPlaneBridge
+                                                    .FILL_REJECTED_STALE_GENERATION);
+            if (!valid) {
+                throw new IllegalStateException(
+                        "Native resident mutation batch returned status="
+                                + status
+                                + ", error="
+                                + error
+                                + ".");
+            }
+            statuses[fromIndex + local] = status;
+        }
+    }
+
     private int fillPreparedMutation() {
         int status = fillPreparedMutationRaw();
         int error = mutationSlot.fillError(0);
@@ -1291,6 +1468,56 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                     NativeRequestPlaneBridge.FILL_VALUE_CHECK_ONLY_FLAG);
         }
 
+        private void prepareMutationChecks(
+                int stateId,
+                long generation,
+                List<byte[]> preparedRocksDBKeys,
+                int fromIndex,
+                int toIndex)
+                throws IOException {
+            requireLeased();
+            missKeys.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            fillValueBytes = 0;
+            for (int index = fromIndex; index < toIndex; index++) {
+                int local = index - fromIndex;
+                missKeys.appendSerialized(
+                        stateId, generation, preparedRocksDBKeys.get(index));
+                putFillValueMetadata(
+                        local,
+                        (DirectValueWriter) null,
+                        NativeRequestPlaneBridge.FILL_VALUE_CHECK_ONLY_FLAG);
+            }
+        }
+
+        private void prepareConditionalMutationUpdates(
+                int stateId,
+                long generation,
+                List<byte[]> preparedRocksDBKeys,
+                List<byte[]> serializedValues,
+                int fromIndex,
+                int toIndex)
+                throws IOException {
+            requireLeased();
+            missKeys.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            fillValueBytes = 0;
+            for (int index = fromIndex; index < toIndex; index++) {
+                int local = index - fromIndex;
+                missKeys.appendSerialized(
+                        stateId, generation, preparedRocksDBKeys.get(index));
+                byte[] value = serializedValues.get(index);
+                putFillValueMetadata(
+                        local,
+                        value == null
+                                ? null
+                                : output -> output.write(value),
+                        NativeRequestPlaneBridge.FILL_VALUE_UPDATE_ONLY_FLAG);
+            }
+        }
+
         private void prepareConditionalUpdateForPreparedKey(DirectValueWriter directValueWriter)
                 throws IOException {
             requireLeased();
@@ -1304,6 +1531,26 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             putFillValueMetadata(
                     0,
                     directValueWriter,
+                    NativeRequestPlaneBridge.FILL_VALUE_UPDATE_ONLY_FLAG);
+        }
+
+        private void prepareSingleConditionalUpdate(
+                int stateId,
+                long generation,
+                byte[] preparedRocksDBKey,
+                byte[] serializedValue)
+                throws IOException {
+            requireLeased();
+            missKeys.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            fillValueBytes = 0;
+            missKeys.appendSerialized(stateId, generation, preparedRocksDBKey);
+            putFillValueMetadata(
+                    0,
+                    serializedValue == null
+                            ? null
+                            : output -> output.write(serializedValue),
                     NativeRequestPlaneBridge.FILL_VALUE_UPDATE_ONLY_FLAG);
         }
 

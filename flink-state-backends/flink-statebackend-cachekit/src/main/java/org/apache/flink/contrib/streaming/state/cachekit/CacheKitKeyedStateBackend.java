@@ -1014,6 +1014,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 && nativeRequestPlaneCoordinator.options().mailboxBatchEnabled();
     }
 
+    /** Reflection seam that avoids dispatch-key extraction when mutation batching is disabled. */
+    public boolean nativeResidentMutationBatchEnabled() {
+        return nativeRequestPlaneCoordinator != null
+                && nativeRequestPlaneCoordinator.isActive()
+                && nativeRequestPlaneCoordinator.options().residentMutationBatchEnabled();
+    }
+
     @Override
     public int maxGroupingEntries() {
         NativeRequestPlaneCoordinator coordinator = nativeRequestPlaneCoordinator;
@@ -1267,6 +1274,49 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Opens resident-only native mutation batches for the exact mailbox-dispatch key set.
+     *
+     * <p>This optional hook is discovered reflectively by the streaming runtime, preserving the
+     * generic keyed-state backend interface. Wrappers that are inactive or unsupported simply do
+     * not participate.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public int beginNativeResidentMutationBatch(Collection<? extends K> keys) {
+        synchronized (lifecycleLock) {
+            if (closed || disposed || keys == null || keys.isEmpty()) {
+                return 0;
+            }
+            int started = 0;
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                if (wrapper instanceof CachedInternalValueState
+                        && ((CachedInternalValueState) wrapper)
+                                .beginNativeResidentMutationBatch(keys)) {
+                    started++;
+                }
+            }
+            return started;
+        }
+    }
+
+    /** Flushes every resident-only native mutation batch opened for the current dispatch. */
+    public int endNativeResidentMutationBatch() {
+        synchronized (lifecycleLock) {
+            if (closed || disposed) {
+                return 0;
+            }
+            int visited = 0;
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                if (wrapper instanceof CachedInternalValueState) {
+                    ((CachedInternalValueState<?, ?, ?>) wrapper)
+                            .endNativeResidentMutationBatch();
+                    visited++;
+                }
+            }
+            return visited;
         }
     }
 

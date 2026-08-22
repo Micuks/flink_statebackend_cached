@@ -171,6 +171,35 @@ class StatePrefetcherTest {
     }
 
     @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void testResidentMutationBatchRequiresCapabilityAndPairsBeginEnd() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings()
+                                .extraInterfaces(
+                                        NativeMutationBatchCapability.class,
+                                        NativeMutationBatchHook.class));
+        NativeMutationBatchCapability capability = (NativeMutationBatchCapability) backend;
+        NativeMutationBatchHook hook = (NativeMutationBatchHook) backend;
+        org.mockito.Mockito.when(capability.nativeResidentMutationBatchEnabled())
+                .thenReturn(true);
+        Collection<Integer> keys = Arrays.asList(1, 2, 3);
+        org.mockito.Mockito.when(hook.beginNativeResidentMutationBatch(keys)).thenReturn(1);
+        AbstractStreamOperator operator =
+                mock(AbstractStreamOperator.class, withSettings().extraInterfaces(Input.class));
+        org.mockito.Mockito.when(operator.getKeyedStateBackend()).thenReturn(backend);
+
+        assertTrue(
+                StatePrefetcher.beginNativeResidentMutationBatch(
+                        (Input<?>) operator, keys));
+        StatePrefetcher.endNativeResidentMutationBatch((Input<?>) operator);
+
+        verify(hook).beginNativeResidentMutationBatch(keys);
+        verify(hook).endNativeResidentMutationBatch();
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void testNativeMailboxPreservesDuplicateArrivalKeysForJniCompaction() {
         KeyedStateBackend<Object> backend =
@@ -255,5 +284,15 @@ class StatePrefetcherTest {
 
     public interface NativePreaggHook {
         int[] nativePreaggGroupIds(List<?> keys);
+    }
+
+    public interface NativeMutationBatchCapability {
+        boolean nativeResidentMutationBatchEnabled();
+    }
+
+    public interface NativeMutationBatchHook {
+        int beginNativeResidentMutationBatch(Collection<?> keys);
+
+        int endNativeResidentMutationBatch();
     }
 }
