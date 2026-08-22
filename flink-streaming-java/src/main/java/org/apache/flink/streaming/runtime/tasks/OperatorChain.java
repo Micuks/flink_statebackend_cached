@@ -144,6 +144,9 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
 
     protected final @Nullable FinishedOnRestoreInput finishedOnRestoreInput;
 
+    /** Kunpeng-only, fail-closed copy elision for audited Table-runtime chain edges. */
+    private final CacheKitArmChainCopyElision cacheKitArmChainCopyElision;
+
     protected boolean isClosed;
 
     public OperatorChain(
@@ -157,6 +160,18 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
 
         final ClassLoader userCodeClassloader = containingTask.getUserCodeClassLoader();
         final StreamConfig configuration = containingTask.getConfiguration();
+        this.cacheKitArmChainCopyElision =
+                new CacheKitArmChainCopyElision(
+                        containingTask
+                                .getEnvironment()
+                                .getTaskManagerInfo()
+                                .getConfiguration());
+        if (cacheKitArmChainCopyElision.isConfigured()) {
+            LOG.info(
+                    "CacheKit ARM chain copy elision configured: active={}, architecture={}",
+                    cacheKitArmChainCopyElision.isActive(),
+                    cacheKitArmChainCopyElision.getArchitecture());
+        }
 
         StreamOperatorFactory<OUT> operatorFactory =
                 configuration.getStreamOperatorFactory(userCodeClassloader);
@@ -269,6 +284,7 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
             StreamOperatorWrapper<OUT, OP> mainOperatorWrapper) {
         this.streamOutputs = streamOutputs;
         this.finishedOnRestoreInput = null;
+        this.cacheKitArmChainCopyElision = CacheKitArmChainCopyElision.disabled();
         this.mainOperatorOutput = checkNotNull(mainOperatorOutput);
         this.operatorEventDispatcher = null;
 
@@ -632,8 +648,15 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
             OutputTag outputTag) {
 
         WatermarkGaugeExposingOutput<StreamRecord> chainedSourceOutput;
-        if (containingTask.getExecutionConfig().isObjectReuseEnabled()) {
+        boolean objectReuse = containingTask.getExecutionConfig().isObjectReuseEnabled();
+        boolean cacheKitElision = !objectReuse && cacheKitArmChainCopyElision.isEligible(input);
+        if (objectReuse || cacheKitElision) {
             chainedSourceOutput = new ChainingOutput(input, metricGroup, outputTag);
+            if (cacheKitElision) {
+                LOG.info(
+                        "CacheKit ARM chain copy elision installed for chained-source downstream={}",
+                        input.getClass().getName());
+            }
         } else {
             TypeSerializer<?> inSerializer =
                     sourceInputConfig.getTypeSerializerOut(userCodeClassloader);
@@ -791,8 +814,16 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
             OutputTag<IN> outputTag) {
 
         WatermarkGaugeExposingOutput<StreamRecord<IN>> currentOperatorOutput;
-        if (containingTask.getExecutionConfig().isObjectReuseEnabled()) {
+        boolean objectReuse = containingTask.getExecutionConfig().isObjectReuseEnabled();
+        boolean cacheKitElision = !objectReuse && cacheKitArmChainCopyElision.isEligible(operator);
+        if (objectReuse || cacheKitElision) {
             currentOperatorOutput = new ChainingOutput<>(operator, outputTag);
+            if (cacheKitElision) {
+                LOG.info(
+                        "CacheKit ARM chain copy elision installed for downstream={} operator={}",
+                        operator.getClass().getName(),
+                        operatorConfig.getOperatorName());
+            }
         } else {
             TypeSerializer<IN> inSerializer =
                     operatorConfig.getTypeSerializerIn1(userCodeClassloader);
