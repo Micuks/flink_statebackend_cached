@@ -337,8 +337,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeMutationSuperseded;
     private volatile long nativeMutationFailures;
     private volatile long nativeMutationTombstonesApplied;
-    private volatile long nativeMutationBatchChecks;
-    private volatile long nativeMutationBatchCheckKeys;
+    private volatile long nativeMutationBatchScopes;
+    private volatile long nativeMutationBatchScopeKeys;
     private volatile long nativeMutationBatchFlushes;
     private volatile long nativeMutationBatchFlushKeys;
     private volatile long nativeMutationBatchCoalesced;
@@ -1174,10 +1174,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 V value = deserializeNativeProbeValue(slot, 0, true);
                 nativeHits++;
                 nativeHitBytesDirect += slot.probeValueLength(0);
+                markNativeResidentBatchKey(key, namespace, preparedKey);
                 return NativePointCacheResult.hit(value);
             }
             if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
                 nativeNegativeHits++;
+                markNativeResidentBatchKey(key, namespace, preparedKey);
                 V defaultValue = batchReader.getBatchDefaultValue();
                 return NativePointCacheResult.hit(
                         deserializeImmediateValueOrCopyDefault(null, defaultValue));
@@ -1233,6 +1235,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     || status == NativeRequestPlaneBridge.FILL_UPDATED) {
                 nativeFillBatches++;
                 nativeFillKeys++;
+                markNativeResidentBatchKey(key, namespace, preparedKey);
             } else {
                 nativeFillRejected++;
             }
@@ -1604,7 +1607,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "nativeMutationResidentMissSkipped={} nativeValueReadActivations={} "
                             + "nativeMutationSuperseded={} nativeMutationFailures={} "
                             + "nativeMutationTombstonesApplied={} "
-                            + "nativeMutationBatchChecks={} nativeMutationBatchCheckKeys={} "
+                            + "nativeMutationBatchScopes={} nativeMutationBatchScopeKeys={} "
                             + "nativeMutationBatchFlushes={} nativeMutationBatchFlushKeys={} "
                             + "nativeMutationBatchCoalesced={} nativeActive={} "
                             + "nativeKernel={} nativeFeatureBits={} nativeFeatures={} "
@@ -1708,8 +1711,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeMutationSuperseded,
                     nativeMutationFailures,
                     nativeMutationTombstonesApplied,
-                    nativeMutationBatchChecks,
-                    nativeMutationBatchCheckKeys,
+                    nativeMutationBatchScopes,
+                    nativeMutationBatchScopeKeys,
                     nativeMutationBatchFlushes,
                     nativeMutationBatchFlushKeys,
                     nativeMutationBatchCoalesced,
@@ -2134,12 +2137,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return nativeMutationResidentMissSkipped;
     }
 
-    long getNativeMutationBatchChecksForTesting() {
-        return nativeMutationBatchChecks;
+    long getNativeMutationBatchScopesForTesting() {
+        return nativeMutationBatchScopes;
     }
 
     long getNativeMutationBatchFlushesForTesting() {
         return nativeMutationBatchFlushes;
+    }
+
+    long getNativeMutationBatchCoalescedForTesting() {
+        return nativeMutationBatchCoalesced;
     }
 
     long getNativeWriteEpochForTesting() {
@@ -4414,13 +4421,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     /**
-     * Starts one mailbox-confined resident-only mutation batch for the exact incoming key set.
+     * Starts one mailbox-confined resident-only mutation batch for the incoming dispatch.
      *
-     * <p>The native check-only vector reuses the current state epoch so a read-only dispatch does
-     * not invalidate useful in-flight prefetch. The first real mutation advances the epoch once;
-     * its update-only flush then fences every older speculative fill before changing resident
-     * values. The method returns false without changing mutation behavior when no bounded native
-     * slot is available.
+     * <p>Residency is learned lazily from real native hits or successful authoritative-read fills
+     * inside this dispatch. This matters for read-modify-write queries: a key is commonly absent at
+     * mailbox flush entry and becomes resident only after its record reads state. The first real
+     * mutation advances the epoch once; the update-only vector at dispatch exit both rechecks
+     * exact-key residency and publishes the coalesced last value. A read-only dispatch never moves
+     * the epoch.
      */
     @SuppressWarnings("unchecked")
     public boolean beginNativeResidentMutationBatch(Iterable<? extends K> keys) {
@@ -4430,65 +4438,26 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 || nativeRequestPlaneCoordinator == null
                 || !nativeRequestPlaneCoordinator.isActive()
                 || !nativeRequestPlaneCoordinator.options().residentMutationBatchEnabled()
-                || nativeValueReadActivation == null
-                || !nativeValueReadActivation.isActive()
                 || !(delegate instanceof RocksDBBatchValueReader<?, ?, ?>)) {
             return false;
         }
-        RocksDBBatchValueReader<K, N, V> batchReader =
-                (RocksDBBatchValueReader<K, N, V>) delegate;
-        java.util.LinkedHashMap<KeyNamespaceKey<K, N>, byte[]> preparedByKey =
-                new java.util.LinkedHashMap<>();
         try {
+            int scopeKeys = 0;
             for (K key : keys) {
-                if (key == null) {
-                    continue;
-                }
-                KeyNamespaceKey<K, N> storageKey =
-                        new KeyNamespaceKey<>(
-                                key,
-                                currentNamespace,
-                                keySerializer,
-                                namespaceSerializer);
-                if (!preparedByKey.containsKey(storageKey)) {
-                    preparedByKey.put(
-                            storageKey,
-                            batchReader.serializeBatchKeyAndNamespace(
-                                    storageKey.key,
-                                    storageKey.namespace,
-                                    nativeMutationKeySerializer,
-                                    nativeMutationNamespaceSerializer));
+                if (key != null) {
+                    scopeKeys++;
                 }
             }
-            if (preparedByKey.isEmpty()) {
-                return false;
-            }
-            long checkEpoch = nativeWriteEpoch.get();
-            java.util.ArrayList<byte[]> preparedKeys =
-                    new java.util.ArrayList<>(preparedByKey.values());
-            int[] statuses =
-                    nativeRequestPlaneCoordinator.tryCheckExactKeysPresent(
-                            nativeStateId, checkEpoch, preparedKeys);
-            if (statuses == null) {
+            if (scopeKeys == 0) {
                 return false;
             }
             nativeResidentBatchKeys.clear();
             nativeResidentBatchDirtyKeys.clear();
             pendingNativeResidentMutations.clear();
-            int index = 0;
-            for (java.util.Map.Entry<KeyNamespaceKey<K, N>, byte[]> entry :
-                    preparedByKey.entrySet()) {
-                int status = statuses[index++];
-                if (status == NativeRequestPlaneBridge.FILL_UPDATED) {
-                    nativeResidentBatchKeys.put(
-                            entry.getKey(),
-                            new NativeBatchResidentKey<>(entry.getKey(), entry.getValue()));
-                }
-            }
             nativeResidentMutationBatchEpoch = 0L;
             nativeResidentMutationBatchActive = true;
-            nativeMutationBatchChecks++;
-            nativeMutationBatchCheckKeys += preparedKeys.size();
+            nativeMutationBatchScopes++;
+            nativeMutationBatchScopeKeys += scopeKeys;
             return true;
         } catch (Exception | LinkageError failure) {
             nativeRequestPlaneCoordinator.disable(failure);
@@ -4588,6 +4557,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeRuntimeFailures++;
             nativeRequestPlaneCoordinator.disable(failure);
         }
+    }
+
+    private void markNativeResidentBatchKey(K key, N namespace, byte[] preparedKey) {
+        if (!nativeResidentMutationBatchActive || key == null || namespace == null) {
+            return;
+        }
+        KeyNamespaceKey<K, N> storageKey =
+                new KeyNamespaceKey<>(key, namespace, keySerializer, namespaceSerializer);
+        nativeResidentBatchKeys.put(
+                storageKey, new NativeBatchResidentKey<>(storageKey, preparedKey));
     }
 
     private static final class NativeBatchResidentKey<K, N> {

@@ -2241,15 +2241,17 @@ class NativePreparedValueStateTest {
                 newNativePreparedState(delegate, currentKey, coordinator, 63, 8, 1);
         state.setCurrentNamespace("batch-ns");
 
-        assertEquals(7, state.value());
         assertTrue(
                 state.beginNativeResidentMutationBatch(
                         Arrays.asList("resident", "absent")));
         assertEquals(0, state.getNativeWriteEpochForTesting());
-        state.update(9);
+        assertEquals(7, state.value());
+        state.update(8);
         assertEquals(0, state.getNativeWriteEpochForTesting());
         state.flush();
         assertEquals(1, state.getNativeWriteEpochForTesting());
+        state.update(9);
+        state.flush();
         state.endNativeResidentMutationBatch();
 
         byte[] prepared =
@@ -2269,11 +2271,12 @@ class NativePreparedValueStateTest {
                             probe.copyProbeValue(0));
             assertEquals(9, IntSerializer.INSTANCE.deserialize(input));
         }
-        assertEquals(1, state.getNativeMutationAttemptsForTesting());
+        assertEquals(2, state.getNativeMutationAttemptsForTesting());
         assertEquals(1, state.getNativeMutationAppliedForTesting());
         assertEquals(0, state.getNativeMutationResidentMissSkippedForTesting());
-        assertEquals(1, state.getNativeMutationBatchChecksForTesting());
+        assertEquals(1, state.getNativeMutationBatchScopesForTesting());
         assertEquals(1, state.getNativeMutationBatchFlushesForTesting());
+        assertEquals(1, state.getNativeMutationBatchCoalescedForTesting());
         state.close();
         coordinator.close();
     }
