@@ -2277,6 +2277,10 @@ class NativePreparedValueStateTest {
         assertEquals(1, state.getNativeMutationBatchScopesForTesting());
         assertEquals(1, state.getNativeMutationBatchFlushesForTesting());
         assertEquals(1, state.getNativeMutationBatchCoalescedForTesting());
+        assertEquals(2, state.getNativeMutationResidentHintChecksForTesting());
+        assertEquals(2, state.getNativeMutationResidentHintPositivesForTesting());
+        assertEquals(0, state.getNativeMutationResidentHintNegativesForTesting());
+        assertEquals(0, state.getNativeMutationFenceOnlyFlushesForTesting());
         state.close();
         coordinator.close();
     }
@@ -2345,6 +2349,10 @@ class NativePreparedValueStateTest {
         assertEquals(1, state.getNativeMutationBatchScopesForTesting());
         assertEquals(1, state.getNativeMutationBatchFlushesForTesting());
         assertEquals(0, state.getNativeMutationBatchCoalescedForTesting());
+        assertEquals(2, state.getNativeMutationResidentHintChecksForTesting());
+        assertEquals(1, state.getNativeMutationResidentHintPositivesForTesting());
+        assertEquals(1, state.getNativeMutationResidentHintNegativesForTesting());
+        assertEquals(0, state.getNativeMutationFenceOnlyFlushesForTesting());
 
         try (NativeRequestPlaneCoordinator.BatchSlot probe =
                 coordinator.tryAcquireBatchSlot()) {
@@ -2356,6 +2364,77 @@ class NativePreparedValueStateTest {
                     new org.apache.flink.core.memory.DataInputDeserializer(
                             probe.copyProbeValue(0));
             assertEquals(8, IntSerializer.INSTANCE.deserialize(input));
+        }
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testHintNegativeBatchStillAdvancesFenceAgainstOlderFill() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("absent");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(null);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+        stubDirectPreparedSerialization(reader);
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        residentMutationBatchOptions(), new FakeNativeRequestPlane());
+        coordinator.valueReadActivation(65).activate();
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 65, 8, 1);
+        state.setCurrentNamespace("batch-ns");
+        byte[] prepared =
+                KvStateSerializer.serializeKeyAndNamespace(
+                        "absent",
+                        StringSerializer.INSTANCE,
+                        "batch-ns",
+                        StringSerializer.INSTANCE);
+
+        assertTrue(state.beginNativeResidentMutationBatch(java.util.Collections.singleton("absent")));
+        state.update(9);
+        state.flush();
+        // Model an older asynchronous read completing after the authoritative mutation but before
+        // dispatch exit. The hint was negative when the mutation was queued.
+        assertEquals(
+                NativeRequestPlaneBridge.FILL_INSERTED,
+                coordinator.updateExactKey(
+                        65,
+                        0L,
+                        prepared,
+                        KvStateSerializer.serializeValue(7, IntSerializer.INSTANCE)));
+        state.endNativeResidentMutationBatch();
+
+        assertEquals(1, state.getNativeMutationResidentHintChecksForTesting());
+        assertEquals(0, state.getNativeMutationResidentHintPositivesForTesting());
+        assertEquals(1, state.getNativeMutationResidentHintNegativesForTesting());
+        assertEquals(1, state.getNativeMutationFenceOnlyFlushesForTesting());
+        assertEquals(1, state.getNativeMutationResidentMissSkippedForTesting());
+        assertEquals(0, state.getNativeMutationAppliedForTesting());
+        assertEquals(0, state.getNativeMutationFailuresForTesting());
+
+        try (NativeRequestPlaneCoordinator.BatchSlot probe =
+                coordinator.tryAcquireBatchSlot()) {
+            assertNotNull(probe);
+            probe.prepareExact(65, 1L, output -> output.write(prepared));
+            assertEquals(1, coordinator.probe(probe));
+            assertEquals(NativeRequestPlaneBridge.PROBE_MISS, probe.probeStatus(0));
         }
         state.close();
         coordinator.close();

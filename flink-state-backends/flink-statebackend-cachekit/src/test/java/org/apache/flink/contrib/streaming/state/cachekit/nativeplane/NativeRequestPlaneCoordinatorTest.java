@@ -449,6 +449,35 @@ class NativeRequestPlaneCoordinatorTest {
         coordinator.close();
     }
 
+    @Test
+    void testResidentHintLearnsEveryAcceptedSingleAndBatchFillWithoutCrossStateLeakage()
+            throws Exception {
+        FakePlane plane = new FakePlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(1), plane);
+        byte[] singleKey = new byte[] {7, 8, 9};
+        byte[] batchKey = new byte[] {10, 11, 12};
+
+        assertFalse(coordinator.mightContainResidentKey(71, singleKey));
+        assertEquals(
+                NativeRequestPlaneBridge.FILL_INSERTED,
+                coordinator.updateExactKey(71, 1L, singleKey, new byte[] {1}));
+        assertTrue(coordinator.mightContainResidentKey(71, singleKey));
+        assertFalse(coordinator.mightContainResidentKey(72, singleKey));
+
+        try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
+            assertNotNull(slot);
+            slot.prepareFill(
+                    71,
+                    1L,
+                    java.util.Collections.singletonList(batchKey),
+                    java.util.Collections.singletonList(new byte[] {2}));
+            assertEquals(1, coordinator.fill(slot));
+        }
+        assertTrue(coordinator.mightContainResidentKey(71, batchKey));
+        coordinator.close();
+    }
+
     private static NativeRequestPlaneOptions options(int slots) {
         return new NativeRequestPlaneOptions(
                 true, "", "auto", 16, 1024, 1024, 4, 1024, 1024, 1, slots, false);

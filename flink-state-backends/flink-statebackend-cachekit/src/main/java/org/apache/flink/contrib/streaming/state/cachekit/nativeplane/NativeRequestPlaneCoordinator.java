@@ -28,6 +28,8 @@ import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicLongArray;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 
@@ -52,6 +54,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private final NativeRequestPlane plane;
     private final ArrayDeque<BatchSlot> availableSlots;
     private final BatchSlot mutationSlot;
+    private final ResidentKeyHint residentKeyHint;
     private final ConcurrentMap<Integer, ValueReadActivation> valueReadActivations =
             new ConcurrentHashMap<>();
     private final String selectedKernel;
@@ -122,6 +125,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         }
         this.mutationSlot = new BatchSlot(this, options, true);
         this.mutationSlot.markLeased();
+        this.residentKeyHint = new ResidentKeyHint(options.capacityEntries());
         // Capture audit metadata during construction. If either JNI query fails, open() closes the
         // bridge before ownership can escape. These getters are thereafter non-JNI and cannot make
         // CacheKitKeyedStateBackend construction leak an already-open plane.
@@ -195,12 +199,19 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         synchronized (planeLock) {
             requireActive();
             try {
-                int processed =
-                        plane.fillBatch(
-                                slot.missKeys,
-                                slot.fillValueArena(),
-                                slot.fillValueMetadata(),
-                                slot.fillResults());
+                int processed;
+                residentKeyHint.beginUpdate();
+                try {
+                    processed =
+                            plane.fillBatch(
+                                    slot.missKeys,
+                                    slot.fillValueArena(),
+                                    slot.fillValueMetadata(),
+                                    slot.fillResults());
+                    recordAcceptedResidentHints(slot, processed);
+                } finally {
+                    residentKeyHint.endUpdate();
+                }
                 fillCalls++;
                 return processed;
             } catch (RuntimeException | LinkageError failure) {
@@ -379,6 +390,45 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 throw failure;
             }
         }
+    }
+
+    /**
+     * Advances one state's generation fence without publishing a value.
+     *
+     * <p>The exact key is only a carrier for the state id and generation. A resident entry is not
+     * changed and an absent entry is never inserted. This is used when a mailbox batch contains
+     * authoritative RocksDB writes but the no-false-negative resident hint rejects every mutation
+     * candidate; advancing the watermark still invalidates any older asynchronous fill.
+     */
+    public int advanceGenerationFence(
+            int stateId, long generation, byte[] preparedRocksDBKey) throws IOException {
+        Objects.requireNonNull(preparedRocksDBKey, "preparedRocksDBKey");
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                mutationSlot.prepareSingleMutationCheck(
+                        stateId, generation, output -> output.write(preparedRocksDBKey));
+                return fillPreparedMutationControl();
+            } catch (IOException failure) {
+                disableLocked(failure);
+                throw failure;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
+    /**
+     * Returns a no-false-negative hint for keys that have ever been accepted by this native plane.
+     *
+     * <p>A false positive only causes the authoritative update-only path to perform an extra exact
+     * lookup. Bits are never cleared during the coordinator lifetime, so eviction cannot turn a
+     * previously resident key into a false negative.
+     */
+    public boolean mightContainResidentKey(int stateId, byte[] preparedRocksDBKey) {
+        Objects.requireNonNull(preparedRocksDBKey, "preparedRocksDBKey");
+        return residentKeyHint.mightContain(stateId, preparedRocksDBKey);
     }
 
     /**
@@ -610,18 +660,46 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     }
 
     private int fillPreparedMutationRaw() {
-        int processed =
-                plane.fillBatch(
-                        mutationSlot.missKeys,
-                        mutationSlot.fillValueArena(),
-                        mutationSlot.fillValueMetadata(),
-                        mutationSlot.fillResults());
+        int processed;
+        residentKeyHint.beginUpdate();
+        try {
+            processed =
+                    plane.fillBatch(
+                            mutationSlot.missKeys,
+                            mutationSlot.fillValueArena(),
+                            mutationSlot.fillValueMetadata(),
+                            mutationSlot.fillResults());
+            recordAcceptedResidentHints(mutationSlot, processed);
+        } finally {
+            residentKeyHint.endUpdate();
+        }
         fillCalls++;
         if (processed != 1) {
             throw new IllegalStateException(
                     "Native exact-key update processed " + processed + " of 1 entry.");
         }
         return mutationSlot.fillStatus(0);
+    }
+
+    private void recordAcceptedResidentHints(BatchSlot slot, int processed) {
+        int count = Math.min(processed, slot.missKeys.entryCount());
+        if (count <= 0) {
+            return;
+        }
+        ByteBuffer arena = slot.missKeys.arenaSlice();
+        for (int index = 0; index < count; index++) {
+            int status = slot.fillStatus(index);
+            int error = slot.fillError(index);
+            if (error == NativeRequestPlaneBridge.ERROR_OK
+                    && (status == NativeRequestPlaneBridge.FILL_INSERTED
+                            || status == NativeRequestPlaneBridge.FILL_UPDATED)) {
+                residentKeyHint.add(
+                        slot.missKeys.stateId(index),
+                        arena,
+                        slot.missKeys.arenaOffset(index),
+                        slot.missKeys.serializedLength(index));
+            }
+        }
     }
 
     public boolean isActive() {
@@ -797,6 +875,116 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
 
         public boolean isActive() {
             return active.get();
+        }
+    }
+
+    /** Fixed-size, monotonically populated Bloom hint; saturation affects cost, never semantics. */
+    private static final class ResidentKeyHint {
+        private static final int MIN_BITS = 1 << 16;
+        private static final int MAX_BITS = 1 << 26;
+        private static final int BITS_PER_CAPACITY_ENTRY = 8;
+        private static final int PROBES = 3;
+        private static final long HASH_OFFSET = 0xcbf29ce484222325L;
+        private static final long HASH_PRIME = 0x100000001b3L;
+        private static final long HASH_SALT = 0x9e3779b97f4a7c15L;
+
+        private final AtomicLongArray words;
+        private final AtomicLong updateVersion = new AtomicLong();
+        private final int bitMask;
+
+        private ResidentKeyHint(int capacityEntries) {
+            long requested = Math.max(MIN_BITS, (long) capacityEntries * BITS_PER_CAPACITY_ENTRY);
+            int bits = MIN_BITS;
+            while (bits < requested && bits < MAX_BITS) {
+                bits <<= 1;
+            }
+            words = new AtomicLongArray(bits >>> 6);
+            bitMask = bits - 1;
+        }
+
+        private void add(int stateId, ByteBuffer bytes, int offset, int length) {
+            long hash = hash(stateId, bytes, offset, length);
+            setProbes(hash);
+        }
+
+        private void beginUpdate() {
+            long version = updateVersion.incrementAndGet();
+            if ((version & 1L) == 0L) {
+                throw new IllegalStateException("Resident-key hint update already in progress.");
+            }
+        }
+
+        private void endUpdate() {
+            long version = updateVersion.incrementAndGet();
+            if ((version & 1L) != 0L) {
+                throw new IllegalStateException("Resident-key hint update was not in progress.");
+            }
+        }
+
+        private boolean mightContain(int stateId, byte[] bytes) {
+            long before = updateVersion.get();
+            if ((before & 1L) != 0L) {
+                return true;
+            }
+            long hash = hash(stateId, bytes);
+            long stride = mix64(hash ^ HASH_SALT) | 1L;
+            for (int probe = 0; probe < PROBES; probe++) {
+                int bit = (int) (hash + probe * stride) & bitMask;
+                long mask = 1L << (bit & 63);
+                if ((words.get(bit >>> 6) & mask) == 0L) {
+                    long after = updateVersion.get();
+                    return before != after || (after & 1L) != 0L;
+                }
+            }
+            return true;
+        }
+
+        private void setProbes(long hash) {
+            long stride = mix64(hash ^ HASH_SALT) | 1L;
+            for (int probe = 0; probe < PROBES; probe++) {
+                int bit = (int) (hash + probe * stride) & bitMask;
+                int wordIndex = bit >>> 6;
+                long mask = 1L << (bit & 63);
+                long observed;
+                do {
+                    observed = words.get(wordIndex);
+                    if ((observed & mask) != 0L) {
+                        break;
+                    }
+                } while (!words.compareAndSet(wordIndex, observed, observed | mask));
+            }
+        }
+
+        private static long hash(int stateId, byte[] bytes) {
+            long hash = seed(stateId, bytes.length);
+            for (byte value : bytes) {
+                hash ^= value & 0xffL;
+                hash *= HASH_PRIME;
+            }
+            return mix64(hash);
+        }
+
+        private static long hash(int stateId, ByteBuffer bytes, int offset, int length) {
+            long hash = seed(stateId, length);
+            for (int index = 0; index < length; index++) {
+                hash ^= bytes.get(offset + index) & 0xffL;
+                hash *= HASH_PRIME;
+            }
+            return mix64(hash);
+        }
+
+        private static long seed(int stateId, int length) {
+            return HASH_OFFSET
+                    ^ (Integer.toUnsignedLong(stateId) * HASH_SALT)
+                    ^ Integer.toUnsignedLong(length);
+        }
+
+        private static long mix64(long value) {
+            value ^= value >>> 33;
+            value *= 0xff51afd7ed558ccdL;
+            value ^= value >>> 33;
+            value *= 0xc4ceb9fe1a85ec53L;
+            return value ^ (value >>> 33);
         }
     }
 
