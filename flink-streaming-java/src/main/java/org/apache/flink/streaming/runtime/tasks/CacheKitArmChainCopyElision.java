@@ -37,8 +37,14 @@ final class CacheKitArmChainCopyElision {
     static final String AARCH64_ONLY_KEY =
             "state.backend.cachekit.arm.chain-copy-elision.aarch64-only";
 
-    private static final String GENERATED_CALC_PREFIX =
-            "org.apache.flink.table.runtime.operators.calc.StreamExecCalc$";
+    private static final String[] NUMBERED_GENERATED_SAFE_PREFIXES = {
+        "StreamExecCalc$",
+        "StreamExecExpand$",
+        "StreamExecCorrelate$",
+        "org.apache.flink.table.runtime.operators.calc.StreamExecCalc$",
+        "org.apache.flink.table.runtime.operators.expand.StreamExecExpand$",
+        "org.apache.flink.table.runtime.operators.join.StreamExecCorrelate$"
+    };
     private static final String WATERMARK_ASSIGNER =
             "org.apache.flink.table.runtime.operators.wmassigners.WatermarkAssignerOperator";
     private static final String SINK_OPERATOR =
@@ -86,22 +92,30 @@ final class CacheKitArmChainCopyElision {
             return false;
         }
 
-        // Janino generates numbered Calc subclasses under the Table-runtime package. Restrict the
-        // suffix to decimal digits so a user lookalike is not admitted.
-        if (className.startsWith(GENERATED_CALC_PREFIX)) {
-            String suffix = className.substring(GENERATED_CALC_PREFIX.length());
-            if (!suffix.isEmpty()) {
-                boolean decimal = true;
-                for (int i = 0; i < suffix.length(); i++) {
-                    decimal &= Character.isDigit(suffix.charAt(i));
-                }
-                if (decimal) {
+        // Janino uses both the default package and Table-runtime packages across builds. Restrict
+        // admission to known generated operator families with a decimal-only generated suffix.
+        for (String prefix : NUMBERED_GENERATED_SAFE_PREFIXES) {
+            if (className.startsWith(prefix)) {
+                String suffix = className.substring(prefix.length());
+                if (isDecimal(suffix)) {
                     return true;
                 }
             }
         }
 
         return WATERMARK_ASSIGNER.equals(className) || SINK_OPERATOR.equals(className);
+    }
+
+    private static boolean isDecimal(String value) {
+        if (value.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            if (!Character.isDigit(value.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     static boolean isAarch64(String architecture) {

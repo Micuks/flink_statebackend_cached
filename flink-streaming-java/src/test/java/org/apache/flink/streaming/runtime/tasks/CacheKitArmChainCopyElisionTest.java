@@ -38,6 +38,11 @@ class CacheKitArmChainCopyElisionTest {
                         CacheKitArmChainCopyElision.isEligibleClassName(
                                 "org.apache.flink.table.runtime.operators.calc.StreamExecCalc$28"))
                 .isTrue();
+        assertThat(CacheKitArmChainCopyElision.isEligibleClassName("StreamExecCalc$76")).isTrue();
+        assertThat(CacheKitArmChainCopyElision.isEligibleClassName("StreamExecExpand$87"))
+                .isTrue();
+        assertThat(CacheKitArmChainCopyElision.isEligibleClassName("StreamExecCorrelate$19"))
+                .isTrue();
         assertThat(
                         CacheKitArmChainCopyElision.isEligibleClassName(
                                 "org.apache.flink.table.runtime.operators.wmassigners."
@@ -56,7 +61,7 @@ class CacheKitArmChainCopyElisionTest {
                                 "org.apache.flink.table.runtime.operators.calc."
                                         + "StreamExecCalc$unsafe"))
                 .isFalse();
-        assertThat(CacheKitArmChainCopyElision.isEligibleClassName("StreamExecCalc$28"))
+        assertThat(CacheKitArmChainCopyElision.isEligibleClassName("StreamExecCalc$lookalike"))
                 .isFalse();
         assertThat(
                         CacheKitArmChainCopyElision.isEligibleClassName(
