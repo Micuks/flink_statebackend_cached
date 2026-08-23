@@ -2856,15 +2856,26 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 prepareNativeBatchSlot(rocksDBKeys);
         if (nativeBatchSlot != null) {
             try {
-                if (executeNativePreparedBatch(
-                        rocksDBKeys,
-                        storageKeys,
-                        defaultValue,
-                        gen,
-                        nativeBatchSlot,
-                        true,
-                        null,
-                        false)) {
+                boolean handled =
+                        nativeRequestPlaneCoordinator.options().directArenaReadOnlyEnabled()
+                                ? executeNativeDirectReadOnlyBatch(
+                                        rocksDBKeys,
+                                        storageKeys,
+                                        defaultValue,
+                                        gen,
+                                        nativeBatchSlot,
+                                        null,
+                                        true)
+                                : executeNativePreparedBatch(
+                                        rocksDBKeys,
+                                        storageKeys,
+                                        defaultValue,
+                                        gen,
+                                        nativeBatchSlot,
+                                        true,
+                                        null,
+                                        false);
+                if (handled) {
                     return;
                 }
             } catch (Exception t) {
@@ -3195,7 +3206,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             defaultValue,
                             gen,
                             nativeBatchSlot,
-                            reservation)) {
+                            reservation,
+                            false)) {
                 return;
             }
             shouldProbeNative = shouldProbeNative && !directArenaReadOnly;
@@ -3260,7 +3272,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return null;
         }
         try {
-            activateNativeValueRead();
+            if (!nativeRequestPlaneCoordinator.options().directArenaReadOnlyEnabled()) {
+                activateNativeValueRead();
+            }
             slot.prepareLatest(nativeStateId, nativeWriteEpoch.get(), rocksDBKeys);
             return slot;
         } catch (IOException | RuntimeException failure) {
@@ -3285,7 +3299,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             V defaultValue,
             long gen,
             NativeRequestPlaneCoordinator.BatchSlot slot,
-            PrefetchReservation reservation)
+            PrefetchReservation reservation,
+            boolean immediate)
             throws Exception {
         if (closed
                 || gen != writeGen
@@ -3339,12 +3354,26 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 return true;
             }
             int originalIndex = preparedIndices[resultIndex];
-            if (!stagePreparedValue(
-                    storageKeys.get(originalIndex),
-                    values.get(resultIndex),
-                    defaultValue,
-                    gen,
-                    reservation)) {
+            byte[] serializedValue = values.get(resultIndex);
+            boolean published;
+            if (immediate) {
+                V value = deserializeImmediateValueOrCopyDefault(serializedValue, defaultValue);
+                published =
+                        publishStagedValue(
+                                StagedValue.materialized(
+                                        storageKeys.get(originalIndex), value, gen),
+                                serializedValue == null,
+                                reservation);
+            } else {
+                published =
+                        stagePreparedValue(
+                                storageKeys.get(originalIndex),
+                                serializedValue,
+                                defaultValue,
+                                gen,
+                                reservation);
+            }
+            if (!published) {
                 return true;
             }
         }

@@ -714,6 +714,11 @@ class NativePreparedValueStateTest {
         when(reader.getBatchDefaultValue()).thenReturn(99);
         when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
         stubDirectPreparedSerialization(reader);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                serializedKey(
+                                        invocation.getArgument(0), invocation.getArgument(1)));
         byte[] first = KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE);
         doAnswer(
                         invocation -> {
@@ -760,6 +765,17 @@ class NativePreparedValueStateTest {
         currentKey.set("k1");
         assertEquals(11, state.value());
         currentKey.set("k2");
+        assertEquals(99, state.value());
+
+        state.setCurrentNamespace("window-direct-read-only-immediate");
+        state.prefetchForImmediateUse(Arrays.asList("k3", "k4"));
+        assertEquals(0, coordinator.probeCalls());
+        assertEquals(0, coordinator.fillCalls());
+        assertEquals(2, state.getNativeDirectArenaReadOnlyBatchesForTesting());
+        assertEquals(4, state.getNativeDirectArenaReadOnlyKeysForTesting());
+        currentKey.set("k3");
+        assertEquals(11, state.value());
+        currentKey.set("k4");
         assertEquals(99, state.value());
 
         state.close();
