@@ -150,3 +150,21 @@ Token32 V3 的 q16 K/s/core 增量为 `+0.12%`，wall throughput `+0.20%`，CPU 
 runtime summary 中 control 为 1,407,555 native batches / 89,794,384 input keys / 44,416,777 groups，candidate 为 1,224,098 / 78,057,971 / 44,437,799。groups 几乎一致而进入新 grouping seam 的 batches/input keys 较少，说明该 activity counter 受 backend seam/批次分布影响，不能当作端到端 records 等价证明。功能正确性以差分、collision、malformed-plan、stable-order 测试为主；Nexmark 只证明真实作业未失败和性能口径有效。
 
 下一主线按 profiling 排序转为：融合 Native Mailbox compact 与 prepared-key probe/MultiGet，复用 compact 的 selected source indexes 直接访问原 direct prepared arena，删除 `direct prepared key → heap byte[] → direct probe` 往返，仅为真正 RocksDB miss 物化 heap key。紧凑证据：`dse_results/cachekit-native-token-plan-q16-50m-20260820/`；远端：`/home/wuql/flink-cluster/experiments/cachekit-native-token-plan-q16-50m-kunpeng-20260820`。
+
+## 2026-08-23 Kunpeng chain-copy-elision 15Q 快筛
+
+q17 CPU profile 显示 FullOpt 后主要热点已经从 RocksDB/state 转到 operator-chain 行复制：`RowDataSerializer.copy` inclusive 38.13%、`copyRowData` 36.04%、`StringDataSerializer.copy` 21.23%、`BinaryStringData.copy` 20.98%。全局 object reuse 的 q17 机制上限为 `77.17 → 106.58 K/s/core`（`+38.11%`），因此实现 AArch64-only、严格算子白名单的 chain-copy-elision；未知/用户算子保持 `CopyingChainingOutput` fail closed。
+
+实现 commit 为 `f6ad18b95ad9049a19b89cfaf6951bd0f40729b3`。正式 15Q/50M/R1 同二进制 A/B 只切换 `state.backend.cachekit.arm.chain-copy-elision.enabled`，`pipeline.object-reuse=false`、无 checkpoint、2×4 TM/8 TM/16 slots。30/30 legs 和逐腿 SHA 审计通过。
+
+| 分组 | 算术平均提升 |
+|---|---:|
+| 前八 | +24.60% |
+| 后七 | +42.42% |
+| ValueState-only | +24.29% |
+| 任意 state | +27.92% |
+| 15Q 总计 | **+32.91%** |
+
+15Q 逐 query 提升为：q4 +24.58%、q5 +31.92%、q8 +38.82%、q9 +14.07%、q11 +12.10%、q18 +21.17%、q19 +35.35%、q20 +18.76%、q3 +69.50%、q7 +7.66%、q12 +39.12%、q13 +102.84%、q15 +28.77%、q16 +13.22%、q17 +35.81%。本轮已通过相对同配置 FullOpt `>=+10%` 的目标门槛。
+
+q3/q13 的 optimized 50M job 短于原 Nexmark source metric 注册窗口，因此 A/B 同时用从当前 Nexmark 源码构建的 event-count CPU collector：吞吐仍为 events/wall，CPU 仍来自 8-TM receiver，过滤冷样本并取 retained CPU 中位数；17 tests、0 failure/error。完整远端 expdir：`/home/wuql/flink-cluster/experiments/cachekit-kunpeng-arm-copy-elision-v3-15q-50m-r1-20260823`；本地紧凑证据：`OmniStateStore/dse_results/cachekit-kunpeng-arm-copy-elision-15q-50m-r1-20260823/v3-final/`。
