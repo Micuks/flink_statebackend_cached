@@ -94,7 +94,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final boolean nativeMapSnapshotEnabled;
     private final int nativeSnapshotStateId;
     private final DataOutputSerializer nativeComponentOutput;
-    private long nativeGeneration;
+    private long nativeMapGeneration;
+    private long nativeSnapshotGeneration;
     private long nativeProbeAttempts;
     private long nativeHits;
     private long nativeNegativeHits;
@@ -102,6 +103,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private long nativeFills;
     private long nativeFallbacks;
     private long nativeFailures;
+    private long nativeMutationAttempts;
+    private long nativeMutationApplied;
+    private long nativeMutationNegativeApplied;
+    private long nativeMutationSuperseded;
+    private long nativeMutationFailures;
     private long nativeSnapshotProbes;
     private long nativeSnapshotHits;
     private long nativeSnapshotNegativeHits;
@@ -561,7 +567,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             remove(userKey);
             return;
         }
-        advanceNativeGeneration();
+        advanceNativeSnapshotGeneration();
         boolean writeThrough = !mapCacheEnabled || (bypassEnabled && isBypassing);
         if (writeThrough) {
             delegate.put(userKey, userValue);
@@ -573,6 +579,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, true);
         }
+        publishNativeMapMutation(currentKey, currentNamespace, userKey, userValue);
         invalidateSnapshot(currentKey);
     }
 
@@ -583,7 +590,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
-        advanceNativeGeneration();
+        advanceNativeSnapshotGeneration();
 
         boolean writeThrough = !mapCacheEnabled || (bypassEnabled && isBypassing);
         if (writeThrough) {
@@ -600,6 +607,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             if (presenceCacheEnabled) {
                 updatePresence(currentKey, uKey, entry.getValue() != null);
             }
+            publishNativeMapMutation(
+                    currentKey, currentNamespace, uKey, entry.getValue());
         }
         invalidateSnapshot(currentKey);
     }
@@ -611,7 +620,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
-        advanceNativeGeneration();
+        advanceNativeSnapshotGeneration();
 
         boolean writeThrough = !mapCacheEnabled || (bypassEnabled && isBypassing);
         if (writeThrough) {
@@ -623,6 +632,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, false);
         }
+        publishNativeMapMutation(currentKey, currentNamespace, userKey, null);
         invalidateSnapshot(currentKey);
     }
 
@@ -797,7 +807,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
         delegate.clear();
-        advanceNativeGeneration();
+        advanceAllNativeGenerations();
         clearPresenceCaches();
         clearValueCaches();
         resetBypassState();
@@ -876,7 +886,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         try (NativeRequestPlaneCoordinator.BatchSlot ignored = slot) {
             slot.prepareLatest(
                     nativeStateId,
-                    nativeGeneration,
+                    nativeMapGeneration,
                     output -> writeNativeMapKey(currentKey, currentNamespace, userKey, output));
             nativeProbeAttempts++;
             int processed = nativeRequestPlaneCoordinator.probe(slot);
@@ -909,7 +919,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         try {
             nativeRequestPlaneCoordinator.updateExactKey(
                     nativeStateId,
-                    nativeGeneration,
+                    nativeMapGeneration,
                     output -> writeNativeMapKey(currentKey, currentNamespace, userKey, output),
                     value == null
                             ? null
@@ -921,6 +931,54 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             // the MapState result; the coordinator already fails closed where appropriate.
         }
         return new NativeMapRead<>(value, false);
+    }
+
+    /**
+     * Publishes an authoritative point mutation without invalidating unrelated native entries.
+     *
+     * <p>MapState aggregation commonly executes {@code get(userKey)} followed by
+     * {@code put(userKey, value)}. Advancing one state-wide generation for every point mutation
+     * discarded the entry filled by the preceding read and made the native cache pay probe/JNI
+     * cost without producing hits. Point mutations are mailbox-serialized, so updating the exact
+     * composite key at the current point-cache generation preserves correctness while retaining
+     * unrelated entries. Collection-wide operations such as {@link #clear()} still advance the
+     * point-cache generation.
+     */
+    private void publishNativeMapMutation(K key, N namespace, UK userKey, UV userValue) {
+        if (!nativeMapCacheEnabled
+                || key == null
+                || namespace == null
+                || userKey == null
+                || !nativeRequestPlaneCoordinator.isActive()) {
+            return;
+        }
+        nativeMutationAttempts++;
+        try {
+            int status =
+                    nativeRequestPlaneCoordinator.updateExactKey(
+                            nativeStateId,
+                            nativeMapGeneration,
+                            output -> writeNativeMapKey(key, namespace, userKey, output),
+                            userValue == null
+                                    ? null
+                                    : output ->
+                                            userValueSerializer.serialize(userValue, output));
+            if (status == NativeRequestPlaneBridge.FILL_INSERTED
+                    || status == NativeRequestPlaneBridge.FILL_UPDATED) {
+                nativeMutationApplied++;
+                if (userValue == null) {
+                    nativeMutationNegativeApplied++;
+                }
+            } else if (status
+                    == NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION) {
+                nativeMutationSuperseded++;
+            }
+        } catch (Exception | LinkageError failure) {
+            nativeMutationFailures++;
+            // The Java cache/delegate mutation is authoritative. The coordinator fails closed;
+            // never re-run or roll back a successful state mutation because native publication
+            // failed.
+        }
     }
 
     private void writeNativeMapKey(
@@ -1028,7 +1086,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             try (NativeRequestPlaneCoordinator.BatchSlot ignored = slot) {
                 slot.prepareExact(
                         nativeSnapshotStateId,
-                        nativeGeneration,
+                        nativeSnapshotGeneration,
                         output -> {
                             writeLengthPrefixed(keySerializer, currentKey, output);
                             writeLengthPrefixed(
@@ -1079,7 +1137,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         try {
             nativeRequestPlaneCoordinator.updateExactKey(
                     nativeSnapshotStateId,
-                    nativeGeneration,
+                    nativeSnapshotGeneration,
                     output -> {
                         writeLengthPrefixed(keySerializer, key, output);
                         writeLengthPrefixed(namespaceSerializer, namespace, output);
@@ -1100,10 +1158,21 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         return mapSnapshotCacheEnabled || nativeMapSnapshotEnabled;
     }
 
-    private void advanceNativeGeneration() {
-        if (nativeMapCacheEnabled || nativeMapSnapshotEnabled) {
-            nativeGeneration++;
+    private void advanceNativeMapGeneration() {
+        if (nativeMapCacheEnabled) {
+            nativeMapGeneration++;
         }
+    }
+
+    private void advanceNativeSnapshotGeneration() {
+        if (nativeMapSnapshotEnabled) {
+            nativeSnapshotGeneration++;
+        }
+    }
+
+    private void advanceAllNativeGenerations() {
+        advanceNativeMapGeneration();
+        advanceNativeSnapshotGeneration();
     }
 
     private Boolean getPresence(K currentKey, UK userKey) {
@@ -1331,7 +1400,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private void recordIteratorRemoval(K key, N namespace, UK userKey) {
-        advanceNativeGeneration();
+        advanceNativeSnapshotGeneration();
         if (userKey != null) {
             if (mapCacheEnabled) {
                 updateValueCache(key, namespace, userKey, null, false);
@@ -1339,6 +1408,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             if (presenceCacheEnabled) {
                 updatePresence(key, namespace, userKey, false);
             }
+            publishNativeMapMutation(key, namespace, userKey, null);
         }
         invalidateSnapshot(key, namespace);
     }
@@ -1675,9 +1745,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             LOG.info(
                     "[CACHEKIT NATIVE MAP CACHE] stateId={} generation={} probes={} hits={} "
                             + "negativeHits={} misses={} fills={} fallbacks={} failures={} "
-                            + "nativeActive={} kernel={}",
+                            + "mutationAttempts={} mutationApplied={} "
+                            + "mutationNegativeApplied={} mutationSuperseded={} "
+                            + "mutationFailures={} nativeActive={} kernel={}",
                     nativeStateId,
-                    nativeGeneration,
+                    nativeMapGeneration,
                     nativeProbeAttempts,
                     nativeHits,
                     nativeNegativeHits,
@@ -1685,6 +1757,11 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                     nativeFills,
                     nativeFallbacks,
                     nativeFailures,
+                    nativeMutationAttempts,
+                    nativeMutationApplied,
+                    nativeMutationNegativeApplied,
+                    nativeMutationSuperseded,
+                    nativeMutationFailures,
                     nativeRequestPlaneCoordinator.isActive(),
                     nativeRequestPlaneCoordinator.selectedKernel());
         }
@@ -1693,7 +1770,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                     "[CACHEKIT NATIVE MAP SNAPSHOT] stateId={} generation={} probes={} hits={} "
                             + "negativeHits={} misses={} fills={} fallbacks={} nativeActive={} kernel={}",
                     nativeSnapshotStateId,
-                    nativeGeneration,
+                    nativeSnapshotGeneration,
                     nativeSnapshotProbes,
                     nativeSnapshotHits,
                     nativeSnapshotNegativeHits,
@@ -1745,6 +1822,22 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
     long getNativeFillsForTesting() {
         return nativeFills;
+    }
+
+    long getNativeMutationAttemptsForTesting() {
+        return nativeMutationAttempts;
+    }
+
+    long getNativeMutationAppliedForTesting() {
+        return nativeMutationApplied;
+    }
+
+    long getNativeMutationNegativeAppliedForTesting() {
+        return nativeMutationNegativeApplied;
+    }
+
+    long getNativeMutationFailuresForTesting() {
+        return nativeMutationFailures;
     }
 
     long getNativeSnapshotHitsForTesting() {
@@ -1917,7 +2010,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             if (value == null) {
                 // A stale native snapshot must become a generation miss. Publishing a null
                 // exact-key fill would mean a real EMPTY snapshot, not a tombstone.
-                advanceNativeGeneration();
+                advanceNativeSnapshotGeneration();
                 removeSnapshot(snapshotProbe);
                 mapSnapshotCacheMetrics.recordStaleInvalidation();
                 return null;
@@ -2284,16 +2377,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         @Override
         public void remove() {
             delegateIterator.remove();
-            advanceNativeGeneration();
-            if (lastUserKey != null) {
-                if (mapCacheEnabled) {
-                    updateValueCache(currentKey, namespace, lastUserKey, null, false);
-                }
-                if (presenceCacheEnabled) {
-                    updatePresence(currentKey, namespace, lastUserKey, false);
-                }
-            }
-            invalidateSnapshot(currentKey, namespace);
+            recordIteratorRemoval(currentKey, namespace, lastUserKey);
             backfilled = true;
         }
 

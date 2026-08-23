@@ -113,7 +113,7 @@ class NativeMapStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void testMutationGenerationInvalidatesOlderNativeEntry() throws Exception {
+    void testGetPutGetPublishesUpdatedValueWithoutInvalidatingPointCache() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
         InternalMapState<String, VoidNamespace, String, Integer> delegate =
                 mock(InternalMapState.class);
@@ -130,10 +130,77 @@ class NativeMapStateTest {
                 createState(delegate, currentKey, coordinator);
 
         assertEquals(7, state.get("uk1"));
-        state.put("other", 9);
+        state.put("uk1", 9);
+        assertEquals(9, state.get("uk1"));
+
+        verify(delegate, times(1)).get("uk1");
+        verify(delegate, times(1)).put("uk1", 9);
+        assertEquals(1, state.getNativeMissesForTesting());
+        assertEquals(1, state.getNativeHitsForTesting());
+        assertEquals(1, state.getNativeMutationAttemptsForTesting());
+        assertEquals(1, state.getNativeMutationAppliedForTesting());
+        assertEquals(0, state.getNativeMutationFailuresForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testRemovePublishesNegativeEntryWithoutDelegateReread() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer())
+                .thenReturn(new MapSerializer<>(StringSerializer.INSTANCE, IntSerializer.INSTANCE));
+        when(delegate.get("uk1")).thenReturn(7);
+
+        OneEntryPlane plane = new OneEntryPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createState(delegate, currentKey, coordinator);
+
+        assertEquals(7, state.get("uk1"));
+        state.remove("uk1");
+        assertNull(state.get("uk1"));
+
+        verify(delegate, times(1)).get("uk1");
+        verify(delegate, times(1)).remove("uk1");
+        assertEquals(1, state.getNativeNegativeHitsForTesting());
+        assertEquals(1, state.getNativeMutationAppliedForTesting());
+        assertEquals(1, state.getNativeMutationNegativeAppliedForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testClearStillInvalidatesWholeNativePointCache() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer())
+                .thenReturn(new MapSerializer<>(StringSerializer.INSTANCE, IntSerializer.INSTANCE));
+        when(delegate.get("uk1")).thenReturn(7);
+
+        OneEntryPlane plane = new OneEntryPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createState(delegate, currentKey, coordinator);
+
+        assertEquals(7, state.get("uk1"));
+        state.clear();
         assertEquals(7, state.get("uk1"));
 
         verify(delegate, times(2)).get("uk1");
+        verify(delegate, times(1)).clear();
         assertEquals(2, state.getNativeMissesForTesting());
         assertEquals(0, state.getNativeHitsForTesting());
 

@@ -176,3 +176,32 @@ q3/q13 的 optimized 50M job 短于原 Nexmark source metric 注册窗口，因�
 GitHub `feat/safe0-analyzer@4b99bbffc0` 已在同一 `OperatorChain` 接缝实现基于字节码安全证明的 per-edge zero-copy，因此当前白名单版还与既有工作重复。`+32.91%` 仍是有效的 Flink runtime record-forwarding 实测结果，也能证明 Kunpeng 上 operator-chain 深拷贝代价很高，但把它表述为“CacheKit Kunpeng native 状态访问链路达到 +10%”是 misleading，撤回该归因和达标判断。相关 `CacheKitArmChainCopyElision` 实现、测试及 `OperatorChain` 接线已从当前分支直接删除；历史结果仅保留作错误归因审计，不再作为候选或可配置功能。
 
 后续严格计分边界：实验 A/B 的 chain-copy-elision 策略必须相同；候选差异只能位于 `State API -> CacheKit -> JNI/RocksDB -> value materialization` 范围。只有这个差分相对同配置 FullOpt 的 15Q 算术平均提升达到 `>=+10%`，才算完成状态访问链路 Kunpeng/ARM native 目标。
+
+## 2026-08-23 q15 状态访问链路 profile 与 coherent native MapState 候选
+
+在 chain-copy-elision 完全移除后，用 canonical FullOpt+mailbox、50M、无 checkpoint、2×4 TM 拓扑重新采集 q15 async-profiler。作业有效完成：8 TM、16 slots、800.52 K/s wall throughput、23.29 cores、34.37 K/s/core；98,337 个 CPU samples，8 份 folded 与 8 份 HTML 全部通过 SHA-256 校验。
+
+caller-context 汇总表明，`RocksDB.get` inclusive 15.15% 几乎全部来自：
+
+```text
+GroupAggsHandler.accumulate
+  -> StateMapView
+  -> UserFacingMapState.get
+  -> CachedInternalMapState.get
+  -> RocksDBMapState.get
+  -> RocksDB.get
+```
+
+因此此前 ValueState native shadow/direct-GET 方向没有命中 q15 的主要状态热点。紧凑 profile 证据：`dse_results/cachekit-kunpeng-native-state-path-20260823/q15-fullopt-state-profile/`；远端：`/home/wuql/flink-cluster/experiments/cachekit-native-sve-fullopt-mailbox-15q-50m-r1-20260822/diagnostics/q15-fullopt-state-profile-v2`。
+
+进一步代码审计发现现有 native MapState exact-entry cache 使用单一 state-wide `nativeGeneration`。每次 `put/remove/putAll` 都递增 generation，典型聚合的 `get(userKey) -> put(userKey, value)` 会立即作废刚由 read miss 填入的 native entry：支付 probe/JNI/fill 开销，却无法在后续访问形成命中。这解释了旧 q4 native map-cache 快筛 `-11.38%`，也不是 ARM kernel 本身的有效否定。
+
+新候选改为 mutation-coherent native MapState：
+
+- point cache 与 snapshot 使用独立 generation；
+- `put/remove/putAll/iterator.remove` 在权威 mutation 成功后，通过现有 128B native request plane 原位发布 exact composite key 的新值或 negative entry；
+- point mutation 只失效 snapshot，不冲掉无关 point entries；
+- `clear()` 等集合级 mutation 仍同时推进两个 generation；
+- 独立记录 mutation attempts/applied/negative/superseded/failures，native 发布失败不回滚或重做权威状态 mutation。
+
+针对 `get→put→get`、remove tombstone、clear 全局失效的测试均通过；CacheKit 模块 229 tests、0 failure/error、9 个既有 native-environment skip。下一门槛是 Kunpeng q15 同二进制 A/B：先证明 native hits 和 mutationApplied 为正且没有 failure，再以 K/s/core 判断是否扩 15Q。
