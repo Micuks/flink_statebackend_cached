@@ -165,6 +165,14 @@ q17 CPU profile 显示 FullOpt 后主要热点已经从 RocksDB/state 转到 ope
 | 任意 state | +27.92% |
 | 15Q 总计 | **+32.91%** |
 
-15Q 逐 query 提升为：q4 +24.58%、q5 +31.92%、q8 +38.82%、q9 +14.07%、q11 +12.10%、q18 +21.17%、q19 +35.35%、q20 +18.76%、q3 +69.50%、q7 +7.66%、q12 +39.12%、q13 +102.84%、q15 +28.77%、q16 +13.22%、q17 +35.81%。本轮已通过相对同配置 FullOpt `>=+10%` 的目标门槛。
+15Q 逐 query 提升为：q4 +24.58%、q5 +31.92%、q8 +38.82%、q9 +14.07%、q11 +12.10%、q18 +21.17%、q19 +35.35%、q20 +18.76%、q3 +69.50%、q7 +7.66%、q12 +39.12%、q13 +102.84%、q15 +28.77%、q16 +13.22%、q17 +35.81%。本轮只通过了系统级 Flink runtime 优化的 `>=+10%` 门槛；不得计入 CacheKit 状态访问链路的 Kunpeng/ARM native `>=+10%` 目标。
 
 q3/q13 的 optimized 50M job 短于原 Nexmark source metric 注册窗口，因此 A/B 同时用从当前 Nexmark 源码构建的 event-count CPU collector：吞吐仍为 events/wall，CPU 仍来自 8-TM receiver，过滤冷样本并取 retained CPU 中位数；17 tests、0 failure/error。完整远端 expdir：`/home/wuql/flink-cluster/experiments/cachekit-kunpeng-arm-copy-elision-v3-15q-50m-r1-20260823`；本地紧凑证据：`OmniStateStore/dse_results/cachekit-kunpeng-arm-copy-elision-15q-50m-r1-20260823/v3-final/`。
+
+### 2026-08-23 归因纠偏：chain-copy-elision 不属于状态访问链路优化
+
+上述实现修改的是 `OperatorChain.wrapOperatorIntoOutput`：在上游 operator 与下游 operator 之间把 `CopyingChainingOutput` 换成 `ChainingOutput`，发生在记录进入 stateful operator 之前。它没有进入 `KeyedStateBackend`、CacheKit state wrapper、key/value serialization、JNI、RocksDB lookup/update 或状态值物化路径；`aarch64-only` 只是启用条件，也没有使用 SVE/LSE/CRC/PMULL 等 ARM 能力。
+
+GitHub `feat/safe0-analyzer@4b99bbffc0` 已在同一 `OperatorChain` 接缝实现基于字节码安全证明的 per-edge zero-copy，因此当前白名单版还与既有工作重复。`+32.91%` 仍是有效的 Flink runtime record-forwarding 实测结果，也能证明 Kunpeng 上 operator-chain 深拷贝代价很高，但把它表述为“CacheKit Kunpeng native 状态访问链路达到 +10%”是 misleading，撤回该归因和达标判断。相关 `CacheKitArmChainCopyElision` 实现、测试及 `OperatorChain` 接线已从当前分支直接删除；历史结果仅保留作错误归因审计，不再作为候选或可配置功能。
+
+后续严格计分边界：实验 A/B 的 chain-copy-elision 策略必须相同；候选差异只能位于 `State API -> CacheKit -> JNI/RocksDB -> value materialization` 范围。只有这个差分相对同配置 FullOpt 的 15Q 算术平均提升达到 `>=+10%`，才算完成状态访问链路 Kunpeng/ARM native 目标。
