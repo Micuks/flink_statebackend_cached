@@ -205,3 +205,32 @@ GroupAggsHandler.accumulate
 - 独立记录 mutation attempts/applied/negative/superseded/failures，native 发布失败不回滚或重做权威状态 mutation。
 
 针对 `get→put→get`、remove tombstone、clear 全局失效的测试均通过；CacheKit 模块 229 tests、0 failure/error、9 个既有 native-environment skip。下一门槛是 Kunpeng q15 同二进制 A/B：先证明 native hits 和 mutationApplied 为正且没有 failure，再以 K/s/core 判断是否扩 15Q。
+
+### q15 mutation-coherent native MapState ABBA 结果
+
+同一 binary 仅切换 `state.backend.cachekit.native.map-cache.enabled`，按 `off_a/on_a/on_b/off_b` 顺序完成 50M、无 checkpoint、2×4 TM 的四腿 ABBA；四腿均为真实 q15、8 TM/16 slots、正 cores，最终摘要和紧凑证据通过 SHA-256 校验。
+
+| Leg | raw K/s | cores | K/s/core | native useful hit rate | mutation applied |
+|---|---:|---:|---:|---:|---:|
+| off_a | 808.04 | 23.48 | 34.41 | — | 0 |
+| on_a | 820.14 | 24.01 | 34.16 | 95.63% | 12,368,012 |
+| on_b | 802.32 | 23.76 | 33.77 | 95.63% | 12,369,072 |
+| off_b | 837.98 | 24.50 | 34.21 | — | 0 |
+
+off 均值为 `34.31`，on 均值为 `33.97 K/s/core`，增量为 `-1.01%`；配对 A/B 分别为 `-0.73%` 和 `-1.29%`，最大顺序漂移仅 `1.14%`。两条 on 腿合计 202,400,000 probes、193,548,284 hits、8,851,716 misses/fills、24,737,084 mutation applied，failure/fallback/mutation failure 均为 0，实际 kernel 为 `aarch64-sve256-hybrid-crc32c`。因此本轮既不是开关未触发，也不是失效策略导致低 hit；mutation-coherent 机制已经成立，但性能 gate 明确失败，不扩 15Q。
+
+结合 profile，根因是当前 shadow cache 为每个 `MapState.get` 额外增加一次 Java→JNI probe，并为每个 point mutation 再增加一次 Java→JNI publish；即使 95.63% 的 probe 避免了后续 RocksDB lookup，这两个新增边界仍抵消了收益。下一候选不得继续在 Java wrapper 外叠加 JNI：应把 ARM exact-entry probe/fill/update 融入原有 `RocksDB.get/put/delete` JNI 边界，复用已经发生的 native transition，并让非 snapshot point lookup 在同一次调用中完成 cache hit 或权威 RocksDB fallback。紧凑证据：`dse_results/cachekit-native-map-coherent-q15-50m-abba-20260823/`；远端：`/home/wuql/flink-cluster/experiments/cachekit-native-map-coherent-q15-50m-abba-20260823`。
+
+## 2026-08-23 FrocksDB JNI-fused ARM point cache 候选
+
+根据上述负结果，下一候选不再从 Java wrapper 额外调用 native cache，而是直接修改 FrocksDB 6.20.3 已存在的 byte-array `get/put/delete` JNI helper：
+
+- 非 snapshot point `get` 在同一次 JNI transition 内先查 4-way exact-entry cache；miss 才进入权威 `DB::Get`，结果或 NotFound tombstone 原位填充；
+- `put/delete/singleDelete` 仅在权威 mutation 成功后原位更新相同 entry；WriteBatch、merge、deleteRange 等无法逐项安全解释的 mutation 只做全 cache 失效；
+- cache key 包含 column-family id 和完整 serialized key，命中必须做 exact compare，不以 hash 近似替代状态语义；
+- Kunpeng binary 用 `-march=armv8.2-a+sve+crc` 构建，hash 使用 ARM CRC32C，完整 key compare 使用 SVE1，bucket 起点按 128B 对齐；非 AArch64 默认永久关闭；
+- treatment 只由 TaskManager 环境变量 `CACHEKIT_ROCKSDB_ARM_FUSED_POINT_CACHE` 控制，control/candidate 的 Flink 配置、CacheKit jar、FrocksDB binary 和拓扑完全相同。
+
+实现位于 FrocksDB 分支 `codex/cachekit-fused-arm-point-cache-20260823`，commit `82997c5b531cc95fe3041616e7c70a8e9ad5b58d`。C++ 3/3 单测、standalone smoke、x86 JNI 语法检查和完整 `rocksdbjava` link 均通过。由于现有运行协议会跳过 DB dispose，统计改为每 2^20 probes 输出一次累计进度，实验审计按 JVM/cache 只取最后快照，避免遗漏或重复相加。
+
+快速 gate 已排队到 Kunpeng：q15、50M、无 checkpoint、2 个物理 TM 容器 × 每容器 4 个 TM JVM、16 slots，顺序 `off_a/on_a/on_b/off_b`。control 已与 q15 profile 的 canonical FullOpt 配置逐 key 比对为零差异：request-plane 保持 `false/scalar`，Bloom/VCache/MapSnapshot/prefetch/mailbox/local-preagg 开启，bypass 与 Chen 关闭。只有 fused point-cache 环境开关不同。远端 expdir 为 `/home/wuql/flink-cluster/experiments/cachekit-fused-arm-point-cache-q15-50m-abba-20260823`；只有 ABBA 两个配对都为正且均值至少 `+2%` 才继续 profiling/迭代，q15 达到 `+10%` 才直接扩 15Q。
