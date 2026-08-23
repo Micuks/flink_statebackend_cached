@@ -234,3 +234,20 @@ off 均值为 `34.31`，on 均值为 `33.97 K/s/core`，增量为 `-1.01%`；配
 实现位于 FrocksDB 分支 `codex/cachekit-fused-arm-point-cache-20260823`，commit `82997c5b531cc95fe3041616e7c70a8e9ad5b58d`。C++ 3/3 单测、standalone smoke、x86 JNI 语法检查和完整 `rocksdbjava` link 均通过。由于现有运行协议会跳过 DB dispose，统计改为每 2^20 probes 输出一次累计进度，实验审计按 JVM/cache 只取最后快照，避免遗漏或重复相加。
 
 快速 gate 已排队到 Kunpeng：q15、50M、无 checkpoint、2 个物理 TM 容器 × 每容器 4 个 TM JVM、16 slots，顺序 `off_a/on_a/on_b/off_b`。control 已与 q15 profile 的 canonical FullOpt 配置逐 key 比对为零差异：request-plane 保持 `false/scalar`，Bloom/VCache/MapSnapshot/prefetch/mailbox/local-preagg 开启，bypass 与 Chen 关闭。只有 fused point-cache 环境开关不同。远端 expdir 为 `/home/wuql/flink-cluster/experiments/cachekit-fused-arm-point-cache-q15-50m-abba-20260823`；只有 ABBA 两个配对都为正且均值至少 `+2%` 才继续 profiling/迭代，q15 达到 `+10%` 才直接扩 15Q。
+
+## 2026-08-24 Key-scoped direct-readonly q16 gate 与 15Q 扩展
+
+并行的 native prefetch 路线先验证 direct-read-only：让 worker 直接从 native prepared arena 读取，避免 prepared key 回到 heap 后再进入 MultiGet。第一版 q16 ABBA 的 off/on 均值为 `6.83/6.92 K/s/core`，增量仅 `+1.17%`；两对方向一致但低于 `+2%` 门槛。
+
+进一步定位到 point mutation 推进 state-wide generation，会让不相关 prepared key 全部失效；改为 exact key-scoped invalidation 后，q16 ABBA 为：
+
+| Leg | raw K/s | cores | K/s/core |
+|---|---:|---:|---:|
+| off_a | 181.75 | 26.43 | 6.88 |
+| on_a | 198.55 | 26.17 | 7.59 |
+| on_b | 197.87 | 26.19 | 7.56 |
+| off_b | 182.13 | 26.42 | 6.89 |
+
+off/on 均值为 `6.88/7.57 K/s/core`，增量 `+10.02%`；paired A/B 为 `+10.32%/+9.72%`，最大漂移 `0.40%`。on 两腿合计 197,155,675 次 key-scoped invalidation、0 次 state-wide generation advance，kernel 为 `aarch64-sve256-hybrid-crc32c`，native runtime failure 为 0。完整证据：`/home/wuql/flink-cluster/experiments/cachekit-native-keyscope-directreadonly-q16-50m-abba-v5-20260823/final/`。
+
+该 q16 gate 使用 VCache=64、prefetch distance=4096、async chunk=1024 的 miss 压力配置，不是 canonical FullOpt，因此 `+10.02%` 只证明机制值得扩展，不能直接宣称最终 15Q 目标达成。对应 15Q/50M/R1 扩展位于 `/home/wuql/flink-cluster/experiments/cachekit-native-keyscope-directreadonly-15q-50m-r1-v6-20260823`。截至 2026-08-24 00:05，q3 三个 attempt 均因 CPU metrics 未覆盖全部 8 TM 被 fail-closed 拒绝；另一个 Tailscale TTY 正在恢复该 campaign。缺 TM/cores=0 的腿不得接受，完成压力筛选后仍须把有效 treatment 放回 canonical FullOpt 做同配置 15Q。
