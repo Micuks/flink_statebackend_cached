@@ -80,6 +80,7 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(options.compactSelectedProbeEnabled());
         assertFalse(options.directArenaMultiGetEnabled());
         assertFalse(options.directArenaReadOnlyEnabled());
+        assertFalse(options.negativeHandoffEnabled());
         assertFalse(options.requiresValueCache());
     }
 
@@ -116,6 +117,7 @@ class NativeRequestPlaneConfigurationTest {
         config.set(CacheKitStateBackendFactory.NATIVE_COMPACT_SELECTED_PROBE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_DIRECT_ARENA_MULTIGET_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_DIRECT_ARENA_READ_ONLY_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_PREFETCH_NEGATIVE_HANDOFF_ENABLED, true);
 
         NativeRequestPlaneOptions options =
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(config);
@@ -144,6 +146,7 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(options.compactSelectedProbeEnabled());
         assertTrue(options.directArenaMultiGetEnabled());
         assertTrue(options.directArenaReadOnlyEnabled());
+        assertTrue(options.negativeHandoffEnabled());
         assertTrue(options.requiresValueCache());
     }
 
@@ -245,6 +248,19 @@ class NativeRequestPlaneConfigurationTest {
                                 8192,
                                 0.02,
                                 262144));
+    }
+
+    @Test
+    void testNegativeHandoffRequiresDirectReadOnlyPrefetch() {
+        Configuration config = new Configuration();
+        config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_PREFETCH_NEGATIVE_HANDOFF_ENABLED, true);
+
+        IllegalArgumentException failure =
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(config));
+        assertTrue(failure.getMessage().contains("direct-read-only"));
     }
 
     @Test

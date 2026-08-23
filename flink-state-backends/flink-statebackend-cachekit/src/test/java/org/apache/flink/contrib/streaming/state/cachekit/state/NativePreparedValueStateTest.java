@@ -829,6 +829,75 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testDirectArenaNegativeHandoffPromotesDefaultAndExactWriteInvalidates() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(7);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        stubDirectPreparedSerialization(reader);
+        doAnswer(
+                        invocation -> {
+                            ByteBuffer descriptors =
+                                    ((ByteBuffer) invocation.getArgument(1))
+                                            .duplicate()
+                                            .order(ByteOrder.nativeOrder());
+                            int count = invocation.getArgument(2);
+                            assertEquals(2, count);
+                            for (int index = 0; index < count; index++) {
+                                descriptors.putInt(
+                                        index
+                                                        * RocksDBBatchValueReader
+                                                                .DIRECT_ARENA_DESCRIPTOR_BYTES
+                                                + RocksDBBatchValueReader
+                                                        .DIRECT_ARENA_RESULT_OFFSET,
+                                        RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND);
+                            }
+                            return 0;
+                        })
+                .when(reader)
+                .getSerializedValuesByRocksDBKeyArena(
+                        any(), any(), anyInt(), any(), anyInt());
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        directArenaReadOnlyOptions(16, true), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 75, 8, 2, true);
+        state.setCurrentNamespace("window-negative-handoff");
+
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
+        assertEquals(2, state.getStagingSizeForTesting());
+        assertEquals(2, state.getNativeDirectArenaNegativeHandoffStagedForTesting());
+        assertEquals(0, state.getStagingRetainedBytesForTesting());
+
+        currentKey.set("k1");
+        assertEquals(99, state.value());
+        assertEquals(1, state.getNativeDirectArenaNegativeHandoffPromotedForTesting());
+        assertEquals(1, state.getStagingSizeForTesting());
+
+        currentKey.set("k2");
+        state.update(8);
+        state.flush();
+        assertEquals(0, state.getStagingSizeForTesting());
+        assertEquals(1, state.getNativeDirectArenaNegativeHandoffInvalidatedForTesting());
+        assertEquals(0, state.getNativeGenerationAdvancesForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testDirectArenaReadOnlyDropsDuplicateHeavyPostCompactSmallBatch() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
@@ -3326,6 +3395,11 @@ class NativePreparedValueStateTest {
     }
 
     private static NativeRequestPlaneOptions directArenaReadOnlyOptions(int batchEntries) {
+        return directArenaReadOnlyOptions(batchEntries, false);
+    }
+
+    private static NativeRequestPlaneOptions directArenaReadOnlyOptions(
+            int batchEntries, boolean negativeHandoffEnabled) {
         return new NativeRequestPlaneOptions(
                 true,
                 "",
@@ -3355,7 +3429,8 @@ class NativePreparedValueStateTest {
                 false,
                 false,
                 false,
-                true);
+                true,
+                negativeHandoffEnabled);
     }
 
     private static NativeRequestPlaneOptions prefetchOffOptions() {

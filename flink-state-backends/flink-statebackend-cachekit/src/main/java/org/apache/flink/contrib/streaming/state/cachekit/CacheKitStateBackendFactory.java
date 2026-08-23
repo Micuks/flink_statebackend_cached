@@ -440,6 +440,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Bypass the native ValueState cache probe/fill for mailbox-compacted prepared keys and issue the authoritative RocksDB MultiGet directly from the native key arena. "
                                                                         + "Generation, reservation, cancellation, and staging publication guards remain unchanged; requires direct-arena MultiGet.");
 
+        public static final ConfigOption<Boolean> NATIVE_PREFETCH_NEGATIVE_HANDOFF_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.negative-handoff.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Retain speculative direct-read-only NOT_FOUND results without allocating one lazy staged-value wrapper per key. "
+                                                                        + "The exact prepared-key reservation and key-scoped write invalidation remain authoritative.");
+
         public static final ConfigOption<Boolean>
                         NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_BYPASS_ENABLED =
                         ConfigOptions.key(
@@ -710,7 +719,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_LOCAL_PREAGG_INDEXED_FOLD_ENABLED),
                                 config.get(NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH),
                                 config.get(NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH),
-                                config.get(NATIVE_DIRECT_ARENA_READ_ONLY_ENABLED));
+                                config.get(NATIVE_DIRECT_ARENA_READ_ONLY_ENABLED),
+                                config.get(NATIVE_PREFETCH_NEGATIVE_HANDOFF_ENABLED));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

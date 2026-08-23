@@ -63,6 +63,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final boolean compactSelectedProbeEnabled;
     private final boolean directArenaMultiGetEnabled;
     private final boolean directArenaReadOnlyEnabled;
+    private final boolean negativeHandoffEnabled;
     private final boolean mapSnapshotAdaptiveBypassEnabled;
     private final int mapSnapshotAdaptiveWindowProbes;
     private final double mapSnapshotAdaptiveMinUsefulHitRate;
@@ -753,6 +754,70 @@ public final class NativeRequestPlaneOptions implements Serializable {
             boolean readActivatedWriteThrough,
             boolean residentMutationBatchEnabled,
             boolean directArenaReadOnlyEnabled) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                aarch64Only,
+                writeThroughMutations,
+                valueCacheEnabled,
+                mapCacheEnabled,
+                mapSnapshotEnabled,
+                prefetchEnabled,
+                mailboxBatchEnabled,
+                preaggEnabled,
+                compactSelectedProbeEnabled,
+                directArenaMultiGetEnabled,
+                mapSnapshotAdaptiveBypassEnabled,
+                mapSnapshotAdaptiveWindowProbes,
+                mapSnapshotAdaptiveMinUsefulHitRate,
+                mapSnapshotAdaptiveResampleIntervalProbes,
+                indexedFoldEnabled,
+                readActivatedWriteThrough,
+                residentMutationBatchEnabled,
+                directArenaReadOnlyEnabled,
+                false);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only,
+            boolean writeThroughMutations,
+            boolean valueCacheEnabled,
+            boolean mapCacheEnabled,
+            boolean mapSnapshotEnabled,
+            boolean prefetchEnabled,
+            boolean mailboxBatchEnabled,
+            boolean preaggEnabled,
+            boolean compactSelectedProbeEnabled,
+            boolean directArenaMultiGetEnabled,
+            boolean mapSnapshotAdaptiveBypassEnabled,
+            int mapSnapshotAdaptiveWindowProbes,
+            double mapSnapshotAdaptiveMinUsefulHitRate,
+            int mapSnapshotAdaptiveResampleIntervalProbes,
+            boolean indexedFoldEnabled,
+            boolean readActivatedWriteThrough,
+            boolean residentMutationBatchEnabled,
+            boolean directArenaReadOnlyEnabled,
+            boolean negativeHandoffEnabled) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
         this.kernel = normalizeKernel(kernel);
@@ -853,6 +918,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
                     "Direct-read-only prefetch requires direct-arena MultiGet.");
         }
         this.directArenaReadOnlyEnabled = directArenaReadOnlyEnabled;
+        if (negativeHandoffEnabled && !directArenaReadOnlyEnabled) {
+            throw new IllegalArgumentException(
+                    "Native negative handoff requires direct-read-only prefetch.");
+        }
+        this.negativeHandoffEnabled = negativeHandoffEnabled;
         if (mapSnapshotAdaptiveBypassEnabled && !mapSnapshotEnabled) {
             throw new IllegalArgumentException(
                     "Native MapSnapshot adaptive bypass requires native MapSnapshot to be enabled.");
@@ -1026,6 +1096,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
     /** Whether prepared keys bypass native cache probe/fill and go directly to RocksDB MultiGet. */
     public boolean directArenaReadOnlyEnabled() {
         return directArenaReadOnlyEnabled;
+    }
+
+    /** Whether speculative native NOT_FOUND results reuse their exact staged key as payload. */
+    public boolean negativeHandoffEnabled() {
+        return negativeHandoffEnabled;
     }
 
     /** Whether this treatment consumes the bounded Java ValueState cache. */
