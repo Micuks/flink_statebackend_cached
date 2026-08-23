@@ -396,6 +396,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "for mailbox dispatch. Published staging values are retained and "
                                                                         + "unsupported prefetch paths fail closed.");
 
+        public static final ConfigOption<Boolean> BP_PREFETCH_KEY_SCOPED_INVALIDATION_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.bp-prefetch.key-scoped-invalidation.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Invalidate only the exact prefetched key touched by a delegate-visible write. "
+                                                                        + "The value is carried through the configured backend instance so TaskManager class-loading cannot freeze a stale GlobalConfiguration value.");
+
         public static final ConfigOption<Boolean> NATIVE_PREFETCH_ENABLED =
                         ConfigOptions.key("state.backend.cachekit.native.prefetch.enabled")
                                         .booleanType()
@@ -581,6 +590,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 		final boolean diagnosticsEnabled = config.get(DIAGNOSTICS_ENABLED);
 		final NativeRequestPlaneOptions nativeRequestPlaneOptions =
 				nativeRequestPlaneOptions(config);
+		final boolean keyScopedPrefetchInvalidationEnabled =
+				config.get(BP_PREFETCH_KEY_SCOPED_INVALIDATION_ENABLED);
 		final String delegateClass = config.get(DELEGATE_BACKEND);
 
 			final boolean listStateCowEnabled = config.get(LIST_STATE_COW_ENABLED);
@@ -660,7 +671,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 							clearedKeysCapacity,
 							priorityQueueOptEnabled,
 							diagnosticsEnabled,
-							nativeRequestPlaneOptions);
+							nativeRequestPlaneOptions,
+							keyScopedPrefetchInvalidationEnabled);
 	}
 
         static NativeRequestPlaneOptions nativeRequestPlaneOptions(ReadableConfig config) {

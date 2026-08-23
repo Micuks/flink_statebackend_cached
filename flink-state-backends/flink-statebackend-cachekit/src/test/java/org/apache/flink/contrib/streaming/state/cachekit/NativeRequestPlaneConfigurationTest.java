@@ -32,6 +32,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class NativeRequestPlaneConfigurationTest {
 
     @Test
+    void testKeyScopedInvalidationIsCarriedByConfiguredBackendInstance() throws Exception {
+        Configuration disabled = new Configuration();
+        disabled.set(
+                CacheKitStateBackendFactory.DELEGATE_BACKEND,
+                "org.apache.flink.runtime.state.hashmap.HashMapStateBackend");
+        CacheKitStateBackend disabledBackend =
+                new CacheKitStateBackendFactory()
+                        .createFromConfig(disabled, getClass().getClassLoader());
+        assertFalse(disabledBackend.keyScopedPrefetchInvalidationEnabledForTesting());
+
+        Configuration enabled = new Configuration();
+        enabled.set(
+                CacheKitStateBackendFactory.DELEGATE_BACKEND,
+                "org.apache.flink.runtime.state.hashmap.HashMapStateBackend");
+        enabled.set(
+                CacheKitStateBackendFactory.BP_PREFETCH_KEY_SCOPED_INVALIDATION_ENABLED, true);
+        CacheKitStateBackend enabledBackend =
+                new CacheKitStateBackendFactory()
+                        .createFromConfig(enabled, getClass().getClassLoader());
+        assertTrue(enabledBackend.keyScopedPrefetchInvalidationEnabledForTesting());
+    }
+
+    @Test
     void testNativeRequestPlaneIsOffByDefault() {
         NativeRequestPlaneOptions options =
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(new Configuration());

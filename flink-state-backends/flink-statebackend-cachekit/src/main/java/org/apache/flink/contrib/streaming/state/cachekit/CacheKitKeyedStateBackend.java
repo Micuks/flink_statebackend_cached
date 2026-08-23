@@ -108,6 +108,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
     private final boolean priorityQueueOptEnabled;
     private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
     private final NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator;
+    private final boolean keyScopedPrefetchInvalidationEnabled;
     private int nextNativeStateId = 1;
     private long nativePreaggGroupBatches;
     private long nativePreaggInputKeys;
@@ -269,7 +270,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 listStateClearedKeysCapacity,
                 priorityQueueOptEnabled,
                 diagnosticsEnabled,
-                nativeRequestPlaneOptions);
+                nativeRequestPlaneOptions,
+                false);
     }
 
     public CacheKitKeyedStateBackend(
@@ -306,6 +308,78 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
             boolean priorityQueueOptEnabled,
             boolean diagnosticsEnabled,
             NativeRequestPlaneOptions nativeRequestPlaneOptions) {
+        this(
+                delegate,
+                kvStateRegistry,
+                keySerializer,
+                userCodeClassLoader,
+                executionConfig,
+                ttlTimeProvider,
+                cancelStreamRegistry,
+                metricGroup,
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow,
+                valueBypassEnabled,
+                valueHitRateThreshold,
+                valueHitRateWindow,
+                mapPresenceCacheMaxEntries,
+                mapPresenceCachePolicy,
+                mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotSmallMaxEntries,
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled,
+                diagnosticsEnabled,
+                nativeRequestPlaneOptions,
+                false);
+    }
+
+    public CacheKitKeyedStateBackend(
+            AbstractKeyedStateBackend<K> delegate,
+            TaskKvStateRegistry kvStateRegistry,
+            TypeSerializer<K> keySerializer,
+            ClassLoader userCodeClassLoader,
+            ExecutionConfig executionConfig,
+            TtlTimeProvider ttlTimeProvider,
+            CloseableRegistry cancelStreamRegistry,
+            MetricGroup metricGroup,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            int mapSnapshotSmallMaxEntries,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled,
+            NativeRequestPlaneOptions nativeRequestPlaneOptions,
+            boolean keyScopedPrefetchInvalidationEnabled) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -341,6 +415,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
         this.listStateRywEnabled = listStateRywEnabled;
         this.listStateClearedKeysCapacity = listStateClearedKeysCapacity;
         this.priorityQueueOptEnabled = priorityQueueOptEnabled;
+        this.keyScopedPrefetchInvalidationEnabled = keyScopedPrefetchInvalidationEnabled;
         this.mapSnapshotCacheMetrics =
                 MapSnapshotCacheMetrics.create(metricGroup, diagnosticsEnabled);
         Preconditions.checkNotNull(nativeRequestPlaneOptions, "nativeRequestPlaneOptions");
@@ -395,12 +470,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
 
         LOG.info(
                 "[CACHEKIT fullOpt] Backend created: listStateCow={}, listStateRyw={}, "
-                        + "clearedKeysCap={}, priorityQueueOpt={}, nativeRequestPlane={}, "
+                        + "clearedKeysCap={}, priorityQueueOpt={}, keyScopedInvalidation={}, nativeRequestPlane={}, "
                         + "nativeKernel={}, nativeFeatureBits={}, nativeFeatures={}",
                 listStateCowEnabled,
                 listStateRywEnabled,
                 listStateClearedKeysCapacity,
                 priorityQueueOptEnabled,
+                keyScopedPrefetchInvalidationEnabled,
                 nativeRequestPlaneCoordinator != null,
                 nativeRequestPlaneCoordinator == null
                         ? "disabled"
@@ -464,7 +540,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                             BP_PREFETCH_MULTIGET,
                             VALUE_STICKY_UPDATE_IN_PLACE,
                             VALUE_LAZY_STAGING,
-                            BP_PREFETCH_KEY_SCOPED_INVALIDATION,
+                            keyScopedPrefetchInvalidationEnabled,
                             nativeRequestPlaneCoordinator,
                             allocateNativeStateId());
             wrappersByDelegateIdentity.put(internal, wrapped);
@@ -664,7 +740,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                             BP_PREFETCH_MULTIGET,
                             VALUE_STICKY_UPDATE_IN_PLACE,
                             VALUE_LAZY_STAGING,
-                            BP_PREFETCH_KEY_SCOPED_INVALIDATION,
+                            keyScopedPrefetchInvalidationEnabled,
                             nativeRequestPlaneCoordinator,
                             allocateNativeStateId());
             wrappersByDelegateIdentity.put(internal, wrapped);
@@ -951,14 +1027,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
     /** Uses ordered, incrementally published RocksDB MultiGet chunks for async ValueState reads. */
     private static final boolean BP_PREFETCH_MULTIGET =
             loadBooleanFlag("state.backend.cachekit.bp-prefetch.multiget.enabled", false);
-    /**
-     * Invalidates only the prepared key touched by a delegate-visible write. The default keeps the
-     * legacy state-wide generation barrier; the narrower mode is opt-in until its Nexmark gate
-     * passes.
-     */
-    private static final boolean BP_PREFETCH_KEY_SCOPED_INVALIDATION =
-            loadBooleanFlag(
-                    "state.backend.cachekit.bp-prefetch.key-scoped-invalidation.enabled", false);
     /**
      * Reuses the L1-owned sticky ValueState wrapper for repeated updates to the same key/namespace.
      * Disabled by default until Nexmark validates that the allocation reduction exceeds its extra
