@@ -3195,7 +3195,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             boolean shouldProbeNative = nativeBatchSlot != null;
             boolean directArenaReadOnly =
                     shouldProbeNative
-                            && compactSelectedPrepared
                             && nativeRequestPlaneCoordinator
                                     .options()
                                     .directArenaReadOnlyEnabled();
