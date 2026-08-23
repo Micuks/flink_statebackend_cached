@@ -422,6 +422,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Read compact-selected RocksDB misses directly from the prepared-key arena through one bounded MultiGet JNI call. "
                                                                         + "Any value-slot overflow falls back for the complete direct chunk.");
 
+        public static final ConfigOption<Boolean> NATIVE_DIRECT_ARENA_READ_ONLY_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.direct-arena-read-only.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Bypass the native ValueState cache probe/fill for mailbox-compacted prepared keys and issue the authoritative RocksDB MultiGet directly from the native key arena. "
+                                                                        + "Generation, reservation, cancellation, and staging publication guards remain unchanged; requires direct-arena MultiGet.");
+
         public static final ConfigOption<Boolean>
                         NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_BYPASS_ENABLED =
                         ConfigOptions.key(
@@ -688,7 +697,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_MAP_SNAPSHOT_ADAPTIVE_RESAMPLE_INTERVAL_PROBES),
                                 config.get(NATIVE_LOCAL_PREAGG_INDEXED_FOLD_ENABLED),
                                 config.get(NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH),
-                                config.get(NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH));
+                                config.get(NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH),
+                                config.get(NATIVE_DIRECT_ARENA_READ_ONLY_ENABLED));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

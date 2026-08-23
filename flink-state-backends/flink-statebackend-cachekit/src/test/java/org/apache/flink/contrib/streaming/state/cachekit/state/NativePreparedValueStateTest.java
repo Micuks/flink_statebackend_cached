@@ -700,6 +700,74 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testDirectArenaReadOnlySkipsNativeProbeAndFill() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        stubDirectPreparedSerialization(reader);
+        byte[] first = KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE);
+        doAnswer(
+                        invocation -> {
+                            ByteBuffer descriptors =
+                                    ((ByteBuffer) invocation.getArgument(1))
+                                            .duplicate()
+                                            .order(ByteOrder.nativeOrder());
+                            ByteBuffer values = invocation.getArgument(3);
+                            int stride = invocation.getArgument(4);
+                            values.duplicate().position(0).put(first);
+                            descriptors.putInt(
+                                    RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET,
+                                    first.length);
+                            descriptors.putInt(
+                                    RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES
+                                            + RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET,
+                                    RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND);
+                            assertEquals(2, (int) invocation.getArgument(2));
+                            assertTrue(stride >= first.length);
+                            return 1;
+                        })
+                .when(reader)
+                .getSerializedValuesByRocksDBKeyArena(
+                        any(), any(), anyInt(), any(), anyInt());
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaReadOnlyOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 59, 8, 2);
+        state.setCurrentNamespace("window-direct-read-only");
+
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
+
+        assertEquals(0, coordinator.probeCalls());
+        assertEquals(0, coordinator.fillCalls());
+        assertEquals(1, state.getNativeDirectArenaReadOnlyBatchesForTesting());
+        assertEquals(2, state.getNativeDirectArenaReadOnlyKeysForTesting());
+        assertEquals(0, state.getNativeDirectArenaReadOnlyCancelledKeysForTesting());
+        assertEquals(1, state.getNativeDirectArenaMultiGetBatchesForTesting());
+        assertEquals(0, state.getNativeCompactSelectedProbeBatchesForTesting());
+        verify(reader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+
+        currentKey.set("k1");
+        assertEquals(11, state.value());
+        currentKey.set("k2");
+        assertEquals(99, state.value());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testDirectArenaLinkageFailureLatchesOffAndFallsBackOnce() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
@@ -2922,6 +2990,39 @@ class NativePreparedValueStateTest {
                 8192,
                 0.02,
                 262144);
+    }
+
+    private static NativeRequestPlaneOptions directArenaReadOnlyOptions() {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                128,
+                1 << 20,
+                1 << 20,
+                16,
+                1 << 20,
+                1 << 20,
+                1,
+                2,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                true,
+                false,
+                true,
+                true,
+                false,
+                8192,
+                0.02,
+                262144,
+                false,
+                false,
+                false,
+                true);
     }
 
     private static NativeRequestPlaneOptions prefetchOffOptions() {

@@ -56,6 +56,7 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(options.preaggEnabled());
         assertFalse(options.compactSelectedProbeEnabled());
         assertFalse(options.directArenaMultiGetEnabled());
+        assertFalse(options.directArenaReadOnlyEnabled());
         assertFalse(options.requiresValueCache());
     }
 
@@ -91,6 +92,7 @@ class NativeRequestPlaneConfigurationTest {
         config.set(CacheKitStateBackendFactory.NATIVE_LOCAL_PREAGG_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_COMPACT_SELECTED_PROBE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_DIRECT_ARENA_MULTIGET_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_DIRECT_ARENA_READ_ONLY_ENABLED, true);
 
         NativeRequestPlaneOptions options =
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(config);
@@ -118,6 +120,7 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(options.preaggEnabled());
         assertTrue(options.compactSelectedProbeEnabled());
         assertTrue(options.directArenaMultiGetEnabled());
+        assertTrue(options.directArenaReadOnlyEnabled());
         assertTrue(options.requiresValueCache());
     }
 

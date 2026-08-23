@@ -342,6 +342,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeDirectArenaMultiGetProtocolFallbacks;
     private volatile long nativeDirectArenaMultiGetHeapKeyCopies;
     private volatile boolean nativeDirectArenaMultiGetDisabled;
+    private volatile long nativeDirectArenaReadOnlyBatches;
+    private volatile long nativeDirectArenaReadOnlyKeys;
+    private volatile long nativeDirectArenaReadOnlyCancelledKeys;
     private volatile long nativeMailboxDirectSerializationFallbackKeys;
     private volatile long nativeMailboxDirectSerializationFallbackBytes;
     private volatile long nativeDirectPreparedBatches;
@@ -1787,6 +1790,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     || nativeDirectArenaMultiGetFallbackBatches > 0) {
                 LOG.info(
                         "[CACHEKIT DIRECT ARENA MULTIGET] configured={} disabled={} "
+                                + "readOnlyConfigured={} readOnlyBatches={} readOnlyKeys={} readOnlyCancelledKeys={} "
                                 + "batches={} keys={} completedBatches={} completedKeys={} valueBytesCopied={} "
                                 + "batchHistogram=1:{},2-3:{},4-7:{},8-15:{},16-31:{},32-63:{},64:{} "
                                 + "found={} notFound={} overflowStatuses={} overflowBatches={} fallbackBatches={} "
@@ -1797,6 +1801,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                         .options()
                                         .directArenaMultiGetEnabled(),
                         nativeDirectArenaMultiGetDisabled,
+                        nativeRequestPlaneCoordinator != null
+                                && nativeRequestPlaneCoordinator
+                                        .options()
+                                        .directArenaReadOnlyEnabled(),
+                        nativeDirectArenaReadOnlyBatches,
+                        nativeDirectArenaReadOnlyKeys,
+                        nativeDirectArenaReadOnlyCancelledKeys,
                         nativeDirectArenaMultiGetBatches,
                         nativeDirectArenaMultiGetKeys,
                         nativeDirectArenaMultiGetCompletedBatches,
@@ -2119,6 +2130,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return nativeDirectArenaMultiGetHeapKeyCopies;
     }
 
+    long getNativeDirectArenaReadOnlyBatchesForTesting() {
+        return nativeDirectArenaReadOnlyBatches;
+    }
+
+    long getNativeDirectArenaReadOnlyKeysForTesting() {
+        return nativeDirectArenaReadOnlyKeys;
+    }
+
+    long getNativeDirectArenaReadOnlyCancelledKeysForTesting() {
+        return nativeDirectArenaReadOnlyCancelledKeys;
+    }
+
     boolean isNativeDirectArenaMultiGetDisabledForTesting() {
         return nativeDirectArenaMultiGetDisabled;
     }
@@ -2384,7 +2407,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (nativeBatchSlot != null
                     && nativeRequestPlaneCoordinator.options().compactSelectedProbeEnabled()) {
                 try {
-                    activateNativeValueRead();
+                    if (!nativeRequestPlaneCoordinator.options().directArenaReadOnlyEnabled()) {
+                        activateNativeValueRead();
+                    }
                     reserveCompactedPreparedKeys(storageKeys, reservation, nativeBatchSlot);
                     if (storageKeys.isEmpty()) {
                         nativeBatchSlot.close();
@@ -2618,7 +2643,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             // generation. This closes the only construction-time window in which a concurrent
             // mutation could still be admitted as "read inactive" after the batch generation was
             // chosen. Compaction-only mailbox batching does not activate write-through.
-            if (nativeRequestPlaneCoordinator.options().prefetchEnabled()) {
+            if (nativeRequestPlaneCoordinator.options().prefetchEnabled()
+                    && !nativeRequestPlaneCoordinator.options().directArenaReadOnlyEnabled()) {
                 activateNativeValueRead();
             }
             try {
@@ -3156,6 +3182,23 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 return;
             }
             boolean shouldProbeNative = nativeBatchSlot != null;
+            boolean directArenaReadOnly =
+                    shouldProbeNative
+                            && compactSelectedPrepared
+                            && nativeRequestPlaneCoordinator
+                                    .options()
+                                    .directArenaReadOnlyEnabled();
+            if (directArenaReadOnly
+                    && executeNativeDirectReadOnlyBatch(
+                            rocksDBKeys,
+                            storageKeys,
+                            defaultValue,
+                            gen,
+                            nativeBatchSlot,
+                            reservation)) {
+                return;
+            }
+            shouldProbeNative = shouldProbeNative && !directArenaReadOnly;
             if (shouldProbeNative
                     && compactSelectedPrepared
                     && adaptiveNativeProbeController != null) {
@@ -3225,6 +3268,87 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             slot.close();
             return null;
         }
+    }
+
+    /**
+     * Issues the authoritative RocksDB read directly from the mailbox-compacted native key arena.
+     *
+     * <p>This mode is intended for write-heavy states where generation fencing makes the native
+     * point cache effectively hitless. It deliberately skips both native probe and fill while
+     * preserving the existing exact reservation, generation, cancellation, and staging guards.
+     * Returning false is fail-open to the existing prepared-key Java MultiGet path.
+     */
+    @SuppressWarnings("unchecked")
+    private boolean executeNativeDirectReadOnlyBatch(
+            java.util.List<byte[]> rocksDBKeys,
+            java.util.List<KeyNamespaceKey<K, N>> storageKeys,
+            V defaultValue,
+            long gen,
+            NativeRequestPlaneCoordinator.BatchSlot slot,
+            PrefetchReservation reservation)
+            throws Exception {
+        if (closed
+                || gen != writeGen
+                || nativeDirectArenaMultiGetDisabled
+                || !nativeRequestPlaneCoordinator.isActive()) {
+            nativeFallbackBatches++;
+            return false;
+        }
+        RocksDBBatchValueReader<K, N, V> batchReader =
+                (RocksDBBatchValueReader<K, N, V>) delegate;
+        if (!batchReader.supportsDirectArenaMultiGet()) {
+            nativeDirectArenaMultiGetCapabilityFallbacks++;
+            nativeDirectArenaMultiGetDisabled = true;
+            nativeFallbackBatches++;
+            return false;
+        }
+
+        int[] preparedIndices = new int[rocksDBKeys.size()];
+        int activeCount = 0;
+        for (int index = 0; index < rocksDBKeys.size(); index++) {
+            if (reservation != null
+                    && !isPrefetchReservationActive(storageKeys.get(index), reservation)) {
+                prefetchWorkerCancelledBeforeRead++;
+                nativeDirectArenaReadOnlyCancelledKeys++;
+                continue;
+            }
+            preparedIndices[activeCount++] = index;
+        }
+        if (activeCount == 0) {
+            return true;
+        }
+        if (reservation != null
+                && activeCount < rocksDBKeys.size()
+                && activeCount < multiGetMinBatchSize) {
+            prefetchSmallBatchDrops++;
+            prefetchSmallBatchKeysDropped += activeCount;
+            return true;
+        }
+
+        java.util.List<byte[]> values =
+                fetchDirectArenaPreparedMissValues(
+                        batchReader, slot, preparedIndices, activeCount, gen);
+        if (values == null) {
+            return true;
+        }
+        nativeDirectArenaReadOnlyBatches++;
+        nativeDirectArenaReadOnlyKeys += activeCount;
+        for (int resultIndex = 0; resultIndex < activeCount; resultIndex++) {
+            if (closed || gen != writeGen) {
+                prefetchStaleAborts++;
+                return true;
+            }
+            int originalIndex = preparedIndices[resultIndex];
+            if (!stagePreparedValue(
+                    storageKeys.get(originalIndex),
+                    values.get(resultIndex),
+                    defaultValue,
+                    gen,
+                    reservation)) {
+                return true;
+            }
+        }
+        return true;
     }
 
     /**
