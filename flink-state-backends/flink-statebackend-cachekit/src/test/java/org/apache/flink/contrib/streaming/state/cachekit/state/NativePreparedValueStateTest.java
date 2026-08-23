@@ -784,6 +784,100 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testDirectArenaReadOnlyKeyScopedWriteCancelsMatchingReservation() throws Exception {
+        CountDownLatch readStarted = new CountDownLatch(1);
+        CountDownLatch releaseRead = new CountDownLatch(1);
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        stubDirectPreparedSerialization(reader);
+        byte[] stale = KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE);
+        byte[] survivor = KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE);
+        doAnswer(
+                        invocation -> {
+                            readStarted.countDown();
+                            if (!releaseRead.await(5, TimeUnit.SECONDS)) {
+                                throw new AssertionError("Timed out waiting to release direct read");
+                            }
+                            ByteBuffer descriptors =
+                                    ((ByteBuffer) invocation.getArgument(1))
+                                            .duplicate()
+                                            .order(ByteOrder.nativeOrder());
+                            ByteBuffer values = invocation.getArgument(3);
+                            int stride = invocation.getArgument(4);
+                            values.duplicate().position(0).put(stale);
+                            values.duplicate().position(stride).put(survivor);
+                            descriptors.putInt(
+                                    RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET,
+                                    stale.length);
+                            descriptors.putInt(
+                                    RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES
+                                            + RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET,
+                                    survivor.length);
+                            return 2;
+                        })
+                .when(reader)
+                .getSerializedValuesByRocksDBKeyArena(
+                        any(), any(), anyInt(), any(), anyInt());
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaReadOnlyOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 67, 8, 2, true);
+        state.setCurrentNamespace("window-direct-keyscope");
+        Runnable task = state.buildAsyncPrefetchTask(Arrays.asList("stale", "survivor"));
+        AtomicReference<Throwable> workerFailure = new AtomicReference<>();
+        Thread worker =
+                new Thread(
+                        () -> {
+                            try {
+                                task.run();
+                            } catch (Throwable failure) {
+                                workerFailure.set(failure);
+                            }
+                        },
+                        "direct-read-only-keyscope-race");
+        try {
+            worker.start();
+            assertTrue(readStarted.await(5, TimeUnit.SECONDS));
+
+            currentKey.set("stale");
+            state.update(7);
+            state.flush();
+            releaseRead.countDown();
+            worker.join(5000);
+
+            assertFalse(worker.isAlive());
+            assertNull(workerFailure.get());
+            assertEquals(1, state.getPrefetchKeyScopedInvalidationsForTesting());
+            assertEquals(1, state.getPrefetchKeyScopedInFlightCancelledForTesting());
+            assertEquals(0, state.getNativeGenerationAdvancesForTesting());
+            assertEquals(1, state.getPrefetchWorkerDiscardedAfterReadForTesting());
+            assertEquals(1, state.getStagingSizeForTesting());
+            currentKey.set("survivor");
+            assertEquals(22, state.value());
+            currentKey.set("stale");
+            assertEquals(7, state.value());
+        } finally {
+            releaseRead.countDown();
+            worker.join(5000);
+            state.close();
+            coordinator.close();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testDirectArenaLinkageFailureLatchesOffAndFallsBackOnce() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
@@ -2771,6 +2865,18 @@ class NativePreparedValueStateTest {
             int stateId,
             int chunkSize,
             int minBatchSize) {
+        return newNativePreparedState(
+                delegate, currentKey, coordinator, stateId, chunkSize, minBatchSize, false);
+    }
+
+    private static CachedInternalValueState<String, String, Integer> newNativePreparedState(
+            InternalValueState<String, String, Integer> delegate,
+            AtomicReference<String> currentKey,
+            NativeRequestPlaneCoordinator coordinator,
+            int stateId,
+            int chunkSize,
+            int minBatchSize,
+            boolean keyScopedPrefetchInvalidationEnabled) {
         return new CachedInternalValueState<>(
                 delegate,
                 currentKey::get,
@@ -2788,7 +2894,7 @@ class NativePreparedValueStateTest {
                 true,
                 Math.max(8, chunkSize),
                 1 << 20,
-                false,
+                keyScopedPrefetchInvalidationEnabled,
                 coordinator,
                 stateId);
     }

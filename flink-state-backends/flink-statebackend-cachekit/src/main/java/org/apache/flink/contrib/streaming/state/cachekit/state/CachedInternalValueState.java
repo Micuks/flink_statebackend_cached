@@ -983,13 +983,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 NATIVE_ADAPTIVE_PROBE_RECOVERY_USEFUL_RATE)
                         : null;
         // The narrow invalidation proof relies on the prepared-key reservation identity checked
-        // before and after RocksDB I/O. Generic query-wire prefetch and the experimental native
-        // coordinator retain the conservative state-wide generation barrier.
+        // before and after RocksDB I/O. Native direct-read-only uses that exact same reservation
+        // on both sides of its authoritative RocksDB MultiGet, so it can safely share the proof.
+        // Native point-cache modes and generic query-wire prefetch retain the conservative
+        // state-wide generation barrier.
+        boolean nativeDirectReadOnly =
+                nativeRequestPlaneCoordinator != null
+                        && nativeRequestPlaneCoordinator.options().directArenaReadOnlyEnabled();
         this.keyScopedPrefetchInvalidationEnabled =
                 keyScopedPrefetchInvalidationEnabled
                         && this.multiGetPrefetchEnabled
                         && delegate instanceof RocksDBBatchValueReader<?, ?, ?>
-                        && nativeRequestPlaneCoordinator == null;
+                        && (nativeRequestPlaneCoordinator == null || nativeDirectReadOnly);
 
         this.keySerializer = delegate.getKeySerializer();
         this.namespaceSerializer = delegate.getNamespaceSerializer();
