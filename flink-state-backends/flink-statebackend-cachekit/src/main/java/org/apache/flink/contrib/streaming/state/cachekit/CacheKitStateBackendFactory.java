@@ -459,6 +459,16 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "The first access and every skipped state retain the authoritative point-read path.");
 
         public static final ConfigOption<Boolean>
+                        NATIVE_PREFETCH_DEFERRED_RESERVATION_MATERIALIZATION_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.deferred-reservation-materialization.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Serialize and compact a native mailbox batch before deep-copying Java reservation keys. "
+                                                                        + "Only compacted unique keys receive KeyNamespaceKey objects; fallback and authoritative reads are unchanged.");
+
+        public static final ConfigOption<Boolean>
                         NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_BYPASS_ENABLED =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.enabled")
@@ -730,7 +740,9 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH),
                                 config.get(NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH),
                                 config.get(NATIVE_DIRECT_ARENA_READ_ONLY_ENABLED),
-                                config.get(NATIVE_PREFETCH_NEGATIVE_HANDOFF_ENABLED));
+                                config.get(NATIVE_PREFETCH_NEGATIVE_HANDOFF_ENABLED),
+                                config.get(
+                                                NATIVE_PREFETCH_DEFERRED_RESERVATION_MATERIALIZATION_ENABLED));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

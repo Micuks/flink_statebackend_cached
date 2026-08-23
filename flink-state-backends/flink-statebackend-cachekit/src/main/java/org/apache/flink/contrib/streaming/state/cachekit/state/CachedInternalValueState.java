@@ -327,6 +327,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeCompactSelectedProbeKeys;
     private volatile long nativeCompactSelectedLazyHeapKeyCopies;
     private volatile long nativeCompactPostCompactBytesRecopied;
+    private volatile long nativeDeferredReservationInputKeys;
+    private volatile long nativeDeferredReservationObjectsMaterialized;
+    private volatile long nativeDeferredReservationObjectsAvoided;
     private volatile long nativeDirectArenaMultiGetBatches;
     private volatile long nativeDirectArenaMultiGetKeys;
     private volatile long nativeDirectArenaMultiGetCompletedBatches;
@@ -1704,6 +1707,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "nativeCompactSelectedProbeKeys={} "
                             + "nativeCompactSelectedLazyHeapKeyCopies={} "
                             + "nativeCompactPostCompactBytesRecopied={} "
+                            + "nativeDeferredReservationInputKeys={} "
+                            + "nativeDeferredReservationObjectsMaterialized={} "
+                            + "nativeDeferredReservationObjectsAvoided={} "
                             + "nativeMailboxDirectSerializationFallbackKeys={} "
                             + "nativeMailboxDirectSerializationFallbackBytes={} "
                             + "nativeDirectPreparedBatches={} "
@@ -1814,6 +1820,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeCompactSelectedProbeKeys,
                     nativeCompactSelectedLazyHeapKeyCopies,
                     nativeCompactPostCompactBytesRecopied,
+                    nativeDeferredReservationInputKeys,
+                    nativeDeferredReservationObjectsMaterialized,
+                    nativeDeferredReservationObjectsAvoided,
                     nativeMailboxDirectSerializationFallbackKeys,
                     nativeMailboxDirectSerializationFallbackBytes,
                     nativeDirectPreparedBatches,
@@ -2167,6 +2176,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return nativeCompactSelectedLazyHeapKeyCopies;
     }
 
+    long getNativeDeferredReservationInputKeysForTesting() {
+        return nativeDeferredReservationInputKeys;
+    }
+
+    long getNativeDeferredReservationObjectsMaterializedForTesting() {
+        return nativeDeferredReservationObjectsMaterialized;
+    }
+
+    long getNativeDeferredReservationObjectsAvoidedForTesting() {
+        return nativeDeferredReservationObjectsAvoided;
+    }
+
     long getNativeDirectArenaMultiGetBatchesForTesting() {
         return nativeDirectArenaMultiGetBatches;
     }
@@ -2496,6 +2517,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         && nativeRequestPlaneCoordinator != null
                         && nativeRequestPlaneCoordinator.isActive()
                         && nativeRequestPlaneCoordinator.options().prefetchEnabled();
+        final boolean deferReservationMaterialization =
+                nativeMailboxBatch
+                        && nativeRequestPlaneCoordinator
+                                .options()
+                                .deferredReservationMaterializationEnabled();
+        final java.util.ArrayList<K> deferredKeys =
+                deferReservationMaterialization ? new java.util.ArrayList<>() : null;
         RocksDBBatchValueReader<K, N, V> batchReader =
                 (RocksDBBatchValueReader<K, N, V>) delegate;
         try {
@@ -2506,9 +2534,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 if (hasStagedOrInFlightValue(key, namespace, gen)) {
                     continue;
                 }
+                if (deferReservationMaterialization) {
+                    deferredKeys.add(key);
+                    continue;
+                }
                 KeyNamespaceKey<K, N> storageKey =
-                        new KeyNamespaceKey<>(
-                                key, namespace, keySerializer, namespaceSerializer);
+                        new KeyNamespaceKey<>(key, namespace, keySerializer, namespaceSerializer);
                 if (!nativeMailboxBatch) {
                     if (inFlight.putIfAbsent(storageKey, reservation) != null) {
                         prefetchKeysDeduplicated++;
@@ -2532,19 +2563,27 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
             return null; // Best-effort: an unserializable key aborts this batch only.
         }
-        if (storageKeys.isEmpty()) {
+        final int initialCandidateCount =
+                deferReservationMaterialization ? deferredKeys.size() : storageKeys.size();
+        if (initialCandidateCount == 0) {
             return null;
+        }
+        if (deferReservationMaterialization) {
+            nativeDeferredReservationInputKeys += initialCandidateCount;
         }
         final boolean nativeDirectReadOnlyMailbox =
                 nativeMailboxBatch
                         && nativeRequestPlaneCoordinator
                                 .options()
                                 .directArenaReadOnlyEnabled();
-        if (nativeDirectReadOnlyMailbox && storageKeys.size() < multiGetMinBatchSize) {
+        if (nativeDirectReadOnlyMailbox && initialCandidateCount < multiGetMinBatchSize) {
             // This is speculative work. A sub-MultiGet batch would ultimately be dropped by the
             // worker so the authoritative mailbox read can run. Do that before native compact,
             // key-arena serialization, slot leasing and task allocation.
-            recordNativeDirectArenaSpeculativePreCompactDrop(storageKeys.size());
+            recordNativeDirectArenaSpeculativePreCompactDrop(initialCandidateCount);
+            if (deferReservationMaterialization) {
+                nativeDeferredReservationObjectsAvoided += initialCandidateCount;
+            }
             return null;
         }
         NativeRequestPlaneCoordinator.BatchSlot nativeBatchSlot = null;
@@ -2552,16 +2591,35 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         boolean compactSelectedPrepared = false;
         if (nativeMailboxBatch) {
             nativeBatchSlot =
-                    compactNativeMailboxBatch(batchReader, rocksDBKeys, storageKeys);
+                    deferReservationMaterialization
+                            ? compactNativeMailboxBatchDeferred(
+                                    batchReader, rocksDBKeys, deferredKeys, namespace)
+                            : compactNativeMailboxBatch(batchReader, rocksDBKeys, storageKeys);
+            final int postCompactCandidateCount =
+                    deferReservationMaterialization ? deferredKeys.size() : storageKeys.size();
             if (nativeBatchSlot != null
                     && nativeDirectReadOnlyMailbox
-                    && storageKeys.size() < multiGetMinBatchSize) {
+                    && postCompactCandidateCount < multiGetMinBatchSize) {
                 // Native compaction can turn a large duplicate-heavy lookahead into only a few
                 // exact keys. Reading those keys as speculative point Gets duplicates the later
                 // authoritative mailbox path, so release the slot before reserving/submitting.
-                recordNativeDirectArenaSpeculativePostCompactDrop(storageKeys.size());
+                recordNativeDirectArenaSpeculativePostCompactDrop(postCompactCandidateCount);
+                if (deferReservationMaterialization) {
+                    nativeDeferredReservationObjectsAvoided += initialCandidateCount;
+                }
                 nativeBatchSlot.close();
                 return null;
+            }
+            if (deferReservationMaterialization) {
+                if (!materializeDeferredReservationKeys(deferredKeys, namespace, storageKeys)) {
+                    if (nativeBatchSlot != null) {
+                        nativeBatchSlot.close();
+                    }
+                    return null;
+                }
+                nativeDeferredReservationObjectsMaterialized += storageKeys.size();
+                nativeDeferredReservationObjectsAvoided +=
+                        Math.max(0, initialCandidateCount - storageKeys.size());
             }
             if (nativeBatchSlot != null
                     && nativeRequestPlaneCoordinator.options().compactSelectedProbeEnabled()) {
@@ -2866,6 +2924,141 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             slot.close();
             materializeMailboxFallbackKeys(batchReader, storageKeys, rocksDBKeys);
             return null;
+        }
+    }
+
+    /**
+     * Native duplicate compaction over mailbox-confined key references. No key or namespace is
+     * published to the worker from this method; the surviving entries are deep-copied into
+     * {@link KeyNamespaceKey} reservations immediately afterwards, before the task is submitted.
+     */
+    private NativeRequestPlaneCoordinator.BatchSlot compactNativeMailboxBatchDeferred(
+            RocksDBBatchValueReader<K, N, V> batchReader,
+            java.util.ArrayList<byte[]> rocksDBKeys,
+            java.util.ArrayList<K> keys,
+            N namespace) {
+        nativeMailboxCompactInputKeys += keys.size();
+        if (keys.size() < nativeRequestPlaneCoordinator.options().minBatchSize()) {
+            nativeFallbackBatches++;
+            nativeMailboxCompactFallbacks++;
+            nativeMailboxCompactThresholdFallbacks++;
+            materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
+            return null;
+        }
+        NativeRequestPlaneCoordinator.BatchSlot slot =
+                nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
+        if (slot == null) {
+            nativeFallbackBatches++;
+            nativeMailboxCompactFallbacks++;
+            materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
+            return null;
+        }
+        try {
+            if (nativeRequestPlaneCoordinator.options().prefetchEnabled()
+                    && !nativeRequestPlaneCoordinator.options().directArenaReadOnlyEnabled()) {
+                activateNativeValueRead();
+            }
+            try {
+                slot.prepareLatestDirect(
+                        nativeStateId,
+                        nativeWriteEpoch.get(),
+                        keys.size(),
+                        (index, output) -> {
+                            try {
+                                batchReader.serializeBatchKeyAndNamespace(
+                                        keys.get(index),
+                                        namespace,
+                                        keySerializer,
+                                        namespaceSerializer,
+                                        output);
+                            } catch (IOException failure) {
+                                throw failure;
+                            } catch (Exception failure) {
+                                throw new IOException(
+                                        "Failed to serialize a deferred native mailbox key.",
+                                        failure);
+                            }
+                        });
+            } catch (IOException directFailure) {
+                rocksDBKeys.clear();
+                for (K key : keys) {
+                    rocksDBKeys.add(
+                            batchReader.serializeBatchKeyAndNamespace(
+                                    key,
+                                    namespace,
+                                    keySerializer,
+                                    namespaceSerializer));
+                }
+                nativeMailboxDirectSerializationFallbackKeys += rocksDBKeys.size();
+                nativeMailboxDirectSerializationFallbackBytes += serializedKeyBytes(rocksDBKeys);
+                slot.prepareLatest(nativeStateId, nativeWriteEpoch.get(), rocksDBKeys);
+            }
+            int uniqueCount = nativeRequestPlaneCoordinator.compact(slot);
+            nativeMailboxCompactBatches++;
+            nativeMailboxCompactUniqueKeys += uniqueCount;
+            rocksDBKeys.clear();
+            boolean retainPreparedArena =
+                    nativeRequestPlaneCoordinator.options().compactSelectedProbeEnabled();
+            for (int target = 0; target < uniqueCount; target++) {
+                int source = slot.compactedSourceIndex(target);
+                keys.set(target, keys.get(source));
+                if (!retainPreparedArena) {
+                    rocksDBKeys.add(slot.copyPreparedKey(source));
+                }
+            }
+            int duplicates = keys.size() - uniqueCount;
+            if (duplicates > 0) {
+                prefetchKeysDeduplicated += duplicates;
+                keys.subList(uniqueCount, keys.size()).clear();
+            }
+            return slot;
+        } catch (Exception | LinkageError failure) {
+            nativeFallbackBatches++;
+            nativeMailboxCompactFallbacks++;
+            slot.close();
+            materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
+            return null;
+        }
+    }
+
+    private void materializeDeferredMailboxFallbackKeys(
+            RocksDBBatchValueReader<K, N, V> batchReader,
+            java.util.ArrayList<K> keys,
+            N namespace,
+            java.util.ArrayList<byte[]> rocksDBKeys) {
+        rocksDBKeys.clear();
+        try {
+            for (K key : keys) {
+                rocksDBKeys.add(
+                        batchReader.serializeBatchKeyAndNamespace(
+                                key,
+                                namespace,
+                                keySerializer,
+                                namespaceSerializer));
+            }
+        } catch (Throwable failure) {
+            rocksDBKeys.clear();
+            keys.clear();
+            prefetchBuildFailures++;
+        }
+    }
+
+    private boolean materializeDeferredReservationKeys(
+            java.util.ArrayList<K> keys,
+            N namespace,
+            java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys) {
+        storageKeys.clear();
+        try {
+            for (K key : keys) {
+                storageKeys.add(
+                        new KeyNamespaceKey<>(
+                                key, namespace, keySerializer, namespaceSerializer));
+            }
+            return true;
+        } catch (Throwable failure) {
+            storageKeys.clear();
+            prefetchBuildFailures++;
+            return false;
         }
     }
 

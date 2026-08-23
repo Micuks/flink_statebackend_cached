@@ -451,4 +451,24 @@ class NativeRequestPlaneConfigurationTest {
                 IllegalArgumentException.class,
                 () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(missingPrefetch));
     }
+
+    @Test
+    void testDeferredReservationMaterializationRequiresCompactSelectedPrefetch() {
+        Configuration invalid = new Configuration();
+        invalid.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        invalid.set(
+                CacheKitStateBackendFactory
+                        .NATIVE_PREFETCH_DEFERRED_RESERVATION_MATERIALIZATION_ENABLED,
+                true);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalid));
+
+        invalid.set(CacheKitStateBackendFactory.NATIVE_PREFETCH_ENABLED, true);
+        invalid.set(CacheKitStateBackendFactory.NATIVE_MAILBOX_BATCH_ENABLED, true);
+        invalid.set(CacheKitStateBackendFactory.NATIVE_COMPACT_SELECTED_PROBE_ENABLED, true);
+        NativeRequestPlaneOptions options =
+                CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalid);
+        assertTrue(options.deferredReservationMaterializationEnabled());
+    }
 }

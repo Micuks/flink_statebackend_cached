@@ -576,6 +576,63 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testDeferredReservationMaterializesOnlyCompactedUniqueKeys() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(null);
+        stubDirectPreparedSerialization(reader);
+        byte[] value17 = KvStateSerializer.serializeValue(17, IntSerializer.INSTANCE);
+        when(reader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
+                .thenAnswer(
+                        invocation -> {
+                            int start = invocation.getArgument(1);
+                            int end = invocation.getArgument(2);
+                            java.util.ArrayList<byte[]> values = new java.util.ArrayList<>();
+                            for (int index = start; index < end; index++) {
+                                values.add(value17);
+                            }
+                            return values;
+                        });
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        deferredReservationOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 29, 8, 2);
+        state.setCurrentNamespace("window-deferred");
+
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2", "k1", "k3")).run();
+
+        assertEquals(4, state.getNativeDeferredReservationInputKeysForTesting());
+        assertEquals(3, state.getNativeDeferredReservationObjectsMaterializedForTesting());
+        assertEquals(1, state.getNativeDeferredReservationObjectsAvoidedForTesting());
+        assertEquals(3, state.getNativeMailboxCompactUniqueKeysForTesting());
+        assertEquals(1, state.getPrefetchKeysDeduplicatedForTesting());
+
+        currentKey.set("k1");
+        assertEquals(17, state.value());
+        currentKey.set("k2");
+        assertEquals(17, state.value());
+        currentKey.set("k3");
+        assertEquals(17, state.value());
+
+        state.close();
+        coordinator.close();
+        assertEquals(1, fakePlane.closeCalls);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testDirectArenaMultiGetPreservesOrderAndAvoidsHeapKeys() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
@@ -3353,6 +3410,41 @@ class NativePreparedValueStateTest {
                 false,
                 true,
                 true,
+                false,
+                true);
+    }
+
+    private static NativeRequestPlaneOptions deferredReservationOptions() {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                128,
+                4096,
+                4096,
+                16,
+                4096,
+                4096,
+                1,
+                2,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                8192,
+                0.02,
+                262144,
+                false,
+                false,
+                false,
+                false,
                 false,
                 true);
     }
