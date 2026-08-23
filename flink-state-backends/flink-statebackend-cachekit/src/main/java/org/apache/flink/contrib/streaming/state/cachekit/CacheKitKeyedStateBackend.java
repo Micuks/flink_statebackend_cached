@@ -109,6 +109,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
     private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
     private final NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator;
     private final boolean keyScopedPrefetchInvalidationEnabled;
+    private final boolean nativePrefetchAccessGuidedStateEnabled;
     private int nextNativeStateId = 1;
     private long nativePreaggGroupBatches;
     private long nativePreaggInputKeys;
@@ -271,6 +272,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 priorityQueueOptEnabled,
                 diagnosticsEnabled,
                 nativeRequestPlaneOptions,
+                false,
                 false);
     }
 
@@ -342,6 +344,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 priorityQueueOptEnabled,
                 diagnosticsEnabled,
                 nativeRequestPlaneOptions,
+                false,
                 false);
     }
 
@@ -379,7 +382,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
             boolean priorityQueueOptEnabled,
             boolean diagnosticsEnabled,
             NativeRequestPlaneOptions nativeRequestPlaneOptions,
-            boolean keyScopedPrefetchInvalidationEnabled) {
+            boolean keyScopedPrefetchInvalidationEnabled,
+            boolean nativePrefetchAccessGuidedStateEnabled) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -467,16 +471,23 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
         this.listStateFlushExecutor = initializedListExecutor;
         this.pqFlushExecutor = initializedPqExecutor;
         this.nativeRequestPlaneCoordinator = initializedNativeCoordinator;
+        this.nativePrefetchAccessGuidedStateEnabled =
+                nativePrefetchAccessGuidedStateEnabled
+                        && initializedNativeCoordinator != null
+                        && initializedNativeCoordinator.isActive()
+                        && initializedNativeCoordinator.options().prefetchEnabled()
+                        && initializedNativeCoordinator.options().mailboxBatchEnabled();
 
         LOG.info(
                 "[CACHEKIT fullOpt] Backend created: listStateCow={}, listStateRyw={}, "
-                        + "clearedKeysCap={}, priorityQueueOpt={}, keyScopedInvalidation={}, nativeRequestPlane={}, "
+                        + "clearedKeysCap={}, priorityQueueOpt={}, keyScopedInvalidation={}, accessGuidedPrefetch={}, nativeRequestPlane={}, "
                         + "nativeKernel={}, nativeFeatureBits={}, nativeFeatures={}",
                 listStateCowEnabled,
                 listStateRywEnabled,
                 listStateClearedKeysCapacity,
                 priorityQueueOptEnabled,
                 keyScopedPrefetchInvalidationEnabled,
+                nativePrefetchAccessGuidedStateEnabled,
                 nativeRequestPlaneCoordinator != null,
                 nativeRequestPlaneCoordinator == null
                         ? "disabled"
@@ -1067,7 +1078,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
             for (Object wrapper : wrappersByDelegateIdentity.values()) {
                 if (wrapper instanceof CachedInternalValueState
                         && ((CachedInternalValueState<?, ?, ?>) wrapper)
-                                .supportsRecordKeyPrefetch()) {
+                                .isRecordKeyPrefetchEligible(
+                                        nativePrefetchAccessGuidedStateEnabled)) {
                     return true;
                 }
             }
@@ -1267,11 +1279,16 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 // and value deserialization run on the shared prefetch worker. No key-context
                 // save/restore needed — submission never touches the backend key context.
                 for (Object wrapper : wrappersByDelegateIdentity.values()) {
-                    if (wrapper instanceof CachedInternalValueState
-                            && ((CachedInternalValueState<?, ?, ?>) wrapper)
-                                    .supportsRecordKeyPrefetch()) {
+                    if (wrapper instanceof CachedInternalValueState) {
+                        CachedInternalValueState<?, ?, ?> valueState =
+                                (CachedInternalValueState<?, ?, ?>) wrapper;
+                        if (!valueState.shouldReceiveRecordKeyPrefetch(
+                                nativePrefetchAccessGuidedStateEnabled)) {
+                            continue;
+                        }
                         Runnable task =
-                                ((CachedInternalValueState) wrapper).buildAsyncPrefetchTask(keys);
+                                ((CachedInternalValueState) valueState)
+                                        .buildAsyncPrefetchTask(keys);
                         if (task != null) {
                             PrefetchExecutor.trySubmit(task);
                         }

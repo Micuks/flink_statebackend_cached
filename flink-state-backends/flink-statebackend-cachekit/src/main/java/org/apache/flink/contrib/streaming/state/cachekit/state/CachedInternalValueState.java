@@ -433,6 +433,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     // expensive for operators with several conditional states).
     private boolean immediatePrefetchAccessObserved;
 
+    // Sticky mailbox-thread-confined signal for speculative record lookahead. A state becomes
+    // eligible after its first authoritative value() access and remains eligible for the job.
+    // Skipping before that point is always safe because the normal point-read path is unchanged.
+    private boolean recordPrefetchAccessObserved;
+    private long recordPrefetchAccessGuidedSkips;
+
     private static int loadStagingMaxEntries() {
         try {
             return Math.max(
@@ -1043,6 +1049,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     @Override
     public V value() throws IOException {
         immediatePrefetchAccessObserved = true;
+        recordPrefetchAccessObserved = true;
         K currentKey = currentKeyProvider.getCurrentKey();
 
         // 1. Check Sticky Cache (Always Check L0 - Fast Path)
@@ -1467,6 +1474,29 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     /**
+     * Returns whether this wrapper should receive the next record-lookahead broadcast.
+     *
+     * <p>When access guidance is enabled, a wrapper is activated by its first real mailbox read.
+     * Until then prefetch is skipped and the unmodified authoritative read learns the state on
+     * demand. The signal is deliberately sticky: later phase changes cannot lose correctness or
+     * permanently starve a state that has once proved relevant.
+     */
+    public boolean shouldReceiveRecordKeyPrefetch(boolean accessGuided) {
+        if (isRecordKeyPrefetchEligible(accessGuided)) {
+            return true;
+        }
+        if (supportsRecordKeyPrefetch() && accessGuided) {
+            recordPrefetchAccessGuidedSkips++;
+        }
+        return false;
+    }
+
+    /** Non-counting capability probe used before the streaming runtime extracts a key batch. */
+    public boolean isRecordKeyPrefetchEligible(boolean accessGuided) {
+        return supportsRecordKeyPrefetch() && (!accessGuided || recordPrefetchAccessObserved);
+    }
+
+    /**
      * Whether mailbox record keys can identify exact prepared-MultiGet reservations.
      *
      * <p>The generic serialized query-wire path is intentionally excluded: it does not expose the
@@ -1635,7 +1665,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             LOG.info(
                     "[CACHEKIT VALUE PREFETCH] delegate={} namespaceSerializer={} "
                             + "recordKeyPrefetch={} multiGet={} chunkSize={} minBatchSize={} "
-                            + "keyScopedInvalidation={} "
+                            + "keyScopedInvalidation={} accessObserved={} accessGuidedSkips={} "
                             + "tasksBuilt={} tasksExecuted={} tasksDropped={} keysPrepared={} "
                             + "keysDeduplicated={} multiGetCalls={} "
                             + "multiGetKeys={} pointGetCalls={} immediatePointGetCalls={} "
@@ -1708,6 +1738,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     multiGetChunkSize,
                     multiGetMinBatchSize,
                     keyScopedPrefetchInvalidationEnabled,
+                    recordPrefetchAccessObserved,
+                    recordPrefetchAccessGuidedSkips,
                     prefetchTasksBuilt,
                     prefetchTasksExecuted,
                     prefetchTasksDropped,

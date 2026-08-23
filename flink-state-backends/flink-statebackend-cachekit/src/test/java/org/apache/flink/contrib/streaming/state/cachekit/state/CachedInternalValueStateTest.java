@@ -635,11 +635,15 @@ class CachedInternalValueStateTest {
                         8);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
+        assertFalse(state.shouldReceiveRecordKeyPrefetch(true));
+        assertTrue(state.shouldReceiveRecordKeyPrefetch(false));
+
         Runnable prefetch = state.buildAsyncPrefetchTask(Arrays.asList("k1", "missing", "k2"));
         prefetch.run();
 
         currentKey.set("k1");
         assertEquals(11, state.value());
+        assertTrue(state.shouldReceiveRecordKeyPrefetch(true));
         currentKey.set("missing");
         assertEquals(99, state.value());
         currentKey.set("k2");

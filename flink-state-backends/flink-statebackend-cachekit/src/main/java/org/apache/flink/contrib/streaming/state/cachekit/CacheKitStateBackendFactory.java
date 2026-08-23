@@ -449,6 +449,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Retain speculative direct-read-only NOT_FOUND results without allocating one lazy staged-value wrapper per key. "
                                                                         + "The exact prepared-key reservation and key-scoped write invalidation remain authoritative.");
 
+        public static final ConfigOption<Boolean> NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.access-guided-state.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Submit record-lookahead prefetch only to ValueState wrappers that have already served a real mailbox read. "
+                                                                        + "The first access and every skipped state retain the authoritative point-read path.");
+
         public static final ConfigOption<Boolean>
                         NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_BYPASS_ENABLED =
                         ConfigOptions.key(
@@ -679,9 +688,10 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 								listStateRywEnabled,
 							clearedKeysCapacity,
 							priorityQueueOptEnabled,
-							diagnosticsEnabled,
-							nativeRequestPlaneOptions,
-							keyScopedPrefetchInvalidationEnabled);
+								diagnosticsEnabled,
+								nativeRequestPlaneOptions,
+								keyScopedPrefetchInvalidationEnabled,
+								config.get(NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED));
 	}
 
         static NativeRequestPlaneOptions nativeRequestPlaneOptions(ReadableConfig config) {

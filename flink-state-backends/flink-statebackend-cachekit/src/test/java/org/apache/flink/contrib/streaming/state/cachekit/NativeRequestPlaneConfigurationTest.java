@@ -55,6 +55,27 @@ class NativeRequestPlaneConfigurationTest {
     }
 
     @Test
+    void testAccessGuidedPrefetchIsExplicitAndCarriedByConfiguredBackendInstance()
+            throws Exception {
+        Configuration disabled = new Configuration();
+        disabled.set(
+                CacheKitStateBackendFactory.DELEGATE_BACKEND,
+                "org.apache.flink.runtime.state.hashmap.HashMapStateBackend");
+        CacheKitStateBackend disabledBackend =
+                new CacheKitStateBackendFactory()
+                        .createFromConfig(disabled, getClass().getClassLoader());
+        assertFalse(disabledBackend.nativePrefetchAccessGuidedStateEnabledForTesting());
+
+        Configuration enabled = new Configuration(disabled);
+        enabled.set(
+                CacheKitStateBackendFactory.NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED, true);
+        CacheKitStateBackend enabledBackend =
+                new CacheKitStateBackendFactory()
+                        .createFromConfig(enabled, getClass().getClassLoader());
+        assertTrue(enabledBackend.nativePrefetchAccessGuidedStateEnabledForTesting());
+    }
+
+    @Test
     void testNativeRequestPlaneIsOffByDefault() {
         NativeRequestPlaneOptions options =
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(new Configuration());

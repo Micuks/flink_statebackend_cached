@@ -92,6 +92,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final boolean diagnosticsEnabled;
     private final NativeRequestPlaneOptions nativeRequestPlaneOptions;
     private final boolean keyScopedPrefetchInvalidationEnabled;
+    private final boolean nativePrefetchAccessGuidedStateEnabled;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -199,6 +200,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 priorityQueueOptEnabled,
                 diagnosticsEnabled,
                 nativeRequestPlaneOptions,
+                false,
                 false);
     }
 
@@ -256,6 +258,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 priorityQueueOptEnabled,
                 diagnosticsEnabled,
                 nativeRequestPlaneOptions,
+                false,
                 false);
     }
 
@@ -286,7 +289,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
             boolean priorityQueueOptEnabled,
             boolean diagnosticsEnabled,
             NativeRequestPlaneOptions nativeRequestPlaneOptions,
-            boolean keyScopedPrefetchInvalidationEnabled) {
+            boolean keyScopedPrefetchInvalidationEnabled,
+            boolean nativePrefetchAccessGuidedStateEnabled) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -316,10 +320,15 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 java.util.Objects.requireNonNull(
                         nativeRequestPlaneOptions, "nativeRequestPlaneOptions");
         this.keyScopedPrefetchInvalidationEnabled = keyScopedPrefetchInvalidationEnabled;
+        this.nativePrefetchAccessGuidedStateEnabled = nativePrefetchAccessGuidedStateEnabled;
     }
 
     boolean keyScopedPrefetchInvalidationEnabledForTesting() {
         return keyScopedPrefetchInvalidationEnabled;
+    }
+
+    boolean nativePrefetchAccessGuidedStateEnabledForTesting() {
+        return nativePrefetchAccessGuidedStateEnabled;
     }
 
     @Override
@@ -409,7 +418,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
                     priorityQueueOptEnabled,
                     diagnosticsEnabled,
                     effectiveNativeRequestPlaneOptions(),
-                    keyScopedPrefetchInvalidationEnabled);
+                    keyScopedPrefetchInvalidationEnabled,
+                    nativePrefetchAccessGuidedStateEnabled);
         } catch (RuntimeException | LinkageError failure) {
             disposeAfterInitializationFailure(delegated, failure);
             throw new IOException(
@@ -515,6 +525,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 config.get(
                         CacheKitStateBackendFactory
                                 .BP_PREFETCH_KEY_SCOPED_INVALIDATION_ENABLED);
+        final boolean nativePrefetchAccessGuidedStateEnabled =
+                config.get(
+                        CacheKitStateBackendFactory
+                                .NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED);
 
         return new CacheKitStateBackend(
                 configuredDelegate,
@@ -543,7 +557,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 priorityQueueOptEnabled,
                 diagnosticsEnabled,
                 nativeOptions,
-                keyScopedPrefetchInvalidationEnabled);
+                keyScopedPrefetchInvalidationEnabled,
+                nativePrefetchAccessGuidedStateEnabled);
     }
 
     private NativeRequestPlaneOptions effectiveNativeRequestPlaneOptions() {
