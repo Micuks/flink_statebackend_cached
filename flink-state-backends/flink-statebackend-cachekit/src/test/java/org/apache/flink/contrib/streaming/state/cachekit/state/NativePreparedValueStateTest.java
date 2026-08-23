@@ -784,6 +784,213 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testDirectArenaReadOnlyDropsPreCompactSpeculativeSmallBatch() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(77);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        stubDirectPreparedSerialization(reader);
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaReadOnlyOptions(64), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 71, 64, 16);
+        state.setCurrentNamespace("window-precompact-small");
+        java.util.ArrayList<String> keys = new java.util.ArrayList<>();
+        for (int index = 0; index < 15; index++) {
+            keys.add("k" + index);
+        }
+
+        assertNull(state.buildAsyncPrefetchTask(keys));
+        assertEquals(1, state.getNativeDirectArenaSpeculativePreCompactDropsForTesting());
+        assertEquals(15, state.getNativeDirectArenaSpeculativePreCompactKeysForTesting());
+        assertEquals(0, fakePlane.compactCalls);
+        assertEquals(0, state.getNativeDirectArenaMultiGetBatchesForTesting());
+        assertEquals(0, state.getStagingSizeForTesting());
+        verify(reader, never())
+                .getSerializedValuesByRocksDBKeyArena(any(), any(), anyInt(), any(), anyInt());
+        verify(reader, never()).getSerializedValueByRocksDBKey(any());
+
+        currentKey.set("k14");
+        assertEquals(77, state.value());
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testDirectArenaReadOnlyDropsDuplicateHeavyPostCompactSmallBatch() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(88);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        stubDirectPreparedSerialization(reader);
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaReadOnlyOptions(64), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 72, 64, 16);
+        state.setCurrentNamespace("window-postcompact-small");
+        String[] duplicateKeys = new String[16];
+        Arrays.fill(duplicateKeys, "same");
+
+        assertNull(state.buildAsyncPrefetchTask(Arrays.asList(duplicateKeys)));
+        assertEquals(1, fakePlane.compactCalls);
+        assertEquals(1, state.getNativeMailboxCompactBatchesForTesting());
+        assertEquals(16, state.getNativeMailboxCompactInputKeysForTesting());
+        assertEquals(1, state.getNativeMailboxCompactUniqueKeysForTesting());
+        assertEquals(1, state.getNativeDirectArenaSpeculativePostCompactDropsForTesting());
+        assertEquals(1, state.getNativeDirectArenaSpeculativePostCompactKeysForTesting());
+        assertEquals(0, state.getNativeDirectArenaMultiGetBatchesForTesting());
+        verify(reader, never())
+                .getSerializedValuesByRocksDBKeyArena(any(), any(), anyInt(), any(), anyInt());
+        verify(reader, never()).getSerializedValueByRocksDBKey(any());
+
+        currentKey.set("same");
+        assertEquals(88, state.value());
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testDirectArenaReadOnlyDropsOnlySpeculativeTail() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(66);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        stubDirectPreparedSerialization(reader);
+        doAnswer(
+                        invocation -> {
+                            ByteBuffer descriptors =
+                                    ((ByteBuffer) invocation.getArgument(1))
+                                            .duplicate()
+                                            .order(ByteOrder.nativeOrder());
+                            int count = invocation.getArgument(2);
+                            assertEquals(64, count);
+                            for (int index = 0; index < count; index++) {
+                                descriptors.putInt(
+                                        index
+                                                        * RocksDBBatchValueReader
+                                                                .DIRECT_ARENA_DESCRIPTOR_BYTES
+                                                + RocksDBBatchValueReader
+                                                        .DIRECT_ARENA_RESULT_OFFSET,
+                                        RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND);
+                            }
+                            return 0;
+                        })
+                .when(reader)
+                .getSerializedValuesByRocksDBKeyArena(any(), any(), anyInt(), any(), anyInt());
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        directArenaReadOnlyOptions(128), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 73, 128, 16);
+        state.setCurrentNamespace("window-tail-small");
+        java.util.ArrayList<String> keys = new java.util.ArrayList<>();
+        for (int index = 0; index < 65; index++) {
+            keys.add("k" + index);
+        }
+
+        Runnable task = state.buildAsyncPrefetchTask(keys);
+        assertNotNull(task);
+        task.run();
+        assertEquals(1, state.getNativeDirectArenaSpeculativeTailDropsForTesting());
+        assertEquals(1, state.getNativeDirectArenaSpeculativeTailKeysForTesting());
+        assertEquals(1, state.getNativeDirectArenaMultiGetBatchesForTesting());
+        assertEquals(64, state.getNativeDirectArenaMultiGetKeysForTesting());
+        assertEquals(64, state.getNativeDirectArenaReadOnlyKeysForTesting());
+        verify(reader, never()).getSerializedValueByRocksDBKey(any());
+
+        currentKey.set("k64");
+        assertEquals(66, state.value());
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testDirectArenaReadOnlyKeepsImmediateSmallBatchAuthoritative() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        stubDirectPreparedSerialization(reader);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                serializedKey(
+                                        invocation.getArgument(0), invocation.getArgument(1)));
+        when(reader.getSerializedValueByRocksDBKey(any()))
+                .thenReturn(
+                        KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE),
+                        KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE));
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaReadOnlyOptions(64), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 74, 64, 16);
+        state.setCurrentNamespace("window-immediate-small");
+
+        state.prefetchForImmediateUse(Arrays.asList("k1", "k2"));
+        assertEquals(0, state.getNativeDirectArenaSpeculativePreCompactDropsForTesting());
+        assertEquals(0, state.getNativeDirectArenaSpeculativePostCompactDropsForTesting());
+        assertEquals(0, state.getNativeDirectArenaSpeculativeTailDropsForTesting());
+        assertEquals(1, state.getNativeDirectArenaMultiGetFallbackBatchesForTesting());
+        assertEquals(2, state.getNativeDirectArenaMultiGetFallbackKeysForTesting());
+        assertEquals(2, state.getNativeDirectArenaMultiGetHeapKeyCopiesForTesting());
+        verify(reader, times(2)).getSerializedValueByRocksDBKey(any());
+
+        currentKey.set("k1");
+        assertEquals(11, state.value());
+        currentKey.set("k2");
+        assertEquals(22, state.value());
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testDirectArenaReadOnlyKeyScopedWriteCancelsMatchingReservation() throws Exception {
         CountDownLatch readStarted = new CountDownLatch(1);
         CountDownLatch releaseRead = new CountDownLatch(1);
@@ -3115,6 +3322,10 @@ class NativePreparedValueStateTest {
     }
 
     private static NativeRequestPlaneOptions directArenaReadOnlyOptions() {
+        return directArenaReadOnlyOptions(16);
+    }
+
+    private static NativeRequestPlaneOptions directArenaReadOnlyOptions(int batchEntries) {
         return new NativeRequestPlaneOptions(
                 true,
                 "",
@@ -3122,7 +3333,7 @@ class NativePreparedValueStateTest {
                 128,
                 1 << 20,
                 1 << 20,
-                16,
+                batchEntries,
                 1 << 20,
                 1 << 20,
                 1,

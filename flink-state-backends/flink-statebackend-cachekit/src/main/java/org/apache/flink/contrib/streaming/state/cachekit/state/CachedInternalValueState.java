@@ -345,6 +345,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeDirectArenaReadOnlyBatches;
     private volatile long nativeDirectArenaReadOnlyKeys;
     private volatile long nativeDirectArenaReadOnlyCancelledKeys;
+    private volatile long nativeDirectArenaSpeculativePreCompactDrops;
+    private volatile long nativeDirectArenaSpeculativePreCompactKeys;
+    private volatile long nativeDirectArenaSpeculativePostCompactDrops;
+    private volatile long nativeDirectArenaSpeculativePostCompactKeys;
+    private volatile long nativeDirectArenaSpeculativeTailDrops;
+    private volatile long nativeDirectArenaSpeculativeTailKeys;
     private volatile long nativeMailboxDirectSerializationFallbackKeys;
     private volatile long nativeMailboxDirectSerializationFallbackBytes;
     private volatile long nativeDirectPreparedBatches;
@@ -1796,6 +1802,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 LOG.info(
                         "[CACHEKIT DIRECT ARENA MULTIGET] configured={} disabled={} "
                                 + "readOnlyConfigured={} readOnlyBatches={} readOnlyKeys={} readOnlyCancelledKeys={} "
+                                + "speculativePreCompactDrops={} speculativePreCompactKeys={} "
+                                + "speculativePostCompactDrops={} speculativePostCompactKeys={} "
+                                + "speculativeTailDrops={} speculativeTailKeys={} "
                                 + "batches={} keys={} completedBatches={} completedKeys={} valueBytesCopied={} "
                                 + "batchHistogram=1:{},2-3:{},4-7:{},8-15:{},16-31:{},32-63:{},64:{} "
                                 + "found={} notFound={} overflowStatuses={} overflowBatches={} fallbackBatches={} "
@@ -1813,6 +1822,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         nativeDirectArenaReadOnlyBatches,
                         nativeDirectArenaReadOnlyKeys,
                         nativeDirectArenaReadOnlyCancelledKeys,
+                        nativeDirectArenaSpeculativePreCompactDrops,
+                        nativeDirectArenaSpeculativePreCompactKeys,
+                        nativeDirectArenaSpeculativePostCompactDrops,
+                        nativeDirectArenaSpeculativePostCompactKeys,
+                        nativeDirectArenaSpeculativeTailDrops,
+                        nativeDirectArenaSpeculativeTailKeys,
                         nativeDirectArenaMultiGetBatches,
                         nativeDirectArenaMultiGetKeys,
                         nativeDirectArenaMultiGetCompletedBatches,
@@ -2147,6 +2162,30 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return nativeDirectArenaReadOnlyCancelledKeys;
     }
 
+    long getNativeDirectArenaSpeculativePreCompactDropsForTesting() {
+        return nativeDirectArenaSpeculativePreCompactDrops;
+    }
+
+    long getNativeDirectArenaSpeculativePreCompactKeysForTesting() {
+        return nativeDirectArenaSpeculativePreCompactKeys;
+    }
+
+    long getNativeDirectArenaSpeculativePostCompactDropsForTesting() {
+        return nativeDirectArenaSpeculativePostCompactDrops;
+    }
+
+    long getNativeDirectArenaSpeculativePostCompactKeysForTesting() {
+        return nativeDirectArenaSpeculativePostCompactKeys;
+    }
+
+    long getNativeDirectArenaSpeculativeTailDropsForTesting() {
+        return nativeDirectArenaSpeculativeTailDrops;
+    }
+
+    long getNativeDirectArenaSpeculativeTailKeysForTesting() {
+        return nativeDirectArenaSpeculativeTailKeys;
+    }
+
     boolean isNativeDirectArenaMultiGetDisabledForTesting() {
         return nativeDirectArenaMultiGetDisabled;
     }
@@ -2403,12 +2442,34 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (storageKeys.isEmpty()) {
             return null;
         }
+        final boolean nativeDirectReadOnlyMailbox =
+                nativeMailboxBatch
+                        && nativeRequestPlaneCoordinator
+                                .options()
+                                .directArenaReadOnlyEnabled();
+        if (nativeDirectReadOnlyMailbox && storageKeys.size() < multiGetMinBatchSize) {
+            // This is speculative work. A sub-MultiGet batch would ultimately be dropped by the
+            // worker so the authoritative mailbox read can run. Do that before native compact,
+            // key-arena serialization, slot leasing and task allocation.
+            recordNativeDirectArenaSpeculativePreCompactDrop(storageKeys.size());
+            return null;
+        }
         NativeRequestPlaneCoordinator.BatchSlot nativeBatchSlot = null;
         java.util.List<byte[]> preparedRocksDBKeys = rocksDBKeys;
         boolean compactSelectedPrepared = false;
         if (nativeMailboxBatch) {
             nativeBatchSlot =
                     compactNativeMailboxBatch(batchReader, rocksDBKeys, storageKeys);
+            if (nativeBatchSlot != null
+                    && nativeDirectReadOnlyMailbox
+                    && storageKeys.size() < multiGetMinBatchSize) {
+                // Native compaction can turn a large duplicate-heavy lookahead into only a few
+                // exact keys. Reading those keys as speculative point Gets duplicates the later
+                // authoritative mailbox path, so release the slot before reserving/submitting.
+                recordNativeDirectArenaSpeculativePostCompactDrop(storageKeys.size());
+                nativeBatchSlot.close();
+                return null;
+            }
             if (nativeBatchSlot != null
                     && nativeRequestPlaneCoordinator.options().compactSelectedProbeEnabled()) {
                 try {
@@ -3336,12 +3397,24 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (activeCount == 0) {
             return true;
         }
-        if (reservation != null
-                && activeCount < rocksDBKeys.size()
-                && activeCount < multiGetMinBatchSize) {
-            prefetchSmallBatchDrops++;
-            prefetchSmallBatchKeysDropped += activeCount;
+        if (reservation != null && activeCount < multiGetMinBatchSize) {
+            recordNativeDirectArenaSpeculativePostCompactDrop(activeCount);
             return true;
+        }
+
+        if (reservation != null) {
+            int directChunkSize =
+                    Math.min(
+                            RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
+                            multiGetChunkSize);
+            int tail = activeCount % directChunkSize;
+            if (activeCount > directChunkSize && tail > 0 && tail < multiGetMinBatchSize) {
+                // The tail would otherwise copy prepared keys back to heap and issue point Gets.
+                // Keep only complete/useful direct chunks; tracked-task completion releases the
+                // unconsumed tail reservations for their authoritative mailbox reads.
+                activeCount -= tail;
+                recordNativeDirectArenaSpeculativeTailDrop(tail);
+            }
         }
 
         java.util.List<byte[]> values =
@@ -3382,6 +3455,27 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
         }
         return true;
+    }
+
+    private void recordNativeDirectArenaSpeculativePreCompactDrop(int keys) {
+        prefetchSmallBatchDrops++;
+        prefetchSmallBatchKeysDropped += keys;
+        nativeDirectArenaSpeculativePreCompactDrops++;
+        nativeDirectArenaSpeculativePreCompactKeys += keys;
+    }
+
+    private void recordNativeDirectArenaSpeculativePostCompactDrop(int keys) {
+        prefetchSmallBatchDrops++;
+        prefetchSmallBatchKeysDropped += keys;
+        nativeDirectArenaSpeculativePostCompactDrops++;
+        nativeDirectArenaSpeculativePostCompactKeys += keys;
+    }
+
+    private void recordNativeDirectArenaSpeculativeTailDrop(int keys) {
+        prefetchSmallBatchDrops++;
+        prefetchSmallBatchKeysDropped += keys;
+        nativeDirectArenaSpeculativeTailDrops++;
+        nativeDirectArenaSpeculativeTailKeys += keys;
     }
 
     /**
