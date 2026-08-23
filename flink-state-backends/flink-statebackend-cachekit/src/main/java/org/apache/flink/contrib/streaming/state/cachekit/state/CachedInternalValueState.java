@@ -218,17 +218,17 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      * generation captured at submission — any delegate-visible write or dirty flush on this state
      * in between makes the RocksDB read potentially stale.
      */
-    private final java.util.concurrent.ConcurrentHashMap<KeyNamespaceKey<K, N>, StagedValue<V>>
+    private final java.util.concurrent.ConcurrentHashMap<KeyNamespaceKey<K, N>, Object>
             staging = new java.util.concurrent.ConcurrentHashMap<>();
     /**
-     * Native direct-read-only NOT_FOUND results need no value payload. Reuse the already-owned
-     * exact storage key as both map key and value so the worker does not allocate a
-     * SerializedStagedValue for every negative result. Access is serialized with {@link #staging}
-     * and is legal only with key-scoped reservation invalidation.
+     * Native direct-read-only NOT_FOUND results need no value payload. When negative handoff is
+     * enabled, {@link #staging} stores the already-owned exact storage key as both key and value;
+     * positive results retain their {@link StagedValue}. This tagged union avoids both a
+     * per-negative {@link SerializedStagedValue} allocation and the second ConcurrentHashMap that
+     * the first implementation used. Access is serialized with {@code staging} whenever retained
+     * byte accounting or exact write invalidation is involved, and the key sentinel is legal only
+     * with key-scoped reservation invalidation.
      */
-    private final java.util.concurrent.ConcurrentHashMap<
-                    KeyNamespaceKey<K, N>, KeyNamespaceKey<K, N>>
-            nativeNegativeStaging = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.atomic.AtomicLong stagingRetainedBytes =
             new java.util.concurrent.atomic.AtomicLong();
 
@@ -1116,9 +1116,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 prefetchLiveReadCancellations++;
             }
         }
-        if (!nativeNegativeStaging.isEmpty()) {
-            KeyNamespaceKey<K, N> negativeKey = removeNativeNegativeStagedValue(lookupKey);
-            if (negativeKey != null) {
+        if (!staging.isEmpty()) {
+            Object stagedEntry = removeStagedEntry(lookupKey);
+            if (isNativeNegativeStagedEntry(stagedEntry)) {
+                KeyNamespaceKey<K, N> negativeKey = nativeNegativeStorageKey(stagedEntry);
                 V stagedValue;
                 try {
                     stagedValue = copyBatchDefaultValueForMailbox();
@@ -1136,35 +1137,40 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeDirectArenaNegativeHandoffPromoted++;
                     return newValue.valueOrNull();
                 }
-            }
-        }
-        if (!staging.isEmpty()) {
-            StagedValue<V> staged = removeStagedValue(lookupKey);
-            if (staged != null && staged.gen == writeGen) {
-                V stagedValue;
-                boolean materializationFailed = false;
-                try {
-                    stagedValue = materializeStagedValue(staged);
-                } catch (IOException | RuntimeException ignored) {
-                    prefetchLazyMaterializationFailures++;
-                    // Speculative cache fill is best-effort. Fall through to the authoritative
-                    // delegate read if a retained payload cannot be materialized.
-                    stagedValue = null;
-                    materializationFailed = true;
+            } else if (stagedEntry instanceof StagedValue<?>) {
+                @SuppressWarnings("unchecked")
+                StagedValue<V> staged = (StagedValue<V>) stagedEntry;
+                if (staged.gen != writeGen) {
+                    prefetchStaleAborts++;
+                    staged = null;
                 }
-                if (!materializationFailed) {
-                    // Cache insertion and eviction are part of the authoritative write-back path.
-                    // Never swallow their failures as if speculative materialization had failed.
-                    KeyNamespaceKey<K, N> storageKey = staged.storageKey();
-                    CachedValue<V> newValue = CachedValue.of(storageKey, stagedValue, false);
-                    l1Cache.put(storageKey, newValue);
-                    updateSticky(storageKey, newValue);
-                    recordAccess(true); // Hit
-                    prefetchValuesPromoted++;
-                    return newValue.valueOrNull();
+                if (staged == null) {
+                    // Continue to the authoritative delegate read below.
+                } else {
+                    V stagedValue;
+                    boolean materializationFailed = false;
+                    try {
+                        stagedValue = materializeStagedValue(staged);
+                    } catch (IOException | RuntimeException ignored) {
+                        prefetchLazyMaterializationFailures++;
+                        // Speculative cache fill is best-effort. Fall through to the authoritative
+                        // delegate read if a retained payload cannot be materialized.
+                        stagedValue = null;
+                        materializationFailed = true;
+                    }
+                    if (!materializationFailed) {
+                        // Cache insertion and eviction are part of the authoritative write-back
+                        // path. Never swallow their failures as if speculative materialization had
+                        // failed.
+                        KeyNamespaceKey<K, N> storageKey = staged.storageKey();
+                        CachedValue<V> newValue = CachedValue.of(storageKey, stagedValue, false);
+                        l1Cache.put(storageKey, newValue);
+                        updateSticky(storageKey, newValue);
+                        recordAccess(true); // Hit
+                        prefetchValuesPromoted++;
+                        return newValue.valueOrNull();
+                    }
                 }
-            } else if (staged != null) {
-                prefetchStaleAborts++;
             }
         }
 
@@ -1508,8 +1514,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             synchronized (staging) {
                 // A completed speculative read is useful to the record now being dispatched.
                 // Never turn a staging hit back into an authoritative RocksDB point read.
-                if (staging.containsKey(lookupKey)
-                        || nativeNegativeStaging.containsKey(lookupKey)) {
+                if (staging.containsKey(lookupKey)) {
                     prefetchDispatchAlreadyStaged++;
                     continue;
                 }
@@ -1618,7 +1623,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         cancelQueuedAndAwaitPrefetchTasks();
         lifecycleLock.writeLock().lock();
         try {
-            prefetchUnusedStagedOnClose += staging.size() + nativeNegativeStaging.size();
+            prefetchUnusedStagedOnClose += staging.size();
             clearStaging();
             inFlight.clear();
         } finally {
@@ -1721,7 +1726,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchLazyValuesStaged,
                     prefetchLazyValuesMaterialized,
                     prefetchLazyMaterializationFailures,
-                    staging.size() + nativeNegativeStaging.size(),
+                    staging.size(),
                     stagingRetainedBytes.get(),
                     asyncStagingMaxRetainedBytes,
                     prefetchStagingAdmissionDrops,
@@ -1952,7 +1957,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     int getStagingSizeForTesting() {
         synchronized (staging) {
-            return staging.size() + nativeNegativeStaging.size();
+            return staging.size();
         }
     }
 
@@ -3076,41 +3081,31 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (cancelInFlight) {
             prefetchDispatchKeysExamined++;
         }
-        StagedValue<V> staged = staging.get(lookupKey);
-        if (staged != null) {
-            if (staged.gen == gen) {
+        Object stagedEntry = staging.get(lookupKey);
+        if (stagedEntry != null) {
+            boolean current =
+                    isNativeNegativeStagedEntry(stagedEntry)
+                            ? gen == writeGen
+                            : ((StagedValue<?>) stagedEntry).gen == gen;
+            if (current) {
                 if (cancelInFlight) {
                     prefetchDispatchAlreadyStaged++;
                 }
                 prefetchKeysDeduplicated++;
                 return true;
             }
-            removeStagedValue(lookupKey, staged);
-        }
-        KeyNamespaceKey<K, N> negative = nativeNegativeStaging.get(lookupKey);
-        if (negative != null) {
-            if (gen == writeGen) {
-                if (cancelInFlight) {
-                    prefetchDispatchAlreadyStaged++;
-                }
-                prefetchKeysDeduplicated++;
-                return true;
-            }
-            removeNativeNegativeStagedValue(lookupKey);
+            removeStagedEntry(lookupKey, stagedEntry);
         }
         PrefetchReservation reservation = inFlight.get(lookupKey);
         if (reservation != null) {
             if (reservation.generation == gen) {
                 if (cancelInFlight) {
                     synchronized (staging) {
-                        staged = staging.get(lookupKey);
-                        if (staged != null && staged.gen == gen) {
-                            prefetchDispatchAlreadyStaged++;
-                            prefetchKeysDeduplicated++;
-                            return true;
-                        }
-                        negative = nativeNegativeStaging.get(lookupKey);
-                        if (negative != null && gen == writeGen) {
+                        stagedEntry = staging.get(lookupKey);
+                        if (stagedEntry != null
+                                && (isNativeNegativeStagedEntry(stagedEntry)
+                                        ? gen == writeGen
+                                        : ((StagedValue<?>) stagedEntry).gen == gen)) {
                             prefetchDispatchAlreadyStaged++;
                             prefetchKeysDeduplicated++;
                             return true;
@@ -4255,26 +4250,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchWorkerDiscardedAfterRead++;
                     return true;
                 }
-                StagedValue<V> previous = staging.get(staged.storageKey());
-                KeyNamespaceKey<K, N> previousNegative =
-                        nativeNegativeStaging.get(staged.storageKey());
-                if (previous == null
-                        && previousNegative == null
-                        && staging.size() + nativeNegativeStaging.size()
-                                >= asyncStagingMaxEntries) {
+                Object previous = staging.get(staged.storageKey());
+                if (previous == null && staging.size() >= asyncStagingMaxEntries) {
                     prefetchStagingAdmissionDrops++;
                     return false;
                 }
                 long retainedBytes =
                         stagingRetainedBytes.get()
-                                - (previous == null ? 0L : previous.retainedBytes())
+                                - stagedEntryRetainedBytes(previous)
                                 + staged.retainedBytes();
                 if (retainedBytes > asyncStagingMaxRetainedBytes) {
                     prefetchStagingAdmissionDrops++;
                     return false;
-                }
-                if (previousNegative != null) {
-                    nativeNegativeStaging.remove(staged.storageKey(), previousNegative);
                 }
                 staging.put(staged.storageKey(), staged);
                 stagingRetainedBytes.set(retainedBytes);
@@ -4292,11 +4279,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
     }
 
-    private StagedValue<V> removeStagedValue(Object key) {
+    private Object removeStagedEntry(Object key) {
         synchronized (staging) {
-            StagedValue<V> removed = staging.remove(key);
+            Object removed = staging.remove(key);
             if (removed != null) {
-                stagingRetainedBytes.addAndGet(-removed.retainedBytes());
+                stagingRetainedBytes.addAndGet(-stagedEntryRetainedBytes(removed));
             }
             return removed;
         }
@@ -4317,20 +4304,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchWorkerDiscardedAfterRead++;
                     return true;
                 }
-                StagedValue<V> previous = staging.get(storageKey);
-                KeyNamespaceKey<K, N> previousNegative =
-                        nativeNegativeStaging.get(storageKey);
-                if (previous == null
-                        && previousNegative == null
-                        && staging.size() + nativeNegativeStaging.size()
-                                >= asyncStagingMaxEntries) {
+                Object previous = staging.get(storageKey);
+                if (previous == null && staging.size() >= asyncStagingMaxEntries) {
                     prefetchStagingAdmissionDrops++;
                     return false;
                 }
-                if (previous != null && staging.remove(storageKey, previous)) {
-                    stagingRetainedBytes.addAndGet(-previous.retainedBytes());
+                if (previous != null) {
+                    stagingRetainedBytes.addAndGet(-stagedEntryRetainedBytes(previous));
                 }
-                nativeNegativeStaging.put(storageKey, storageKey);
+                staging.put(storageKey, storageKey);
             }
             prefetchValuesStaged++;
             prefetchMissingValuesStaged++;
@@ -4341,26 +4323,32 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
     }
 
-    private KeyNamespaceKey<K, N> removeNativeNegativeStagedValue(Object key) {
-        synchronized (staging) {
-            return nativeNegativeStaging.remove(key);
-        }
-    }
-
-    private boolean removeStagedValue(Object key, StagedValue<V> expected) {
+    private boolean removeStagedEntry(Object key, Object expected) {
         synchronized (staging) {
             if (!staging.remove(key, expected)) {
                 return false;
             }
-            stagingRetainedBytes.addAndGet(-expected.retainedBytes());
+            stagingRetainedBytes.addAndGet(-stagedEntryRetainedBytes(expected));
             return true;
         }
+    }
+
+    private static boolean isNativeNegativeStagedEntry(Object entry) {
+        return entry instanceof KeyNamespaceKey<?, ?>;
+    }
+
+    @SuppressWarnings("unchecked")
+    private KeyNamespaceKey<K, N> nativeNegativeStorageKey(Object entry) {
+        return (KeyNamespaceKey<K, N>) entry;
+    }
+
+    private static long stagedEntryRetainedBytes(Object entry) {
+        return entry instanceof StagedValue<?> ? ((StagedValue<?>) entry).retainedBytes() : 0L;
     }
 
     private void clearStaging() {
         synchronized (staging) {
             staging.clear();
-            nativeNegativeStaging.clear();
             stagingRetainedBytes.set(0L);
         }
     }
@@ -4781,14 +4769,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 if (inFlight.remove(key, reservation)) {
                     prefetchKeyScopedInFlightCancelled++;
                 }
-                StagedValue<V> staged = staging.get(key);
+                Object staged = staging.get(key);
                 if (staged != null && staging.remove(key, staged)) {
-                    stagingRetainedBytes.addAndGet(-staged.retainedBytes());
+                    stagingRetainedBytes.addAndGet(-stagedEntryRetainedBytes(staged));
                     prefetchKeyScopedStagedRemoved++;
-                }
-                if (nativeNegativeStaging.remove(key) != null) {
-                    prefetchKeyScopedStagedRemoved++;
-                    nativeDirectArenaNegativeHandoffInvalidated++;
+                    if (isNativeNegativeStagedEntry(staged)) {
+                        nativeDirectArenaNegativeHandoffInvalidated++;
+                    }
                 }
             }
             return 0L;
@@ -4796,18 +4783,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // A worker releases its reservation only after publishing. Therefore, when the mailbox
         // thread sees no reservation, an absent staged value is a true negative; a future task was
         // submitted after this write and will read the new delegate value.
-        StagedValue<V> staged = staging.get(key);
-        KeyNamespaceKey<K, N> negative = nativeNegativeStaging.get(key);
-        if (staged == null && negative == null) {
+        Object staged = staging.get(key);
+        if (staged == null) {
             prefetchKeyScopedFastNegativeSkips++;
             return 0L;
         }
-        if (staged != null && removeStagedValue(key, staged)) {
+        if (removeStagedEntry(key, staged)) {
             prefetchKeyScopedStagedRemoved++;
-        }
-        if (negative != null && removeNativeNegativeStagedValue(key) != null) {
-            prefetchKeyScopedStagedRemoved++;
-            nativeDirectArenaNegativeHandoffInvalidated++;
+            if (isNativeNegativeStagedEntry(staged)) {
+                nativeDirectArenaNegativeHandoffInvalidated++;
+            }
         }
         return 0L;
     }
