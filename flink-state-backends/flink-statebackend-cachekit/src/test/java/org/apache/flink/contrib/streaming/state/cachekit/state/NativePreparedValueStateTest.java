@@ -551,6 +551,84 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testLargeCompactionScratchCoversBatchAboveRegularSlotCapacity() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(null);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+        byte[] serializedValue = KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE);
+        when(reader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
+                .thenReturn(java.util.Collections.nCopies(10, serializedValue));
+        stubDirectPreparedSerialization(reader);
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(mailboxLargeScratchOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true,
+                        1,
+                        1 << 20,
+                        false,
+                        coordinator,
+                        19);
+        state.setCurrentNamespace("window-large-scratch");
+        java.util.ArrayList<String> keys = new java.util.ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            keys.add("k" + i);
+            keys.add("k" + i);
+        }
+
+        Runnable task = state.buildAsyncPrefetchTask(keys);
+        assertNotNull(task);
+        task.run();
+
+        assertEquals(1, state.getNativeMailboxCompactBatchesForTesting());
+        assertEquals(1, state.getNativeMailboxCompactScratchBatchesForTesting());
+        assertEquals(20, state.getNativeMailboxCompactInputKeysForTesting());
+        assertEquals(10, state.getNativeMailboxCompactUniqueKeysForTesting());
+        assertEquals(0, state.getNativeMailboxCompactFallbacksForTesting());
+        assertEquals(0, state.getNativeMailboxCompactSlotMissFallbacksForTesting());
+        assertEquals(0, state.getNativeMailboxCompactCapacityFallbacksForTesting());
+        assertEquals(0, state.getNativeMailboxCompactOperationFallbacksForTesting());
+        assertEquals(10, state.getPrefetchKeysDeduplicatedForTesting());
+
+        state.close();
+        coordinator.close();
+        assertEquals(1, fakePlane.closeCalls);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testCompactSelectedProbeMaterializesOnlyTrueRocksDbMisses() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
@@ -3507,6 +3585,44 @@ class NativePreparedValueStateTest {
                 false,
                 false,
                 true);
+    }
+
+    private static NativeRequestPlaneOptions mailboxLargeScratchOptions() {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                128,
+                4096,
+                4096,
+                16,
+                4096,
+                4096,
+                1,
+                2,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                8192,
+                0.02,
+                262144,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                64,
+                65536);
     }
 
     private static NativeRequestPlaneOptions compactSelectedOptions() {

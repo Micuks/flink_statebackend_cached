@@ -103,6 +103,8 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(options.directArenaReadOnlyEnabled());
         assertFalse(options.negativeHandoffEnabled());
         assertFalse(options.compactionScratchSlotEnabled());
+        assertEquals(4096, options.compactionScratchEntries());
+        assertEquals(2 << 20, options.compactionScratchKeyArenaBytes());
         assertFalse(options.requiresValueCache());
     }
 
@@ -142,6 +144,10 @@ class NativeRequestPlaneConfigurationTest {
         config.set(CacheKitStateBackendFactory.NATIVE_PREFETCH_NEGATIVE_HANDOFF_ENABLED, true);
         config.set(
                 CacheKitStateBackendFactory.NATIVE_MAILBOX_COMPACTION_SCRATCH_SLOT_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_MAILBOX_COMPACTION_SCRATCH_ENTRIES, 777);
+        config.set(
+                CacheKitStateBackendFactory.NATIVE_MAILBOX_COMPACTION_SCRATCH_KEY_ARENA_BYTES,
+                123456);
 
         NativeRequestPlaneOptions options =
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(config);
@@ -172,6 +178,8 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(options.directArenaReadOnlyEnabled());
         assertTrue(options.negativeHandoffEnabled());
         assertTrue(options.compactionScratchSlotEnabled());
+        assertEquals(777, options.compactionScratchEntries());
+        assertEquals(123456, options.compactionScratchKeyArenaBytes());
         assertTrue(options.requiresValueCache());
     }
 

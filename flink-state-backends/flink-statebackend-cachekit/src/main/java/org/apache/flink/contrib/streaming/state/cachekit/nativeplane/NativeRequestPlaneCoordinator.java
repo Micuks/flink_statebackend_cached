@@ -1099,8 +1099,18 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             this.kind = kind;
             boolean mutationOnly = kind == SlotKind.MUTATION;
             boolean compactionOnly = kind == SlotKind.COMPACTION_SCRATCH;
-            int entries = mutationOnly ? 1 : options.batchEntries();
-            int preparedArenaBytes = mutationOnly ? 0 : options.batchKeyArenaBytes();
+            int entries =
+                    mutationOnly
+                            ? 1
+                            : (compactionOnly
+                                    ? options.compactionScratchEntries()
+                                    : options.batchEntries());
+            int preparedArenaBytes =
+                    mutationOnly
+                            ? 0
+                            : (compactionOnly
+                                    ? options.compactionScratchKeyArenaBytes()
+                                    : options.batchKeyArenaBytes());
             int preparedMetadataBytes =
                     mutationOnly
                             ? 0

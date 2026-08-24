@@ -254,6 +254,22 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "copy only unique prepared keys to the established Java MultiGet queue, and release it before submission. "
                                                                         + "The scratch slot has no probe/fill value arena and is disabled by default.");
 
+        public static final ConfigOption<Integer> NATIVE_MAILBOX_COMPACTION_SCRATCH_ENTRIES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.mailbox-compaction.scratch-entries")
+                                        .intType()
+                                        .defaultValue(4096)
+                                        .withDescription(
+                                                        "Maximum prepared keys in the key-only mailbox compaction scratch slot. This may exceed the full request-plane batch size because the scratch slot has no value arena.");
+
+        public static final ConfigOption<Integer> NATIVE_MAILBOX_COMPACTION_SCRATCH_KEY_ARENA_BYTES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.mailbox-compaction.scratch-key-arena-bytes")
+                                        .intType()
+                                        .defaultValue(2 << 20)
+                                        .withDescription(
+                                                        "Prepared-key bytes in the key-only mailbox compaction scratch slot.");
+
         public static final ConfigOption<Boolean> NATIVE_REQUEST_PLANE_AARCH64_ONLY =
                         ConfigOptions.key("state.backend.cachekit.native.request-plane.aarch64-only")
                                         .booleanType()
@@ -753,7 +769,9 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_PREFETCH_NEGATIVE_HANDOFF_ENABLED),
                                 config.get(
                                                 NATIVE_PREFETCH_DEFERRED_RESERVATION_MATERIALIZATION_ENABLED),
-                                config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_SLOT_ENABLED));
+                                config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_SLOT_ENABLED),
+                                config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_ENTRIES),
+                                config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_KEY_ARENA_BYTES));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

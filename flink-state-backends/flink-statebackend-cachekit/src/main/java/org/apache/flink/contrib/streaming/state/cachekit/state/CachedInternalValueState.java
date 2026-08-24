@@ -324,6 +324,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeMailboxCompactUniqueKeys;
     private volatile long nativeMailboxCompactFallbacks;
     private volatile long nativeMailboxCompactThresholdFallbacks;
+    private volatile long nativeMailboxCompactSlotMissFallbacks;
+    private volatile long nativeMailboxCompactCapacityFallbacks;
+    private volatile long nativeMailboxCompactOperationFallbacks;
     private volatile long nativeCompactSelectedProbeBatches;
     private volatile long nativeCompactSelectedProbeKeys;
     private volatile long nativeCompactSelectedLazyHeapKeyCopies;
@@ -1705,6 +1708,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "nativeMailboxCompactUniqueKeys={} "
                             + "nativeMailboxCompactFallbacks={} "
                             + "nativeMailboxCompactThresholdFallbacks={} "
+                            + "nativeMailboxCompactSlotMissFallbacks={} "
+                            + "nativeMailboxCompactCapacityFallbacks={} "
+                            + "nativeMailboxCompactOperationFallbacks={} "
                             + "nativeCompactSelectedProbeBatches={} "
                             + "nativeCompactSelectedProbeKeys={} "
                             + "nativeCompactSelectedLazyHeapKeyCopies={} "
@@ -1819,6 +1825,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeMailboxCompactUniqueKeys,
                     nativeMailboxCompactFallbacks,
                     nativeMailboxCompactThresholdFallbacks,
+                    nativeMailboxCompactSlotMissFallbacks,
+                    nativeMailboxCompactCapacityFallbacks,
+                    nativeMailboxCompactOperationFallbacks,
                     nativeCompactSelectedProbeBatches,
                     nativeCompactSelectedProbeKeys,
                     nativeCompactSelectedLazyHeapKeyCopies,
@@ -2169,6 +2178,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getNativeMailboxCompactThresholdFallbacksForTesting() {
         return nativeMailboxCompactThresholdFallbacks;
+    }
+
+    long getNativeMailboxCompactSlotMissFallbacksForTesting() {
+        return nativeMailboxCompactSlotMissFallbacks;
+    }
+
+    long getNativeMailboxCompactCapacityFallbacksForTesting() {
+        return nativeMailboxCompactCapacityFallbacks;
+    }
+
+    long getNativeMailboxCompactOperationFallbacksForTesting() {
+        return nativeMailboxCompactOperationFallbacks;
     }
 
     long getNativeCompactSelectedProbeBatchesForTesting() {
@@ -2854,10 +2875,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             materializeMailboxFallbackKeys(batchReader, storageKeys, rocksDBKeys);
             return null;
         }
-        NativeRequestPlaneCoordinator.BatchSlot slot = acquireNativeMailboxCompactionSlot();
+        if (storageKeys.size() > nativeRequestPlaneCoordinator.options().batchEntries()
+                && (!nativeRequestPlaneCoordinator.options().compactionScratchSlotEnabled()
+                        || storageKeys.size()
+                                > nativeRequestPlaneCoordinator.options().compactionScratchEntries())) {
+            nativeFallbackBatches++;
+            nativeMailboxCompactFallbacks++;
+            nativeMailboxCompactCapacityFallbacks++;
+            materializeMailboxFallbackKeys(batchReader, storageKeys, rocksDBKeys);
+            return null;
+        }
+        NativeRequestPlaneCoordinator.BatchSlot slot =
+                acquireNativeMailboxCompactionSlot(storageKeys.size());
         if (slot == null) {
             nativeFallbackBatches++;
             nativeMailboxCompactFallbacks++;
+            nativeMailboxCompactSlotMissFallbacks++;
             materializeMailboxFallbackKeys(batchReader, storageKeys, rocksDBKeys);
             return null;
         }
@@ -2930,9 +2963,24 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 return null;
             }
             return slot;
-        } catch (Exception | LinkageError failure) {
+        } catch (IOException failure) {
             nativeFallbackBatches++;
             nativeMailboxCompactFallbacks++;
+            nativeMailboxCompactCapacityFallbacks++;
+            slot.close();
+            materializeMailboxFallbackKeys(batchReader, storageKeys, rocksDBKeys);
+            return null;
+        } catch (Exception failure) {
+            nativeFallbackBatches++;
+            nativeMailboxCompactFallbacks++;
+            nativeMailboxCompactOperationFallbacks++;
+            slot.close();
+            materializeMailboxFallbackKeys(batchReader, storageKeys, rocksDBKeys);
+            return null;
+        } catch (LinkageError failure) {
+            nativeFallbackBatches++;
+            nativeMailboxCompactFallbacks++;
+            nativeMailboxCompactOperationFallbacks++;
             slot.close();
             materializeMailboxFallbackKeys(batchReader, storageKeys, rocksDBKeys);
             return null;
@@ -2957,10 +3005,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
             return null;
         }
-        NativeRequestPlaneCoordinator.BatchSlot slot = acquireNativeMailboxCompactionSlot();
+        if (keys.size() > nativeRequestPlaneCoordinator.options().batchEntries()
+                && (!nativeRequestPlaneCoordinator.options().compactionScratchSlotEnabled()
+                        || keys.size()
+                                > nativeRequestPlaneCoordinator.options().compactionScratchEntries())) {
+            nativeFallbackBatches++;
+            nativeMailboxCompactFallbacks++;
+            nativeMailboxCompactCapacityFallbacks++;
+            materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
+            return null;
+        }
+        NativeRequestPlaneCoordinator.BatchSlot slot =
+                acquireNativeMailboxCompactionSlot(keys.size());
         if (slot == null) {
             nativeFallbackBatches++;
             nativeMailboxCompactFallbacks++;
+            nativeMailboxCompactSlotMissFallbacks++;
             materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
             return null;
         }
@@ -3029,16 +3089,35 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 return null;
             }
             return slot;
-        } catch (Exception | LinkageError failure) {
+        } catch (IOException failure) {
             nativeFallbackBatches++;
             nativeMailboxCompactFallbacks++;
+            nativeMailboxCompactCapacityFallbacks++;
+            slot.close();
+            materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
+            return null;
+        } catch (Exception failure) {
+            nativeFallbackBatches++;
+            nativeMailboxCompactFallbacks++;
+            nativeMailboxCompactOperationFallbacks++;
+            slot.close();
+            materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
+            return null;
+        } catch (LinkageError failure) {
+            nativeFallbackBatches++;
+            nativeMailboxCompactFallbacks++;
+            nativeMailboxCompactOperationFallbacks++;
             slot.close();
             materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
             return null;
         }
     }
 
-    private NativeRequestPlaneCoordinator.BatchSlot acquireNativeMailboxCompactionSlot() {
+    private NativeRequestPlaneCoordinator.BatchSlot acquireNativeMailboxCompactionSlot(
+            int candidateCount) {
+        if (candidateCount > nativeRequestPlaneCoordinator.options().batchEntries()) {
+            return nativeRequestPlaneCoordinator.tryAcquireCompactionScratchSlot();
+        }
         NativeRequestPlaneCoordinator.BatchSlot slot =
                 nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
         if (slot != null) {
