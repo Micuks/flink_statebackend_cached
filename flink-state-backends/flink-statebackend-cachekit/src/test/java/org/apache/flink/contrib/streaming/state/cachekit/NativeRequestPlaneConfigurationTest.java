@@ -102,6 +102,7 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(options.directArenaMultiGetEnabled());
         assertFalse(options.directArenaReadOnlyEnabled());
         assertFalse(options.negativeHandoffEnabled());
+        assertFalse(options.compactionScratchSlotEnabled());
         assertFalse(options.requiresValueCache());
     }
 
@@ -139,6 +140,8 @@ class NativeRequestPlaneConfigurationTest {
         config.set(CacheKitStateBackendFactory.NATIVE_DIRECT_ARENA_MULTIGET_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_DIRECT_ARENA_READ_ONLY_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_PREFETCH_NEGATIVE_HANDOFF_ENABLED, true);
+        config.set(
+                CacheKitStateBackendFactory.NATIVE_MAILBOX_COMPACTION_SCRATCH_SLOT_ENABLED, true);
 
         NativeRequestPlaneOptions options =
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(config);
@@ -168,6 +171,7 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(options.directArenaMultiGetEnabled());
         assertTrue(options.directArenaReadOnlyEnabled());
         assertTrue(options.negativeHandoffEnabled());
+        assertTrue(options.compactionScratchSlotEnabled());
         assertTrue(options.requiresValueCache());
     }
 
@@ -470,5 +474,22 @@ class NativeRequestPlaneConfigurationTest {
         NativeRequestPlaneOptions options =
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalid);
         assertTrue(options.deferredReservationMaterializationEnabled());
+    }
+
+    @Test
+    void testCompactionScratchRequiresMailboxPrefetch() {
+        Configuration invalid = new Configuration();
+        invalid.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        invalid.set(
+                CacheKitStateBackendFactory.NATIVE_MAILBOX_COMPACTION_SCRATCH_SLOT_ENABLED, true);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalid));
+
+        invalid.set(CacheKitStateBackendFactory.NATIVE_PREFETCH_ENABLED, true);
+        invalid.set(CacheKitStateBackendFactory.NATIVE_MAILBOX_BATCH_ENABLED, true);
+        assertTrue(
+                CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalid)
+                        .compactionScratchSlotEnabled());
     }
 }

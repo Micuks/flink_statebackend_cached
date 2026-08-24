@@ -244,6 +244,16 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         .withDescription(
                                                         "Bounded direct batch slots; exhaustion falls back to Java.");
 
+        public static final ConfigOption<Boolean> NATIVE_MAILBOX_COMPACTION_SCRATCH_SLOT_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.mailbox-compaction.scratch-slot.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "When every full native batch slot is leased, use one short-lived compaction-only scratch slot, "
+                                                                        + "copy only unique prepared keys to the established Java MultiGet queue, and release it before submission. "
+                                                                        + "The scratch slot has no probe/fill value arena and is disabled by default.");
+
         public static final ConfigOption<Boolean> NATIVE_REQUEST_PLANE_AARCH64_ONLY =
                         ConfigOptions.key("state.backend.cachekit.native.request-plane.aarch64-only")
                                         .booleanType()
@@ -742,7 +752,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_DIRECT_ARENA_READ_ONLY_ENABLED),
                                 config.get(NATIVE_PREFETCH_NEGATIVE_HANDOFF_ENABLED),
                                 config.get(
-                                                NATIVE_PREFETCH_DEFERRED_RESERVATION_MATERIALIZATION_ENABLED));
+                                                NATIVE_PREFETCH_DEFERRED_RESERVATION_MATERIALIZATION_ENABLED),
+                                config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_SLOT_ENABLED));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

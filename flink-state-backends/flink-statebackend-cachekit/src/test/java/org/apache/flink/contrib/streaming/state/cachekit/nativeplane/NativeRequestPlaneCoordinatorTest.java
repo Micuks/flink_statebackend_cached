@@ -75,6 +75,46 @@ class NativeRequestPlaneCoordinatorTest {
     }
 
     @Test
+    void testCloseWaitsForOutstandingCompactionScratchSlot() throws Exception {
+        FakePlane plane = new FakePlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        optionsWithCompactionScratch(1), plane);
+        NativeRequestPlaneCoordinator.BatchSlot scratch =
+                coordinator.tryAcquireCompactionScratchSlot();
+        assertNotNull(scratch);
+
+        CountDownLatch closeStarted = new CountDownLatch(1);
+        CountDownLatch closeReturned = new CountDownLatch(1);
+        Thread closer =
+                new Thread(
+                        () -> {
+                            closeStarted.countDown();
+                            coordinator.close();
+                            closeReturned.countDown();
+                        },
+                        "native-coordinator-scratch-close");
+        try {
+            closer.start();
+            assertTrue(closeStarted.await(5, TimeUnit.SECONDS));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (coordinator.isActive() && System.nanoTime() < deadline) {
+                Thread.yield();
+            }
+            assertFalse(coordinator.isActive());
+            assertNull(coordinator.tryAcquireCompactionScratchSlot());
+            assertFalse(closeReturned.await(200, TimeUnit.MILLISECONDS));
+            assertEquals(0, plane.closeCalls);
+        } finally {
+            scratch.close();
+            closer.join(5000);
+        }
+        assertFalse(closer.isAlive());
+        assertEquals(0, closeReturned.getCount());
+        assertEquals(1, plane.closeCalls);
+    }
+
+    @Test
     void testConstructionMetadataFailureClosesPlaneBeforeOwnershipEscapes() {
         FakePlane plane = new FakePlane();
         plane.failSelectedKernel = true;
@@ -134,6 +174,46 @@ class NativeRequestPlaneCoordinatorTest {
         coordinator.disable(new IllegalStateException("injected"));
         assertFalse(coordinator.isActive());
         assertNull(coordinator.tryAcquireBatchSlot());
+        coordinator.close();
+        assertEquals(1, plane.closeCalls);
+    }
+
+    @Test
+    void testCompactionScratchSlotIsIndependentBoundedAndLightweight() throws Exception {
+        FakePlane plane = new FakePlane();
+        plane.compactIndexes = new int[] {0, 2};
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        optionsWithCompactionScratch(1), plane);
+        long regularBytes = coordinator.regularSlotDirectBytesForTesting();
+        long scratchBytes = coordinator.compactionScratchSlotDirectBytesForTesting();
+        assertTrue(scratchBytes < regularBytes);
+
+        NativeRequestPlaneCoordinator.BatchSlot regular = coordinator.tryAcquireBatchSlot();
+        assertNotNull(regular);
+        assertNull(coordinator.tryAcquireBatchSlot());
+
+        NativeRequestPlaneCoordinator.BatchSlot scratch =
+                coordinator.tryAcquireCompactionScratchSlot();
+        assertNotNull(scratch);
+        assertTrue(scratch.isCompactionScratch());
+        assertNull(coordinator.tryAcquireCompactionScratchSlot());
+        assertEquals(1, coordinator.compactionScratchLeases());
+        assertEquals(1, coordinator.compactionScratchLeaseMisses());
+
+        scratch.prepareLatest(
+                3,
+                17L,
+                Arrays.asList(new byte[] {1}, new byte[] {1}, new byte[] {2}));
+        assertEquals(2, coordinator.compact(scratch));
+        assertEquals(0, scratch.compactedSourceIndex(0));
+        assertEquals(2, scratch.compactedSourceIndex(1));
+        scratch.close();
+        NativeRequestPlaneCoordinator.BatchSlot reused =
+                coordinator.tryAcquireCompactionScratchSlot();
+        assertNotNull(reused);
+        reused.close();
+        regular.close();
         coordinator.close();
         assertEquals(1, plane.closeCalls);
     }
@@ -510,6 +590,42 @@ class NativeRequestPlaneCoordinatorTest {
                 8192,
                 0.02,
                 262144);
+    }
+
+    private static NativeRequestPlaneOptions optionsWithCompactionScratch(int slots) {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                16,
+                1024,
+                1024,
+                4,
+                1024,
+                1024,
+                1,
+                slots,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                true,
+                false,
+                true,
+                true,
+                false,
+                8192,
+                0.02,
+                262144,
+                false,
+                false,
+                false,
+                true,
+                false,
+                false,
+                true);
     }
 
     private static final class FakePlane implements NativeRequestPlane {

@@ -319,6 +319,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeFillRejected;
     private volatile long nativeFallbackBatches;
     private volatile long nativeMailboxCompactBatches;
+    private volatile long nativeMailboxCompactScratchBatches;
     private volatile long nativeMailboxCompactInputKeys;
     private volatile long nativeMailboxCompactUniqueKeys;
     private volatile long nativeMailboxCompactFallbacks;
@@ -1699,6 +1700,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "nativeMisses={} nativeFillBatches={} nativeFillKeys={} "
                             + "nativeFillRejected={} nativeFallbackBatches={} "
                             + "nativeMailboxCompactBatches={} "
+                            + "nativeMailboxCompactScratchBatches={} "
                             + "nativeMailboxCompactInputKeys={} "
                             + "nativeMailboxCompactUniqueKeys={} "
                             + "nativeMailboxCompactFallbacks={} "
@@ -1812,6 +1814,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeFillRejected,
                     nativeFallbackBatches,
                     nativeMailboxCompactBatches,
+                    nativeMailboxCompactScratchBatches,
                     nativeMailboxCompactInputKeys,
                     nativeMailboxCompactUniqueKeys,
                     nativeMailboxCompactFallbacks,
@@ -2146,6 +2149,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getNativeMailboxCompactBatchesForTesting() {
         return nativeMailboxCompactBatches;
+    }
+
+    long getNativeMailboxCompactScratchBatchesForTesting() {
+        return nativeMailboxCompactScratchBatches;
     }
 
     long getNativeMailboxCompactInputKeysForTesting() {
@@ -2847,8 +2854,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             materializeMailboxFallbackKeys(batchReader, storageKeys, rocksDBKeys);
             return null;
         }
-        NativeRequestPlaneCoordinator.BatchSlot slot =
-                nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
+        NativeRequestPlaneCoordinator.BatchSlot slot = acquireNativeMailboxCompactionSlot();
         if (slot == null) {
             nativeFallbackBatches++;
             nativeMailboxCompactFallbacks++;
@@ -2904,7 +2910,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeMailboxCompactUniqueKeys += uniqueCount;
             rocksDBKeys.clear();
             boolean retainPreparedArena =
-                    nativeRequestPlaneCoordinator.options().compactSelectedProbeEnabled();
+                    nativeRequestPlaneCoordinator.options().compactSelectedProbeEnabled()
+                            && !slot.isCompactionScratch();
             for (int target = 0; target < uniqueCount; target++) {
                 int source = slot.compactedSourceIndex(target);
                 storageKeys.set(target, storageKeys.get(source));
@@ -2916,6 +2923,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (duplicates > 0) {
                 prefetchKeysDeduplicated += duplicates;
                 storageKeys.subList(uniqueCount, storageKeys.size()).clear();
+            }
+            if (slot.isCompactionScratch()) {
+                nativeMailboxCompactScratchBatches++;
+                slot.close();
+                return null;
             }
             return slot;
         } catch (Exception | LinkageError failure) {
@@ -2945,8 +2957,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
             return null;
         }
-        NativeRequestPlaneCoordinator.BatchSlot slot =
-                nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
+        NativeRequestPlaneCoordinator.BatchSlot slot = acquireNativeMailboxCompactionSlot();
         if (slot == null) {
             nativeFallbackBatches++;
             nativeMailboxCompactFallbacks++;
@@ -2998,7 +3009,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeMailboxCompactUniqueKeys += uniqueCount;
             rocksDBKeys.clear();
             boolean retainPreparedArena =
-                    nativeRequestPlaneCoordinator.options().compactSelectedProbeEnabled();
+                    nativeRequestPlaneCoordinator.options().compactSelectedProbeEnabled()
+                            && !slot.isCompactionScratch();
             for (int target = 0; target < uniqueCount; target++) {
                 int source = slot.compactedSourceIndex(target);
                 keys.set(target, keys.get(source));
@@ -3011,6 +3023,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 prefetchKeysDeduplicated += duplicates;
                 keys.subList(uniqueCount, keys.size()).clear();
             }
+            if (slot.isCompactionScratch()) {
+                nativeMailboxCompactScratchBatches++;
+                slot.close();
+                return null;
+            }
             return slot;
         } catch (Exception | LinkageError failure) {
             nativeFallbackBatches++;
@@ -3019,6 +3036,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
             return null;
         }
+    }
+
+    private NativeRequestPlaneCoordinator.BatchSlot acquireNativeMailboxCompactionSlot() {
+        NativeRequestPlaneCoordinator.BatchSlot slot =
+                nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
+        if (slot != null) {
+            return slot;
+        }
+        return nativeRequestPlaneCoordinator.tryAcquireCompactionScratchSlot();
     }
 
     private void materializeDeferredMailboxFallbackKeys(

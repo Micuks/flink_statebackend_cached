@@ -65,6 +65,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final boolean directArenaReadOnlyEnabled;
     private final boolean negativeHandoffEnabled;
     private final boolean deferredReservationMaterializationEnabled;
+    private final boolean compactionScratchSlotEnabled;
     private final boolean mapSnapshotAdaptiveBypassEnabled;
     private final int mapSnapshotAdaptiveWindowProbes;
     private final double mapSnapshotAdaptiveMinUsefulHitRate;
@@ -885,6 +886,74 @@ public final class NativeRequestPlaneOptions implements Serializable {
             boolean directArenaReadOnlyEnabled,
             boolean negativeHandoffEnabled,
             boolean deferredReservationMaterializationEnabled) {
+        this(
+                enabled,
+                libraryPath,
+                kernel,
+                capacityEntries,
+                keyArenaBytes,
+                valueArenaBytes,
+                batchEntries,
+                batchKeyArenaBytes,
+                batchValueArenaBytes,
+                minBatchSize,
+                batchSlots,
+                aarch64Only,
+                writeThroughMutations,
+                valueCacheEnabled,
+                mapCacheEnabled,
+                mapSnapshotEnabled,
+                prefetchEnabled,
+                mailboxBatchEnabled,
+                preaggEnabled,
+                compactSelectedProbeEnabled,
+                directArenaMultiGetEnabled,
+                mapSnapshotAdaptiveBypassEnabled,
+                mapSnapshotAdaptiveWindowProbes,
+                mapSnapshotAdaptiveMinUsefulHitRate,
+                mapSnapshotAdaptiveResampleIntervalProbes,
+                indexedFoldEnabled,
+                readActivatedWriteThrough,
+                residentMutationBatchEnabled,
+                directArenaReadOnlyEnabled,
+                negativeHandoffEnabled,
+                deferredReservationMaterializationEnabled,
+                false);
+    }
+
+    public NativeRequestPlaneOptions(
+            boolean enabled,
+            String libraryPath,
+            String kernel,
+            int capacityEntries,
+            long keyArenaBytes,
+            long valueArenaBytes,
+            int batchEntries,
+            int batchKeyArenaBytes,
+            int batchValueArenaBytes,
+            int minBatchSize,
+            int batchSlots,
+            boolean aarch64Only,
+            boolean writeThroughMutations,
+            boolean valueCacheEnabled,
+            boolean mapCacheEnabled,
+            boolean mapSnapshotEnabled,
+            boolean prefetchEnabled,
+            boolean mailboxBatchEnabled,
+            boolean preaggEnabled,
+            boolean compactSelectedProbeEnabled,
+            boolean directArenaMultiGetEnabled,
+            boolean mapSnapshotAdaptiveBypassEnabled,
+            int mapSnapshotAdaptiveWindowProbes,
+            double mapSnapshotAdaptiveMinUsefulHitRate,
+            int mapSnapshotAdaptiveResampleIntervalProbes,
+            boolean indexedFoldEnabled,
+            boolean readActivatedWriteThrough,
+            boolean residentMutationBatchEnabled,
+            boolean directArenaReadOnlyEnabled,
+            boolean negativeHandoffEnabled,
+            boolean deferredReservationMaterializationEnabled,
+            boolean compactionScratchSlotEnabled) {
         this.enabled = enabled;
         this.libraryPath = Objects.requireNonNull(libraryPath, "libraryPath").trim();
         this.kernel = normalizeKernel(kernel);
@@ -1000,6 +1069,12 @@ public final class NativeRequestPlaneOptions implements Serializable {
         }
         this.deferredReservationMaterializationEnabled =
                 deferredReservationMaterializationEnabled;
+        if (compactionScratchSlotEnabled
+                && (!enabled || !prefetchEnabled || !mailboxBatchEnabled)) {
+            throw new IllegalArgumentException(
+                    "Native mailbox compaction scratch slot requires native request plane, prefetch, and mailbox batching.");
+        }
+        this.compactionScratchSlotEnabled = compactionScratchSlotEnabled;
         if (mapSnapshotAdaptiveBypassEnabled && !mapSnapshotEnabled) {
             throw new IllegalArgumentException(
                     "Native MapSnapshot adaptive bypass requires native MapSnapshot to be enabled.");
@@ -1183,6 +1258,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
     /** Whether Java reservation objects are allocated only after native duplicate compaction. */
     public boolean deferredReservationMaterializationEnabled() {
         return deferredReservationMaterializationEnabled;
+    }
+
+    /** Whether slot exhaustion may fall back to one compaction-only, short-lived scratch lease. */
+    public boolean compactionScratchSlotEnabled() {
+        return compactionScratchSlotEnabled;
     }
 
     /** Whether this treatment consumes the bounded Java ValueState cache. */

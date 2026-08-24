@@ -53,6 +53,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private final NativeRequestPlaneOptions options;
     private final NativeRequestPlane plane;
     private final ArrayDeque<BatchSlot> availableSlots;
+    private final ArrayDeque<BatchSlot> availableCompactionScratchSlots;
     private final BatchSlot mutationSlot;
     private final ResidentKeyHint residentKeyHint;
     private final ConcurrentMap<Integer, ValueReadActivation> valueReadActivations =
@@ -65,6 +66,8 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private boolean planeClosed;
     private long leases;
     private long leaseMisses;
+    private long compactionScratchLeases;
+    private long compactionScratchLeaseMisses;
     private long probeCalls;
     private long fillCalls;
     private long compactCalls;
@@ -123,7 +126,12 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         for (int i = 0; i < options.batchSlots(); i++) {
             availableSlots.addLast(new BatchSlot(this, options));
         }
-        this.mutationSlot = new BatchSlot(this, options, true);
+        this.availableCompactionScratchSlots = new ArrayDeque<>(1);
+        if (options.compactionScratchSlotEnabled()) {
+            availableCompactionScratchSlots.addLast(
+                    new BatchSlot(this, options, SlotKind.COMPACTION_SCRATCH));
+        }
+        this.mutationSlot = new BatchSlot(this, options, SlotKind.MUTATION);
         this.mutationSlot.markLeased();
         this.residentKeyHint = new ResidentKeyHint(options.capacityEntries());
         // Capture audit metadata during construction. If either JNI query fails, open() closes the
@@ -173,6 +181,31 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             }
             slot.markLeased();
             leases++;
+            return slot;
+        }
+    }
+
+    /**
+     * Leases the single short-lived mailbox-compaction scratch slot.
+     *
+     * <p>This slot has no probe/fill or direct-MultiGet value arenas. Callers must copy the unique
+     * prepared keys to their established Java queue and release it before submitting async work.
+     */
+    public BatchSlot tryAcquireCompactionScratchSlot() {
+        if (!options.compactionScratchSlotEnabled()) {
+            return null;
+        }
+        synchronized (availableCompactionScratchSlots) {
+            if (!active) {
+                return null;
+            }
+            BatchSlot slot = availableCompactionScratchSlots.pollFirst();
+            if (slot == null) {
+                compactionScratchLeaseMisses++;
+                return null;
+            }
+            slot.markLeased();
+            compactionScratchLeases++;
             return slot;
         }
     }
@@ -761,6 +794,14 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         return leaseMisses;
     }
 
+    public long compactionScratchLeases() {
+        return compactionScratchLeases;
+    }
+
+    public long compactionScratchLeaseMisses() {
+        return compactionScratchLeaseMisses;
+    }
+
     public long probeCalls() {
         return probeCalls;
     }
@@ -791,6 +832,17 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         }
     }
 
+    long compactionScratchSlotDirectBytesForTesting() {
+        synchronized (availableCompactionScratchSlots) {
+            BatchSlot slot = availableCompactionScratchSlots.peekFirst();
+            if (slot == null) {
+                throw new IllegalStateException(
+                        "No native mailbox compaction scratch slot is available.");
+            }
+            return slot.allocatedDirectBytes;
+        }
+    }
+
     public void disable(Throwable cause) {
         synchronized (planeLock) {
             disableLocked(Objects.requireNonNull(cause, "cause"));
@@ -815,6 +867,16 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             while (availableSlots.size() != options.batchSlots()) {
                 try {
                     availableSlots.wait();
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        }
+        int expectedScratchSlots = options.compactionScratchSlotEnabled() ? 1 : 0;
+        synchronized (availableCompactionScratchSlots) {
+            while (availableCompactionScratchSlots.size() != expectedScratchSlots) {
+                try {
+                    availableCompactionScratchSlots.wait();
                 } catch (InterruptedException ignored) {
                     interrupted = true;
                 }
@@ -857,11 +919,21 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private void release(BatchSlot slot) {
         requireOwnedSlot(slot);
         slot.reset();
-        synchronized (availableSlots) {
+        ArrayDeque<BatchSlot> pool =
+                slot.kind == SlotKind.COMPACTION_SCRATCH
+                        ? availableCompactionScratchSlots
+                        : availableSlots;
+        synchronized (pool) {
             slot.leased = false;
-            availableSlots.addLast(slot);
-            availableSlots.notifyAll();
+            pool.addLast(slot);
+            pool.notifyAll();
         }
+    }
+
+    private enum SlotKind {
+        REGULAR,
+        COMPACTION_SCRATCH,
+        MUTATION
     }
 
     /** Backend-lifetime one-way gate used to preserve coherent read-activated write-through. */
@@ -993,6 +1065,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     public static final class BatchSlot implements AutoCloseable {
 
         private final NativeRequestPlaneCoordinator owner;
+        private final SlotKind kind;
         private final SerializedKeyBatch<byte[], byte[]> preparedKeys;
         private final SerializedKeyBatch<byte[], byte[]> missKeys;
         private final ByteBuffer probeValueOutput;
@@ -1015,42 +1088,55 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         private int directMultiGetValueStride;
 
         private BatchSlot(NativeRequestPlaneCoordinator owner, NativeRequestPlaneOptions options) {
-            this(owner, options, false);
+            this(owner, options, SlotKind.REGULAR);
         }
 
         private BatchSlot(
                 NativeRequestPlaneCoordinator owner,
                 NativeRequestPlaneOptions options,
-                boolean mutationOnly) {
+                SlotKind kind) {
             this.owner = owner;
+            this.kind = kind;
+            boolean mutationOnly = kind == SlotKind.MUTATION;
+            boolean compactionOnly = kind == SlotKind.COMPACTION_SCRATCH;
             int entries = mutationOnly ? 1 : options.batchEntries();
             int preparedArenaBytes = mutationOnly ? 0 : options.batchKeyArenaBytes();
             int preparedMetadataBytes =
                     mutationOnly
                             ? 0
                             : Math.multiplyExact(entries, SerializedKeyBatch.METADATA_RECORD_BYTES);
-            int missArenaBytes = options.batchKeyArenaBytes();
+            int missArenaBytes = compactionOnly ? 0 : options.batchKeyArenaBytes();
             int missMetadataBytes =
-                    Math.multiplyExact(entries, SerializedKeyBatch.METADATA_RECORD_BYTES);
-            int probeValueBytes = mutationOnly ? 0 : options.batchValueArenaBytes();
+                    compactionOnly
+                            ? 0
+                            : Math.multiplyExact(
+                                    entries, SerializedKeyBatch.METADATA_RECORD_BYTES);
+            int probeValueBytes =
+                    mutationOnly || compactionOnly ? 0 : options.batchValueArenaBytes();
             int probeResultBytes =
-                    mutationOnly
+                    mutationOnly || compactionOnly
                             ? 0
                             : Math.multiplyExact(
                                     entries, NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
-            int valueArenaBytes = options.batchValueArenaBytes();
+            int valueArenaBytes = compactionOnly ? 0 : options.batchValueArenaBytes();
             int valueMetadataBytes =
-                    Math.multiplyExact(entries, NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES);
+                    compactionOnly
+                            ? 0
+                            : Math.multiplyExact(
+                                    entries, NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES);
             int fillResultBytes =
-                    Math.multiplyExact(entries, NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES);
+                    compactionOnly
+                            ? 0
+                            : Math.multiplyExact(
+                                    entries, NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES);
             int directMultiGetDescriptorBytes =
-                    mutationOnly || !options.directArenaMultiGetEnabled()
+                    mutationOnly || compactionOnly || !options.directArenaMultiGetEnabled()
                             ? 0
                             : Math.multiplyExact(
                                     RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
                                     RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES);
             int uniqueIndexBytes = mutationOnly ? 0 : Math.multiplyExact(entries, Integer.BYTES);
-            int groupIndexBytes = uniqueIndexBytes;
+            int groupIndexBytes = compactionOnly ? 0 : uniqueIndexBytes;
 
             ByteBuffer preparedArena = ByteBuffer.allocateDirect(preparedArenaBytes);
             ByteBuffer preparedMetadata = ByteBuffer.allocateDirect(preparedMetadataBytes);
@@ -1089,6 +1175,11 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                             + directMultiGetDescriptorBytes
                             + uniqueIndexBytes
                             + groupIndexBytes;
+        }
+
+        /** Whether this lease can only compact and must not escape the mailbox thread. */
+        public boolean isCompactionScratch() {
+            return kind == SlotKind.COMPACTION_SCRATCH;
         }
 
         public void prepareLatest(
