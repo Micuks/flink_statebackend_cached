@@ -179,7 +179,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
     public boolean contains(UK userKey) throws IOException, RocksDBException {
         byte[] rawKeyBytes =
                 serializeCurrentKeyWithGroupAndNamespacePlusUserKey(userKey, userKeySerializer);
-        return reusablePointGet.get(backend.db, columnFamily, rawKeyBytes) != RocksDB.NOT_FOUND;
+        return reusablePointGet.exists(backend.db, columnFamily, rawKeyBytes);
     }
 
     @Override

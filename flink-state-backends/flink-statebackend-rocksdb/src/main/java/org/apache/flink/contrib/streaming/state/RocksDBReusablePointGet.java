@@ -57,10 +57,7 @@ final class RocksDBReusablePointGet {
             if (valueLength == RocksDB.NOT_FOUND) {
                 return RocksDB.NOT_FOUND;
             }
-            if (valueLength < 0) {
-                throw new IllegalStateException(
-                        "Unexpected RocksDB preallocated-get result: " + valueLength);
-            }
+            validateFoundLength(valueLength);
             if (valueLength <= valueBuffer.length) {
                 return valueLength;
             }
@@ -68,8 +65,26 @@ final class RocksDBReusablePointGet {
         }
     }
 
+    /** Checks for a key without retrying when only part of an oversized value was copied. */
+    boolean exists(RocksDB db, ColumnFamilyHandle columnFamily, byte[] key)
+            throws RocksDBException {
+        final int valueLength = db.get(columnFamily, key, valueBuffer);
+        if (valueLength == RocksDB.NOT_FOUND) {
+            return false;
+        }
+        validateFoundLength(valueLength);
+        return true;
+    }
+
     byte[] buffer() {
         return valueBuffer;
+    }
+
+    private static void validateFoundLength(int valueLength) {
+        if (valueLength < 0) {
+            throw new IllegalStateException(
+                    "Unexpected RocksDB preallocated-get result: " + valueLength);
+        }
     }
 
     private void grow(int requiredCapacity) {

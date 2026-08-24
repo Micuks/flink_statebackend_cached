@@ -79,6 +79,27 @@ public class RocksDBReusablePointGetTest {
     }
 
     @Test
+    public void oversizedExistenceCheckDoesNotGrowOrRetry() throws Exception {
+        final RocksDBReusablePointGet pointGet = new RocksDBReusablePointGet(4);
+        final byte[] initialBuffer = pointGet.buffer();
+        write(bytes("large"), sequence(257));
+
+        assertThat(
+                        pointGet.exists(
+                                rocksDBResource.getRocksDB(),
+                                rocksDBResource.getDefaultColumnFamily(),
+                                bytes("large")))
+                .isTrue();
+        assertThat(pointGet.buffer()).isSameAs(initialBuffer);
+        assertThat(
+                        pointGet.exists(
+                                rocksDBResource.getRocksDB(),
+                                rocksDBResource.getDefaultColumnFamily(),
+                                bytes("missing")))
+                .isFalse();
+    }
+
+    @Test
     public void rejectsNegativeInitialCapacity() {
         assertThatThrownBy(() -> new RocksDBReusablePointGet(-1))
                 .isInstanceOf(IllegalArgumentException.class);
