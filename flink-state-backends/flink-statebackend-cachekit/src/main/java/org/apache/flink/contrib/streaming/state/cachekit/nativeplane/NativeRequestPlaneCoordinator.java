@@ -82,7 +82,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 NativeRequestPlaneBridge.open(
                         true,
                         options.capacityEntries(),
-                        options.batchEntries(),
+                        nativeMaxBatchEntries(options),
                         options.keyArenaBytes(),
                         options.valueArenaBytes(),
                         options.kernelPreference(),
@@ -97,6 +97,12 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             }
             throw failure;
         }
+    }
+
+    static int nativeMaxBatchEntries(NativeRequestPlaneOptions options) {
+        return options.compactionScratchSlotEnabled()
+                ? Math.max(options.batchEntries(), options.compactionScratchEntries())
+                : options.batchEntries();
     }
 
     /** Test seam for deterministic probe/fill/failure and lifecycle tests without JNI. */

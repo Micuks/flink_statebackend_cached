@@ -37,6 +37,17 @@ import org.junit.jupiter.api.Test;
 class NativeRequestPlaneCoordinatorTest {
 
     @Test
+    void testNativeBatchCapacityCoversLargeCompactionScratch() {
+        NativeRequestPlaneOptions largeScratch =
+                optionsWithCompactionScratch(2, 4096, 2 << 20);
+        assertEquals(4096, NativeRequestPlaneCoordinator.nativeMaxBatchEntries(largeScratch));
+        assertEquals(
+                4,
+                NativeRequestPlaneCoordinator.nativeMaxBatchEntries(
+                        optionsWithCompactionScratch(2)));
+    }
+
+    @Test
     void testCloseWaitsForOutstandingRegularSlot() throws Exception {
         FakePlane plane = new FakePlane();
         NativeRequestPlaneCoordinator coordinator =
@@ -593,6 +604,11 @@ class NativeRequestPlaneCoordinatorTest {
     }
 
     private static NativeRequestPlaneOptions optionsWithCompactionScratch(int slots) {
+        return optionsWithCompactionScratch(slots, 4, 1024);
+    }
+
+    private static NativeRequestPlaneOptions optionsWithCompactionScratch(
+            int slots, int scratchEntries, int scratchKeyArenaBytes) {
         return new NativeRequestPlaneOptions(
                 true,
                 "",
@@ -625,7 +641,9 @@ class NativeRequestPlaneCoordinatorTest {
                 true,
                 false,
                 false,
-                true);
+                true,
+                scratchEntries,
+                scratchKeyArenaBytes);
     }
 
     private static final class FakePlane implements NativeRequestPlane {
