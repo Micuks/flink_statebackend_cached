@@ -19,6 +19,7 @@
 package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ReadableConfig;
@@ -256,6 +257,11 @@ public final class RocksDBResourceContainer implements AutoCloseable {
                                 .getStateType()
                                 .name()
                         : "NON_KV";
+        final boolean valueState =
+                stateMetaInfo instanceof RegisteredKeyValueStateBackendMetaInfo
+                        && ((RegisteredKeyValueStateBackendMetaInfo<?, ?>) stateMetaInfo)
+                                        .getStateType()
+                                == StateDescriptor.Type.VALUE;
 
         if (selection.appliesTo(stateMetaInfo)) {
             final String previousFactory = options.memTableFactoryName();
@@ -267,18 +273,24 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
             final int bucketCount =
                     internalGetOption(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_BUCKET_COUNT);
+            // Flat append authority removes the ordered-write cost for point-only ValueState.
+            // MAP and every other range-oriented state retain the bounded ordered authority.
+            final String factoryProbeMode =
+                    armPointFactoryProbeMode(selection.probeMode, valueState);
             options.setMemTableConfig(
                     new ArmPointMemTableConfig()
                             .setBucketCount(bucketCount)
-                            .setProbeMode(selection.probeMode));
+                            .setProbeMode(factoryProbeMode));
             LOG.info(
                     "[CACHEKIT_ARM_POINT] state={} state_type={} enabled=true factory={} "
-                            + "bucket_count={} tag_bits=16 probe_mode={} scope={} sve_supported={}",
+                            + "bucket_count={} tag_bits=16 probe_mode={} authority={} scope={} "
+                            + "sve_supported={}",
                     stateMetaInfo.getName(),
                     stateType,
                     options.memTableFactoryName(),
                     bucketCount,
                     selection.probeMode,
+                    valueState ? "flat" : "ordered",
                     selection.allKeyValueStates ? "all-kv" : "value-only",
                     ArmPointMemTableConfig.isSveSupported());
         } else {
@@ -291,6 +303,11 @@ public final class RocksDBResourceContainer implements AutoCloseable {
                     ArmPointMemTableConfig.isSveSupported());
         }
         return options;
+    }
+
+    @VisibleForTesting
+    static String armPointFactoryProbeMode(String probeMode, boolean valueState) {
+        return valueState ? probeMode + "-flat" : probeMode;
     }
 
     /** Gets the RocksDB {@link WriteOptions} to be used for write operations. */

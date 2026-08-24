@@ -305,6 +305,16 @@ public class RocksDBResourceContainerTest {
     }
 
     @Test
+    public void testArmPointAuthorityIsStateAware() {
+        assertEquals(
+                "scalar-flat",
+                RocksDBResourceContainer.armPointFactoryProbeMode("scalar", true));
+        assertEquals(
+                "scalar",
+                RocksDBResourceContainer.armPointFactoryProbeMode("scalar", false));
+    }
+
+    @Test
     public void testStateMetadataSurvivesColumnFamilyOptionsRouting() {
         final RegisteredKeyValueStateBackendMetaInfo<Integer, Integer> valueMeta =
                 new RegisteredKeyValueStateBackendMetaInfo<>(
