@@ -30,6 +30,7 @@ import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.util.FlinkRuntimeException;
 
 import org.rocksdb.ColumnFamilyHandle;
+import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 
 import java.io.IOException;
@@ -47,6 +48,8 @@ import java.util.List;
  */
 class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
         implements InternalValueState<K, N, V>, RocksDBBatchValueReader<K, N, V> {
+
+    private final RocksDBReusablePointGet reusablePointGet = new RocksDBReusablePointGet();
 
     /**
      * Creates a new {@code RocksDBValueState}.
@@ -90,13 +93,14 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
     @Override
     public V value() {
         try {
-            byte[] valueBytes =
-                    backend.db.get(columnFamily, serializeCurrentKeyWithGroupAndNamespace());
+            final int valueLength =
+                    reusablePointGet.get(
+                            backend.db, columnFamily, serializeCurrentKeyWithGroupAndNamespace());
 
-            if (valueBytes == null) {
+            if (valueLength == RocksDB.NOT_FOUND) {
                 return getDefaultValue();
             }
-            dataInputView.setBuffer(valueBytes);
+            dataInputView.setBuffer(reusablePointGet.buffer(), 0, valueLength);
             return valueSerializer.deserialize(dataInputView);
         } catch (IOException | RocksDBException e) {
             throw new FlinkRuntimeException("Error while retrieving data from RocksDB.", e);

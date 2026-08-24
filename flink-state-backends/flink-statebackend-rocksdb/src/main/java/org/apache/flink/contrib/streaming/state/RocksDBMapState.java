@@ -69,6 +69,8 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
 
     private static final Logger LOG = LoggerFactory.getLogger(RocksDBMapState.class);
 
+    private final RocksDBReusablePointGet reusablePointGet = new RocksDBReusablePointGet();
+
     /** Serializer for the keys and values. */
     private TypeSerializer<UK> userKeySerializer;
 
@@ -123,11 +125,16 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
     public UV get(UK userKey) throws IOException, RocksDBException {
         byte[] rawKeyBytes =
                 serializeCurrentKeyWithGroupAndNamespacePlusUserKey(userKey, userKeySerializer);
-        byte[] rawValueBytes = backend.db.get(columnFamily, rawKeyBytes);
+        final int rawValueLength = reusablePointGet.get(backend.db, columnFamily, rawKeyBytes);
 
-        return (rawValueBytes == null
+        return (rawValueLength == RocksDB.NOT_FOUND
                 ? null
-                : deserializeUserValue(dataInputView, rawValueBytes, userValueSerializer));
+                : deserializeUserValue(
+                        dataInputView,
+                        reusablePointGet.buffer(),
+                        0,
+                        rawValueLength,
+                        userValueSerializer));
     }
 
     @Override
@@ -172,9 +179,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
     public boolean contains(UK userKey) throws IOException, RocksDBException {
         byte[] rawKeyBytes =
                 serializeCurrentKeyWithGroupAndNamespacePlusUserKey(userKey, userKeySerializer);
-        byte[] rawValueBytes = backend.db.get(columnFamily, rawKeyBytes);
-
-        return (rawValueBytes != null);
+        return reusablePointGet.get(backend.db, columnFamily, rawKeyBytes) != RocksDB.NOT_FOUND;
     }
 
     @Override
