@@ -166,9 +166,9 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         .booleanType()
                         .defaultValue(false)
                         .withDescription(
-                                        "Classify RocksDB MapState prefixes as EMPTY/SINGLE/MULTI inside "
-                                                        + "the CacheKit JNI library. The Java snapshot cache may remain enabled "
-                                                        + "by leaving native.enabled=false.");
+                                        "Reserved compatibility option for the withdrawn Native RocksDB "
+                                                        + "prefix-classifier experiment. Must remain false because CacheKit "
+                                                        + "does not modify the RocksDB state backend.");
 
         public static final ConfigOption<String> MAP_SNAPSHOT_CACHE_NATIVE_KERNEL = ConfigOptions
                         .key("state.backend.cachekit.map.snapshot.cache.native.kernel")

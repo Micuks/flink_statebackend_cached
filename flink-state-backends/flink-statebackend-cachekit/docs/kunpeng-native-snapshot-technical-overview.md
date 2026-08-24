@@ -1,5 +1,9 @@
 # CacheKit Native Snapshot 缓存技术说明
 
+> **当前边界（2026-08-24）：** RocksDB 状态后端必须保持原版。本文涉及 Native
+> RocksDB prefix classifier/range scan 的内容仅保留为历史实验记录；对应接口、JNI bridge
+> 和生产代码均已撤销。当前实现只下沉 CacheKit 自己的 snapshot 缓存索引与判定结果。
+
 ## 1. 结论
 
 当前已经实现并验证了一套可部署的 Native snapshot 缓存：将 CacheKit 的

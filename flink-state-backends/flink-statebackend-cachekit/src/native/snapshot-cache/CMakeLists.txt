@@ -42,9 +42,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
 endif()
 
 find_package(JNI REQUIRED)
-add_library(cachekit_snapshot_jni SHARED src/rocks_jni_bridge.cc src/snapshot_jni.cc)
+add_library(cachekit_snapshot_jni SHARED src/snapshot_jni.cc)
 target_include_directories(cachekit_snapshot_jni PRIVATE ${JNI_INCLUDE_DIRS})
-target_link_libraries(cachekit_snapshot_jni PRIVATE cachekit_snapshot_core ${CMAKE_DL_LIBS})
+target_link_libraries(cachekit_snapshot_jni PRIVATE cachekit_snapshot_core)
 target_compile_options(cachekit_snapshot_jni PRIVATE -O3 -Wall -Wextra -Werror)
 
 add_executable(cachekit_snapshot_test test/snapshot_table_test.cc)

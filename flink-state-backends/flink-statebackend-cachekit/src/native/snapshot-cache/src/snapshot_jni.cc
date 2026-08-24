@@ -1,6 +1,5 @@
 #include "cachekit_snapshot_table.h"
 #include "cachekit_byte_snapshot_table.h"
-#include "rocks_jni_bridge.h"
 
 #include <jni.h>
 
@@ -69,35 +68,18 @@ public:
             std::size_t max_entries,
             ProbeKernel kernel,
             jobject miss_sentinel,
-            jobject empty_sentinel,
-            jobject multi_sentinel,
-            bool classifier_enabled)
+            jobject empty_sentinel)
             : table_(max_entries, kernel),
               miss_sentinel_(env->NewGlobalRef(miss_sentinel)),
-              empty_sentinel_(env->NewGlobalRef(empty_sentinel)),
-              multi_sentinel_(env->NewGlobalRef(multi_sentinel)),
-              rocks_bridge_(nullptr) {
-        if (miss_sentinel_ == nullptr || empty_sentinel_ == nullptr || multi_sentinel_ == nullptr) {
+              empty_sentinel_(env->NewGlobalRef(empty_sentinel)) {
+        if (miss_sentinel_ == nullptr || empty_sentinel_ == nullptr) {
             if (miss_sentinel_ != nullptr) {
                 env->DeleteGlobalRef(miss_sentinel_);
             }
             if (empty_sentinel_ != nullptr) {
                 env->DeleteGlobalRef(empty_sentinel_);
             }
-            if (multi_sentinel_ != nullptr) {
-                env->DeleteGlobalRef(multi_sentinel_);
-            }
             throw std::runtime_error("failed to retain Native snapshot sentinels");
-        }
-        try {
-            if (classifier_enabled) {
-                rocks_bridge_ = cachekit::RocksJniBridge::Load();
-            }
-        } catch (...) {
-            env->DeleteGlobalRef(miss_sentinel_);
-            env->DeleteGlobalRef(empty_sentinel_);
-            env->DeleteGlobalRef(multi_sentinel_);
-            throw;
         }
     }
 
@@ -155,64 +137,6 @@ public:
         return DecodePayload(result.payload, result.payload_size);
     }
 
-    jobject Classify(
-            JNIEnv* env,
-            jlong db_handle,
-            jlong column_family_handle,
-            jlong read_options_handle,
-            jbyteArray prefix,
-            jint compare_offset) const {
-        if (rocks_bridge_ == nullptr) {
-            throw std::runtime_error("Native snapshot classifier is disabled");
-        }
-        cachekit::PrefixClassification result = rocks_bridge_->Classify(
-                env,
-                db_handle,
-                column_family_handle,
-                read_options_handle,
-                prefix,
-                compare_offset);
-        if (env->ExceptionCheck()) {
-            return nullptr;
-        }
-        if (result.kind == cachekit::PrefixKind::kEmpty) {
-            return env->NewLocalRef(empty_sentinel_);
-        }
-        if (result.kind == cachekit::PrefixKind::kMulti) {
-            return env->NewLocalRef(multi_sentinel_);
-        }
-        return result.single_key;
-    }
-
-    jobjectArray ReadPrefixBatch(
-            JNIEnv* env,
-            jlong db_handle,
-            jlong column_family_handle,
-            jlong read_options_handle,
-            jbyteArray prefix,
-            jint compare_offset,
-            jbyteArray start_after,
-            jint max_entries) const {
-        if (rocks_bridge_ == nullptr) {
-            throw std::runtime_error("Native snapshot classifier is disabled");
-        }
-        return rocks_bridge_->ReadPrefixBatch(
-                env,
-                db_handle,
-                column_family_handle,
-                read_options_handle,
-                prefix,
-                compare_offset,
-                start_after,
-                max_entries,
-                empty_sentinel_,
-                multi_sentinel_);
-    }
-
-    const char* bridge_description() const {
-        return rocks_bridge_ == nullptr ? "disabled" : rocks_bridge_->description().c_str();
-    }
-
     bool Remove(
             JNIEnv* env,
             const std::uint8_t* key,
@@ -235,10 +159,8 @@ public:
         Clear(env);
         env->DeleteGlobalRef(miss_sentinel_);
         env->DeleteGlobalRef(empty_sentinel_);
-        env->DeleteGlobalRef(multi_sentinel_);
         miss_sentinel_ = nullptr;
         empty_sentinel_ = nullptr;
-        multi_sentinel_ = nullptr;
     }
 
     std::size_t size() const { return table_.size(); }
@@ -265,8 +187,6 @@ private:
     ByteSnapshotTable table_;
     jobject miss_sentinel_;
     jobject empty_sentinel_;
-    jobject multi_sentinel_;
-    std::unique_ptr<cachekit::RocksJniBridge> rocks_bridge_;
 };
 
 JniByteSnapshotCache* ByteCache(jlong handle) {
@@ -401,9 +321,7 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapsho
                 static_cast<std::size_t>(capacity),
                 Kernel(kernel),
                 miss_sentinel,
-                empty_sentinel,
-                miss_sentinel,
-                false));
+                empty_sentinel));
     } catch (const std::exception& error) {
         ThrowIllegalArgument(env, error.what());
         return 0;
@@ -506,12 +424,9 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
         jint max_entries,
         jint kernel,
         jobject miss_sentinel,
-        jobject empty_sentinel,
-        jobject multi_sentinel,
-        jboolean classifier_enabled) {
+        jobject empty_sentinel) {
     try {
-        if (max_entries <= 0 || miss_sentinel == nullptr || empty_sentinel == nullptr
-                || multi_sentinel == nullptr) {
+        if (max_entries <= 0 || miss_sentinel == nullptr || empty_sentinel == nullptr) {
             throw std::invalid_argument("invalid Native snapshot creation arguments");
         }
         return ByteHandle(new JniByteSnapshotCache(
@@ -519,9 +434,7 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
                 static_cast<std::size_t>(max_entries),
                 Kernel(kernel),
                 miss_sentinel,
-                empty_sentinel,
-                multi_sentinel,
-                classifier_enabled == JNI_TRUE));
+                empty_sentinel));
     } catch (const std::exception& error) {
         if (!env->ExceptionCheck()) {
             ThrowIllegalArgument(env, error.what());
@@ -732,6 +645,40 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
 }
 
 extern "C" JNIEXPORT jobject JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeLookup16Profiled(
+        JNIEnv* env,
+        jclass,
+        jlong handle,
+        jlong first,
+        jlong second,
+        jlongArray native_core_nanos) {
+    if (handle == 0 || native_core_nanos == nullptr
+            || env->GetArrayLength(native_core_nanos) < 1) {
+        ThrowIllegalArgument(env, "invalid profiled 16-byte native snapshot lookup arguments");
+        return nullptr;
+    }
+    const std::uint64_t words[] = {
+            static_cast<std::uint64_t>(first),
+            static_cast<std::uint64_t>(second)};
+    jobject retained_result = nullptr;
+    ProfileClock::time_point core_start;
+    ProfileClock::time_point core_end;
+    try {
+        core_start = ProfileClock::now();
+        retained_result = ByteCache(handle)->Lookup(
+                reinterpret_cast<const std::uint8_t*>(words), sizeof(words));
+        core_end = ProfileClock::now();
+    } catch (const std::exception& error) {
+        if (!env->ExceptionCheck()) {
+            ThrowIllegalState(env, error.what());
+        }
+        return nullptr;
+    }
+    RecordNativeCoreNanos(env, native_core_nanos, core_start, core_end);
+    return env->ExceptionCheck() ? nullptr : env->NewLocalRef(retained_result);
+}
+
+extern "C" JNIEXPORT jobject JNICALL
 Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeLookupProfiled(
         JNIEnv* env,
         jclass,
@@ -871,85 +818,4 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
         return nullptr;
     }
     return env->NewStringUTF(ByteCache(handle)->hash_name());
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeBridgeDescription(
-        JNIEnv* env, jclass, jlong handle) {
-    if (handle == 0) {
-        ThrowIllegalState(env, "native snapshot cache is closed");
-        return nullptr;
-    }
-    return env->NewStringUTF(ByteCache(handle)->bridge_description());
-}
-
-extern "C" JNIEXPORT jobject JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeClassifyPrefix(
-        JNIEnv* env,
-        jclass,
-        jlong handle,
-        jlong db_handle,
-        jlong column_family_handle,
-        jlong read_options_handle,
-        jbyteArray prefix,
-        jint compare_offset) {
-    const jsize prefix_size = prefix == nullptr ? 0 : env->GetArrayLength(prefix);
-    if (handle == 0 || db_handle == 0 || column_family_handle == 0
-            || read_options_handle == 0 || prefix == nullptr || prefix_size <= 0
-            || compare_offset < 0 || compare_offset >= prefix_size) {
-        ThrowIllegalArgument(env, "invalid native snapshot classifier arguments");
-        return nullptr;
-    }
-    try {
-        return ByteCache(handle)->Classify(
-                env,
-                db_handle,
-                column_family_handle,
-                read_options_handle,
-                prefix,
-                compare_offset);
-    } catch (const std::exception& error) {
-        if (!env->ExceptionCheck()) {
-            ThrowIllegalState(env, error.what());
-        }
-        return nullptr;
-    }
-}
-
-extern "C" JNIEXPORT jobjectArray JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeReadPrefixBatch(
-        JNIEnv* env,
-        jclass,
-        jlong handle,
-        jlong db_handle,
-        jlong column_family_handle,
-        jlong read_options_handle,
-        jbyteArray prefix,
-        jint compare_offset,
-        jbyteArray start_after,
-        jint max_entries) {
-    const jsize prefix_size = prefix == nullptr ? 0 : env->GetArrayLength(prefix);
-    if (handle == 0 || db_handle == 0 || column_family_handle == 0
-            || read_options_handle == 0 || prefix == nullptr || prefix_size <= 0
-            || compare_offset < 0 || compare_offset >= prefix_size || max_entries <= 0
-            || max_entries > 128) {
-        ThrowIllegalArgument(env, "invalid Native snapshot prefix-batch arguments");
-        return nullptr;
-    }
-    try {
-        return ByteCache(handle)->ReadPrefixBatch(
-                env,
-                db_handle,
-                column_family_handle,
-                read_options_handle,
-                prefix,
-                compare_offset,
-                start_after,
-                max_entries);
-    } catch (const std::exception& error) {
-        if (!env->ExceptionCheck()) {
-            ThrowIllegalState(env, error.what());
-        }
-        return nullptr;
-    }
 }

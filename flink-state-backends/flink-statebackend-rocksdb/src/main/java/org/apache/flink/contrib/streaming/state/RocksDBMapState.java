@@ -63,7 +63,7 @@ import static org.apache.flink.util.Preconditions.checkArgument;
  * @param <UV> The type of the values in the map state.
  */
 class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, UV>>
-        implements InternalMapState<K, N, UK, UV>, RocksDBMapStateNativeSnapshotAccess {
+        implements InternalMapState<K, N, UK, UV> {
 
     private static final Logger LOG = LoggerFactory.getLogger(RocksDBMapState.class);
 
@@ -111,31 +111,6 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
     @Override
     public TypeSerializer<Map<UK, UV>> getValueSerializer() {
         return valueSerializer;
-    }
-
-    @Override
-    public byte[] serializeCurrentKeyNamespacePrefix() {
-        return serializeCurrentKeyWithGroupAndNamespace();
-    }
-
-    @Override
-    public long getDbNativeHandle() {
-        return backend.db.getNativeHandle();
-    }
-
-    @Override
-    public long getColumnFamilyNativeHandle() {
-        return columnFamily.getNativeHandle();
-    }
-
-    @Override
-    public long getReadOptionsNativeHandle() {
-        return backend.getReadOptions().getNativeHandle();
-    }
-
-    @Override
-    public int getKeyGroupPrefixBytes() {
-        return backend.getKeyGroupPrefixBytes();
     }
 
     // ------------------------------------------------------------------------

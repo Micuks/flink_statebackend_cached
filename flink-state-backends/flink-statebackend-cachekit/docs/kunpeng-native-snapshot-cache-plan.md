@@ -1,5 +1,9 @@
 # Kunpeng Native snapshot cache：设计、实现与验证记录
 
+> **当前边界（2026-08-24）：** RocksDB 状态后端保持原版。P5/P6 中依赖修改
+> `RocksDBMapState` 的 classifier/range-scan 路径已撤销，以下对应章节仅作为失败实验的历史
+> 记录；可部署路径只下沉 CacheKit snapshot 缓存索引与判定结果。
+
 基线为 `8be59704462a8f2c6228b6b42e1f0c32f9e32589`。P1--P4 开发分支为
 `cachekit/dev_wutb_kunpeng_native`；P5 混合边界在
 `cachekit/dev_wutb_kunpeng_native_hybrid` 独立工作树中推进。

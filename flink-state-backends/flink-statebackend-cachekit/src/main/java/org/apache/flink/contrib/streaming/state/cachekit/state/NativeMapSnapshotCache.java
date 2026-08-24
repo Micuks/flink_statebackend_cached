@@ -7,8 +7,6 @@
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.contrib.streaming.state.RocksDBMapStateNativeSnapshotAccess;
-import org.apache.flink.core.memory.DataInputDeserializer;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.core.memory.MemorySegment;
 import org.apache.flink.runtime.state.VoidNamespace;
@@ -23,8 +21,6 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 
@@ -43,7 +39,6 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
 
     private static final Object NATIVE_MISS = new Object();
     private static final Object NATIVE_EMPTY = new Object();
-    private static final Object NATIVE_MULTI = new Object();
     private static final String EMBEDDED_LIBRARY =
             "/META-INF/native/libcachekit_snapshot_jni.so";
     private static String loadedLibrary;
@@ -53,8 +48,6 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
     private final TypeSerializer<UK> userKeySerializer;
     private final MapSnapshotCacheMetrics metrics;
     private final ThreadLocal<Buffers> buffers = ThreadLocal.withInitial(Buffers::new);
-    private final DataInputDeserializer userKeyInput = new DataInputDeserializer();
-    private final boolean classifierEnabled;
     private final boolean removeHintEnabled;
     private final Long2IntOpenHashMap membershipCounts;
     private long handle;
@@ -133,66 +126,68 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
         this.namespaceSerializer = Objects.requireNonNull(namespaceSerializer, "namespaceSerializer");
         this.userKeySerializer = Objects.requireNonNull(userKeySerializer, "userKeySerializer");
         this.metrics = Objects.requireNonNull(metrics, "metrics");
-        this.classifierEnabled = classifierEnabled;
+        if (classifierEnabled) {
+            throw new IllegalArgumentException(
+                    "Native snapshot classifier is unavailable without RocksDB backend changes");
+        }
         this.removeHintEnabled = removeHintEnabled;
         this.membershipCounts = removeHintEnabled ? new Long2IntOpenHashMap() : null;
         loadLibrary(libraryPath);
         this.handle =
-                nativeCreate(
-                        maxEntries,
-                        kernelId(kernel),
-                        NATIVE_MISS,
-                        NATIVE_EMPTY,
-                        NATIVE_MULTI,
-                        classifierEnabled);
+                nativeCreate(maxEntries, kernelId(kernel), NATIVE_MISS, NATIVE_EMPTY);
         if (handle == 0) {
             throw new IllegalStateException("Native snapshot cache creation returned a null handle");
         }
         LOG.info(
-                "CacheKit Native snapshot JNI initialized: maxEntries={}, kernel={}, hash={}, classifier={}, removeHint={}",
+                "CacheKit Native snapshot JNI initialized: maxEntries={}, kernel={}, hash={}, removeHint={}",
                 maxEntries,
                 kernelName(),
                 nativeHashName(liveHandle()),
-                classifierEnabled ? nativeBridgeDescription(liveHandle()) : "disabled",
                 removeHintEnabled);
     }
 
     synchronized Lookup<UK> get(K key, N namespace) throws IOException {
         Buffers local = buffers.get();
-        boolean sampled = metrics.shouldSampleNativeCost();
-        long encodeStart = sampled ? System.nanoTime() : 0;
+        if (metrics.shouldSampleNativeLookupCost()) {
+            return getProfiled(local, key, namespace);
+        }
+
         KeyBytes serialized = keyBytes(local, key, namespace);
-        long encodeNs = sampled ? System.nanoTime() - encodeStart : 0;
-        Object result;
-        long jniNs = 0;
-        if (sampled) {
-            long jniStart = System.nanoTime();
-            result =
-                    nativeLookupProfiled(
-                            liveHandle(),
-                            serialized.bytes,
-                            serialized.offset,
-                            serialized.length,
-                            local.nativeCoreNs);
-            jniNs = System.nanoTime() - jniStart;
-            metrics.recordNativeKeySample(serialized.raw, serialized.length, encodeNs);
-        } else {
-            result = serialized.words
-                    ? nativeLookup16(liveHandle(), serialized.firstWord, serialized.secondWord)
-                    : nativeLookup(
-                            liveHandle(),
-                            serialized.bytes,
-                            serialized.offset,
-                            serialized.length);
-        }
-        long materializeStart = sampled ? System.nanoTime() : 0;
+        return materializeLookup(
+                serialized.words
+                        ? nativeLookup16(
+                                liveHandle(), serialized.firstWord, serialized.secondWord)
+                        : nativeLookup(
+                                liveHandle(),
+                                serialized.bytes,
+                                serialized.offset,
+                                serialized.length));
+    }
+
+    private Lookup<UK> getProfiled(Buffers local, K key, N namespace) throws IOException {
+        long encodeStart = System.nanoTime();
+        KeyBytes serialized = keyBytes(local, key, namespace);
+        long encodeNs = System.nanoTime() - encodeStart;
+        long jniStart = System.nanoTime();
+        Object result =
+                serialized.words
+                        ? nativeLookup16Profiled(
+                                liveHandle(),
+                                serialized.firstWord,
+                                serialized.secondWord,
+                                local.nativeCoreNs)
+                        : nativeLookupProfiled(
+                                liveHandle(),
+                                serialized.bytes,
+                                serialized.offset,
+                                serialized.length,
+                                local.nativeCoreNs);
+        long jniNs = System.nanoTime() - jniStart;
+        metrics.recordNativeKeySample(serialized.raw, serialized.length, encodeNs);
+        long materializeStart = System.nanoTime();
         Lookup<UK> lookup = materializeLookup(result);
-        if (sampled) {
-            metrics.recordNativeLookupCost(
-                    jniNs,
-                    local.nativeCoreNs[0],
-                    System.nanoTime() - materializeStart);
-        }
+        metrics.recordNativeLookupCost(
+                jniNs, local.nativeCoreNs[0], System.nanoTime() - materializeStart);
         return lookup;
     }
 
@@ -216,88 +211,9 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
         return put(key, namespace, SINGLE, Objects.requireNonNull(userKey, "userKey"));
     }
 
-    synchronized Classification<UK> classify(
-            RocksDBMapStateNativeSnapshotAccess access) throws IOException {
-        if (!classifierEnabled) {
-            throw new IllegalStateException("Native snapshot classifier is disabled");
-        }
-        byte[] prefix = access.serializeCurrentKeyNamespacePrefix();
-        Object result = nativeClassifyPrefix(
-                liveHandle(),
-                access.getDbNativeHandle(),
-                access.getColumnFamilyNativeHandle(),
-                access.getReadOptionsNativeHandle(),
-                prefix,
-                access.getKeyGroupPrefixBytes());
-        if (result == NATIVE_EMPTY) {
-            return Classification.empty();
-        }
-        if (result == NATIVE_MULTI) {
-            return Classification.multi();
-        }
-        if (!(result instanceof byte[])) {
-            throw new IllegalStateException("Native classifier returned an invalid result");
-        }
-        return Classification.single(decodeUserKey((byte[]) result, prefix.length));
-    }
-
-    synchronized PrefixBatch<UK> readPrefixBatch(
-            RocksDBMapStateNativeSnapshotAccess access,
-            byte[] prefix,
-            byte[] startAfter,
-            int maxEntries)
-            throws IOException {
-        if (!classifierEnabled) {
-            throw new IllegalStateException("Native snapshot classifier is disabled");
-        }
-        Object[] result = nativeReadPrefixBatch(
-                liveHandle(),
-                access.getDbNativeHandle(),
-                access.getColumnFamilyNativeHandle(),
-                access.getReadOptionsNativeHandle(),
-                prefix,
-                access.getKeyGroupPrefixBytes(),
-                startAfter,
-                maxEntries);
-        List<PrefixEntry<UK>> entries = new ArrayList<>(maxEntries);
-        for (int index = 0; index < result.length; index += 2) {
-            Object keyOrMarker = result[index];
-            if (keyOrMarker == NATIVE_EMPTY) {
-                return new PrefixBatch<>(prefix, entries, false);
-            }
-            if (keyOrMarker == NATIVE_MULTI) {
-                return new PrefixBatch<>(prefix, entries, true);
-            }
-            if (!(keyOrMarker instanceof byte[])
-                    || index + 1 >= result.length
-                    || !(result[index + 1] instanceof byte[])) {
-                throw new IllegalStateException("Native prefix batch returned an invalid result");
-            }
-            byte[] rawKey = (byte[]) keyOrMarker;
-            entries.add(
-                    new PrefixEntry<>(
-                            rawKey,
-                            decodeUserKey(rawKey, prefix.length),
-                            (byte[]) result[index + 1]));
-        }
-        throw new IllegalStateException("Native prefix batch omitted its continuation marker");
-    }
-
-    private UK decodeUserKey(byte[] rawKey, int userKeyOffset) throws IOException {
-        if (rawKey.length < userKeyOffset) {
-            throw new IllegalStateException("Native classifier returned a truncated RocksDB key");
-        }
-        userKeyInput.setBuffer(rawKey, userKeyOffset, rawKey.length - userKeyOffset);
-        UK userKey = userKeySerializer.deserialize(userKeyInput);
-        if (userKeyInput.available() != 0) {
-            throw new IllegalStateException("Native classifier user-key suffix was not fully decoded");
-        }
-        return userKey;
-    }
-
     synchronized boolean remove(K key, N namespace) throws IOException {
         Buffers local = buffers.get();
-        boolean sampled = metrics.shouldSampleNativeCost();
+        boolean sampled = metrics.shouldSampleNativeRemoveCost();
         long encodeStart = sampled ? System.nanoTime() : 0;
         KeyBytes serialized = keyBytes(local, key, namespace);
         metrics.recordNativeRemoveRequest();
@@ -377,7 +293,7 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
 
     private boolean put(K key, N namespace, int kind, UK userKey) throws IOException {
         Buffers local = buffers.get();
-        boolean sampled = metrics.shouldSampleNativeCost();
+        boolean sampled = metrics.shouldSampleNativePutCost();
         long encodeStart = sampled ? System.nanoTime() : 0;
         KeyBytes serialized = keyBytes(local, key, namespace);
         int result;
@@ -563,93 +479,6 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
         }
     }
 
-    static final class Classification<T> {
-        private static final int EMPTY_KIND = 1;
-        private static final int SINGLE_KIND = 2;
-        private static final int MULTI_KIND = 3;
-
-        private final int kind;
-        private final T userKey;
-
-        private Classification(int kind, T userKey) {
-            this.kind = kind;
-            this.userKey = userKey;
-        }
-
-        boolean isEmpty() {
-            return kind == EMPTY_KIND;
-        }
-
-        boolean isSingle() {
-            return kind == SINGLE_KIND;
-        }
-
-        T userKey() {
-            return userKey;
-        }
-
-        static <T> Classification<T> empty() {
-            return new Classification<>(EMPTY_KIND, null);
-        }
-
-        static <T> Classification<T> single(T userKey) {
-            return new Classification<>(SINGLE_KIND, userKey);
-        }
-
-        static <T> Classification<T> multi() {
-            return new Classification<>(MULTI_KIND, null);
-        }
-    }
-
-    static final class PrefixBatch<T> {
-        private final byte[] prefix;
-        private final List<PrefixEntry<T>> entries;
-        private final boolean hasMore;
-
-        private PrefixBatch(
-                byte[] prefix, List<PrefixEntry<T>> entries, boolean hasMore) {
-            this.prefix = prefix;
-            this.entries = entries;
-            this.hasMore = hasMore;
-        }
-
-        byte[] prefix() {
-            return prefix;
-        }
-
-        List<PrefixEntry<T>> entries() {
-            return entries;
-        }
-
-        boolean hasMore() {
-            return hasMore;
-        }
-    }
-
-    static final class PrefixEntry<T> {
-        private final byte[] rawKey;
-        private final T userKey;
-        private final byte[] rawValue;
-
-        private PrefixEntry(byte[] rawKey, T userKey, byte[] rawValue) {
-            this.rawKey = rawKey;
-            this.userKey = userKey;
-            this.rawValue = rawValue;
-        }
-
-        byte[] rawKey() {
-            return rawKey;
-        }
-
-        T userKey() {
-            return userKey;
-        }
-
-        byte[] rawValue() {
-            return rawValue;
-        }
-    }
-
     private static final class Buffers {
         private final DataOutputSerializer keyOutput = new DataOutputSerializer(128);
         private final KeyBytes keyBytes = new KeyBytes();
@@ -692,9 +521,7 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
             int maxEntries,
             int kernel,
             Object missSentinel,
-            Object emptySentinel,
-            Object multiSentinel,
-            boolean classifierEnabled);
+            Object emptySentinel);
 
     private static native void nativeDestroy(long handle);
 
@@ -725,6 +552,9 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
 
     private static native Object nativeLookup16(long handle, long firstWord, long secondWord);
 
+    private static native Object nativeLookup16Profiled(
+            long handle, long firstWord, long secondWord, long[] nativeCoreNs);
+
     private static native Object nativeLookupProfiled(
             long handle, byte[] key, int keyOffset, int keySize, long[] nativeCoreNs);
 
@@ -742,23 +572,4 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
 
     private static native String nativeHashName(long handle);
 
-    private static native String nativeBridgeDescription(long handle);
-
-    private static native Object nativeClassifyPrefix(
-            long handle,
-            long dbHandle,
-            long columnFamilyHandle,
-            long readOptionsHandle,
-            byte[] prefix,
-            int compareOffset);
-
-    private static native Object[] nativeReadPrefixBatch(
-            long handle,
-            long dbHandle,
-            long columnFamilyHandle,
-            long readOptionsHandle,
-            byte[] prefix,
-            int compareOffset,
-            byte[] startAfter,
-            int maxEntries);
 }

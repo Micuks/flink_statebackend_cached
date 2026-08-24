@@ -44,6 +44,9 @@ public final class MapSnapshotCacheMetrics {
     private final AtomicLong staleInvalidations = new AtomicLong();
     private final AtomicLong evictions = new AtomicLong();
     private final AtomicLong nativeCostOperations = new AtomicLong();
+    private final AtomicLong nativeLookupOperations = new AtomicLong();
+    private final AtomicLong nativePutOperations = new AtomicLong();
+    private final AtomicLong nativeRemoveOperations = new AtomicLong();
     private final AtomicLong nativeCostRawKeySamples = new AtomicLong();
     private final AtomicLong nativeCostSerializedKeySamples = new AtomicLong();
     private final AtomicLong nativeCostInputBytes = new AtomicLong();
@@ -89,6 +92,18 @@ public final class MapSnapshotCacheMetrics {
                 metrics.staleInvalidations);
         registerGauge(diagnostics, "map_snapshot_cache_evictions", metrics.evictions);
         registerGauge(diagnostics, "native_snapshot_cost_operations", metrics.nativeCostOperations);
+        registerGauge(
+                diagnostics,
+                "native_snapshot_cost_lookup_operations",
+                metrics.nativeLookupOperations);
+        registerGauge(
+                diagnostics,
+                "native_snapshot_cost_put_operations",
+                metrics.nativePutOperations);
+        registerGauge(
+                diagnostics,
+                "native_snapshot_cost_remove_operations",
+                metrics.nativeRemoveOperations);
         registerGauge(
                 diagnostics,
                 "native_snapshot_cost_raw_key_samples",
@@ -177,8 +192,24 @@ public final class MapSnapshotCacheMetrics {
         increment(evictions);
     }
 
-    boolean shouldSampleNativeCost() {
-        return enabled && (nativeCostOperations.incrementAndGet() & 1023L) == 0;
+    boolean shouldSampleNativeLookupCost() {
+        return shouldSampleNativeCost(nativeLookupOperations);
+    }
+
+    boolean shouldSampleNativePutCost() {
+        return shouldSampleNativeCost(nativePutOperations);
+    }
+
+    boolean shouldSampleNativeRemoveCost() {
+        return shouldSampleNativeCost(nativeRemoveOperations);
+    }
+
+    private boolean shouldSampleNativeCost(AtomicLong operationCounter) {
+        if (!enabled) {
+            return false;
+        }
+        nativeCostOperations.incrementAndGet();
+        return (operationCounter.incrementAndGet() & 1023L) == 0;
     }
 
     void recordNativeKeySample(boolean rawKey, int inputBytes, long keyEncodeNs) {
