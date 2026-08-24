@@ -55,6 +55,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /** Tests to guard {@link RocksDBResourceContainer}. */
@@ -279,6 +280,28 @@ public class RocksDBResourceContainerTest {
             assertEquals("SkipListFactory", mapOptions.memTableFactoryName());
             assertEquals("SkipListFactory", defaultOptions.memTableFactoryName());
         }
+    }
+
+    @Test
+    public void testArmPointExperimentSelectionCoversMapState() {
+        final ArmPointMemTableRuntime.Selection scalar =
+                ArmPointMemTableRuntime.selection("scalar", false, "auto");
+        final RegisteredKeyValueStateBackendMetaInfo<Integer, Integer> mapMeta =
+                new RegisteredKeyValueStateBackendMetaInfo<>(
+                        StateDescriptor.Type.MAP,
+                        "map-state",
+                        IntSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+
+        assertTrue(scalar.enabled);
+        assertTrue(scalar.allKeyValueStates);
+        assertEquals("scalar", scalar.probeMode);
+        assertTrue(scalar.appliesTo(mapMeta));
+
+        final ArmPointMemTableRuntime.Selection off =
+                ArmPointMemTableRuntime.selection("off", true, "sve");
+        assertFalse(off.enabled);
+        assertFalse(off.appliesTo(mapMeta));
     }
 
     @Test

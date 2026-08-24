@@ -19,7 +19,6 @@
 package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.annotation.VisibleForTesting;
-import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ReadableConfig;
@@ -244,13 +243,13 @@ public final class RocksDBResourceContainer implements AutoCloseable {
     public ColumnFamilyOptions getColumnOptions(
             @Nullable RegisteredStateMetaInfoBase stateMetaInfo) {
         final ColumnFamilyOptions options = getColumnOptions();
-        final boolean enabled =
+        final boolean configured =
                 internalGetOption(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_ENABLED);
-        final boolean valueState =
-                stateMetaInfo instanceof RegisteredKeyValueStateBackendMetaInfo
-                        && ((RegisteredKeyValueStateBackendMetaInfo<?, ?>) stateMetaInfo)
-                                        .getStateType()
-                                == StateDescriptor.Type.VALUE;
+        final String configuredProbeMode =
+                internalGetOption(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_PROBE_MODE);
+        final ArmPointMemTableRuntime.Selection selection =
+                ArmPointMemTableRuntime.currentSelection(configured, configuredProbeMode);
+        ArmPointMemTableRuntime.initializeAndRecord(selection);
         final String stateType =
                 stateMetaInfo instanceof RegisteredKeyValueStateBackendMetaInfo
                         ? ((RegisteredKeyValueStateBackendMetaInfo<?, ?>) stateMetaInfo)
@@ -258,30 +257,29 @@ public final class RocksDBResourceContainer implements AutoCloseable {
                                 .name()
                         : "NON_KV";
 
-        if (enabled && valueState) {
+        if (selection.appliesTo(stateMetaInfo)) {
             final String previousFactory = options.memTableFactoryName();
             Preconditions.checkState(
                     "SkipListFactory".equals(previousFactory),
-                    "ArmPoint refuses to overwrite user memtable factory %s for ValueState %s",
+                    "ArmPoint refuses to overwrite user memtable factory %s for state %s",
                     previousFactory,
                     stateMetaInfo.getName());
 
             final int bucketCount =
                     internalGetOption(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_BUCKET_COUNT);
-            final String probeMode =
-                    internalGetOption(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_PROBE_MODE)
-                            .toLowerCase(java.util.Locale.ROOT);
             options.setMemTableConfig(
                     new ArmPointMemTableConfig()
                             .setBucketCount(bucketCount)
-                            .setProbeMode(probeMode));
+                            .setProbeMode(selection.probeMode));
             LOG.info(
-                    "[CACHEKIT_ARM_POINT] state={} state_type=VALUE enabled=true factory={} "
-                            + "bucket_count={} tag_bits=16 probe_mode={} sve_supported={}",
+                    "[CACHEKIT_ARM_POINT] state={} state_type={} enabled=true factory={} "
+                            + "bucket_count={} tag_bits=16 probe_mode={} scope={} sve_supported={}",
                     stateMetaInfo.getName(),
+                    stateType,
                     options.memTableFactoryName(),
                     bucketCount,
-                    probeMode,
+                    selection.probeMode,
+                    selection.allKeyValueStates ? "all-kv" : "value-only",
                     ArmPointMemTableConfig.isSveSupported());
         } else {
             LOG.info(
@@ -340,25 +338,6 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
-        final ArmPointMemTableConfig.Stats stats = ArmPointMemTableConfig.stats();
-        LOG.info(
-                "[CACHEKIT_ARM_POINT_STATS] {\"sve_supported\":{},"
-                        + "\"point_lookups\":{},\"tag_rejects\":{},\"bucket_scans\":{},"
-                        + "\"internal_key_candidates\":{},\"scalar_tag_probes\":{},"
-                        + "\"sve_tag_probes\":{},\"tag_directory_overflows\":{},"
-                        + "\"ordered_fallback_lookups\":{},\"hash_indexed_reps\":{},"
-                        + "\"incompatible_comparator_reps\":{}}",
-                ArmPointMemTableConfig.isSveSupported(),
-                stats.pointLookups(),
-                stats.tagRejects(),
-                stats.bucketScans(),
-                stats.internalKeyCandidates(),
-                stats.scalarTagProbes(),
-                stats.sveTagProbes(),
-                stats.tagDirectoryOverflows(),
-                stats.orderedFallbackLookups(),
-                stats.hashIndexedReps(),
-                stats.incompatibleComparatorReps());
         handlesToClose.forEach(IOUtils::closeQuietly);
         handlesToClose.clear();
 
