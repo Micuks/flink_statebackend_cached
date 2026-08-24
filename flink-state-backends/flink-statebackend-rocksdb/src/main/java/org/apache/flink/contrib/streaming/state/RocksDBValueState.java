@@ -18,6 +18,11 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
@@ -28,16 +33,11 @@ import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.state.RegisteredKeyValueStateBackendMetaInfo;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.util.FlinkRuntimeException;
-
 import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
-
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * {@link ValueState} implementation that stores state in RocksDB.
@@ -49,7 +49,10 @@ import java.util.List;
 class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
         implements InternalValueState<K, N, V>, RocksDBBatchValueReader<K, N, V> {
 
-    private final RocksDBReusablePointGet reusablePointGet = new RocksDBReusablePointGet();
+    private static final Logger LOG = LoggerFactory.getLogger(RocksDBValueState.class);
+
+    private final RocksDBReusablePointGet reusablePointGet;
+    private boolean reusablePointGetActivationLogged;
 
     /**
      * Creates a new {@code RocksDBValueState}.
@@ -68,6 +71,8 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
             RocksDBKeyedStateBackend<K> backend) {
 
         super(columnFamily, namespaceSerializer, valueSerializer, defaultValue, backend);
+        this.reusablePointGet =
+                backend.isReusablePointGetEnabled() ? new RocksDBReusablePointGet() : null;
     }
 
     @Override
@@ -93,17 +98,32 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
     @Override
     public V value() {
         try {
-            final int valueLength =
-                    reusablePointGet.get(
-                            backend.db, columnFamily, serializeCurrentKeyWithGroupAndNamespace());
+            final byte[] key = serializeCurrentKeyWithGroupAndNamespace();
+            if (reusablePointGet != null) {
+                logReusablePointGetActivation();
+                final int valueLength = reusablePointGet.get(backend.db, columnFamily, key);
+                if (valueLength == RocksDB.NOT_FOUND) {
+                    return getDefaultValue();
+                }
+                dataInputView.setBuffer(reusablePointGet.buffer(), 0, valueLength);
+                return valueSerializer.deserialize(dataInputView);
+            }
 
-            if (valueLength == RocksDB.NOT_FOUND) {
+            final byte[] valueBytes = backend.db.get(columnFamily, key);
+            if (valueBytes == null) {
                 return getDefaultValue();
             }
-            dataInputView.setBuffer(reusablePointGet.buffer(), 0, valueLength);
+            dataInputView.setBuffer(valueBytes);
             return valueSerializer.deserialize(dataInputView);
         } catch (IOException | RocksDBException e) {
             throw new FlinkRuntimeException("Error while retrieving data from RocksDB.", e);
+        }
+    }
+
+    private void logReusablePointGetActivation() {
+        if (!reusablePointGetActivationLogged) {
+            reusablePointGetActivationLogged = true;
+            LOG.info("[CACHEKIT REUSABLE POINT GET] configured=true stateType=ValueState");
         }
     }
 

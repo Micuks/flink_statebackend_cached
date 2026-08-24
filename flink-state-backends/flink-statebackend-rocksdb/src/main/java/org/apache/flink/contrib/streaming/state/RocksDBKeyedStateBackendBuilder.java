@@ -18,6 +18,21 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.RESTORE_OVERLAP_FRACTION_THRESHOLD;
+import static org.apache.flink.util.Preconditions.checkArgument;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.SortedMap;
+import java.util.TreeMap;
+import java.util.UUID;
+import java.util.function.Function;
+import javax.annotation.Nonnull;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
@@ -55,28 +70,10 @@ import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.IOUtils;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.ResourceGuard;
-
 import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.ColumnFamilyOptions;
 import org.rocksdb.DBOptions;
 import org.rocksdb.RocksDB;
-
-import javax.annotation.Nonnull;
-
-import java.io.File;
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.SortedMap;
-import java.util.TreeMap;
-import java.util.UUID;
-import java.util.function.Function;
-
-import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.RESTORE_OVERLAP_FRACTION_THRESHOLD;
-import static org.apache.flink.util.Preconditions.checkArgument;
 
 /**
  * Builder class for {@link RocksDBKeyedStateBackend} which handles all necessary initializations
@@ -116,6 +113,7 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
     /** RocksDB property-based and statistics-based native metrics options. */
     private RocksDBNativeMetricOptions nativeMetricOptions;
 
+    private boolean reusablePointGetEnabled;
     private boolean mapIteratorSingleKeyFetchEnabled;
     private boolean mapIteratorPrefixUpperBoundEnabled;
     private boolean mapIteratorPackedTinyScanEnabled;
@@ -177,6 +175,7 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
         this.metricGroup = metricGroup;
         this.enableIncrementalCheckpointing = false;
         this.nativeMetricOptions = new RocksDBNativeMetricOptions();
+        this.reusablePointGetEnabled = RocksDBOptions.REUSABLE_POINT_GET_ENABLED.defaultValue();
         this.mapIteratorSingleKeyFetchEnabled = false;
         this.mapIteratorPrefixUpperBoundEnabled = false;
         this.mapIteratorPackedTinyScanEnabled = false;
@@ -248,6 +247,11 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
         return this;
     }
 
+    RocksDBKeyedStateBackendBuilder<K> setReusablePointGetEnabled(boolean reusablePointGetEnabled) {
+        this.reusablePointGetEnabled = reusablePointGetEnabled;
+        return this;
+    }
+
     RocksDBKeyedStateBackendBuilder<K> setMapIteratorSingleKeyFetchEnabled(
             boolean mapIteratorSingleKeyFetchEnabled) {
         this.mapIteratorSingleKeyFetchEnabled = mapIteratorSingleKeyFetchEnabled;
@@ -272,8 +276,7 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
         return this;
     }
 
-    RocksDBKeyedStateBackendBuilder<K> setMapIteratorPackedTinyScanReuseEnabled(
-            boolean enabled) {
+    RocksDBKeyedStateBackendBuilder<K> setMapIteratorPackedTinyScanReuseEnabled(boolean enabled) {
         this.mapIteratorPackedTinyScanReuseEnabled = enabled;
         return this;
     }
@@ -490,6 +493,7 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
                 ttlCompactFiltersManager,
                 keyContext,
                 writeBatchSize,
+                reusablePointGetEnabled,
                 mapIteratorSingleKeyFetchEnabled,
                 mapIteratorPrefixUpperBoundEnabled,
                 mapIteratorPackedTinyScanEnabled,

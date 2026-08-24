@@ -18,6 +18,12 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import static org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackend.PriorityQueueStateType.ROCKSDB;
+import static org.apache.flink.contrib.streaming.state.PredefinedOptions.DEFAULT;
+import static org.apache.flink.contrib.streaming.state.PredefinedOptions.FLASH_SSD_OPTIMIZED;
+import static org.apache.flink.contrib.streaming.state.PredefinedOptions.SPINNING_DISK_OPTIMIZED;
+import static org.apache.flink.contrib.streaming.state.PredefinedOptions.SPINNING_DISK_OPTIMIZED_HIGH_MEM;
+
 import org.apache.flink.annotation.docs.Documentation;
 import org.apache.flink.configuration.ClusterOptions;
 import org.apache.flink.configuration.ConfigOption;
@@ -26,14 +32,17 @@ import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.description.Description;
 import org.apache.flink.configuration.description.TextElement;
 
-import static org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackend.PriorityQueueStateType.ROCKSDB;
-import static org.apache.flink.contrib.streaming.state.PredefinedOptions.DEFAULT;
-import static org.apache.flink.contrib.streaming.state.PredefinedOptions.FLASH_SSD_OPTIMIZED;
-import static org.apache.flink.contrib.streaming.state.PredefinedOptions.SPINNING_DISK_OPTIMIZED;
-import static org.apache.flink.contrib.streaming.state.PredefinedOptions.SPINNING_DISK_OPTIMIZED_HIGH_MEM;
-
 /** Configuration options for the RocksDB backend. */
 public class RocksDBOptions {
+
+    /** Reuses Java and native storage for synchronous RocksDB point gets. */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Boolean> REUSABLE_POINT_GET_ENABLED =
+            ConfigOptions.key("state.backend.cachekit.rocksdb.reusable-point-get.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether RocksDB ValueState and MapState point gets use a reusable preallocated value buffer and the architecture-specific native point-get path. Disabled by default while the optimization is experimentally validated.");
 
     /**
      * Fetches the raw key of each RocksDB MapState iterator position only once. This avoids a

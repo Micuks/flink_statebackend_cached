@@ -18,6 +18,16 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import static org.apache.flink.util.Preconditions.checkArgument;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.Map;
+import javax.annotation.Nonnegative;
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
@@ -35,26 +45,13 @@ import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.StateMigrationException;
-
 import org.rocksdb.ColumnFamilyHandle;
+import org.rocksdb.ReadOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
-import org.rocksdb.ReadOptions;
 import org.rocksdb.Slice;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.annotation.Nonnegative;
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
-
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Iterator;
-import java.util.Map;
-
-import static org.apache.flink.util.Preconditions.checkArgument;
 
 /**
  * {@link MapState} implementation that stores state in RocksDB.
@@ -69,7 +66,8 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
 
     private static final Logger LOG = LoggerFactory.getLogger(RocksDBMapState.class);
 
-    private final RocksDBReusablePointGet reusablePointGet = new RocksDBReusablePointGet();
+    private final RocksDBReusablePointGet reusablePointGet;
+    private boolean reusablePointGetActivationLogged;
 
     /** Serializer for the keys and values. */
     private TypeSerializer<UK> userKeySerializer;
@@ -100,6 +98,8 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
         MapSerializer<UK, UV> castedMapSerializer = (MapSerializer<UK, UV>) valueSerializer;
         this.userKeySerializer = castedMapSerializer.getKeySerializer();
         this.userValueSerializer = castedMapSerializer.getValueSerializer();
+        this.reusablePointGet =
+                backend.isReusablePointGetEnabled() ? new RocksDBReusablePointGet() : null;
     }
 
     @Override
@@ -125,16 +125,23 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
     public UV get(UK userKey) throws IOException, RocksDBException {
         byte[] rawKeyBytes =
                 serializeCurrentKeyWithGroupAndNamespacePlusUserKey(userKey, userKeySerializer);
-        final int rawValueLength = reusablePointGet.get(backend.db, columnFamily, rawKeyBytes);
+        if (reusablePointGet != null) {
+            logReusablePointGetActivation();
+            final int rawValueLength = reusablePointGet.get(backend.db, columnFamily, rawKeyBytes);
+            return (rawValueLength == RocksDB.NOT_FOUND
+                    ? null
+                    : deserializeUserValue(
+                            dataInputView,
+                            reusablePointGet.buffer(),
+                            0,
+                            rawValueLength,
+                            userValueSerializer));
+        }
 
-        return (rawValueLength == RocksDB.NOT_FOUND
+        final byte[] rawValueBytes = backend.db.get(columnFamily, rawKeyBytes);
+        return (rawValueBytes == null
                 ? null
-                : deserializeUserValue(
-                        dataInputView,
-                        reusablePointGet.buffer(),
-                        0,
-                        rawValueLength,
-                        userValueSerializer));
+                : deserializeUserValue(dataInputView, rawValueBytes, userValueSerializer));
     }
 
     @Override
@@ -179,7 +186,18 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
     public boolean contains(UK userKey) throws IOException, RocksDBException {
         byte[] rawKeyBytes =
                 serializeCurrentKeyWithGroupAndNamespacePlusUserKey(userKey, userKeySerializer);
-        return reusablePointGet.exists(backend.db, columnFamily, rawKeyBytes);
+        if (reusablePointGet != null) {
+            logReusablePointGetActivation();
+            return reusablePointGet.exists(backend.db, columnFamily, rawKeyBytes);
+        }
+        return backend.db.get(columnFamily, rawKeyBytes) != null;
+    }
+
+    private void logReusablePointGetActivation() {
+        if (!reusablePointGetActivationLogged) {
+            reusablePointGetActivationLogged = true;
+            LOG.info("[CACHEKIT REUSABLE POINT GET] configured=true stateType=MapState");
+        }
     }
 
     @Override
@@ -418,9 +436,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             TypeSerializer<UK> keySerializer)
             throws IOException {
         dataInputView.setBuffer(
-                packedPage,
-                rawKeyOffset + userKeyOffset,
-                rawKeyLength - userKeyOffset);
+                packedPage, rawKeyOffset + userKeyOffset, rawKeyLength - userKeyOffset);
         return keySerializer.deserialize(dataInputView);
     }
 
@@ -469,6 +485,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
 
         /** Immutable packed page shared by all entries from one complete tiny scan. */
         @Nullable private final byte[] packedPage;
+
         private final int packedRawKeyOffset;
         private final int packedRawKeyLength;
         private final int packedRawValueOffset;
@@ -771,12 +788,12 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             try (Slice ignoredUpperBoundSlice = upperBoundSlice;
                     ReadOptions ignoredBoundedReadOptions = boundedReadOptions;
                     RocksIteratorWrapper iterator =
-                    RocksDBOperationUtils.getRocksIterator(
-                            db,
-                            columnFamily,
-                            boundedReadOptions == null
-                                    ? backend.getReadOptions()
-                                    : boundedReadOptions)) {
+                            RocksDBOperationUtils.getRocksIterator(
+                                    db,
+                                    columnFamily,
+                                    boundedReadOptions == null
+                                            ? backend.getReadOptions()
+                                            : boundedReadOptions)) {
                 nativeIterators = 1;
                 boundedIterators = boundedReadOptions == null ? 0 : 1;
                 /*

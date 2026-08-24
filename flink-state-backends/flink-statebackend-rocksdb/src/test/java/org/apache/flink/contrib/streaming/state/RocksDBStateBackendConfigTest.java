@@ -18,11 +18,32 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import static org.apache.flink.contrib.streaming.state.RocksDBTestUtils.createKeyedStateBackend;
+import static org.hamcrest.CoreMatchers.anyOf;
+import static org.hamcrest.CoreMatchers.instanceOf;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.startsWith;
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import static org.mockito.Mockito.mock;
+
+import java.io.File;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.api.java.typeutils.runtime.NullableSerializer;
-import org.apache.flink.api.common.state.MapState;
-import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
@@ -50,7 +71,6 @@ import org.apache.flink.runtime.state.memory.MemoryStateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
 import org.apache.flink.util.IOUtils;
-
 import org.junit.Assert;
 import org.junit.Assume;
 import org.junit.Rule;
@@ -63,28 +83,6 @@ import org.rocksdb.CompactionStyle;
 import org.rocksdb.DBOptions;
 import org.rocksdb.InfoLogLevel;
 import org.rocksdb.util.SizeUnit;
-
-import java.io.File;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
-
-import static org.apache.flink.contrib.streaming.state.RocksDBTestUtils.createKeyedStateBackend;
-import static org.hamcrest.CoreMatchers.anyOf;
-import static org.hamcrest.CoreMatchers.instanceOf;
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.startsWith;
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
-import static org.mockito.Mockito.mock;
 
 /** Tests for configuring the RocksDB State Backend. */
 @SuppressWarnings("serial")
@@ -103,6 +101,7 @@ public class RocksDBStateBackendConfigTest {
 
         EmbeddedRocksDBStateBackend backend = new EmbeddedRocksDBStateBackend();
         assertEquals(defaultIncremental, backend.isIncrementalCheckpointsEnabled());
+        assertFalse(RocksDBOptions.REUSABLE_POINT_GET_ENABLED.defaultValue());
         assertFalse(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_REUSE_ENABLED.defaultValue());
         assertTrue(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_FLAT_PAGE_ENABLED.defaultValue());
     }
@@ -110,6 +109,7 @@ public class RocksDBStateBackendConfigTest {
     @Test
     public void testMapIteratorSingleKeyFetchConfigurationAndPagingSemantics() throws Exception {
         Configuration configuration = new Configuration();
+        configuration.set(RocksDBOptions.REUSABLE_POINT_GET_ENABLED, true);
         configuration.set(RocksDBOptions.MAP_ITERATOR_SINGLE_KEY_FETCH_ENABLED, true);
         configuration.set(RocksDBOptions.MAP_ITERATOR_PREFIX_UPPER_BOUND_ENABLED, true);
         configuration.set(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_ENABLED, true);
@@ -124,6 +124,7 @@ public class RocksDBStateBackendConfigTest {
         RocksDBKeyedStateBackend<Integer> keyedBackend =
                 createKeyedStateBackend(configuredBackend, environment, IntSerializer.INSTANCE);
         try {
+            assertTrue(keyedBackend.isReusablePointGetEnabled());
             assertFalse(keyedBackend.isMapIteratorPackedTinyScanReuseEligible());
             assertTrue(keyedBackend.isMapIteratorSingleKeyFetchEnabled());
             assertTrue(keyedBackend.isMapIteratorPrefixUpperBoundEnabled());
@@ -199,11 +200,13 @@ public class RocksDBStateBackendConfigTest {
                     keyedBackend.getPartitionedState(
                             "namespace-a", StringSerializer.INSTANCE, namespacedDescriptor);
             namespacedState.put(1, 11);
-            keyedBackend.getPartitionedState(
+            keyedBackend
+                    .getPartitionedState(
                             "namespace-b", StringSerializer.INSTANCE, namespacedDescriptor)
                     .put(1, 12);
             keyedBackend.setCurrentKey(2);
-            keyedBackend.getPartitionedState(
+            keyedBackend
+                    .getPartitionedState(
                             "namespace-a", StringSerializer.INSTANCE, namespacedDescriptor)
                     .put(1, 21);
 
@@ -212,26 +215,20 @@ public class RocksDBStateBackendConfigTest {
                     Integer.valueOf(11),
                     keyedBackend
                             .getPartitionedState(
-                                    "namespace-a",
-                                    StringSerializer.INSTANCE,
-                                    namespacedDescriptor)
+                                    "namespace-a", StringSerializer.INSTANCE, namespacedDescriptor)
                             .get(1));
             assertEquals(
                     Integer.valueOf(12),
                     keyedBackend
                             .getPartitionedState(
-                                    "namespace-b",
-                                    StringSerializer.INSTANCE,
-                                    namespacedDescriptor)
+                                    "namespace-b", StringSerializer.INSTANCE, namespacedDescriptor)
                             .get(1));
             keyedBackend.setCurrentKey(2);
             assertEquals(
                     Integer.valueOf(21),
                     keyedBackend
                             .getPartitionedState(
-                                    "namespace-a",
-                                    StringSerializer.INSTANCE,
-                                    namespacedDescriptor)
+                                    "namespace-a", StringSerializer.INSTANCE, namespacedDescriptor)
                             .get(1));
         } finally {
             keyedBackend.dispose();
@@ -246,6 +243,7 @@ public class RocksDBStateBackendConfigTest {
                 createKeyedStateBackend(
                         new EmbeddedRocksDBStateBackend(), environment, IntSerializer.INSTANCE);
         try {
+            assertFalse(keyedBackend.isReusablePointGetEnabled());
             assertFalse(keyedBackend.isMapIteratorSingleKeyFetchEnabled());
             assertFalse(keyedBackend.isMapIteratorPrefixUpperBoundEnabled());
             assertFalse(keyedBackend.isMapIteratorPackedTinyScanEnabled());
@@ -256,9 +254,7 @@ public class RocksDBStateBackendConfigTest {
                             VoidNamespace.INSTANCE,
                             VoidNamespaceSerializer.INSTANCE,
                             new MapStateDescriptor<>(
-                                    "single-key-fetch-default-off",
-                                    Integer.class,
-                                    Integer.class));
+                                    "single-key-fetch-default-off", Integer.class, Integer.class));
             state.put(1, 10);
             state.put(2, 20);
             state.put(3, 30);
@@ -394,16 +390,13 @@ public class RocksDBStateBackendConfigTest {
             EmbeddedRocksDBStateBackend configuredBackend =
                     new EmbeddedRocksDBStateBackend()
                             .configure(
-                                    configuration,
-                                    Thread.currentThread().getContextClassLoader());
+                                    configuration, Thread.currentThread().getContextClassLoader());
             MockEnvironment environment = new MockEnvironmentBuilder().build();
             RocksDBKeyedStateBackend<Integer> keyedBackend =
-                    createKeyedStateBackend(
-                            configuredBackend, environment, IntSerializer.INSTANCE);
+                    createKeyedStateBackend(configuredBackend, environment, IntSerializer.INSTANCE);
             try {
                 assertEquals(
-                        flatPageEnabled,
-                        keyedBackend.isMapIteratorPackedTinyScanFlatPageEnabled());
+                        flatPageEnabled, keyedBackend.isMapIteratorPackedTinyScanFlatPageEnabled());
                 keyedBackend.setCurrentKey(flatPageEnabled ? 91 : 92);
                 MapState<Integer, Integer> state =
                         keyedBackend.getPartitionedState(
@@ -550,9 +543,7 @@ public class RocksDBStateBackendConfigTest {
                             VoidNamespace.INSTANCE,
                             VoidNamespaceSerializer.INSTANCE,
                             new MapStateDescriptor<>(
-                                    "packed-tiny-overflow-fallback",
-                                    Integer.class,
-                                    Integer.class));
+                                    "packed-tiny-overflow-fallback", Integer.class, Integer.class));
             state.put(1, 10);
             state.put(2, 20);
 
@@ -605,8 +596,7 @@ public class RocksDBStateBackendConfigTest {
                         new byte[] {0x01, 0x02, (byte) 0xff}));
         assertArrayEquals(
                 new byte[] {0x02},
-                RocksDBMapState.unsignedBytewisePrefixSuccessor(
-                        new byte[] {0x01, (byte) 0xff}));
+                RocksDBMapState.unsignedBytewisePrefixSuccessor(new byte[] {0x01, (byte) 0xff}));
         assertNull(
                 RocksDBMapState.unsignedBytewisePrefixSuccessor(
                         new byte[] {(byte) 0xff, (byte) 0xff}));

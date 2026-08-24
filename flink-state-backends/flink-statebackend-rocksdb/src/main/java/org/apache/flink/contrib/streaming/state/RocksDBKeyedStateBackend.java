@@ -17,6 +17,27 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import static org.apache.flink.contrib.streaming.state.RocksDBSnapshotTransformFactoryAdaptor.wrapStateSnapshotTransformFactory;
+import static org.apache.flink.runtime.state.SnapshotExecutionType.ASYNCHRONOUS;
+import static org.apache.flink.util.Preconditions.checkState;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Spliterator;
+import java.util.Spliterators;
+import java.util.concurrent.RunnableFuture;
+import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
+import javax.annotation.Nonnegative;
+import javax.annotation.Nonnull;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.state.State;
@@ -67,7 +88,6 @@ import org.apache.flink.util.IOUtils;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.ResourceGuard;
 import org.apache.flink.util.StateMigrationException;
-
 import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.ColumnFamilyOptions;
 import org.rocksdb.ReadOptions;
@@ -77,29 +97,6 @@ import org.rocksdb.Snapshot;
 import org.rocksdb.WriteOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.annotation.Nonnegative;
-import javax.annotation.Nonnull;
-
-import java.io.File;
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Spliterator;
-import java.util.Spliterators;
-import java.util.concurrent.RunnableFuture;
-import java.util.concurrent.atomic.LongAdder;
-import java.util.function.Function;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
-import java.util.stream.StreamSupport;
-
-import static org.apache.flink.contrib.streaming.state.RocksDBSnapshotTransformFactoryAdaptor.wrapStateSnapshotTransformFactory;
-import static org.apache.flink.runtime.state.SnapshotExecutionType.ASYNCHRONOUS;
-import static org.apache.flink.util.Preconditions.checkState;
 
 /**
  * An {@link AbstractKeyedStateBackend} that stores its state in {@code RocksDB} and serializes
@@ -204,8 +201,12 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     /** The max memory size for one batch in {@link RocksDBWriteBatchWrapper}. */
     private final long writeBatchSize;
 
+    /** Whether synchronous point gets reuse Java and native storage. */
+    private final boolean reusablePointGetEnabled;
+
     /** Whether MapState iterator entries reuse the raw key fetched for the prefix check. */
     private final boolean mapIteratorSingleKeyFetchEnabled;
+
     private final boolean mapIteratorPrefixUpperBoundEnabled;
     private final boolean mapIteratorPackedTinyScanEnabled;
     private final boolean mapIteratorPackedTinyScanReuseEnabled;
@@ -318,6 +319,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             RocksDbTtlCompactFiltersManager ttlCompactFiltersManager,
             InternalKeyContext<K> keyContext,
             @Nonnegative long writeBatchSize,
+            boolean reusablePointGetEnabled,
             boolean mapIteratorSingleKeyFetchEnabled,
             boolean mapIteratorPrefixUpperBoundEnabled,
             boolean mapIteratorPackedTinyScanEnabled,
@@ -353,6 +355,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.writeOptions = optionsContainer.getWriteOptions();
         this.readOptions = optionsContainer.getReadOptions();
         this.writeBatchSize = writeBatchSize;
+        this.reusablePointGetEnabled = reusablePointGetEnabled;
         this.mapIteratorSingleKeyFetchEnabled = mapIteratorSingleKeyFetchEnabled;
         this.mapIteratorPrefixUpperBoundEnabled = mapIteratorPrefixUpperBoundEnabled;
         this.mapIteratorPackedTinyScanEnabled = mapIteratorPackedTinyScanEnabled;
@@ -614,6 +617,10 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         return mapIteratorSingleKeyFetchEnabled;
     }
 
+    boolean isReusablePointGetEnabled() {
+        return reusablePointGetEnabled;
+    }
+
     boolean isMapIteratorPrefixUpperBoundEnabled() {
         return mapIteratorPrefixUpperBoundEnabled;
     }
@@ -649,11 +656,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             throws RocksDBException {
         if (isMapIteratorPackedTinyScanReuseEligible()) {
             return mapIteratorPackedTinyScanIteratorPool.tryScan(
-                    columnFamily,
-                    seekPrefix,
-                    prefixCompareOffset,
-                    maxEntries,
-                    maxBytes);
+                    columnFamily, seekPrefix, prefixCompareOffset, maxEntries, maxBytes);
         }
         return RocksDBPackedTinyMapScan.tryScan(
                 db,

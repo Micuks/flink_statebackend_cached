@@ -18,6 +18,27 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import static org.apache.flink.configuration.description.TextElement.text;
+import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.RESTORE_OVERLAP_FRACTION_THRESHOLD;
+import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.WRITE_BATCH_SIZE;
+import static org.apache.flink.contrib.streaming.state.RocksDBOptions.CHECKPOINT_TRANSFER_THREAD_NUM;
+import static org.apache.flink.contrib.streaming.state.RocksDBOptions.TIMER_SERVICE_FACTORY;
+import static org.apache.flink.util.Preconditions.checkArgument;
+import static org.apache.flink.util.Preconditions.checkNotNull;
+
+import java.io.File;
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
+import java.util.Optional;
+import java.util.Random;
+import java.util.UUID;
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.ExecutionConfig;
@@ -55,34 +76,10 @@ import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.TernaryBoolean;
-
 import org.rocksdb.NativeLibraryLoader;
 import org.rocksdb.RocksDB;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
-
-import java.io.File;
-import java.io.IOException;
-import java.lang.reflect.Field;
-import java.net.URI;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.List;
-import java.util.Optional;
-import java.util.Random;
-import java.util.UUID;
-
-import static org.apache.flink.configuration.description.TextElement.text;
-import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.RESTORE_OVERLAP_FRACTION_THRESHOLD;
-import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.WRITE_BATCH_SIZE;
-import static org.apache.flink.contrib.streaming.state.RocksDBOptions.CHECKPOINT_TRANSFER_THREAD_NUM;
-import static org.apache.flink.contrib.streaming.state.RocksDBOptions.TIMER_SERVICE_FACTORY;
-import static org.apache.flink.util.Preconditions.checkArgument;
-import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
  * A {@link org.apache.flink.runtime.state.StateBackend} that stores its state in an embedded {@code
@@ -151,6 +148,8 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
     private final RocksDBNativeMetricOptions nativeMetricOptions;
 
     /** Avoids the duplicate raw-key JNI fetch in RocksDB MapState iterators. */
+    private final boolean reusablePointGetEnabled;
+
     private final boolean mapIteratorSingleKeyFetchEnabled;
     private final boolean mapIteratorPrefixUpperBoundEnabled;
     private final boolean mapIteratorPackedTinyScanEnabled;
@@ -209,6 +208,7 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
         this.enableIncrementalCheckpointing = enableIncrementalCheckpointing;
         this.numberOfTransferThreads = UNDEFINED_NUMBER_OF_TRANSFER_THREADS;
         this.nativeMetricOptions = new RocksDBNativeMetricOptions();
+        this.reusablePointGetEnabled = RocksDBOptions.REUSABLE_POINT_GET_ENABLED.defaultValue();
         this.mapIteratorSingleKeyFetchEnabled = false;
         this.mapIteratorPrefixUpperBoundEnabled = false;
         this.mapIteratorPackedTinyScanEnabled = false;
@@ -283,6 +283,7 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
 
         // configure metric options
         this.nativeMetricOptions = RocksDBNativeMetricOptions.fromConfig(config);
+        this.reusablePointGetEnabled = config.get(RocksDBOptions.REUSABLE_POINT_GET_ENABLED);
         this.mapIteratorSingleKeyFetchEnabled =
                 config.get(RocksDBOptions.MAP_ITERATOR_SINGLE_KEY_FETCH_ENABLED);
         this.mapIteratorPrefixUpperBoundEnabled =
@@ -297,8 +298,7 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
                 config.get(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES);
         this.mapIteratorPackedTinyScanMaxBytes =
                 config.get(RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES);
-        if (mapIteratorPackedTinyScanMaxEntries < 1
-                || mapIteratorPackedTinyScanMaxEntries > 128) {
+        if (mapIteratorPackedTinyScanMaxEntries < 1 || mapIteratorPackedTinyScanMaxEntries > 128) {
             throw new IllegalConfigurationException(
                     RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES.key()
                             + " must be between 1 and 128.");
@@ -545,9 +545,9 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
                         .setNumberOfTransferingThreads(getNumberOfTransferThreads())
                         .setNativeMetricOptions(
                                 resourceContainer.getMemoryWatcherOptions(nativeMetricOptions))
+                        .setReusablePointGetEnabled(reusablePointGetEnabled)
                         .setMapIteratorSingleKeyFetchEnabled(mapIteratorSingleKeyFetchEnabled)
-                        .setMapIteratorPrefixUpperBoundEnabled(
-                                mapIteratorPrefixUpperBoundEnabled)
+                        .setMapIteratorPrefixUpperBoundEnabled(mapIteratorPrefixUpperBoundEnabled)
                         .setMapIteratorPackedTinyScan(
                                 mapIteratorPackedTinyScanEnabled,
                                 mapIteratorPackedTinyScanMaxEntries,
