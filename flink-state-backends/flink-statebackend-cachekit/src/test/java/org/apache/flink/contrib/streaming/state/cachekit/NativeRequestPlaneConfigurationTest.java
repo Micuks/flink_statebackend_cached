@@ -101,6 +101,7 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(options.compactSelectedProbeEnabled());
         assertFalse(options.directArenaMultiGetEnabled());
         assertFalse(options.directArenaReadOnlyEnabled());
+        assertFalse(options.directArenaEagerMaterializationEnabled());
         assertFalse(options.negativeHandoffEnabled());
         assertFalse(options.compactionScratchSlotEnabled());
         assertEquals(4096, options.compactionScratchEntries());
@@ -141,6 +142,9 @@ class NativeRequestPlaneConfigurationTest {
         config.set(CacheKitStateBackendFactory.NATIVE_COMPACT_SELECTED_PROBE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_DIRECT_ARENA_MULTIGET_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_DIRECT_ARENA_READ_ONLY_ENABLED, true);
+        config.set(
+                CacheKitStateBackendFactory.NATIVE_DIRECT_ARENA_EAGER_MATERIALIZATION_ENABLED,
+                true);
         config.set(CacheKitStateBackendFactory.NATIVE_PREFETCH_NEGATIVE_HANDOFF_ENABLED, true);
         config.set(
                 CacheKitStateBackendFactory.NATIVE_MAILBOX_COMPACTION_SCRATCH_SLOT_ENABLED, true);
@@ -176,6 +180,7 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(options.compactSelectedProbeEnabled());
         assertTrue(options.directArenaMultiGetEnabled());
         assertTrue(options.directArenaReadOnlyEnabled());
+        assertTrue(options.directArenaEagerMaterializationEnabled());
         assertTrue(options.negativeHandoffEnabled());
         assertTrue(options.compactionScratchSlotEnabled());
         assertEquals(777, options.compactionScratchEntries());
@@ -281,6 +286,49 @@ class NativeRequestPlaneConfigurationTest {
                                 8192,
                                 0.02,
                                 262144));
+    }
+
+    @Test
+    void testDirectArenaEagerMaterializationRequiresDirectReadOnly() {
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        new NativeRequestPlaneOptions(
+                                true,
+                                "",
+                                "auto",
+                                128,
+                                4096,
+                                4096,
+                                16,
+                                4096,
+                                4096,
+                                1,
+                                2,
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                true,
+                                true,
+                                false,
+                                true,
+                                true,
+                                false,
+                                8192,
+                                0.02,
+                                262144,
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                16,
+                                4096,
+                                true));
     }
 
     @Test

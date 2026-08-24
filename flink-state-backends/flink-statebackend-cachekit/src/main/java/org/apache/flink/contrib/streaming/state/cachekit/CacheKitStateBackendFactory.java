@@ -466,6 +466,16 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Bypass the native ValueState cache probe/fill for mailbox-compacted prepared keys and issue the authoritative RocksDB MultiGet directly from the native key arena. "
                                                                         + "Generation, reservation, cancellation, and staging publication guards remain unchanged; requires direct-arena MultiGet.");
 
+        public static final ConfigOption<Boolean>
+                        NATIVE_DIRECT_ARENA_EAGER_MATERIALIZATION_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.direct-arena-eager-materialization.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Deserialize direct-read-only RocksDB results from the native value arena on the prefetch worker before releasing its batch slot. "
+                                                                        + "This avoids the intermediate heap byte[] copy while retaining exact reservation, generation, and staging guards.");
+
         public static final ConfigOption<Boolean> NATIVE_PREFETCH_NEGATIVE_HANDOFF_ENABLED =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.prefetch.negative-handoff.enabled")
@@ -771,7 +781,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                 NATIVE_PREFETCH_DEFERRED_RESERVATION_MATERIALIZATION_ENABLED),
                                 config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_SLOT_ENABLED),
                                 config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_ENTRIES),
-                                config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_KEY_ARENA_BYTES));
+                                config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_KEY_ARENA_BYTES),
+                                config.get(NATIVE_DIRECT_ARENA_EAGER_MATERIALIZATION_ENABLED));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

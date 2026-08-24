@@ -1078,6 +1078,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         private final DirectBufferDataInputView probeValueInput;
         private final ByteBuffer probeResults;
         private final ByteBuffer valueArena;
+        private final DirectBufferDataInputView directMultiGetValueInput;
         private final DirectBufferDataOutputView valueArenaOutput;
         private final ByteBuffer valueMetadata;
         private final ByteBuffer fillResults;
@@ -1166,6 +1167,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             this.probeResults =
                     ByteBuffer.allocateDirect(probeResultBytes).order(ByteOrder.nativeOrder());
             this.valueArena = ByteBuffer.allocateDirect(valueArenaBytes);
+            this.directMultiGetValueInput = new DirectBufferDataInputView(this.valueArena);
             this.valueArenaOutput = new DirectBufferDataOutputView(this.valueArena);
             this.valueMetadata =
                     ByteBuffer.allocateDirect(valueMetadataBytes).order(ByteOrder.nativeOrder());
@@ -1410,6 +1412,17 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 source.get(copy);
             }
             return copy;
+        }
+
+        /** Reuses one bounded view over an in-slot direct MultiGet value without a heap copy. */
+        public DirectBufferDataInputView directMultiGetValueInput(int index) {
+            int length = directMultiGetResult(index);
+            if (length < 0 || length > directMultiGetValueStride) {
+                throw new IllegalStateException(
+                        "Direct-arena result at " + index + " is not a present in-slot value.");
+            }
+            directMultiGetValueInput.reset(index * directMultiGetValueStride, length);
+            return directMultiGetValueInput;
         }
 
         public void prepareFill(

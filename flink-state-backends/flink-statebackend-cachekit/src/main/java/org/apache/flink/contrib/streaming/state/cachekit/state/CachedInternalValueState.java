@@ -339,6 +339,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeDirectArenaMultiGetCompletedBatches;
     private volatile long nativeDirectArenaMultiGetCompletedKeys;
     private volatile long nativeDirectArenaMultiGetValueBytesCopied;
+    private volatile long nativeDirectArenaEagerMaterializedValues;
+    private volatile long nativeDirectArenaEagerMaterializedValueBytes;
+    private volatile long nativeDirectArenaEagerMissingValues;
+    private volatile long nativeDirectArenaEagerFallbackValues;
     private volatile long nativeDirectArenaMultiGetFound;
     private volatile long nativeDirectArenaMultiGetNotFound;
     private volatile long nativeDirectArenaMultiGetOverflowStatuses;
@@ -1900,6 +1904,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 + "speculativeTailDrops={} speculativeTailKeys={} "
                                 + "negativeHandoffConfigured={} negativeHandoffStaged={} "
                                 + "negativeHandoffPromoted={} negativeHandoffInvalidated={} "
+                                + "eagerMaterializationConfigured={} eagerValues={} eagerValueBytes={} "
+                                + "eagerMissingValues={} eagerFallbackValues={} "
                                 + "batches={} keys={} completedBatches={} completedKeys={} valueBytesCopied={} "
                                 + "batchHistogram=1:{},2-3:{},4-7:{},8-15:{},16-31:{},32-63:{},64:{} "
                                 + "found={} notFound={} overflowStatuses={} overflowBatches={} fallbackBatches={} "
@@ -1930,6 +1936,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         nativeDirectArenaNegativeHandoffStaged,
                         nativeDirectArenaNegativeHandoffPromoted,
                         nativeDirectArenaNegativeHandoffInvalidated,
+                        nativeRequestPlaneCoordinator != null
+                                && nativeRequestPlaneCoordinator
+                                        .options()
+                                        .directArenaEagerMaterializationEnabled(),
+                        nativeDirectArenaEagerMaterializedValues,
+                        nativeDirectArenaEagerMaterializedValueBytes,
+                        nativeDirectArenaEagerMissingValues,
+                        nativeDirectArenaEagerFallbackValues,
                         nativeDirectArenaMultiGetBatches,
                         nativeDirectArenaMultiGetKeys,
                         nativeDirectArenaMultiGetCompletedBatches,
@@ -2234,6 +2248,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getNativeDirectArenaMultiGetValueBytesCopiedForTesting() {
         return nativeDirectArenaMultiGetValueBytesCopied;
+    }
+
+    long getNativeDirectArenaEagerMaterializedValuesForTesting() {
+        return nativeDirectArenaEagerMaterializedValues;
+    }
+
+    long getNativeDirectArenaEagerMaterializedValueBytesForTesting() {
+        return nativeDirectArenaEagerMaterializedValueBytes;
+    }
+
+    long getNativeDirectArenaEagerMissingValuesForTesting() {
+        return nativeDirectArenaEagerMissingValues;
+    }
+
+    long getNativeDirectArenaEagerFallbackValuesForTesting() {
+        return nativeDirectArenaEagerFallbackValues;
     }
 
     long getNativeDirectArenaMultiGetFoundForTesting() {
@@ -3815,6 +3845,23 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
         }
 
+        if (nativeRequestPlaneCoordinator
+                .options()
+                .directArenaEagerMaterializationEnabled()) {
+            nativeDirectArenaReadOnlyBatches++;
+            nativeDirectArenaReadOnlyKeys += activeCount;
+            return fetchAndPublishDirectArenaPreparedValues(
+                    batchReader,
+                    slot,
+                    preparedIndices,
+                    activeCount,
+                    storageKeys,
+                    defaultValue,
+                    gen,
+                    reservation,
+                    immediate);
+        }
+
         java.util.List<byte[]> values =
                 fetchDirectArenaPreparedMissValues(
                         batchReader, slot, preparedIndices, activeCount, gen);
@@ -3860,6 +3907,243 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
         }
         return true;
+    }
+
+    /**
+     * Reads direct-arena values and materializes them before the bounded slot is released.
+     *
+     * <p>This is the zero-intermediate-copy counterpart of {@link
+     * #fetchDirectArenaPreparedMissValues}. It deliberately preserves the same transactional
+     * chunk fallback, generation fencing, reservation checks, and staging publication rules. The
+     * only successful fast-path difference is that the value serializer consumes the reusable
+     * direct-memory view instead of a temporary heap byte array.
+     */
+    private boolean fetchAndPublishDirectArenaPreparedValues(
+            RocksDBBatchValueReader<K, N, V> batchReader,
+            NativeRequestPlaneCoordinator.BatchSlot slot,
+            int[] preparedIndices,
+            int count,
+            java.util.List<KeyNamespaceKey<K, N>> storageKeys,
+            V defaultValue,
+            long gen,
+            PrefetchReservation reservation,
+            boolean immediate)
+            throws Exception {
+        int directChunkSize =
+                Math.min(
+                        RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
+                        multiGetChunkSize);
+        for (int start = 0; start < count; start += directChunkSize) {
+            if (closed || gen != writeGen) {
+                prefetchStaleAborts++;
+                return true;
+            }
+            int chunkCount = Math.min(directChunkSize, count - start);
+            boolean fallback = nativeDirectArenaMultiGetDisabled;
+            if (!fallback && chunkCount < multiGetMinBatchSize) {
+                nativeDirectArenaMultiGetThresholdFallbacks++;
+                fallback = true;
+            }
+            if (!fallback) {
+                slot.prepareDirectArenaMultiGet(preparedIndices, start, chunkCount);
+                int presentCount;
+                try {
+                    lifecycleLock.readLock().lock();
+                    try {
+                        if (closed || gen != writeGen) {
+                            prefetchStaleAborts++;
+                            return true;
+                        }
+                        nativeDirectArenaMultiGetBatches++;
+                        nativeDirectArenaMultiGetKeys += chunkCount;
+                        recordNativeDirectArenaMultiGetBatchSize(chunkCount);
+                        presentCount =
+                                batchReader.getSerializedValuesByRocksDBKeyArena(
+                                        slot.directMultiGetKeyArena(),
+                                        slot.directMultiGetDescriptors(),
+                                        chunkCount,
+                                        slot.directMultiGetValueArena(),
+                                        slot.directMultiGetValueStride());
+                        prefetchMultiGetCalls++;
+                        prefetchMultiGetKeys += chunkCount;
+                    } finally {
+                        lifecycleLock.readLock().unlock();
+                    }
+                } catch (LinkageError missingNativeSymbol) {
+                    nativeDirectArenaMultiGetLinkageFallbacks++;
+                    nativeDirectArenaMultiGetDisabled = true;
+                    fallback = true;
+                    presentCount = 0;
+                } catch (UnsupportedOperationException invalidCapabilityAdvertisement) {
+                    nativeDirectArenaMultiGetProtocolFallbacks++;
+                    nativeDirectArenaMultiGetDisabled = true;
+                    fallback = true;
+                    presentCount = 0;
+                } catch (IllegalArgumentException invalidDirectAbi) {
+                    nativeDirectArenaMultiGetProtocolFallbacks++;
+                    nativeDirectArenaMultiGetDisabled = true;
+                    fallback = true;
+                    presentCount = 0;
+                }
+
+                if (!fallback) {
+                    int observedPresent = 0;
+                    int observedNotFound = 0;
+                    int observedOverflow = 0;
+                    boolean overflow = false;
+                    boolean invalidProtocol = presentCount < 0 || presentCount > chunkCount;
+                    for (int index = 0; index < chunkCount && !invalidProtocol; index++) {
+                        int result = slot.directMultiGetResult(index);
+                        if (result >= 0 && result <= slot.directMultiGetValueStride()) {
+                            observedPresent++;
+                        } else if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
+                            observedNotFound++;
+                        } else if (result == RocksDBBatchValueReader.DIRECT_ARENA_OVERFLOW) {
+                            observedPresent++;
+                            observedOverflow++;
+                            overflow = true;
+                        } else {
+                            invalidProtocol = true;
+                        }
+                    }
+                    if (observedPresent != presentCount) {
+                        invalidProtocol = true;
+                    }
+                    if (invalidProtocol) {
+                        nativeDirectArenaMultiGetProtocolFallbacks++;
+                        nativeDirectArenaMultiGetDisabled = true;
+                        fallback = true;
+                    } else if (overflow) {
+                        nativeDirectArenaMultiGetFound += observedPresent - observedOverflow;
+                        nativeDirectArenaMultiGetNotFound += observedNotFound;
+                        nativeDirectArenaMultiGetOverflowStatuses += observedOverflow;
+                        nativeDirectArenaMultiGetOverflows++;
+                        fallback = true;
+                    } else {
+                        nativeDirectArenaMultiGetFound += observedPresent;
+                        nativeDirectArenaMultiGetNotFound += observedNotFound;
+                        nativeDirectArenaMultiGetCompletedBatches++;
+                        nativeDirectArenaMultiGetCompletedKeys += chunkCount;
+                        for (int index = 0; index < chunkCount; index++) {
+                            if (closed || gen != writeGen) {
+                                prefetchStaleAborts++;
+                                return true;
+                            }
+                            int originalIndex = preparedIndices[start + index];
+                            KeyNamespaceKey<K, N> storageKey = storageKeys.get(originalIndex);
+                            int result = slot.directMultiGetResult(index);
+                            boolean missing =
+                                    result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND;
+                            if (missing) {
+                                nativeDirectArenaEagerMissingValues++;
+                            } else {
+                                nativeDirectArenaEagerMaterializedValues++;
+                                nativeDirectArenaEagerMaterializedValueBytes += result;
+                            }
+                            if (!publishDirectArenaEagerValue(
+                                    slot,
+                                    index,
+                                    storageKey,
+                                    defaultValue,
+                                    gen,
+                                    reservation,
+                                    immediate,
+                                    missing)) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            if (fallback) {
+                java.util.List<byte[]> fallbackValues =
+                        fetchPreparedIndexFallbackValues(
+                                batchReader, slot, preparedIndices, start, chunkCount, gen);
+                if (fallbackValues == null) {
+                    return true;
+                }
+                nativeDirectArenaEagerFallbackValues += chunkCount;
+                for (int index = 0; index < chunkCount; index++) {
+                    if (closed || gen != writeGen) {
+                        prefetchStaleAborts++;
+                        return true;
+                    }
+                    int originalIndex = preparedIndices[start + index];
+                    byte[] serializedValue = fallbackValues.get(index);
+                    boolean missing = serializedValue == null;
+                    boolean published;
+                    if (!immediate
+                            && missing
+                            && nativeRequestPlaneCoordinator.options().negativeHandoffEnabled()
+                            && keyScopedPrefetchInvalidationEnabled
+                            && reservation != null) {
+                        published =
+                                publishNativeNegativeStagedValue(
+                                        storageKeys.get(originalIndex), gen, reservation);
+                    } else {
+                        V value =
+                                immediate
+                                        ? deserializeImmediateValueOrCopyDefault(
+                                                serializedValue, defaultValue)
+                                        : deserializeValueOrCopyDefault(
+                                                serializedValue, defaultValue);
+                        published =
+                                publishStagedValue(
+                                        StagedValue.materialized(
+                                                storageKeys.get(originalIndex), value, gen),
+                                        missing,
+                                        reservation);
+                    }
+                    if (!published) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    private boolean publishDirectArenaEagerValue(
+            NativeRequestPlaneCoordinator.BatchSlot slot,
+            int resultIndex,
+            KeyNamespaceKey<K, N> storageKey,
+            V defaultValue,
+            long gen,
+            PrefetchReservation reservation,
+            boolean immediate,
+            boolean missing)
+            throws IOException {
+        if (!immediate
+                && missing
+                && nativeRequestPlaneCoordinator.options().negativeHandoffEnabled()
+                && keyScopedPrefetchInvalidationEnabled
+                && reservation != null) {
+            return publishNativeNegativeStagedValue(storageKey, gen, reservation);
+        }
+        V value;
+        if (immediate) {
+            if (immediateValueSerializer == null) {
+                immediateValueSerializer = delegate.getValueSerializer().duplicate();
+            }
+            value =
+                    missing
+                            ? (defaultValue == null
+                                    ? null
+                                    : immediateValueSerializer.copy(defaultValue))
+                            : immediateValueSerializer.deserialize(
+                                    slot.directMultiGetValueInput(resultIndex));
+        } else {
+            prepareWorkerValueState();
+            value =
+                    missing
+                            ? (defaultValue == null
+                                    ? null
+                                    : workerValueSerializer.copy(defaultValue))
+                            : workerValueSerializer.deserialize(
+                                    slot.directMultiGetValueInput(resultIndex));
+        }
+        return publishStagedValue(
+                StagedValue.materialized(storageKey, value, gen), missing, reservation);
     }
 
     private void recordNativeDirectArenaSpeculativePreCompactDrop(int keys) {
