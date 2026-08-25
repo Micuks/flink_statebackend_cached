@@ -495,6 +495,43 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "The first access and every skipped state retain the authoritative point-read path.");
 
         public static final ConfigOption<Boolean>
+                        NATIVE_PREFETCH_PROMOTION_YIELD_ADMISSION_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.promotion-yield-admission.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Suppress speculative work for ValueState wrappers whose staged values are not promoted by mailbox reads. "
+                                                                        + "Periodic probes preserve phase-change recovery and authoritative reads are never bypassed.");
+
+        public static final ConfigOption<Integer>
+                        NATIVE_PREFETCH_PROMOTION_YIELD_MIN_STAGED_VALUES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.promotion-yield-admission.min-staged-values")
+                                        .intType()
+                                        .defaultValue(4096)
+                                        .withDescription(
+                                                        "Number of staged values required before promotion-yield admission can suppress a state.");
+
+        public static final ConfigOption<Double>
+                        NATIVE_PREFETCH_PROMOTION_YIELD_MIN_PROMOTION_RATE =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.promotion-yield-admission.min-promotion-rate")
+                                        .doubleType()
+                                        .defaultValue(0.02)
+                                        .withDescription(
+                                                        "Minimum cumulative promoted/staged ratio for continuously admitting a ValueState prefetch stream.");
+
+        public static final ConfigOption<Integer>
+                        NATIVE_PREFETCH_PROMOTION_YIELD_PROBE_EVERY_TASKS =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.promotion-yield-admission.probe-every-tasks")
+                                        .intType()
+                                        .defaultValue(256)
+                                        .withDescription(
+                                                        "Low-yield admission decisions between recovery probes for a suppressed ValueState.");
+
+        public static final ConfigOption<Boolean>
                         NATIVE_PREFETCH_DEFERRED_RESERVATION_MATERIALIZATION_ENABLED =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.prefetch.deferred-reservation-materialization.enabled")

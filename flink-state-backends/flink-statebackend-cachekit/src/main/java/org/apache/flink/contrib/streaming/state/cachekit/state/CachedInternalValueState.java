@@ -141,6 +141,28 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     1024,
                     1,
                     1_000_000);
+    private static final boolean PROMOTION_YIELD_ADMISSION_ENABLED =
+            loadBooleanConfig(
+                    "state.backend.cachekit.native.prefetch.promotion-yield-admission.enabled",
+                    false);
+    private static final int PROMOTION_YIELD_MIN_STAGED_VALUES =
+            loadIntConfig(
+                    "state.backend.cachekit.native.prefetch.promotion-yield-admission.min-staged-values",
+                    4096,
+                    64,
+                    1_000_000);
+    private static final double PROMOTION_YIELD_MIN_PROMOTION_RATE =
+            loadDoubleConfig(
+                    "state.backend.cachekit.native.prefetch.promotion-yield-admission.min-promotion-rate",
+                    0.02,
+                    0.0,
+                    1.0);
+    private static final int PROMOTION_YIELD_PROBE_EVERY_TASKS =
+            loadIntConfig(
+                    "state.backend.cachekit.native.prefetch.promotion-yield-admission.probe-every-tasks",
+                    256,
+                    1,
+                    1_000_000);
     private static final boolean NATIVE_ADAPTIVE_PROBE_BYPASS_ENABLED =
             loadBooleanConfig(
                     "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.enabled",
@@ -414,6 +436,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final java.util.concurrent.atomic.AtomicLong nativeWriteEpoch =
             new java.util.concurrent.atomic.AtomicLong();
     private AdaptiveNativeProbeController adaptiveNativeProbeController;
+    private final PromotionYieldAdmissionController promotionYieldAdmissionController;
 
     // Worker-only serializers and scratch inputs. PrefetchExecutor serializes all tasks on its
     // single shared worker; mailbox paths use separate fields below.
@@ -1017,6 +1040,17 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 NATIVE_ADAPTIVE_PROBE_RECOVERY_MIN_USEFUL,
                                 NATIVE_ADAPTIVE_PROBE_RECOVERY_USEFUL_RATE)
                         : null;
+        this.promotionYieldAdmissionController =
+                PROMOTION_YIELD_ADMISSION_ENABLED
+                                && nativeRequestPlaneCoordinator != null
+                                && nativeRequestPlaneCoordinator.isActive()
+                                && nativeRequestPlaneCoordinator.options().prefetchEnabled()
+                                && nativeRequestPlaneCoordinator.options().mailboxBatchEnabled()
+                        ? new PromotionYieldAdmissionController(
+                                PROMOTION_YIELD_MIN_STAGED_VALUES,
+                                PROMOTION_YIELD_MIN_PROMOTION_RATE,
+                                PROMOTION_YIELD_PROBE_EVERY_TASKS)
+                        : null;
         // The narrow invalidation proof relies on the prepared-key reservation identity checked
         // before and after RocksDB I/O. Native direct-read-only uses that exact same reservation
         // on both sides of its authoritative RocksDB MultiGet, so it can safely share the proof.
@@ -1494,7 +1528,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      */
     public boolean shouldReceiveRecordKeyPrefetch(boolean accessGuided) {
         if (isRecordKeyPrefetchEligible(accessGuided)) {
-            return true;
+            return promotionYieldAdmissionController == null
+                    || promotionYieldAdmissionController.shouldAdmit(
+                            prefetchValuesStaged, prefetchValuesPromoted);
         }
         if (supportsRecordKeyPrefetch() && accessGuided) {
             recordPrefetchAccessGuidedSkips++;
@@ -1697,6 +1733,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "liveReadRaceAvgUs={} liveReadRaceMaxUs={} "
                             + "asyncValuesRead={} asyncUsefulValues={} "
                             + "adaptiveAdmissionSkips={} adaptiveProbeTasks={} "
+                            + "promotionYieldAdmissionActive={} "
+                            + "promotionYieldAdmissionSkips={} promotionYieldProbeTasks={} "
                             + "unusedStagedOnClose={} "
                             + "buildFailures={} workerFailures={} stickyUpdateInPlace={} "
                             + "stickySameKeyAttempts={} stickyInPlaceReuses={} "
@@ -1804,6 +1842,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchAsyncUsefulValues,
                     prefetchAdaptiveAdmissionSkips,
                     prefetchAdaptiveProbeTasks,
+                    promotionYieldAdmissionController != null,
+                    promotionYieldAdmissionController == null
+                            ? 0L
+                            : promotionYieldAdmissionController.skippedTasks(),
+                    promotionYieldAdmissionController == null
+                            ? 0L
+                            : promotionYieldAdmissionController.probeTasks(),
                     prefetchUnusedStagedOnClose,
                     prefetchBuildFailures,
                     prefetchWorkerFailures,
