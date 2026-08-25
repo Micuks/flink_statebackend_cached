@@ -28,6 +28,7 @@ import org.mockito.ArgumentCaptor;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -42,6 +43,22 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class DistinctBatchStateMapViewTest {
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void delegatesExactKeyPrefetchBeforeBatchStarts() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        List<String> keys = List.of("bidder-1", "bidder-2");
+        when(delegate.beginPrefetchKeys(keys)).thenReturn(true);
+        DistinctBatchStateMapView<Void, String, Long> view = createView(delegate);
+
+        assertTrue(view.beginPrefetchKeys(keys));
+        view.beginBatch();
+        view.commitBatch();
+
+        verify(delegate, times(1)).beginPrefetchKeys(keys);
+        verify(delegate, times(1)).endPrefetchKeys();
+    }
 
     @Test
     @SuppressWarnings("unchecked")

@@ -21,6 +21,7 @@ package org.apache.flink.table.runtime.dataview;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.table.api.dataview.MapView;
@@ -41,6 +42,14 @@ import java.util.Map;
  */
 @Internal
 public abstract class StateMapView<N, EK, EV> extends MapView<EK, EV> implements StateDataView<N> {
+
+    /** Optional exact-key prefetch hook used by a batch-scoped DISTINCT overlay. */
+    boolean beginPrefetchKeys(Iterable<? extends EK> keys) throws Exception {
+        return false;
+    }
+
+    /** Ends an optional batch-scoped exact-key prefetch. */
+    void endPrefetchKeys() {}
 
     @Override
     public Map<EK, EV> getMap() {
@@ -78,6 +87,23 @@ public abstract class StateMapView<N, EK, EV> extends MapView<EK, EV> implements
         private final Map<EK, EV> emptyState = Collections.emptyMap();
 
         protected abstract MapState<EK, EV> getMapState();
+
+        @Override
+        @SuppressWarnings("unchecked")
+        boolean beginPrefetchKeys(Iterable<? extends EK> keys) throws Exception {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof BatchPrefetchableMapState
+                    && ((BatchPrefetchableMapState<EK>) state).beginPrefetchCurrentKeys(keys);
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        void endPrefetchKeys() {
+            MapState<EK, EV> state = getMapState();
+            if (state instanceof BatchPrefetchableMapState) {
+                ((BatchPrefetchableMapState<EK>) state).endPrefetchCurrentKeys();
+            }
+        }
 
         @Override
         public EV get(EK key) throws Exception {
@@ -246,6 +272,23 @@ public abstract class StateMapView<N, EK, EV> extends MapView<EK, EV> implements
         }
 
         protected abstract MapState<EK, EV> getMapState();
+
+        @Override
+        @SuppressWarnings("unchecked")
+        boolean beginPrefetchKeys(Iterable<? extends EK> keys) throws Exception {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof BatchPrefetchableMapState
+                    && ((BatchPrefetchableMapState<EK>) state).beginPrefetchCurrentKeys(keys);
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        void endPrefetchKeys() {
+            MapState<EK, EV> state = getMapState();
+            if (state instanceof BatchPrefetchableMapState) {
+                ((BatchPrefetchableMapState<EK>) state).endPrefetchCurrentKeys();
+            }
+        }
 
         protected abstract ValueState<EV> getNullState();
 

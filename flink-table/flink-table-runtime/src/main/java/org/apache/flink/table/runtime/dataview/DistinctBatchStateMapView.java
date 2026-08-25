@@ -51,6 +51,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     private final HashMap<EK, BufferedValue<EK, EV>> overlay = new HashMap<>();
 
     private boolean active;
+    private boolean prefetchActive;
     private long logicalGets;
     private long delegateGets;
     private long overlayHits;
@@ -89,6 +90,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         } finally {
             overlay.clear();
             active = false;
+            endPrefetchScope();
         }
     }
 
@@ -98,10 +100,21 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         }
         overlay.clear();
         active = false;
+        endPrefetchScope();
     }
 
     boolean isBatchActive() {
         return active;
+    }
+
+    /** Prefetches exact keys before the batch overlay starts recording reads and writes. */
+    @Override
+    boolean beginPrefetchKeys(Iterable<? extends EK> keys) throws Exception {
+        if (active || prefetchActive) {
+            throw new IllegalStateException("DISTINCT batch prefetch is already active");
+        }
+        prefetchActive = delegate.beginPrefetchKeys(keys);
+        return prefetchActive;
     }
 
     @Override
@@ -218,6 +231,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     @Override
     public void clear() {
         overlay.clear();
+        endPrefetchScope();
         delegate.clear();
     }
 
@@ -227,7 +241,15 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             throw new IllegalStateException(
                     "Cannot change namespace with an uncommitted DISTINCT batch overlay");
         }
+        endPrefetchScope();
         delegate.setCurrentNamespace(namespace);
+    }
+
+    private void endPrefetchScope() {
+        if (prefetchActive) {
+            delegate.endPrefetchKeys();
+            prefetchActive = false;
+        }
     }
 
     private void flushForCompleteView() throws Exception {
