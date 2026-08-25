@@ -35,7 +35,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -57,6 +59,32 @@ class DistinctBatchStateMapViewTest {
         view.commitBatch();
 
         verify(delegate, times(1)).beginPrefetchKeys(keys);
+        verify(delegate, times(1)).endPrefetchKeys();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void collectsGeneratedDistinctKeysAndAbortsWithoutLeakingScope() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        doAnswer(
+                        invocation -> {
+                            assertEquals(
+                                    List.of("bidder-1", "bidder-2"),
+                                    invocation.getArgument(0));
+                            return true;
+                        })
+                .when(delegate)
+                .beginPrefetchKeys(any());
+        DistinctBatchStateMapView<Void, String, Long> view = createView(delegate);
+
+        view.beginPrefetchKeyCollection(3);
+        view.addPrefetchKey("bidder-1");
+        view.addPrefetchKey(null);
+        view.addPrefetchKey("bidder-2");
+        assertTrue(view.finishPrefetchKeyCollection());
+        view.abortPrefetchKeyCollection();
+
+        verify(delegate, times(1)).beginPrefetchKeys(any());
         verify(delegate, times(1)).endPrefetchKeys();
     }
 

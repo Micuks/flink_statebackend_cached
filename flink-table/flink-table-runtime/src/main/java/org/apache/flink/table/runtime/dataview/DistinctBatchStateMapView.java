@@ -21,6 +21,7 @@ package org.apache.flink.table.runtime.dataview;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -41,7 +42,8 @@ import java.util.Map;
  * generated DISTINCT hot path uses only get/put/remove.
  */
 @Internal
-final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV> {
+final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
+        implements BatchPrefetchableMapView<EK> {
 
     private final StateMapView<N, EK, EV> delegate;
     private final TypeSerializer<EK> keySerializer;
@@ -49,9 +51,11 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     private final boolean copyKeys;
     private final boolean copyValues;
     private final HashMap<EK, BufferedValue<EK, EV>> overlay = new HashMap<>();
+    private final ArrayList<EK> pendingPrefetchKeys = new ArrayList<>();
 
     private boolean active;
     private boolean prefetchActive;
+    private boolean collectingPrefetchKeys;
     private long logicalGets;
     private long delegateGets;
     private long overlayHits;
@@ -105,6 +109,46 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
 
     boolean isBatchActive() {
         return active;
+    }
+
+    @Override
+    public void beginPrefetchKeyCollection(int expectedKeys) {
+        if (active || prefetchActive || collectingPrefetchKeys) {
+            throw new IllegalStateException("DISTINCT batch prefetch is already active");
+        }
+        pendingPrefetchKeys.clear();
+        pendingPrefetchKeys.ensureCapacity(Math.max(0, expectedKeys));
+        collectingPrefetchKeys = true;
+    }
+
+    @Override
+    public void addPrefetchKey(EK key) {
+        if (!collectingPrefetchKeys) {
+            throw new IllegalStateException("DISTINCT prefetch key collection is not active");
+        }
+        if (key != null) {
+            pendingPrefetchKeys.add(copyKey(key));
+        }
+    }
+
+    @Override
+    public boolean finishPrefetchKeyCollection() throws Exception {
+        if (!collectingPrefetchKeys) {
+            return false;
+        }
+        collectingPrefetchKeys = false;
+        try {
+            return !pendingPrefetchKeys.isEmpty() && beginPrefetchKeys(pendingPrefetchKeys);
+        } finally {
+            pendingPrefetchKeys.clear();
+        }
+    }
+
+    @Override
+    public void abortPrefetchKeyCollection() {
+        collectingPrefetchKeys = false;
+        pendingPrefetchKeys.clear();
+        endPrefetchScope();
     }
 
     /** Prefetches exact keys before the batch overlay starts recording reads and writes. */
@@ -231,6 +275,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     @Override
     public void clear() {
         overlay.clear();
+        abortPrefetchKeyCollection();
         endPrefetchScope();
         delegate.clear();
     }
