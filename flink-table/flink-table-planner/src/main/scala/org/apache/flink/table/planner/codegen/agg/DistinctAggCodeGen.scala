@@ -28,6 +28,7 @@ import org.apache.flink.table.planner.codegen.GenerateUtils.{generateFieldAccess
 import org.apache.flink.table.planner.codegen.agg.AggsHandlerCodeGenerator._
 import org.apache.flink.table.planner.expressions.converter.ExpressionConverter
 import org.apache.flink.table.planner.plan.utils.DistinctInfo
+import org.apache.flink.table.runtime.dataview.BatchPrefetchableMapView
 import org.apache.flink.table.types.DataType
 import org.apache.flink.table.types.logical.{LogicalType, RowType}
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks
@@ -91,6 +92,7 @@ class DistinctAggCodeGen(
   val MAP_VIEW: String = className[MapView[_, _]]
   val MAP_ENTRY: String = className[java.util.Map.Entry[_, _]]
   val ITERABLE: String = className[java.lang.Iterable[_]]
+  val BATCH_PREFETCHABLE_MAP_VIEW: String = className[BatchPrefetchableMapView[_]]
 
   val aggCount: Int = innerAggCodeGens.length
   val externalAccType: DataType = distinctInfo.accType
@@ -300,6 +302,61 @@ class DistinctAggCodeGen(
        """.stripMargin
     } else {
       body
+    }
+  }
+
+  def beginBatchPrefetch(expectedKeysTerm: String): String = {
+    if (distinctInfo.dataViewSpec.isEmpty) {
+      ""
+    } else {
+      s"""
+         |if ($distinctAccTerm instanceof $BATCH_PREFETCHABLE_MAP_VIEW) {
+         |  (($BATCH_PREFETCHABLE_MAP_VIEW) $distinctAccTerm)
+         |    .beginPrefetchKeyCollection($expectedKeysTerm);
+         |}
+       """.stripMargin
+    }
+  }
+
+  def addBatchPrefetchKey(generator: ExprCodeGenerator): String = {
+    if (distinctInfo.dataViewSpec.isEmpty) {
+      ""
+    } else {
+      val keyExpr = generateKeyExpression(ctx, generator)
+      s"""
+         |${keyExpr.code}
+         |if (!${keyExpr.nullTerm} &&
+         |    $distinctAccTerm instanceof $BATCH_PREFETCHABLE_MAP_VIEW) {
+         |  (($BATCH_PREFETCHABLE_MAP_VIEW) $distinctAccTerm)
+         |    .addPrefetchKey(${keyExpr.resultTerm});
+         |}
+       """.stripMargin
+    }
+  }
+
+  def finishBatchPrefetch(resultTerm: String): String = {
+    if (distinctInfo.dataViewSpec.isEmpty) {
+      ""
+    } else {
+      s"""
+         |if ($distinctAccTerm instanceof $BATCH_PREFETCHABLE_MAP_VIEW) {
+         |  $resultTerm |= (($BATCH_PREFETCHABLE_MAP_VIEW) $distinctAccTerm)
+         |    .finishPrefetchKeyCollection();
+         |}
+       """.stripMargin
+    }
+  }
+
+  def abortBatchPrefetch(): String = {
+    if (distinctInfo.dataViewSpec.isEmpty) {
+      ""
+    } else {
+      s"""
+         |if ($distinctAccTerm instanceof $BATCH_PREFETCHABLE_MAP_VIEW) {
+         |  (($BATCH_PREFETCHABLE_MAP_VIEW) $distinctAccTerm)
+         |    .abortPrefetchKeyCollection();
+         |}
+       """.stripMargin
     }
   }
 

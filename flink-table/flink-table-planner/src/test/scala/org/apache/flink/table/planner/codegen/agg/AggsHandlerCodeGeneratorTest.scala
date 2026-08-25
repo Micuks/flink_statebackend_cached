@@ -32,6 +32,9 @@ class AggsHandlerCodeGeneratorTest extends AggTestBase(isBatchMode = false) {
   @Test
   def testAvg(): Unit = {
     val handler = getHandler(needRetract = false, needMerge = false)
+    Assert.assertFalse(
+      handler.prefetchDistinctBatch(
+        java.util.Arrays.asList(GenericRowData.of("f0", jl(5L), jd(5.3d), jl(2L)))))
     handler.resetAccumulators()
     handler.accumulate(GenericRowData.of("f0", jl(5L), jd(5.3d), jl(2L)))
     handler.accumulate(GenericRowData.of("f0", jl(6L), jd(6.5d), jl(3L)))

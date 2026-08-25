@@ -331,6 +331,7 @@ class AggsHandlerCodeGenerator(
     val getAccumulatorsCode = genGetAccumulators()
     val setAccumulatorsCode = genSetAccumulators()
     val resetAccumulatorsCode = genResetAccumulators()
+    val prefetchDistinctBatchCode = genPrefetchDistinctBatch()
     val accumulateCode = genAccumulate()
     val retractCode = genRetract()
     val mergeCode = genMerge()
@@ -363,6 +364,12 @@ class AggsHandlerCodeGenerator(
           @Override
           public void setWindowSize(int $WINDOWS_SIZE) {
             $setWindowSizeCode
+          }
+
+          @Override
+          public boolean prefetchDistinctBatch(
+              java.util.List<$ROW_DATA> prefetchInputs) throws Exception {
+            $prefetchDistinctBatchCode
           }
 
           @Override
@@ -984,6 +991,44 @@ class AggsHandlerCodeGenerator(
     } else {
       genThrowException(
         "This function not require accumulate method, but the accumulate method is called.")
+    }
+  }
+
+  private def genPrefetchDistinctBatch(): String = {
+    val distinctCodeGens = aggActionCodeGens.collect { case codegen: DistinctAggCodeGen => codegen }
+    if (distinctCodeGens.isEmpty) {
+      "return false;"
+    } else {
+      val methodName = "prefetchDistinctBatch"
+      val inputTerm = "prefetchInput"
+      val resultTerm = "prefetchExercised"
+      ctx.startNewLocalVariableStatement(methodName)
+      val exprGenerator = new ExprCodeGenerator(ctx, INPUT_NOT_NULL)
+        .bindInput(inputType, inputTerm = inputTerm)
+      val beginCode = distinctCodeGens.map(_.beginBatchPrefetch("prefetchInputs.size()"))
+        .mkString("\n")
+      val addCode = distinctCodeGens.map(_.addBatchPrefetchKey(exprGenerator)).mkString("\n")
+      val finishCode = distinctCodeGens.map(_.finishBatchPrefetch(resultTerm)).mkString("\n")
+      val abortCode = distinctCodeGens.map(_.abortBatchPrefetch()).mkString("\n")
+      s"""
+         |if (prefetchInputs == null || prefetchInputs.isEmpty()) {
+         |  return false;
+         |}
+         |${ctx.reuseLocalVariableCode(methodName)}
+         |try {
+         |  $beginCode
+         |  for ($ROW_DATA $inputTerm : prefetchInputs) {
+         |    ${ctx.reuseInputUnboxingCode(inputTerm)}
+         |    $addCode
+         |  }
+         |  boolean $resultTerm = false;
+         |  $finishCode
+         |  return $resultTerm;
+         |} catch (java.lang.Exception prefetchFailure) {
+         |  $abortCode
+         |  return false;
+         |}
+       """.stripMargin
     }
   }
 

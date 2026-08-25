@@ -248,6 +248,7 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
             firstRow = true;
         }
 
+        function.prefetchDistinctBatch(inputRows);
         final boolean distinctBatch = dataViewStore.beginDistinctBatch();
         boolean distinctBatchCommitted = false;
         try {

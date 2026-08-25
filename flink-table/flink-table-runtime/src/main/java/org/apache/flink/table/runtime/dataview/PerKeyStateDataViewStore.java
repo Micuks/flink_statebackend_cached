@@ -114,17 +114,15 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
         if (distinctBatchViews.isEmpty()) {
             return false;
         }
-        int started = 0;
         try {
             for (DistinctBatchStateMapView<?, ?, ?> view : distinctBatchViews) {
                 view.beginBatch();
-                started++;
             }
         } catch (RuntimeException failure) {
             // A generated aggregate can own more than one DISTINCT view. Never leave the earlier
             // views active when a later view rejects the batch.
-            for (int index = 0; index < started; index++) {
-                distinctBatchViews.get(index).abortBatch();
+            for (DistinctBatchStateMapView<?, ?, ?> view : distinctBatchViews) {
+                view.abortBatch();
             }
             throw failure;
         }

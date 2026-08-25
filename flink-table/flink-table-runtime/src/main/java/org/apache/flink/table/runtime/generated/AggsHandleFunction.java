@@ -21,6 +21,8 @@ package org.apache.flink.table.runtime.generated;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.functions.AggregateFunction;
 
+import java.util.List;
+
 /**
  * The base class for handling aggregate functions.
  *
@@ -29,6 +31,14 @@ import org.apache.flink.table.functions.AggregateFunction;
  * <p>It is the entry point for aggregate operators to operate all {@link AggregateFunction}s.
  */
 public interface AggsHandleFunction extends AggsHandleFunctionBase {
+
+    /**
+     * Collects exact DISTINCT MapState keys and starts a fail-closed batch-prefetch scope.
+     * Generated handlers without state-backed DISTINCT aggregates keep the no-op default.
+     */
+    default boolean prefetchDistinctBatch(List<RowData> inputs) throws Exception {
+        return false;
+    }
 
     /**
      * Gets the result of the aggregation from the current accumulators.
