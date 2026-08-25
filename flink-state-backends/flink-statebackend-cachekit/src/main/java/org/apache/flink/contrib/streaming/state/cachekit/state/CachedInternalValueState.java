@@ -327,6 +327,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchUnusedStagedOnClose;
     private volatile long prefetchBuildFailures;
     private volatile long prefetchWorkerFailures;
+    private static final java.util.concurrent.atomic.AtomicBoolean
+            FIRST_PREFETCH_WORKER_FAILURE_LOGGED = new java.util.concurrent.atomic.AtomicBoolean();
     private volatile long stickyUpdateSameKeyAttempts;
     private volatile long stickyUpdateInPlaceReuses;
     private volatile long nativeBatchesActivated;
@@ -3712,9 +3714,26 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     return;
                 }
             }
-        } catch (Throwable ignored) {
-            prefetchWorkerFailures++;
+        } catch (Throwable failure) {
+            recordPrefetchWorkerFailure("prepared-chunks", failure);
             // Best-effort cache warmup; the authoritative read path is untouched.
+        }
+    }
+
+    private void recordPrefetchWorkerFailure(String phase, Throwable failure) {
+        prefetchWorkerFailures++;
+        if (FIRST_PREFETCH_WORKER_FAILURE_LOGGED.compareAndSet(false, true)) {
+            LOG.warn(
+                    "[CACHEKIT PREFETCH WORKER FAILURE] phase={} delegate={} nativeStateId={} "
+                            + "directReadOnly={} directBatchSize={} message={}",
+                    phase,
+                    delegate.getClass().getName(),
+                    nativeStateId,
+                    nativeRequestPlaneCoordinator != null
+                            && nativeRequestPlaneCoordinator.options().directArenaReadOnlyEnabled(),
+                    directArenaChunkSize(),
+                    failure.toString(),
+                    failure);
         }
     }
 
