@@ -315,6 +315,15 @@ public class RocksDBResourceContainerTest {
     }
 
     @Test
+    public void testArmPointMapFlatAuthorityIsDefaultOffAndConfigurable() {
+        assertFalse(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_MAP_FLAT_AUTHORITY.defaultValue());
+        assertTrue(RocksDBResourceContainer.armPointFlatAuthority(true, false, false));
+        assertFalse(RocksDBResourceContainer.armPointFlatAuthority(false, true, false));
+        assertTrue(RocksDBResourceContainer.armPointFlatAuthority(false, true, true));
+        assertFalse(RocksDBResourceContainer.armPointFlatAuthority(false, false, true));
+    }
+
+    @Test
     public void testStateMetadataSurvivesColumnFamilyOptionsRouting() {
         final RegisteredKeyValueStateBackendMetaInfo<Integer, Integer> valueMeta =
                 new RegisteredKeyValueStateBackendMetaInfo<>(

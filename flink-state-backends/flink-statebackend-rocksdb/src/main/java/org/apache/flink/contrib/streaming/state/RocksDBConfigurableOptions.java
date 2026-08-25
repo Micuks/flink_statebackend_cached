@@ -316,6 +316,14 @@ public class RocksDBConfigurableOptions implements Serializable {
                     .withDescription(
                             "ArmPoint tag probe mode: scalar, sve, or auto. Forced sve fails closed when unavailable.");
 
+    public static final ConfigOption<Boolean> MEMTABLE_ARM_POINT_MAP_FLAT_AUTHORITY =
+            key("state.backend.rocksdb.memtable.arm-point.map-flat-authority")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Experimentally use ArmPoint's append-and-KeyHead flat authority for MapState. "
+                                    + "When false, MapState keeps the ordered InlineSkipList authority.");
+
     public static final ConfigOption<Double> RESTORE_OVERLAP_FRACTION_THRESHOLD =
             key("state.backend.rocksdb.restore-overlap-fraction-threshold")
                     .doubleType()
@@ -358,6 +366,7 @@ public class RocksDBConfigurableOptions implements Serializable {
                 MEMTABLE_ARM_POINT_ENABLED,
                 MEMTABLE_ARM_POINT_BUCKET_COUNT,
                 MEMTABLE_ARM_POINT_PROBE_MODE,
+                MEMTABLE_ARM_POINT_MAP_FLAT_AUTHORITY,
                 RESTORE_OVERLAP_FRACTION_THRESHOLD
             };
 

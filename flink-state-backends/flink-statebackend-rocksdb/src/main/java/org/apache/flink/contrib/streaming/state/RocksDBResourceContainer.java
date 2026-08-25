@@ -262,6 +262,16 @@ public final class RocksDBResourceContainer implements AutoCloseable {
                         && ((RegisteredKeyValueStateBackendMetaInfo<?, ?>) stateMetaInfo)
                                         .getStateType()
                                 == StateDescriptor.Type.VALUE;
+        final boolean mapState =
+                stateMetaInfo instanceof RegisteredKeyValueStateBackendMetaInfo
+                        && ((RegisteredKeyValueStateBackendMetaInfo<?, ?>) stateMetaInfo)
+                                        .getStateType()
+                                == StateDescriptor.Type.MAP;
+        final boolean mapFlatAuthority =
+                internalGetOption(
+                        RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_MAP_FLAT_AUTHORITY);
+        final boolean flatAuthority =
+                armPointFlatAuthority(valueState, mapState, mapFlatAuthority);
 
         if (selection.appliesTo(stateMetaInfo)) {
             final String previousFactory = options.memTableFactoryName();
@@ -273,10 +283,10 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
             final int bucketCount =
                     internalGetOption(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_BUCKET_COUNT);
-            // Flat append authority removes the ordered-write cost for point-only ValueState.
-            // MAP and every other range-oriented state retain the bounded ordered authority.
+            // Flat append authority removes ordered-write maintenance. ValueState always uses
+            // it. MapState may opt in experimentally; every other state retains ordered authority.
             final String factoryProbeMode =
-                    armPointFactoryProbeMode(selection.probeMode, valueState);
+                    armPointFactoryProbeMode(selection.probeMode, flatAuthority);
             options.setMemTableConfig(
                     new ArmPointMemTableConfig()
                             .setBucketCount(bucketCount)
@@ -290,7 +300,7 @@ public final class RocksDBResourceContainer implements AutoCloseable {
                     options.memTableFactoryName(),
                     bucketCount,
                     selection.probeMode,
-                    valueState ? "flat" : "ordered",
+                    flatAuthority ? "flat" : "ordered",
                     selection.allKeyValueStates ? "all-kv" : "value-only",
                     ArmPointMemTableConfig.isSveSupported());
         } else {
@@ -306,8 +316,14 @@ public final class RocksDBResourceContainer implements AutoCloseable {
     }
 
     @VisibleForTesting
-    static String armPointFactoryProbeMode(String probeMode, boolean valueState) {
-        return valueState ? probeMode + "-flat" : probeMode;
+    static String armPointFactoryProbeMode(String probeMode, boolean flatAuthority) {
+        return flatAuthority ? probeMode + "-flat" : probeMode;
+    }
+
+    @VisibleForTesting
+    static boolean armPointFlatAuthority(
+            boolean valueState, boolean mapState, boolean mapFlatAuthority) {
+        return valueState || (mapState && mapFlatAuthority);
     }
 
     /** Gets the RocksDB {@link WriteOptions} to be used for write operations. */
