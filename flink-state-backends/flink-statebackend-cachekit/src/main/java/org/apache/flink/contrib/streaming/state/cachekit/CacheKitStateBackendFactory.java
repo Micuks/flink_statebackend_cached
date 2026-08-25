@@ -15,138 +15,139 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit;
 
+import java.io.IOException;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.contrib.streaming.state.RocksDBStateBackendFactory;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneOptions;
-import org.apache.flink.contrib.streaming.state.RocksDBStateBackendFactory;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.StateBackendFactory;
 import org.apache.flink.runtime.state.hashmap.HashMapStateBackend;
 
-import java.io.IOException;
-
 /**
  * A minimal factory for creating {@link CacheKitStateBackend} instances.
  *
- * <p>
- * This is intentionally small and only exposes a single feature to start with:
- * LRU caching for {@code ValueState}.
+ * <p>This is intentionally small and only exposes a single feature to start with: LRU caching for
+ * {@code ValueState}.
  */
 public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKitStateBackend> {
 
-        public static final ConfigOption<Integer> VALUE_CACHE_MAX_ENTRIES = ConfigOptions
-                        .key("state.backend.cachekit.value.cache.max-entries")
+    public static final ConfigOption<Integer> VALUE_CACHE_MAX_ENTRIES =
+            ConfigOptions.key("state.backend.cachekit.value.cache.max-entries")
                         .intType()
                         .defaultValue(1024)
                         .withDescription("Max entries for per-ValueState LRU cache.");
 
-        public static final ConfigOption<CachePolicyType> VALUE_CACHE_POLICY = ConfigOptions
-                        .key("state.backend.cachekit.value.cache.policy")
+    public static final ConfigOption<CachePolicyType> VALUE_CACHE_POLICY =
+            ConfigOptions.key("state.backend.cachekit.value.cache.policy")
                         .enumType(CachePolicyType.class)
                         .defaultValue(CachePolicyType.LRU)
                         .withDescription("Cache policy for ValueState (LRU or CAFFEINE).");
 
-        public static final ConfigOption<Integer> VALUE_CACHE_LRU_OVERFLOW = ConfigOptions
-                        .key("state.backend.cachekit.value.cache.lru.overflow")
+    public static final ConfigOption<Integer> VALUE_CACHE_LRU_OVERFLOW =
+            ConfigOptions.key("state.backend.cachekit.value.cache.lru.overflow")
                         .intType()
                         .defaultValue(256)
-                        .withDescription(
-                                        "Overflow entries for LRU before batch eviction triggers.");
+                    .withDescription("Overflow entries for LRU before batch eviction triggers.");
 
-        public static final ConfigOption<Boolean> VALUE_BYPASS_ENABLED = ConfigOptions
-                        .key("state.backend.cachekit.value.bypass.enabled")
+    public static final ConfigOption<Boolean> VALUE_BYPASS_ENABLED =
+            ConfigOptions.key("state.backend.cachekit.value.bypass.enabled")
                         .booleanType()
                         .defaultValue(true)
-                        .withDescription("Enable adaptive bypass for ValueState caching based on hit rate.");
+                    .withDescription(
+                            "Enable adaptive bypass for ValueState caching based on hit rate.");
 
-        public static final ConfigOption<Double> VALUE_HIT_RATE_THRESHOLD = ConfigOptions
-                        .key("state.backend.cachekit.value.hit-rate.threshold")
+    public static final ConfigOption<Double> VALUE_HIT_RATE_THRESHOLD =
+            ConfigOptions.key("state.backend.cachekit.value.hit-rate.threshold")
                         .doubleType()
                         .defaultValue(0.05)
                         .withDescription(
                                         "Hit rate threshold (0.0 to 1.0) below which cache is bypassed. Default 0.05 (5%).");
 
-        public static final ConfigOption<Integer> VALUE_HIT_RATE_WINDOW = ConfigOptions
-                        .key("state.backend.cachekit.value.hit-rate.window")
+    public static final ConfigOption<Integer> VALUE_HIT_RATE_WINDOW =
+            ConfigOptions.key("state.backend.cachekit.value.hit-rate.window")
                         .intType()
                         .defaultValue(1000)
                         .withDescription("Number of accesses to calculate hit rate over.");
 
-        public static final ConfigOption<Integer> MAP_PRESENCE_CACHE_MAX_ENTRIES = ConfigOptions
-                        .key("state.backend.cachekit.map.presence.cache.max-entries")
+    public static final ConfigOption<Integer> MAP_PRESENCE_CACHE_MAX_ENTRIES =
+            ConfigOptions.key("state.backend.cachekit.map.presence.cache.max-entries")
                         .intType()
                         .defaultValue(8192)
                         .withDescription("Max entries for per-MapState key presence cache.");
 
-        public static final ConfigOption<CachePolicyType> MAP_PRESENCE_CACHE_POLICY = ConfigOptions
-                        .key("state.backend.cachekit.map.presence.cache.policy")
+    public static final ConfigOption<CachePolicyType> MAP_PRESENCE_CACHE_POLICY =
+            ConfigOptions.key("state.backend.cachekit.map.presence.cache.policy")
                         .enumType(CachePolicyType.class)
                         .defaultValue(CachePolicyType.LRU)
-                        .withDescription("Cache policy for MapState key presence cache (LRU or CAFFEINE).");
+                    .withDescription(
+                            "Cache policy for MapState key presence cache (LRU or CAFFEINE).");
 
-        public static final ConfigOption<Integer> MAP_PRESENCE_CACHE_LRU_OVERFLOW = ConfigOptions
-                        .key("state.backend.cachekit.map.presence.cache.lru.overflow")
+    public static final ConfigOption<Integer> MAP_PRESENCE_CACHE_LRU_OVERFLOW =
+            ConfigOptions.key("state.backend.cachekit.map.presence.cache.lru.overflow")
                         .intType()
                         .defaultValue(256)
                         .withDescription(
                                         "Overflow entries for MapState key presence LRU before batch eviction triggers.");
 
-        public static final ConfigOption<PresenceCacheImplementation> MAP_PRESENCE_CACHE_IMPLEMENTATION = ConfigOptions
-                        .key("state.backend.cachekit.map.presence.cache.impl")
+    public static final ConfigOption<PresenceCacheImplementation>
+            MAP_PRESENCE_CACHE_IMPLEMENTATION =
+                    ConfigOptions.key("state.backend.cachekit.map.presence.cache.impl")
                         .enumType(PresenceCacheImplementation.class)
                         .defaultValue(PresenceCacheImplementation.PRIMITIVE)
                         .withDescription(
                                         "Presence cache implementation for MapState (PRIMITIVE or OBJECT).");
 
-        public static final ConfigOption<Integer> MAP_CACHE_MAX_ENTRIES = ConfigOptions
-                        .key("state.backend.cachekit.map.cache.max-entries")
+    public static final ConfigOption<Integer> MAP_CACHE_MAX_ENTRIES =
+            ConfigOptions.key("state.backend.cachekit.map.cache.max-entries")
                         .intType()
                         .defaultValue(4096)
                         .withDescription("Max entries for per-MapState cache.");
 
-        public static final ConfigOption<CachePolicyType> MAP_CACHE_POLICY = ConfigOptions
-                        .key("state.backend.cachekit.map.cache.policy")
+    public static final ConfigOption<CachePolicyType> MAP_CACHE_POLICY =
+            ConfigOptions.key("state.backend.cachekit.map.cache.policy")
                         .enumType(CachePolicyType.class)
                         .defaultValue(CachePolicyType.LRU)
                         .withDescription("Cache policy for MapState (LRU or CAFFEINE).");
 
-        public static final ConfigOption<Integer> MAP_CACHE_LRU_OVERFLOW = ConfigOptions
-                        .key("state.backend.cachekit.map.cache.lru.overflow")
+    public static final ConfigOption<Integer> MAP_CACHE_LRU_OVERFLOW =
+            ConfigOptions.key("state.backend.cachekit.map.cache.lru.overflow")
                         .intType()
                         .defaultValue(256)
                         .withDescription(
                                         "Overflow entries for MapState LRU before batch eviction triggers.");
 
-        public static final ConfigOption<Boolean> MAP_BYPASS_ENABLED = ConfigOptions
-                        .key("state.backend.cachekit.map.bypass.enabled")
+    public static final ConfigOption<Boolean> MAP_BYPASS_ENABLED =
+            ConfigOptions.key("state.backend.cachekit.map.bypass.enabled")
                         .booleanType()
                         .defaultValue(false)
-                        .withDescription("Enable adaptive bypass for MapState caching based on hit rate.");
+                    .withDescription(
+                            "Enable adaptive bypass for MapState caching based on hit rate.");
 
-        public static final ConfigOption<Double> MAP_HIT_RATE_THRESHOLD = ConfigOptions
-                        .key("state.backend.cachekit.map.hit-rate.threshold")
+    public static final ConfigOption<Double> MAP_HIT_RATE_THRESHOLD =
+            ConfigOptions.key("state.backend.cachekit.map.hit-rate.threshold")
                         .doubleType()
                         .defaultValue(0.05)
                         .withDescription(
                                         "Hit rate threshold (0.0 to 1.0) below which MapState cache is bypassed.");
 
-        public static final ConfigOption<Integer> MAP_HIT_RATE_WINDOW = ConfigOptions
-                        .key("state.backend.cachekit.map.hit-rate.window")
+    public static final ConfigOption<Integer> MAP_HIT_RATE_WINDOW =
+            ConfigOptions.key("state.backend.cachekit.map.hit-rate.window")
                         .intType()
                         .defaultValue(1000)
                         .withDescription("Number of MapState accesses to calculate hit rate over.");
 
-        public static final ConfigOption<Boolean> MAP_ITERATION_CACHE_FILL_ENABLED = ConfigOptions
-                        .key("state.backend.cachekit.map.iteration.cache-fill.enabled")
+    public static final ConfigOption<Boolean> MAP_ITERATION_CACHE_FILL_ENABLED =
+            ConfigOptions.key("state.backend.cachekit.map.iteration.cache-fill.enabled")
                         .booleanType()
                         .defaultValue(true)
                         .withDescription("Enable cache backfill during MapState iteration.");
 
-        public static final ConfigOption<Integer> MAP_SNAPSHOT_CACHE_MAX_ENTRIES = ConfigOptions
-                        .key("state.backend.cachekit.map.snapshot.cache.max-entries")
+    public static final ConfigOption<Integer> MAP_SNAPSHOT_CACHE_MAX_ENTRIES =
+            ConfigOptions.key("state.backend.cachekit.map.snapshot.cache.max-entries")
                         .intType()
                         .defaultValue(0)
                         .withDescription(
@@ -154,8 +155,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         + "Caches (Key, Namespace) -> {EMPTY | SINGLE(UserKey)} to short-circuit "
                                                         + "entries()/iterator() calls. Set 0 to disable.");
 
-        public static final ConfigOption<Integer> MAP_SNAPSHOT_SMALL_MAX_ENTRIES = ConfigOptions
-                        .key("state.backend.cachekit.map.snapshot.small.max-entries")
+    public static final ConfigOption<Integer> MAP_SNAPSHOT_SMALL_MAX_ENTRIES =
+            ConfigOptions.key("state.backend.cachekit.map.snapshot.small.max-entries")
                         .intType()
                         .defaultValue(1)
                         .withDescription(
@@ -163,8 +164,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         + "1 preserves EMPTY/SINGLE behavior; 2-16 enables bounded point-get "
                                                         + "replay in original iteration order. Native snapshots remain EMPTY/SINGLE.");
 
-        public static final ConfigOption<Boolean> DIAGNOSTICS_ENABLED = ConfigOptions
-                        .key("state.backend.cachekit.diagnostics.enabled")
+    public static final ConfigOption<Boolean> DIAGNOSTICS_ENABLED =
+            ConfigOptions.key("state.backend.cachekit.diagnostics.enabled")
                         .booleanType()
                         .defaultValue(false)
                         .withDescription(
@@ -181,8 +182,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         ConfigOptions.key("state.backend.cachekit.native.request-plane.library")
                                         .stringType()
                                         .defaultValue("")
-                                        .withDescription(
-                                                        "Absolute JNI library path. Empty uses java.library.path.");
+                    .withDescription("Absolute JNI library path. Empty uses java.library.path.");
 
         public static final ConfigOption<String> NATIVE_REQUEST_PLANE_KERNEL =
                         ConfigOptions.key("state.backend.cachekit.native.request-plane.kernel")
@@ -217,15 +217,13 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         .withDescription("Maximum entries in one prepared native batch.");
 
         public static final ConfigOption<Integer> NATIVE_REQUEST_PLANE_BATCH_KEY_ARENA_BYTES =
-                        ConfigOptions.key(
-                                                        "state.backend.cachekit.native.request-plane.batch-key-arena-bytes")
+            ConfigOptions.key("state.backend.cachekit.native.request-plane.batch-key-arena-bytes")
                                         .intType()
                                         .defaultValue(256 << 10)
                                         .withDescription("Direct prepared-key bytes per bounded batch slot.");
 
         public static final ConfigOption<Integer> NATIVE_REQUEST_PLANE_BATCH_VALUE_ARENA_BYTES =
-                        ConfigOptions.key(
-                                                        "state.backend.cachekit.native.request-plane.batch-value-arena-bytes")
+            ConfigOptions.key("state.backend.cachekit.native.request-plane.batch-value-arena-bytes")
                                         .intType()
                                         .defaultValue(4 << 20)
                                         .withDescription("Direct probe/fill value bytes per bounded batch slot.");
@@ -241,8 +239,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         ConfigOptions.key("state.backend.cachekit.native.request-plane.batch-slots")
                                         .intType()
                                         .defaultValue(2)
-                                        .withDescription(
-                                                        "Bounded direct batch slots; exhaustion falls back to Java.");
+                    .withDescription("Bounded direct batch slots; exhaustion falls back to Java.");
 
         public static final ConfigOption<Boolean> NATIVE_MAILBOX_COMPACTION_SCRATCH_SLOT_ENABLED =
                         ConfigOptions.key(
@@ -255,8 +252,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "The scratch slot has no probe/fill value arena and is disabled by default.");
 
         public static final ConfigOption<Integer> NATIVE_MAILBOX_COMPACTION_SCRATCH_ENTRIES =
-                        ConfigOptions.key(
-                                                        "state.backend.cachekit.native.mailbox-compaction.scratch-entries")
+            ConfigOptions.key("state.backend.cachekit.native.mailbox-compaction.scratch-entries")
                                         .intType()
                                         .defaultValue(4096)
                                         .withDescription(
@@ -279,16 +275,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "Set false only for an explicit portable x86 comparison.");
 
         public static final ConfigOption<Boolean> NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS =
-                        ConfigOptions.key(
-                                                        "state.backend.cachekit.native.request-plane.write-through-mutations")
+            ConfigOptions.key("state.backend.cachekit.native.request-plane.write-through-mutations")
                                         .booleanType()
                                         .defaultValue(false)
                                         .withDescription(
                                                         "Also serialize and publish every authoritative ValueState mutation to the native plane. "
                                                                         + "Disabled by default: exact-generation probes invalidate older native entries without duplicate JNI writes.");
 
-        public static final ConfigOption<Boolean>
-                        NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH =
+    public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH =
                                         ConfigOptions.key(
                                                                         "state.backend.cachekit.native.value-cache.read-activated-write-through.enabled")
                                                         .booleanType()
@@ -308,8 +302,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "The batch advances the native generation fence before dispatch, bypasses native reads for pending dirty keys, "
                                                                         + "and publishes only prechecked resident keys in one bounded JNI fill at batch end.");
 
-        public static final ConfigOption<Boolean>
-                        NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH_ADAPTIVE =
+    public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH_ADAPTIVE =
                                         ConfigOptions.key(
                                                                         "state.backend.cachekit.native.value-cache.resident-mutation-batch.adaptive.enabled")
                                                         .booleanType()
@@ -370,8 +363,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "Java retains snapshot ownership, mutation generation, and iterator semantics.");
 
         public static final ConfigOption<Boolean> NATIVE_MAP_SNAPSHOT_ADAPTIVE_BYPASS_ENABLED =
-                        ConfigOptions.key(
-                                                        "state.backend.cachekit.native.map-snapshot.adaptive-bypass.enabled")
+            ConfigOptions.key("state.backend.cachekit.native.map-snapshot.adaptive-bypass.enabled")
                                         .booleanType()
                                         .defaultValue(false)
                                         .withDescription(
@@ -386,8 +378,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         .withDescription(
                                                         "Native MapSnapshot probes in each observation window before evaluating useful-hit rate.");
 
-        public static final ConfigOption<Double>
-                        NATIVE_MAP_SNAPSHOT_ADAPTIVE_MIN_USEFUL_HIT_RATE =
+    public static final ConfigOption<Double> NATIVE_MAP_SNAPSHOT_ADAPTIVE_MIN_USEFUL_HIT_RATE =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.map-snapshot.adaptive-bypass.min-useful-hit-rate")
                                         .doubleType()
@@ -413,8 +404,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "from Mailbox lookahead batches before reservation and MultiGet.");
 
         public static final ConfigOption<Boolean> BP_PREFETCH_CANCEL_ON_DISPATCH_ENABLED =
-                        ConfigOptions.key(
-                                                        "state.backend.cachekit.bp-prefetch.cancel-on-dispatch.enabled")
+            ConfigOptions.key("state.backend.cachekit.bp-prefetch.cancel-on-dispatch.enabled")
                                         .booleanType()
                                         .defaultValue(false)
                                         .withDescription(
@@ -423,8 +413,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "unsupported prefetch paths fail closed.");
 
         public static final ConfigOption<Boolean> BP_PREFETCH_KEY_SCOPED_INVALIDATION_ENABLED =
-                        ConfigOptions.key(
-                                                        "state.backend.cachekit.bp-prefetch.key-scoped-invalidation.enabled")
+            ConfigOptions.key("state.backend.cachekit.bp-prefetch.key-scoped-invalidation.enabled")
                                         .booleanType()
                                         .defaultValue(false)
                                         .withDescription(
@@ -440,8 +429,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "and fill around the authoritative RocksDB MultiGet path.");
 
         public static final ConfigOption<Boolean> NATIVE_COMPACT_SELECTED_PROBE_ENABLED =
-                        ConfigOptions.key(
-                                                        "state.backend.cachekit.native.compact-selected-probe.enabled")
+            ConfigOptions.key("state.backend.cachekit.native.compact-selected-probe.enabled")
                                         .booleanType()
                                         .defaultValue(false)
                                         .withDescription(
@@ -458,8 +446,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "Any value-slot overflow falls back for the complete direct chunk.");
 
         public static final ConfigOption<Integer> NATIVE_DIRECT_ARENA_BATCH_SIZE =
-                        ConfigOptions.key(
-                                                        "state.backend.cachekit.native.prefetch.direct-arena.batch-size")
+            ConfigOptions.key("state.backend.cachekit.native.prefetch.direct-arena.batch-size")
                                         .intType()
                                         .defaultValue(64)
                                         .withDescription(
@@ -475,8 +462,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Bypass the native ValueState cache probe/fill for mailbox-compacted prepared keys and issue the authoritative RocksDB MultiGet directly from the native key arena. "
                                                                         + "Generation, reservation, cancellation, and staging publication guards remain unchanged; requires direct-arena MultiGet.");
 
-        public static final ConfigOption<Boolean>
-                        NATIVE_DIRECT_ARENA_EAGER_MATERIALIZATION_ENABLED =
+    public static final ConfigOption<Boolean> NATIVE_DIRECT_ARENA_EAGER_MATERIALIZATION_ENABLED =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.prefetch.direct-arena-eager-materialization.enabled")
                                         .booleanType()
@@ -486,8 +472,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "This avoids the intermediate heap byte[] copy while retaining exact reservation, generation, and staging guards.");
 
         public static final ConfigOption<Boolean> NATIVE_PREFETCH_NEGATIVE_HANDOFF_ENABLED =
-                        ConfigOptions.key(
-                                                        "state.backend.cachekit.native.prefetch.negative-handoff.enabled")
+            ConfigOptions.key("state.backend.cachekit.native.prefetch.negative-handoff.enabled")
                                         .booleanType()
                                         .defaultValue(false)
                                         .withDescription(
@@ -495,16 +480,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "The exact prepared-key reservation and key-scoped write invalidation remain authoritative.");
 
         public static final ConfigOption<Boolean> NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED =
-                        ConfigOptions.key(
-                                                        "state.backend.cachekit.native.prefetch.access-guided-state.enabled")
+            ConfigOptions.key("state.backend.cachekit.native.prefetch.access-guided-state.enabled")
                                         .booleanType()
                                         .defaultValue(false)
                                         .withDescription(
                                                         "Submit record-lookahead prefetch only to ValueState wrappers that have already served a real mailbox read. "
                                                                         + "The first access and every skipped state retain the authoritative point-read path.");
 
-        public static final ConfigOption<Boolean>
-                        NATIVE_PREFETCH_PROMOTION_YIELD_ADMISSION_ENABLED =
+    public static final ConfigOption<Boolean> NATIVE_PREFETCH_PROMOTION_YIELD_ADMISSION_ENABLED =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.prefetch.promotion-yield-admission.enabled")
                                         .booleanType()
@@ -513,8 +496,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Suppress speculative work for ValueState wrappers whose staged values are not promoted by mailbox reads. "
                                                                         + "Periodic probes preserve phase-change recovery and authoritative reads are never bypassed.");
 
-        public static final ConfigOption<Integer>
-                        NATIVE_PREFETCH_PROMOTION_YIELD_MIN_STAGED_VALUES =
+    public static final ConfigOption<Integer> NATIVE_PREFETCH_PROMOTION_YIELD_MIN_STAGED_VALUES =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.prefetch.promotion-yield-admission.min-staged-values")
                                         .intType()
@@ -522,8 +504,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         .withDescription(
                                                         "Number of staged values required before promotion-yield admission can suppress a state.");
 
-        public static final ConfigOption<Double>
-                        NATIVE_PREFETCH_PROMOTION_YIELD_MIN_PROMOTION_RATE =
+    public static final ConfigOption<Double> NATIVE_PREFETCH_PROMOTION_YIELD_MIN_PROMOTION_RATE =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.prefetch.promotion-yield-admission.min-promotion-rate")
                                         .doubleType()
@@ -531,8 +512,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         .withDescription(
                                                         "Minimum cumulative promoted/staged ratio for continuously admitting a ValueState prefetch stream.");
 
-        public static final ConfigOption<Integer>
-                        NATIVE_PREFETCH_PROMOTION_YIELD_PROBE_EVERY_TASKS =
+    public static final ConfigOption<Integer> NATIVE_PREFETCH_PROMOTION_YIELD_PROBE_EVERY_TASKS =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.prefetch.promotion-yield-admission.probe-every-tasks")
                                         .intType()
@@ -569,43 +549,37 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Drop a newly requested speculative ValueState prefetch task while the adaptive mailbox-density controller is in bypass mode. "
                                                                         + "The authoritative synchronous state read and periodic native recovery probes are unchanged.");
 
-        public static final ConfigOption<Integer>
-                        NATIVE_MAILBOX_ADAPTIVE_DENSITY_WINDOW_INPUT_KEYS =
+    public static final ConfigOption<Integer> NATIVE_MAILBOX_ADAPTIVE_DENSITY_WINDOW_INPUT_KEYS =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.mailbox-batch.adaptive-density.window-input-keys")
                                         .intType()
                                         .defaultValue(8192);
 
-        public static final ConfigOption<Integer>
-                        NATIVE_MAILBOX_ADAPTIVE_DENSITY_WINDOW_BATCHES =
+    public static final ConfigOption<Integer> NATIVE_MAILBOX_ADAPTIVE_DENSITY_WINDOW_BATCHES =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.mailbox-batch.adaptive-density.window-batches")
                                         .intType()
                                         .defaultValue(64);
 
-        public static final ConfigOption<Integer>
-                        NATIVE_MAILBOX_ADAPTIVE_DENSITY_LOW_WINDOWS =
+    public static final ConfigOption<Integer> NATIVE_MAILBOX_ADAPTIVE_DENSITY_LOW_WINDOWS =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.mailbox-batch.adaptive-density.low-density-windows")
                                         .intType()
                                         .defaultValue(2);
 
-        public static final ConfigOption<Integer>
-                        NATIVE_MAILBOX_ADAPTIVE_DENSITY_COOLDOWN_BATCHES =
+    public static final ConfigOption<Integer> NATIVE_MAILBOX_ADAPTIVE_DENSITY_COOLDOWN_BATCHES =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.mailbox-batch.adaptive-density.cooldown-batches")
                                         .intType()
                                         .defaultValue(4096);
 
-        public static final ConfigOption<Double>
-                        NATIVE_MAILBOX_ADAPTIVE_DENSITY_MIN_UNIQUE_RATE =
+    public static final ConfigOption<Double> NATIVE_MAILBOX_ADAPTIVE_DENSITY_MIN_UNIQUE_RATE =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.mailbox-batch.adaptive-density.min-unique-rate")
                                         .doubleType()
                                         .defaultValue(0.10);
 
-        public static final ConfigOption<Double>
-                        NATIVE_MAILBOX_ADAPTIVE_DENSITY_RECOVERY_UNIQUE_RATE =
+    public static final ConfigOption<Double> NATIVE_MAILBOX_ADAPTIVE_DENSITY_RECOVERY_UNIQUE_RATE =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.mailbox-batch.adaptive-density.recovery-unique-rate")
                                         .doubleType()
@@ -621,8 +595,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Temporarily bypass zero-useful-hit native prepared-key probe/fill per ValueState. "
                                                                         + "Mailbox compaction and the authoritative RocksDB path remain unchanged.");
 
-        public static final ConfigOption<Integer>
-                        NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_WINDOW_KEYS =
+    public static final ConfigOption<Integer> NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_WINDOW_KEYS =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.window-keys")
                                         .intType()
@@ -635,8 +608,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         .intType()
                                         .defaultValue(64);
 
-        public static final ConfigOption<Integer>
-                        NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_ZERO_WINDOWS =
+    public static final ConfigOption<Integer> NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_ZERO_WINDOWS =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.zero-windows")
                                         .intType()
@@ -672,8 +644,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "group ids; Java retains accumulator, emission, and ordering semantics.");
 
         public static final ConfigOption<Boolean> NATIVE_LOCAL_PREAGG_INDEXED_FOLD_ENABLED =
-                        ConfigOptions.key(
-                                                        "state.backend.cachekit.native.local-preagg.indexed-fold.enabled")
+            ConfigOptions.key("state.backend.cachekit.native.local-preagg.indexed-fold.enabled")
                                         .booleanType()
                                         .defaultValue(false)
                                         .withDescription(
@@ -682,8 +653,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "Requires native LocalPreAgg and is disabled by default.");
 
         public static final ConfigOption<Boolean> DISTINCT_BATCH_OVERLAY_ENABLED =
-                        ConfigOptions.key(
-                                                        "state.backend.cachekit.local-preagg.distinct-overlay.enabled")
+            ConfigOptions.key("state.backend.cachekit.local-preagg.distinct-overlay.enabled")
                                         .booleanType()
                                         .defaultValue(false)
                                         .withDescription(
@@ -691,7 +661,17 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "LocalPreagg outer-key batch. Disabled for TTL state; final values "
                                                                         + "are committed through MapState.putAll before output.");
 
-	public static final ConfigOption<String> DELEGATE_BACKEND = ConfigOptions.key("state.backend.cachekit.delegate")
+    public static final ConfigOption<Boolean> NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED =
+            ConfigOptions.key("state.backend.cachekit.native.map-distinct-batch-prefetch.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Prefetch exact DISTINCT MapState user keys with one ordered native RocksDB "
+                                    + "MultiGet per outer-key batch. Results are scoped staging only and "
+                                    + "fail closed to authoritative MapState reads.");
+
+    public static final ConfigOption<String> DELEGATE_BACKEND =
+            ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
 			.noDefaultValue()
 			.withDescription(
@@ -747,7 +727,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final int mapPresenceMaxEntries = Math.max(0, config.get(MAP_PRESENCE_CACHE_MAX_ENTRIES));
                 final CachePolicyType mapPresencePolicy = config.get(MAP_PRESENCE_CACHE_POLICY);
                 final int mapPresenceLruOverflow = Math.max(0, config.get(MAP_PRESENCE_CACHE_LRU_OVERFLOW));
-                final PresenceCacheImplementation mapPresenceImpl = config.get(MAP_PRESENCE_CACHE_IMPLEMENTATION);
+        final PresenceCacheImplementation mapPresenceImpl =
+                config.get(MAP_PRESENCE_CACHE_IMPLEMENTATION);
                 final int mapCacheMaxEntries = Math.max(0, config.get(MAP_CACHE_MAX_ENTRIES));
                 final CachePolicyType mapCachePolicy = config.get(MAP_CACHE_POLICY);
                 final int mapCacheLruOverflow = Math.max(0, config.get(MAP_CACHE_LRU_OVERFLOW));
@@ -844,7 +825,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 								diagnosticsEnabled,
 								nativeRequestPlaneOptions,
 								keyScopedPrefetchInvalidationEnabled,
-								config.get(NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED));
+                config.get(NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED),
+                config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED));
 	}
 
         static NativeRequestPlaneOptions nativeRequestPlaneOptions(ReadableConfig config) {
@@ -884,8 +866,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH),
                                 config.get(NATIVE_DIRECT_ARENA_READ_ONLY_ENABLED),
                                 config.get(NATIVE_PREFETCH_NEGATIVE_HANDOFF_ENABLED),
-                                config.get(
-                                                NATIVE_PREFETCH_DEFERRED_RESERVATION_MATERIALIZATION_ENABLED),
+                        config.get(NATIVE_PREFETCH_DEFERRED_RESERVATION_MATERIALIZATION_ENABLED),
                                 config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_SLOT_ENABLED),
                                 config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_ENTRIES),
                                 config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_KEY_ARENA_BYTES),

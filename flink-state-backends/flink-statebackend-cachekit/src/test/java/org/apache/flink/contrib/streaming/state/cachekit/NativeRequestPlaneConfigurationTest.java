@@ -18,16 +18,15 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit;
 
-import org.apache.flink.configuration.Configuration;
-import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneBridge;
-import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneOptions;
-
-import org.junit.jupiter.api.Test;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneBridge;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneOptions;
+import org.junit.jupiter.api.Test;
 
 class NativeRequestPlaneConfigurationTest {
 
@@ -46,8 +45,7 @@ class NativeRequestPlaneConfigurationTest {
         enabled.set(
                 CacheKitStateBackendFactory.DELEGATE_BACKEND,
                 "org.apache.flink.runtime.state.hashmap.HashMapStateBackend");
-        enabled.set(
-                CacheKitStateBackendFactory.BP_PREFETCH_KEY_SCOPED_INVALIDATION_ENABLED, true);
+        enabled.set(CacheKitStateBackendFactory.BP_PREFETCH_KEY_SCOPED_INVALIDATION_ENABLED, true);
         CacheKitStateBackend enabledBackend =
                 new CacheKitStateBackendFactory()
                         .createFromConfig(enabled, getClass().getClassLoader());
@@ -67,12 +65,31 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(disabledBackend.nativePrefetchAccessGuidedStateEnabledForTesting());
 
         Configuration enabled = new Configuration(disabled);
-        enabled.set(
-                CacheKitStateBackendFactory.NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED, true);
+        enabled.set(CacheKitStateBackendFactory.NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED, true);
         CacheKitStateBackend enabledBackend =
                 new CacheKitStateBackendFactory()
                         .createFromConfig(enabled, getClass().getClassLoader());
         assertTrue(enabledBackend.nativePrefetchAccessGuidedStateEnabledForTesting());
+    }
+
+    @Test
+    void testMapDistinctBatchPrefetchIsExplicitAndCarriedByConfiguredBackendInstance()
+            throws Exception {
+        Configuration disabled = new Configuration();
+        disabled.set(
+                CacheKitStateBackendFactory.DELEGATE_BACKEND,
+                "org.apache.flink.runtime.state.hashmap.HashMapStateBackend");
+        CacheKitStateBackend disabledBackend =
+                new CacheKitStateBackendFactory()
+                        .createFromConfig(disabled, getClass().getClassLoader());
+        assertFalse(disabledBackend.nativeMapDistinctBatchPrefetchEnabledForTesting());
+
+        Configuration enabled = new Configuration(disabled);
+        enabled.set(CacheKitStateBackendFactory.NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED, true);
+        CacheKitStateBackend enabledBackend =
+                new CacheKitStateBackendFactory()
+                        .createFromConfig(enabled, getClass().getClassLoader());
+        assertTrue(enabledBackend.nativeMapDistinctBatchPrefetchEnabledForTesting());
     }
 
     @Test
@@ -121,11 +138,9 @@ class NativeRequestPlaneConfigurationTest {
         config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_MIN_BATCH_SIZE, 5);
         config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_BATCH_SLOTS, 3);
         config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_AARCH64_ONLY, false);
+        config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS, true);
         config.set(
-                CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS, true);
-        config.set(
-                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH,
-                true);
+                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH, true);
         config.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_CACHE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
@@ -195,34 +210,12 @@ class NativeRequestPlaneConfigurationTest {
     void testSVE2AndRelativeLibraryAreRejected() {
         assertThrows(
                 IllegalArgumentException.class,
-                () ->
-                        new NativeRequestPlaneOptions(
-                                true,
-                                "",
-                                "sve2",
-                                1,
-                                1,
-                                1,
-                                1,
-                                1,
-                                1,
-                                1,
-                                1));
+                () -> new NativeRequestPlaneOptions(true, "", "sve2", 1, 1, 1, 1, 1, 1, 1, 1));
         assertThrows(
                 IllegalArgumentException.class,
                 () ->
                         new NativeRequestPlaneOptions(
-                                true,
-                                "relative.so",
-                                "auto",
-                                1,
-                                1,
-                                1,
-                                1,
-                                1,
-                                1,
-                                1,
-                                1));
+                                true, "relative.so", "auto", 1, 1, 1, 1, 1, 1, 1, 1));
     }
 
     @Test
@@ -231,31 +224,9 @@ class NativeRequestPlaneConfigurationTest {
                 IllegalArgumentException.class,
                 () ->
                         new NativeRequestPlaneOptions(
-                                true,
-                                "",
-                                "auto",
-                                128,
-                                4096,
-                                4096,
-                                16,
-                                4096,
-                                4096,
-                                1,
-                                2,
-                                false,
-                                false,
-                                false,
-                                false,
-                                false,
-                                true,
-                                true,
-                                false,
-                                false,
-                                true,
-                                false,
-                                8192,
-                                0.02,
-                                262144));
+                                true, "", "auto", 128, 4096, 4096, 16, 4096, 4096, 1, 2, false,
+                                false, false, false, false, true, true, false, false, true, false,
+                                8192, 0.02, 262144));
     }
 
     @Test
@@ -264,31 +235,9 @@ class NativeRequestPlaneConfigurationTest {
                 IllegalArgumentException.class,
                 () ->
                         new NativeRequestPlaneOptions(
-                                true,
-                                "",
-                                "auto",
-                                128,
-                                4096,
-                                4096,
-                                16,
-                                4096,
-                                63,
-                                1,
-                                2,
-                                false,
-                                false,
-                                false,
-                                false,
-                                false,
-                                true,
-                                true,
-                                false,
-                                true,
-                                true,
-                                false,
-                                8192,
-                                0.02,
-                                262144));
+                                true, "", "auto", 128, 4096, 4096, 16, 4096, 63, 1, 2, false, false,
+                                false, false, false, true, true, false, true, true, false, 8192,
+                                0.02, 262144));
     }
 
     @Test
@@ -297,41 +246,10 @@ class NativeRequestPlaneConfigurationTest {
                 IllegalArgumentException.class,
                 () ->
                         new NativeRequestPlaneOptions(
-                                true,
-                                "",
-                                "auto",
-                                128,
-                                4096,
-                                4096,
-                                16,
-                                4096,
-                                4096,
-                                1,
-                                2,
-                                false,
-                                false,
-                                false,
-                                false,
-                                false,
-                                true,
-                                true,
-                                false,
-                                true,
-                                true,
-                                false,
-                                8192,
-                                0.02,
-                                262144,
-                                false,
-                                false,
-                                false,
-                                false,
-                                false,
-                                false,
-                                false,
-                                16,
-                                4096,
-                                true));
+                                true, "", "auto", 128, 4096, 4096, 16, 4096, 4096, 1, 2, false,
+                                false, false, false, false, true, true, false, true, true, false,
+                                8192, 0.02, 262144, false, false, false, false, false, false, false,
+                                16, 4096, true));
     }
 
     @Test
@@ -399,7 +317,8 @@ class NativeRequestPlaneConfigurationTest {
         Configuration invalidWindow = new Configuration();
         invalidWindow.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
         invalidWindow.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
-        invalidWindow.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_WINDOW_PROBES, 1);
+        invalidWindow.set(
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_WINDOW_PROBES, 1);
         assertThrows(
                 IllegalArgumentException.class,
                 () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalidWindow));
@@ -408,8 +327,7 @@ class NativeRequestPlaneConfigurationTest {
         invalidRate.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
         invalidRate.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
         invalidRate.set(
-                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_MIN_USEFUL_HIT_RATE,
-                1.01);
+                CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_MIN_USEFUL_HIT_RATE, 1.01);
         assertThrows(
                 IllegalArgumentException.class,
                 () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalidRate));
@@ -448,8 +366,7 @@ class NativeRequestPlaneConfigurationTest {
         preagg.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
         preagg.set(CacheKitStateBackendFactory.NATIVE_LOCAL_PREAGG_ENABLED, true);
         assertFalse(
-                CacheKitStateBackendFactory.nativeRequestPlaneOptions(preagg)
-                        .requiresValueCache());
+                CacheKitStateBackendFactory.nativeRequestPlaneOptions(preagg).requiresValueCache());
 
         Configuration prefetch = new Configuration();
         prefetch.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
@@ -463,8 +380,7 @@ class NativeRequestPlaneConfigurationTest {
     void testIndexedFoldRequiresNativeLocalPreagg() {
         Configuration invalid = new Configuration();
         invalid.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
-        invalid.set(
-                CacheKitStateBackendFactory.NATIVE_LOCAL_PREAGG_INDEXED_FOLD_ENABLED, true);
+        invalid.set(CacheKitStateBackendFactory.NATIVE_LOCAL_PREAGG_INDEXED_FOLD_ENABLED, true);
         assertThrows(
                 IllegalArgumentException.class,
                 () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalid));
@@ -482,14 +398,12 @@ class NativeRequestPlaneConfigurationTest {
         invalid.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
         invalid.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ENABLED, true);
         invalid.set(
-                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH,
-                true);
+                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH, true);
         assertThrows(
                 IllegalArgumentException.class,
                 () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalid));
 
-        invalid.set(
-                CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS, true);
+        invalid.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS, true);
         invalid.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ENABLED, false);
         assertThrows(
                 IllegalArgumentException.class,
@@ -509,7 +423,8 @@ class NativeRequestPlaneConfigurationTest {
         Configuration missingPrefetch = new Configuration();
         missingPrefetch.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
         missingPrefetch.set(CacheKitStateBackendFactory.NATIVE_MAILBOX_BATCH_ENABLED, true);
-        missingPrefetch.set(CacheKitStateBackendFactory.NATIVE_COMPACT_SELECTED_PROBE_ENABLED, true);
+        missingPrefetch.set(
+                CacheKitStateBackendFactory.NATIVE_COMPACT_SELECTED_PROBE_ENABLED, true);
         assertThrows(
                 IllegalArgumentException.class,
                 () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(missingPrefetch));

@@ -14,24 +14,8 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
-import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.base.IntSerializer;
-import org.apache.flink.api.common.typeutils.base.MapSerializer;
-import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
-import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
-import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
-import org.apache.flink.runtime.state.VoidNamespace;
-import org.apache.flink.runtime.state.internal.InternalMapState;
-
-import org.junit.jupiter.api.Test;
-
-import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -42,16 +26,174 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
+
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.api.common.typeutils.base.MapSerializer;
+import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
+import org.apache.flink.contrib.streaming.state.RocksDBBatchMapReader;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
+import org.apache.flink.core.memory.DataOutputSerializer;
+import org.apache.flink.runtime.state.VoidNamespace;
+import org.apache.flink.runtime.state.internal.InternalMapState;
+import org.junit.jupiter.api.Test;
 
 class CachedInternalMapStateTest {
 
     @Test
+    @SuppressWarnings("unchecked")
+    void testExactDistinctBatchPrefetchStagesFoundAndMissingValues() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer
+                                        .INSTANCE,
+                                IntSerializer.INSTANCE));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        when(reader.getSerializedValuesByUserKeys(Arrays.asList("u1", "u2")))
+                .thenReturn(Arrays.asList(serializedMapValue(7), null));
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0);
+        state.enableNativeDistinctBatchPrefetch(true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        assertTrue(state.beginPrefetchCurrentKeys(Arrays.asList("u1", "u2", "u1")));
+        assertEquals(7, state.get("u1"));
+        assertNull(state.get("u2"));
+        assertTrue(state.contains("u1"));
+        assertFalse(state.contains("u2"));
+        assertEquals(1, state.getBatchPrefetchBatchesForTesting());
+        assertEquals(2, state.getBatchPrefetchUniqueKeysForTesting());
+        assertEquals(4, state.getBatchPrefetchHitsForTesting());
+        verify(delegate, times(0)).get(any());
+        verify(delegate, times(0)).contains(any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testExactDistinctBatchPrefetchInvalidatesOnOuterKeyChangeAndTracksWrites()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer
+                                        .INSTANCE,
+                                IntSerializer.INSTANCE));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        when(reader.getSerializedValuesByUserKeys(Arrays.asList("u1", "u2")))
+                .thenReturn(Arrays.asList(serializedMapValue(1), serializedMapValue(2)));
+        when(delegate.get("u1")).thenReturn(99);
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0);
+        state.enableNativeDistinctBatchPrefetch(true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        assertTrue(state.beginPrefetchCurrentKeys(Arrays.asList("u1", "u2")));
+        state.put("u1", 11);
+        assertEquals(11, state.get("u1"));
+        state.remove("u2");
+        assertFalse(state.contains("u2"));
+
+        currentKey.set("k2");
+        assertEquals(99, state.get("u1"));
+        verify(delegate, times(1)).get("u1");
+    }
+
+    @Test
+    void testExactDistinctBatchPrefetchFailsClosedWithoutRocksDBCapability() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer
+                                        .INSTANCE,
+                                IntSerializer.INSTANCE));
+        when(delegate.get("u1")).thenReturn(5);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0);
+        state.enableNativeDistinctBatchPrefetch(true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        assertFalse(state.beginPrefetchCurrentKeys(Arrays.asList("u1", "u2")));
+        assertEquals(5, state.get("u1"));
+        assertEquals(1, state.getBatchPrefetchFallbacksForTesting());
+    }
+
+    @Test
     void testPresenceCacheSkipsDelegateOnAbsentContains() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         when(delegate.contains("uk1")).thenReturn(false);
 
-        CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
                 delegate,
                 currentKey::get,
                 currentKey::set,
@@ -78,9 +220,11 @@ class CachedInternalMapStateTest {
     @Test
     void testPresenceCacheUpdatedOnPutAndRemove() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
 
-        CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
                 delegate,
                 currentKey::get,
                 currentKey::set,
@@ -111,10 +255,12 @@ class CachedInternalMapStateTest {
     @Test
     void testPresenceCacheShortCircuitsGetAfterAbsent() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         when(delegate.contains("uk1")).thenReturn(false);
 
-        CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
                 delegate,
                 currentKey::get,
                 currentKey::set,
@@ -142,10 +288,12 @@ class CachedInternalMapStateTest {
     @Test
     void testBypassEntersAndExitsOnHitRate() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         when(delegate.get(any())).thenReturn(1);
 
-        CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
                 delegate,
                 currentKey::get,
                 currentKey::set,
@@ -185,13 +333,15 @@ class CachedInternalMapStateTest {
     @Test
     void testIterationCacheFillToggleDisablesBackfill() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         Map<String, Integer> entries = new java.util.HashMap<>();
         entries.put("uk1", 1);
         when(delegate.entries()).thenReturn(entries.entrySet());
         when(delegate.contains("uk1")).thenReturn(true);
 
-        CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
                 delegate,
                 currentKey::get,
                 currentKey::set,
@@ -220,9 +370,11 @@ class CachedInternalMapStateTest {
     @Test
     void testFlushWritesBackDirtyEntries() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
 
-        CachedInternalMapState<String, VoidNamespace, String, Integer> state = new CachedInternalMapState<>(
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
                 delegate,
                 currentKey::get,
                 currentKey::set,
@@ -250,7 +402,8 @@ class CachedInternalMapStateTest {
     @Test
     void testFlushDoesNotWriteAfterClose() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
 
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =
                 new CachedInternalMapState<>(
@@ -279,10 +432,10 @@ class CachedInternalMapStateTest {
     }
 
     @Test
-    void testEntriesIteratorRemoveUsesConsumedDelegateAndInvalidatesValueCache()
-            throws Exception {
+    void testEntriesIteratorRemoveUsesConsumedDelegateAndInvalidatesValueCache() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         Map<String, Integer> entries = new LinkedHashMap<>();
         entries.put("uk1", 1);
         when(delegate.entries()).thenReturn(entries.entrySet());
@@ -318,7 +471,8 @@ class CachedInternalMapStateTest {
     @Test
     void testDirectIteratorRemoveInvalidatesPresenceCache() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         Map<String, Integer> entries = new LinkedHashMap<>();
         entries.put("uk1", 1);
         when(delegate.iterator()).thenAnswer(ignored -> entries.entrySet().iterator());
@@ -354,7 +508,8 @@ class CachedInternalMapStateTest {
     @Test
     void testEntriesIteratorRemoveWorksWithoutSnapshotCache() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         Map<String, Integer> entries = new LinkedHashMap<>();
         entries.put("uk1", 1);
         when(delegate.entries()).thenReturn(entries.entrySet());
@@ -390,7 +545,8 @@ class CachedInternalMapStateTest {
     void testEntriesIteratorRemoveInvalidatesExistingCacheWhenIterationFillDisabled()
             throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         Map<String, Integer> entries = new LinkedHashMap<>();
         entries.put("uk1", 1);
         when(delegate.entries()).thenReturn(entries.entrySet());
@@ -428,7 +584,8 @@ class CachedInternalMapStateTest {
     @Test
     void testSnapshotHitIteratorRemoveUsesMapStateRemove() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         Map<String, Integer> entries = new LinkedHashMap<>();
         entries.put("uk1", 1);
         when(delegate.entries()).thenReturn(entries.entrySet());
@@ -468,7 +625,8 @@ class CachedInternalMapStateTest {
     @Test
     void testSnapshotReadPathsAvoidFlushingOtherKeysDirtyMapCache() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         when(delegate.entries()).thenReturn(java.util.Collections.emptyList());
 
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =
@@ -528,7 +686,8 @@ class CachedInternalMapStateTest {
         assertTrue(state.isEmpty());
         verify(delegate, times(0)).put(any(), any());
 
-        // A snapshot miss must still flush deferred writes for the current key before using delegate.
+        // A snapshot miss must still flush deferred writes for the current key before using
+        // delegate.
         currentKey.set("k2");
         clearInvocations(delegate);
         assertFalse(state.entries().iterator().hasNext());
@@ -538,7 +697,8 @@ class CachedInternalMapStateTest {
     @Test
     void testSnapshotMissFlushesOnlyCurrentKeyDirtyMapCache() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         when(delegate.entries()).thenReturn(java.util.Collections.emptyList());
 
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =
@@ -577,7 +737,8 @@ class CachedInternalMapStateTest {
     @Test
     void testClearDiscardsDirtyEntriesFromScopedFlushIndex() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         when(delegate.entries()).thenReturn(java.util.Collections.emptyList());
 
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =
@@ -610,7 +771,8 @@ class CachedInternalMapStateTest {
     @Test
     void testScopedFlushWritesRemainingDirtyEntriesAfterL1Eviction() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         when(delegate.entries()).thenReturn(java.util.Collections.emptyList());
 
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =
@@ -632,7 +794,8 @@ class CachedInternalMapStateTest {
                         0);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
-        // L1 has a minimum size of 128. The 129th write flushes exactly one dirty entry on eviction.
+        // L1 has a minimum size of 128. The 129th write flushes exactly one dirty entry on
+        // eviction.
         for (int i = 0; i < 129; i++) {
             state.put("dirty-" + i, i);
         }
@@ -645,7 +808,8 @@ class CachedInternalMapStateTest {
     @Test
     void testDisabledSnapshotMetricsDoNotRecord() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         when(delegate.entries()).thenReturn(java.util.Collections.emptyList());
         MapSnapshotCacheMetrics metrics = MapSnapshotCacheMetrics.disabled();
 
@@ -682,7 +846,8 @@ class CachedInternalMapStateTest {
     @Test
     void testSnapshotMetricsRecordEmptyBackfillAndShortCircuit() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         when(delegate.entries()).thenReturn(java.util.Collections.emptyList());
         MapSnapshotCacheMetrics metrics = MapSnapshotCacheMetrics.forTesting();
 
@@ -726,7 +891,8 @@ class CachedInternalMapStateTest {
     @Test
     void testSnapshotMetricsRecordSingleBackfillAndShortCircuit() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
-        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
         Map<String, Integer> entries = new LinkedHashMap<>();
         entries.put("uk1", 1);
         when(delegate.entries()).thenReturn(entries.entrySet());
@@ -998,6 +1164,15 @@ class CachedInternalMapStateTest {
             count++;
         }
         return count;
+    }
+
+    private static byte[] serializedMapValue(Integer value) throws Exception {
+        DataOutputSerializer out = new DataOutputSerializer(16);
+        out.writeBoolean(value == null);
+        if (value != null) {
+            IntSerializer.INSTANCE.serialize(value, out);
+        }
+        return out.getCopyOfBuffer();
     }
 
     private static final class MutableKey {

@@ -110,6 +110,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
     private final NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator;
     private final boolean keyScopedPrefetchInvalidationEnabled;
     private final boolean nativePrefetchAccessGuidedStateEnabled;
+    private final boolean nativeMapDistinctBatchPrefetchEnabled;
     private int nextNativeStateId = 1;
     private long nativePreaggGroupBatches;
     private long nativePreaggInputKeys;
@@ -273,6 +274,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 diagnosticsEnabled,
                 nativeRequestPlaneOptions,
                 false,
+                false,
                 false);
     }
 
@@ -345,6 +347,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 diagnosticsEnabled,
                 nativeRequestPlaneOptions,
                 false,
+                false,
                 false);
     }
 
@@ -383,7 +386,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
             boolean diagnosticsEnabled,
             NativeRequestPlaneOptions nativeRequestPlaneOptions,
             boolean keyScopedPrefetchInvalidationEnabled,
-            boolean nativePrefetchAccessGuidedStateEnabled) {
+            boolean nativePrefetchAccessGuidedStateEnabled,
+            boolean nativeMapDistinctBatchPrefetchEnabled) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -420,6 +424,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
         this.listStateClearedKeysCapacity = listStateClearedKeysCapacity;
         this.priorityQueueOptEnabled = priorityQueueOptEnabled;
         this.keyScopedPrefetchInvalidationEnabled = keyScopedPrefetchInvalidationEnabled;
+        this.nativeMapDistinctBatchPrefetchEnabled = nativeMapDistinctBatchPrefetchEnabled;
         this.mapSnapshotCacheMetrics =
                 MapSnapshotCacheMetrics.create(metricGroup, diagnosticsEnabled);
         Preconditions.checkNotNull(nativeRequestPlaneOptions, "nativeRequestPlaneOptions");
@@ -563,6 +568,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 && (mapPresenceCacheMaxEntries > 0
                         || mapCacheMaxEntries > 0
                         || mapSnapshotCacheMaxEntries > 0
+                        || nativeMapDistinctBatchPrefetchEnabled
                         || (nativeRequestPlaneCoordinator != null
                                 && (nativeRequestPlaneCoordinator.options().mapCacheEnabled()
                                         || nativeRequestPlaneCoordinator
@@ -608,9 +614,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                                     ? allocateNativeStateId()
                                     : 0,
                             nativeRequestPlaneCoordinator != null
-                                    && nativeRequestPlaneCoordinator
-                                            .options()
-                                            .mapSnapshotEnabled(),
+                                    && nativeRequestPlaneCoordinator.options().mapSnapshotEnabled(),
                             mapSnapshotSmallMaxEntries,
                             nativeRequestPlaneCoordinator != null
                                     && nativeRequestPlaneCoordinator
@@ -631,6 +635,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                                     : nativeRequestPlaneCoordinator
                                             .options()
                                             .mapSnapshotAdaptiveResampleIntervalProbes());
+            wrapped.enableNativeDistinctBatchPrefetch(nativeMapDistinctBatchPrefetchEnabled);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -763,6 +768,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 && (mapPresenceCacheMaxEntries > 0
                         || mapCacheMaxEntries > 0
                         || mapSnapshotCacheMaxEntries > 0
+                        || nativeMapDistinctBatchPrefetchEnabled
                         || (nativeRequestPlaneCoordinator != null
                                 && (nativeRequestPlaneCoordinator.options().mapCacheEnabled()
                                         || nativeRequestPlaneCoordinator
@@ -808,9 +814,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                                     ? allocateNativeStateId()
                                     : 0,
                             nativeRequestPlaneCoordinator != null
-                                    && nativeRequestPlaneCoordinator
-                                            .options()
-                                            .mapSnapshotEnabled(),
+                                    && nativeRequestPlaneCoordinator.options().mapSnapshotEnabled(),
                             mapSnapshotSmallMaxEntries,
                             nativeRequestPlaneCoordinator != null
                                     && nativeRequestPlaneCoordinator
@@ -831,6 +835,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                                     : nativeRequestPlaneCoordinator
                                             .options()
                                             .mapSnapshotAdaptiveResampleIntervalProbes());
+            wrapped.enableNativeDistinctBatchPrefetch(nativeMapDistinctBatchPrefetchEnabled);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
@@ -1354,8 +1359,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                         // Keep exact cancellation coverage for a state not observed by an earlier
                         // batch (or only reached conditionally). This remains inside the single
                         // backend wrapper traversal; only such inactive states scan the keys.
-                        ((CachedInternalValueState) valueState)
-                                .cancelPrefetchForDispatch(keys);
+                        ((CachedInternalValueState) valueState).cancelPrefetchForDispatch(keys);
                     }
                 }
             }
@@ -1396,8 +1400,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
             int visited = 0;
             for (Object wrapper : wrappersByDelegateIdentity.values()) {
                 if (wrapper instanceof CachedInternalValueState) {
-                    ((CachedInternalValueState<?, ?, ?>) wrapper)
-                            .endNativeResidentMutationBatch();
+                    ((CachedInternalValueState<?, ?, ?>) wrapper).endNativeResidentMutationBatch();
                     visited++;
                 }
             }

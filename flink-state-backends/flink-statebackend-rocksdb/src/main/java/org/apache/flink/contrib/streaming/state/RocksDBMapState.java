@@ -18,6 +18,16 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import static org.apache.flink.util.Preconditions.checkArgument;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.Map;
+import javax.annotation.Nonnegative;
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
@@ -35,26 +45,13 @@ import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.StateMigrationException;
-
 import org.rocksdb.ColumnFamilyHandle;
+import org.rocksdb.ReadOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
-import org.rocksdb.ReadOptions;
 import org.rocksdb.Slice;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.annotation.Nonnegative;
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
-
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Iterator;
-import java.util.Map;
-
-import static org.apache.flink.util.Preconditions.checkArgument;
 
 /**
  * {@link MapState} implementation that stores state in RocksDB.
@@ -65,7 +62,7 @@ import static org.apache.flink.util.Preconditions.checkArgument;
  * @param <UV> The type of the values in the map state.
  */
 class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, UV>>
-        implements InternalMapState<K, N, UK, UV> {
+        implements InternalMapState<K, N, UK, UV>, RocksDBBatchMapReader<UK> {
 
     private static final Logger LOG = LoggerFactory.getLogger(RocksDBMapState.class);
 
@@ -128,6 +125,22 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
         return (rawValueBytes == null
                 ? null
                 : deserializeUserValue(dataInputView, rawValueBytes, userValueSerializer));
+    }
+
+    @Override
+    public java.util.List<byte[]> getSerializedValuesByUserKeys(java.util.List<UK> userKeys)
+            throws Exception {
+        if (userKeys.isEmpty()) {
+            return java.util.Collections.emptyList();
+        }
+        java.util.List<byte[]> rocksDBKeys = new java.util.ArrayList<>(userKeys.size());
+        for (UK userKey : userKeys) {
+            rocksDBKeys.add(
+                    serializeCurrentKeyWithGroupAndNamespacePlusUserKey(
+                            userKey, userKeySerializer));
+        }
+        return backend.db.multiGetAsList(
+                java.util.Collections.nCopies(userKeys.size(), columnFamily), rocksDBKeys);
     }
 
     @Override
@@ -413,9 +426,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             TypeSerializer<UK> keySerializer)
             throws IOException {
         dataInputView.setBuffer(
-                packedPage,
-                rawKeyOffset + userKeyOffset,
-                rawKeyLength - userKeyOffset);
+                packedPage, rawKeyOffset + userKeyOffset, rawKeyLength - userKeyOffset);
         return keySerializer.deserialize(dataInputView);
     }
 
@@ -464,6 +475,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
 
         /** Immutable packed page shared by all entries from one complete tiny scan. */
         @Nullable private final byte[] packedPage;
+
         private final int packedRawKeyOffset;
         private final int packedRawKeyLength;
         private final int packedRawValueOffset;
