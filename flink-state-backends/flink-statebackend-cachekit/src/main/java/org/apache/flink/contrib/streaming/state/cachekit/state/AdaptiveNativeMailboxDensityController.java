@@ -42,6 +42,7 @@ final class AdaptiveNativeMailboxDensityController {
     private long completedWindows;
     private long bypassedBatches;
     private long bypassedInputKeys;
+    private long droppedSpeculativePrefetchTasks;
 
     AdaptiveNativeMailboxDensityController(
             long windowInputKeys,
@@ -87,6 +88,13 @@ final class AdaptiveNativeMailboxDensityController {
     synchronized void recordBypassedInputKeys(int inputKeys) {
         if (mode == Mode.BYPASS && inputKeys > 0) {
             bypassedInputKeys += inputKeys;
+        }
+    }
+
+    /** Records a speculative task rejected before key materialization or reservation. */
+    synchronized void recordDroppedSpeculativePrefetchTask() {
+        if (mode == Mode.BYPASS) {
+            droppedSpeculativePrefetchTasks++;
         }
     }
 
@@ -155,5 +163,9 @@ final class AdaptiveNativeMailboxDensityController {
 
     synchronized long bypassedInputKeys() {
         return bypassedInputKeys;
+    }
+
+    synchronized long droppedSpeculativePrefetchTasks() {
+        return droppedSpeculativePrefetchTasks;
     }
 }

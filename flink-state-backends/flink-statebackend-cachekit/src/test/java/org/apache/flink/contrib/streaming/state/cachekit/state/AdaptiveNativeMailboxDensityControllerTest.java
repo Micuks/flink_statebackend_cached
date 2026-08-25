@@ -39,8 +39,10 @@ class AdaptiveNativeMailboxDensityControllerTest {
         assertEquals(AdaptiveNativeMailboxDensityController.Mode.BYPASS, controller.mode());
         assertFalse(controller.shouldUseNativeMailbox());
         controller.recordBypassedInputKeys(128);
+        controller.recordDroppedSpeculativePrefetchTask();
         assertEquals(1, controller.bypassedBatches());
         assertEquals(128, controller.bypassedInputKeys());
+        assertEquals(1, controller.droppedSpeculativePrefetchTasks());
     }
 
     @Test

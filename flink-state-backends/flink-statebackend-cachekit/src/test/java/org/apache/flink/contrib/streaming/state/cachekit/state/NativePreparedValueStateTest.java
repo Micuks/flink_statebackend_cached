@@ -2069,6 +2069,74 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testAdaptiveMailboxDensityCanDropOnlySpeculativeTaskBeforeKeyPreparation()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(77);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(compactSelectedOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true,
+                        8,
+                        1 << 20,
+                        false,
+                        coordinator,
+                        31);
+        state.setCurrentNamespace("window-mailbox-density-drop");
+        AdaptiveNativeMailboxDensityController controller =
+                new AdaptiveNativeMailboxDensityController(2, 1, 1, 16, 0.10, 0.20);
+        controller.recordCompaction(2, 0);
+        assertEquals(AdaptiveNativeMailboxDensityController.Mode.BYPASS, controller.mode());
+        state.setAdaptiveNativeMailboxDensityControllerForTesting(controller);
+        state.setAdaptiveNativeMailboxDropSpeculativePrefetchEnabledForTesting(true);
+
+        assertNull(state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")));
+
+        assertEquals(0, fakePlane.compactCalls);
+        assertEquals(0, coordinator.probeCalls());
+        assertEquals(0, coordinator.fillCalls());
+        assertEquals(1, controller.bypassedBatches());
+        assertEquals(0, controller.bypassedInputKeys());
+        assertEquals(1, controller.droppedSpeculativePrefetchTasks());
+        verify(reader, never()).serializeBatchKeyAndNamespace(any(), any(), any(), any());
+        verify(reader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+
+        currentKey.set("k1");
+        assertEquals(77, state.value());
+        verify(delegate, times(1)).value();
+
+        state.close();
+        coordinator.close();
+        assertEquals(1, fakePlane.closeCalls);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testCompactSelectedNativeFiltersMailboxCancellationBeforeMissIoAndPublish()
             throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");

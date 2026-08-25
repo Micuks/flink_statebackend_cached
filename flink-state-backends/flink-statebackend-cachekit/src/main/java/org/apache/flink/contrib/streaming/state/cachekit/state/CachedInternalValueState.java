@@ -166,6 +166,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private static final boolean NATIVE_MAILBOX_ADAPTIVE_DENSITY_ENABLED =
             loadBooleanConfig(
                     "state.backend.cachekit.native.mailbox-batch.adaptive-density.enabled", false);
+    private static final boolean
+            NATIVE_MAILBOX_ADAPTIVE_DENSITY_DROP_SPECULATIVE_PREFETCH_ENABLED =
+                    loadBooleanConfig(
+                            "state.backend.cachekit.native.mailbox-batch.adaptive-density.drop-speculative-prefetch.enabled",
+                            false);
     private static final int NATIVE_MAILBOX_ADAPTIVE_DENSITY_WINDOW_INPUT_KEYS =
             loadIntConfig(
                     "state.backend.cachekit.native.mailbox-batch.adaptive-density.window-input-keys",
@@ -480,6 +485,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             new java.util.concurrent.atomic.AtomicLong();
     private AdaptiveNativeProbeController adaptiveNativeProbeController;
     private AdaptiveNativeMailboxDensityController adaptiveNativeMailboxDensityController;
+    private boolean adaptiveNativeMailboxDropSpeculativePrefetchEnabled;
     private final PromotionYieldAdmissionController promotionYieldAdmissionController;
 
     // Worker-only serializers and scratch inputs. PrefetchExecutor serializes all tasks on its
@@ -1096,6 +1102,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 NATIVE_MAILBOX_ADAPTIVE_DENSITY_MIN_UNIQUE_RATE,
                                 NATIVE_MAILBOX_ADAPTIVE_DENSITY_RECOVERY_UNIQUE_RATE)
                         : null;
+        this.adaptiveNativeMailboxDropSpeculativePrefetchEnabled =
+                NATIVE_MAILBOX_ADAPTIVE_DENSITY_DROP_SPECULATIVE_PREFETCH_ENABLED;
         this.promotionYieldAdmissionController =
                 PROMOTION_YIELD_ADMISSION_ENABLED
                                 && nativeRequestPlaneCoordinator != null
@@ -2092,12 +2100,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (adaptiveNativeMailboxDensityController != null) {
             LOG.info(
                     "[CACHEKIT NATIVE MAILBOX DENSITY] mode={} transitions={} windows={} "
-                            + "bypassedBatches={} bypassedInputKeys={}",
+                            + "bypassedBatches={} bypassedInputKeys={} droppedSpeculativePrefetchTasks={}",
                     adaptiveNativeMailboxDensityController.mode(),
                     adaptiveNativeMailboxDensityController.transitions(),
                     adaptiveNativeMailboxDensityController.completedWindows(),
                     adaptiveNativeMailboxDensityController.bypassedBatches(),
-                    adaptiveNativeMailboxDensityController.bypassedInputKeys());
+                    adaptiveNativeMailboxDensityController.bypassedInputKeys(),
+                    adaptiveNativeMailboxDensityController.droppedSpeculativePrefetchTasks());
         }
     }
 
@@ -2133,6 +2142,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     void setAdaptiveNativeMailboxDensityControllerForTesting(
             AdaptiveNativeMailboxDensityController controller) {
         this.adaptiveNativeMailboxDensityController = controller;
+    }
+
+    void setAdaptiveNativeMailboxDropSpeculativePrefetchEnabledForTesting(boolean enabled) {
+        this.adaptiveNativeMailboxDropSpeculativePrefetchEnabled = enabled;
     }
 
     long getPrefetchLazyValuesStagedForTesting() {
@@ -2691,10 +2704,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      */
     @SuppressWarnings("unchecked")
     private Runnable buildPreparedMultiGetTask(Iterable<? extends K> keys, N namespace) {
-        java.util.ArrayList<byte[]> rocksDBKeys = new java.util.ArrayList<>();
-        java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys = new java.util.ArrayList<>();
-        final long gen = writeGen;
-        final PrefetchReservation reservation = newPrefetchReservation(gen);
         final boolean nativeMailboxConfigured =
                 nativeRequestPlaneCoordinator != null
                         && nativeRequestPlaneCoordinator.isActive()
@@ -2703,6 +2712,20 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 nativeMailboxConfigured
                         && adaptiveNativeMailboxDensityController != null
                         && !adaptiveNativeMailboxDensityController.shouldUseNativeMailbox();
+        if (nativeMailboxDensityBypassed
+                && adaptiveNativeMailboxDropSpeculativePrefetchEnabled) {
+            // This work is speculative. In low-density phases the Java fallback still pays key
+            // copies, reservation traffic and RocksDB I/O while almost none of the prefetched
+            // values are promoted. Reject the new task before any of those side effects. A later
+            // ValueState.value() remains authoritative and periodic recovery probes are selected
+            // by shouldUseNativeMailbox() before reaching this branch.
+            adaptiveNativeMailboxDensityController.recordDroppedSpeculativePrefetchTask();
+            return null;
+        }
+        java.util.ArrayList<byte[]> rocksDBKeys = new java.util.ArrayList<>();
+        java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys = new java.util.ArrayList<>();
+        final long gen = writeGen;
+        final PrefetchReservation reservation = newPrefetchReservation(gen);
         final boolean nativeMailboxBatch =
                 nativeMailboxConfigured && !nativeMailboxDensityBypassed;
         final boolean nativeDirectPrefetch =

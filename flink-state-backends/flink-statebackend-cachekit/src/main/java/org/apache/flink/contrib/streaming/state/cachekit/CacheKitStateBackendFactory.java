@@ -559,6 +559,16 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Route duplicate-heavy ValueState lookahead batches through the existing Java prepared-MultiGet path. "
                                                                         + "The decision uses sampled compacted-unique/input density and periodically re-samples native compaction for phase recovery.");
 
+        public static final ConfigOption<Boolean>
+                        NATIVE_MAILBOX_ADAPTIVE_DENSITY_DROP_SPECULATIVE_PREFETCH_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.mailbox-batch.adaptive-density.drop-speculative-prefetch.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Drop a newly requested speculative ValueState prefetch task while the adaptive mailbox-density controller is in bypass mode. "
+                                                                        + "The authoritative synchronous state read and periodic native recovery probes are unchanged.");
+
         public static final ConfigOption<Integer>
                         NATIVE_MAILBOX_ADAPTIVE_DENSITY_WINDOW_INPUT_KEYS =
                         ConfigOptions.key(
