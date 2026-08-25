@@ -408,7 +408,7 @@ class NativeRequestPlaneCoordinatorTest {
         FakePlane plane = new FakePlane();
         NativeRequestPlaneCoordinator coordinator =
                 NativeRequestPlaneCoordinator.forTesting(directArenaOptions(1), plane);
-        assertEquals(6_528, coordinator.regularSlotDirectBytesForTesting());
+        assertEquals(8_576, coordinator.regularSlotDirectBytesForTesting());
 
         try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
             slot.prepareLatest(
@@ -418,6 +418,12 @@ class NativeRequestPlaneCoordinatorTest {
                             new byte[] {10, 11}, new byte[] {20}, new byte[] {30, 31, 32}));
             int[] selection = new int[] {2, 0};
             slot.prepareDirectArenaMultiGet(selection, 0, 2);
+            assertEquals(16, slot.directMultiGetValueStride());
+
+            // The extended ABI can select 128-slot geometry while the legacy overload above
+            // retains the original 64-slot value width. Tail count does not alter either width.
+            slot.prepareDirectArenaMultiGet(selection, 0, 2, 128);
+            assertEquals(8, slot.directMultiGetValueStride());
 
             ByteBuffer descriptors =
                     slot.directMultiGetDescriptors().order(ByteOrder.nativeOrder());

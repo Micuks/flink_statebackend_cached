@@ -173,6 +173,29 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
     }
 
     @Override
+    public int directArenaMultiGetMaxBatch() {
+        try {
+            Object advertised =
+                    backend.db
+                            .getClass()
+                            .getMethod("directMultiGetMaxBatch")
+                            .invoke(backend.db);
+            if (!(advertised instanceof Number)) {
+                return RocksDBBatchValueReader.DIRECT_ARENA_DEFAULT_BATCH;
+            }
+            return Math.max(
+                    1,
+                    Math.min(
+                            RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
+                            ((Number) advertised).intValue()));
+        } catch (ReflectiveOperationException
+                | LinkageError
+                | SecurityException incompatibleWrapperOrNativeLibrary) {
+            return RocksDBBatchValueReader.DIRECT_ARENA_DEFAULT_BATCH;
+        }
+    }
+
+    @Override
     public int getSerializedValuesByRocksDBKeyArena(
             ByteBuffer keyArena,
             ByteBuffer descriptors,

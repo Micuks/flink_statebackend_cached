@@ -457,6 +457,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Read compact-selected RocksDB misses directly from the prepared-key arena through one bounded MultiGet JNI call. "
                                                                         + "Any value-slot overflow falls back for the complete direct chunk.");
 
+        public static final ConfigOption<Integer> NATIVE_DIRECT_ARENA_BATCH_SIZE =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.direct-arena.batch-size")
+                                        .intType()
+                                        .defaultValue(64)
+                                        .withDescription(
+                                                        "Bound the number of prepared keys passed to one direct-arena RocksDB MultiGet. "
+                                                                        + "The default retains the legacy 64-key call geometry; the extended JNI ABI accepts up to 128.");
+
         public static final ConfigOption<Boolean> NATIVE_DIRECT_ARENA_READ_ONLY_ENABLED =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.prefetch.direct-arena-read-only.enabled")
@@ -819,7 +828,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_SLOT_ENABLED),
                                 config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_ENTRIES),
                                 config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_KEY_ARENA_BYTES),
-                                config.get(NATIVE_DIRECT_ARENA_EAGER_MATERIALIZATION_ENABLED));
+                                config.get(NATIVE_DIRECT_ARENA_EAGER_MATERIALIZATION_ENABLED))
+                                .withDirectArenaBatchSize(config.get(NATIVE_DIRECT_ARENA_BATCH_SIZE));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

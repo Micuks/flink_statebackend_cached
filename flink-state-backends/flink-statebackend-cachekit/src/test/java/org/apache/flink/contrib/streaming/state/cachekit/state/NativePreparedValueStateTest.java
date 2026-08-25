@@ -1742,7 +1742,7 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void testDirectArenaReusesDescriptorAndValueArenasAcrossTwoFullChunks() throws Exception {
+    void testDirectArenaExtendedCapabilityExecutesOne128KeyChunk() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
                 mock(
@@ -1756,6 +1756,7 @@ class NativePreparedValueStateTest {
         when(reader.getBatchDefaultValue()).thenReturn(null);
         when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
         stubDirectPreparedSerialization(reader);
+        when(reader.directArenaMultiGetMaxBatch()).thenReturn(128);
         AtomicInteger call = new AtomicInteger();
         doAnswer(
                         invocation -> {
@@ -1767,11 +1768,11 @@ class NativePreparedValueStateTest {
                             int count = invocation.getArgument(2);
                             ByteBuffer values = invocation.getArgument(3);
                             int stride = invocation.getArgument(4);
-                            assertEquals(64, count);
+                            assertEquals(128, count);
                             for (int index = 0; index < count; index++) {
                                 byte[] value =
                                         KvStateSerializer.serializeValue(
-                                                2000 + callIndex * 64 + index,
+                                                2000 + callIndex * 128 + index,
                                                 IntSerializer.INSTANCE);
                                 ByteBuffer target = values.duplicate();
                                 target.position(index * stride);
@@ -1791,7 +1792,8 @@ class NativePreparedValueStateTest {
 
         FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
         NativeRequestPlaneCoordinator coordinator =
-                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(128), fakePlane);
+                NativeRequestPlaneCoordinator.forTesting(
+                        directArenaOptions(128).withDirectArenaBatchSize(128), fakePlane);
         CachedInternalValueState<String, String, Integer> state =
                 newNativePreparedState(delegate, currentKey, coordinator, 57, 128, 1);
         state.setCurrentNamespace("window-128");
@@ -1802,15 +1804,16 @@ class NativePreparedValueStateTest {
 
         state.buildAsyncPrefetchTask(keys).run();
 
-        assertEquals(2, state.getNativeDirectArenaMultiGetBatchesForTesting());
+        assertEquals(1, state.getNativeDirectArenaMultiGetBatchesForTesting());
         assertEquals(128, state.getNativeDirectArenaMultiGetKeysForTesting());
-        assertEquals(2, state.getNativeDirectArenaMultiGetCompletedBatchesForTesting());
+        assertEquals(1, state.getNativeDirectArenaMultiGetCompletedBatchesForTesting());
         assertEquals(128, state.getNativeDirectArenaMultiGetCompletedKeysForTesting());
         assertEquals(0, state.getNativeDirectArenaMultiGetFallbackBatchesForTesting());
         assertArrayEquals(
-                new long[] {0, 0, 0, 0, 0, 0, 2},
+                new long[] {0, 0, 0, 0, 0, 0, 1},
                 state.getNativeDirectArenaMultiGetBatchHistogramForTesting());
-        verify(reader, times(2))
+        assertEquals(1, state.getNativeDirectArenaMultiGetBatch128ForTesting());
+        verify(reader, times(1))
                 .getSerializedValuesByRocksDBKeyArena(any(), any(), anyInt(), any(), anyInt());
         verify(reader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
         verify(reader, never()).getSerializedValueByRocksDBKey(any());
@@ -3424,6 +3427,8 @@ class NativePreparedValueStateTest {
 
     private static void stubDirectPreparedSerialization(
             RocksDBBatchValueReader<String, String, Integer> reader) throws Exception {
+        when(reader.directArenaMultiGetMaxBatch())
+                .thenReturn(RocksDBBatchValueReader.DIRECT_ARENA_DEFAULT_BATCH);
         doAnswer(
                         invocation -> {
                             byte[] serialized =

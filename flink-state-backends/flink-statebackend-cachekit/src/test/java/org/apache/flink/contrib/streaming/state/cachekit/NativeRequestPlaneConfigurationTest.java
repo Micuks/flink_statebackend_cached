@@ -100,6 +100,7 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(options.preaggEnabled());
         assertFalse(options.compactSelectedProbeEnabled());
         assertFalse(options.directArenaMultiGetEnabled());
+        assertEquals(64, options.directArenaBatchSize());
         assertFalse(options.directArenaReadOnlyEnabled());
         assertFalse(options.directArenaEagerMaterializationEnabled());
         assertFalse(options.negativeHandoffEnabled());
@@ -141,6 +142,7 @@ class NativeRequestPlaneConfigurationTest {
         config.set(CacheKitStateBackendFactory.NATIVE_LOCAL_PREAGG_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_COMPACT_SELECTED_PROBE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_DIRECT_ARENA_MULTIGET_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_DIRECT_ARENA_BATCH_SIZE, 128);
         config.set(CacheKitStateBackendFactory.NATIVE_DIRECT_ARENA_READ_ONLY_ENABLED, true);
         config.set(
                 CacheKitStateBackendFactory.NATIVE_DIRECT_ARENA_EAGER_MATERIALIZATION_ENABLED,
@@ -179,6 +181,7 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(options.preaggEnabled());
         assertTrue(options.compactSelectedProbeEnabled());
         assertTrue(options.directArenaMultiGetEnabled());
+        assertEquals(128, options.directArenaBatchSize());
         assertTrue(options.directArenaReadOnlyEnabled());
         assertTrue(options.directArenaEagerMaterializationEnabled());
         assertTrue(options.negativeHandoffEnabled());

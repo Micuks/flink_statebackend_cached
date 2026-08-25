@@ -62,6 +62,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final boolean indexedFoldEnabled;
     private final boolean compactSelectedProbeEnabled;
     private final boolean directArenaMultiGetEnabled;
+    private final int directArenaBatchSize;
     private final boolean directArenaReadOnlyEnabled;
     private final boolean directArenaEagerMaterializationEnabled;
     private final boolean negativeHandoffEnabled;
@@ -1200,6 +1201,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
                             + ".");
         }
         this.directArenaMultiGetEnabled = directArenaMultiGetEnabled;
+        this.directArenaBatchSize = RocksDBBatchValueReader.DIRECT_ARENA_DEFAULT_BATCH;
         if (directArenaReadOnlyEnabled && !directArenaMultiGetEnabled) {
             throw new IllegalArgumentException(
                     "Direct-read-only prefetch requires direct-arena MultiGet.");
@@ -1402,6 +1404,65 @@ public final class NativeRequestPlaneOptions implements Serializable {
     /** Whether compacted RocksDB misses are read from the original prepared-key direct arena. */
     public boolean directArenaMultiGetEnabled() {
         return directArenaMultiGetEnabled;
+    }
+
+    /** Maximum prepared-key count requested by one direct-arena JNI call. */
+    public int directArenaBatchSize() {
+        return directArenaBatchSize;
+    }
+
+    /** Returns an otherwise identical immutable option set with a different direct batch size. */
+    public NativeRequestPlaneOptions withDirectArenaBatchSize(int batchSize) {
+        if (batchSize < 2 || batchSize > RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
+            throw new IllegalArgumentException(
+                    "Direct-arena batch size must be between 2 and "
+                            + RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH
+                            + ".");
+        }
+        return batchSize == directArenaBatchSize
+                ? this
+                : new NativeRequestPlaneOptions(this, batchSize);
+    }
+
+    private NativeRequestPlaneOptions(NativeRequestPlaneOptions source, int batchSize) {
+        this.enabled = source.enabled;
+        this.libraryPath = source.libraryPath;
+        this.kernel = source.kernel;
+        this.capacityEntries = source.capacityEntries;
+        this.keyArenaBytes = source.keyArenaBytes;
+        this.valueArenaBytes = source.valueArenaBytes;
+        this.batchEntries = source.batchEntries;
+        this.batchKeyArenaBytes = source.batchKeyArenaBytes;
+        this.batchValueArenaBytes = source.batchValueArenaBytes;
+        this.minBatchSize = source.minBatchSize;
+        this.batchSlots = source.batchSlots;
+        this.aarch64Only = source.aarch64Only;
+        this.writeThroughMutations = source.writeThroughMutations;
+        this.readActivatedWriteThrough = source.readActivatedWriteThrough;
+        this.residentMutationBatchEnabled = source.residentMutationBatchEnabled;
+        this.valueCacheEnabled = source.valueCacheEnabled;
+        this.mapCacheEnabled = source.mapCacheEnabled;
+        this.mapSnapshotEnabled = source.mapSnapshotEnabled;
+        this.prefetchEnabled = source.prefetchEnabled;
+        this.mailboxBatchEnabled = source.mailboxBatchEnabled;
+        this.preaggEnabled = source.preaggEnabled;
+        this.indexedFoldEnabled = source.indexedFoldEnabled;
+        this.compactSelectedProbeEnabled = source.compactSelectedProbeEnabled;
+        this.directArenaMultiGetEnabled = source.directArenaMultiGetEnabled;
+        this.directArenaBatchSize = batchSize;
+        this.directArenaReadOnlyEnabled = source.directArenaReadOnlyEnabled;
+        this.directArenaEagerMaterializationEnabled = source.directArenaEagerMaterializationEnabled;
+        this.negativeHandoffEnabled = source.negativeHandoffEnabled;
+        this.deferredReservationMaterializationEnabled =
+                source.deferredReservationMaterializationEnabled;
+        this.compactionScratchSlotEnabled = source.compactionScratchSlotEnabled;
+        this.compactionScratchEntries = source.compactionScratchEntries;
+        this.compactionScratchKeyArenaBytes = source.compactionScratchKeyArenaBytes;
+        this.mapSnapshotAdaptiveBypassEnabled = source.mapSnapshotAdaptiveBypassEnabled;
+        this.mapSnapshotAdaptiveWindowProbes = source.mapSnapshotAdaptiveWindowProbes;
+        this.mapSnapshotAdaptiveMinUsefulHitRate = source.mapSnapshotAdaptiveMinUsefulHitRate;
+        this.mapSnapshotAdaptiveResampleIntervalProbes =
+                source.mapSnapshotAdaptiveResampleIntervalProbes;
     }
 
     /** Whether prepared keys bypass native cache probe/fill and go directly to RocksDB MultiGet. */

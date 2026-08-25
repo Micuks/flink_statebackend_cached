@@ -1311,12 +1311,21 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         /**
          * Builds one bounded direct-arena MultiGet descriptor chunk over prepared keys.
          *
-         * <p>The prepared key arena remains immutable. The value arena is divided into 64 fixed
-         * slots regardless of the current chunk size, so changing the final chunk length cannot
-         * change the overflow boundary.
+         * <p>The prepared key arena remains immutable. The value arena is divided by the selected
+         * call geometry rather than the final chunk length, so a short tail cannot change the
+         * overflow boundary. The three-argument overload retains the legacy 64-slot geometry.
          */
         public void prepareDirectArenaMultiGet(
                 int[] preparedIndices, int fromIndex, int count) {
+            prepareDirectArenaMultiGet(
+                    preparedIndices,
+                    fromIndex,
+                    count,
+                    RocksDBBatchValueReader.DIRECT_ARENA_DEFAULT_BATCH);
+        }
+
+        public void prepareDirectArenaMultiGet(
+                int[] preparedIndices, int fromIndex, int count, int valueSlotCount) {
             requireLeased();
             Objects.requireNonNull(preparedIndices, "preparedIndices");
             if (fromIndex < 0
@@ -1325,8 +1334,11 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                     || fromIndex > preparedIndices.length - count) {
                 throw new IllegalArgumentException("Invalid direct-arena MultiGet chunk.");
             }
-            int stride =
-                    valueArena.capacity() / RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH;
+            if (valueSlotCount < count
+                    || valueSlotCount > RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
+                throw new IllegalArgumentException("Invalid direct-arena value-slot count.");
+            }
+            int stride = valueArena.capacity() / valueSlotCount;
             if (stride <= 0) {
                 throw new IllegalStateException(
                         "Native batch value arena is too small for direct MultiGet slots.");

@@ -375,6 +375,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeDirectArenaMultiGetBatch16To31;
     private volatile long nativeDirectArenaMultiGetBatch32To63;
     private volatile long nativeDirectArenaMultiGetBatch64;
+    private volatile long nativeDirectArenaMultiGetBatch65To127;
+    private volatile long nativeDirectArenaMultiGetBatch128;
     private volatile long nativeDirectArenaMultiGetOverflows;
     private volatile long nativeDirectArenaMultiGetFallbackBatches;
     private volatile long nativeDirectArenaMultiGetFallbackKeys;
@@ -1952,7 +1954,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 + "eagerMaterializationConfigured={} eagerValues={} eagerValueBytes={} "
                                 + "eagerMissingValues={} eagerFallbackValues={} "
                                 + "batches={} keys={} completedBatches={} completedKeys={} valueBytesCopied={} "
-                                + "batchHistogram=1:{},2-3:{},4-7:{},8-15:{},16-31:{},32-63:{},64:{} "
+                                + "configuredBatchSize={} configuredValueStride={} "
+                                + "batchHistogram=1:{},2-3:{},4-7:{},8-15:{},16-31:{},32-63:{},64+:{} "
+                                + "batch65To127={} batch128={} "
                                 + "found={} notFound={} overflowStatuses={} overflowBatches={} fallbackBatches={} "
                                 + "fallbackKeys={} thresholdFallbacks={} capabilityFallbacks={} linkageFallbacks={} protocolFallbacks={} "
                                 + "heapKeyCopies={}",
@@ -1994,6 +1998,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         nativeDirectArenaMultiGetCompletedBatches,
                         nativeDirectArenaMultiGetCompletedKeys,
                         nativeDirectArenaMultiGetValueBytesCopied,
+                        directArenaChunkSize(),
+                        nativeRequestPlaneCoordinator == null
+                                ? 0
+                                : nativeRequestPlaneCoordinator.options().batchValueArenaBytes()
+                                        / RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
                         nativeDirectArenaMultiGetBatch1,
                         nativeDirectArenaMultiGetBatch2To3,
                         nativeDirectArenaMultiGetBatch4To7,
@@ -2001,6 +2010,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         nativeDirectArenaMultiGetBatch16To31,
                         nativeDirectArenaMultiGetBatch32To63,
                         nativeDirectArenaMultiGetBatch64,
+                        nativeDirectArenaMultiGetBatch65To127,
+                        nativeDirectArenaMultiGetBatch128,
                         nativeDirectArenaMultiGetFound,
                         nativeDirectArenaMultiGetNotFound,
                         nativeDirectArenaMultiGetOverflowStatuses,
@@ -2333,6 +2344,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeDirectArenaMultiGetBatch32To63,
             nativeDirectArenaMultiGetBatch64
         };
+    }
+
+    long getNativeDirectArenaMultiGetBatch128ForTesting() {
+        return nativeDirectArenaMultiGetBatch128;
     }
 
     long getNativeDirectArenaMultiGetOverflowsForTesting() {
@@ -3876,10 +3891,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
 
         if (reservation != null) {
-            int directChunkSize =
-                    Math.min(
-                            RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
-                            multiGetChunkSize);
+            int directChunkSize = directArenaChunkSize(batchReader);
             int tail = activeCount % directChunkSize;
             if (activeCount > directChunkSize && tail > 0 && tail < multiGetMinBatchSize) {
                 // The tail would otherwise copy prepared keys back to heap and issue point Gets.
@@ -3974,10 +3986,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             PrefetchReservation reservation,
             boolean immediate)
             throws Exception {
-        int directChunkSize =
-                Math.min(
-                        RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
-                        multiGetChunkSize);
+        int directChunkSize = directArenaChunkSize(batchReader);
         for (int start = 0; start < count; start += directChunkSize) {
             if (closed || gen != writeGen) {
                 prefetchStaleAborts++;
@@ -3990,7 +3999,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 fallback = true;
             }
             if (!fallback) {
-                slot.prepareDirectArenaMultiGet(preparedIndices, start, chunkCount);
+                slot.prepareDirectArenaMultiGet(
+                        preparedIndices,
+                        start,
+                        chunkCount,
+                        RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
                 int presentCount;
                 try {
                     lifecycleLock.readLock().lock();
@@ -4546,10 +4559,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return java.util.Collections.emptyList();
         }
         java.util.ArrayList<byte[]> values = new java.util.ArrayList<>(count);
-        int directChunkSize =
-                Math.min(
-                        RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
-                        multiGetChunkSize);
+        int directChunkSize = directArenaChunkSize(batchReader);
         for (int start = 0; start < count; start += directChunkSize) {
             if (closed || gen != writeGen) {
                 prefetchStaleAborts++;
@@ -4562,7 +4572,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 fallback = true;
             }
             if (!fallback) {
-                slot.prepareDirectArenaMultiGet(preparedIndices, start, chunkCount);
+                slot.prepareDirectArenaMultiGet(
+                        preparedIndices,
+                        start,
+                        chunkCount,
+                        RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
                 int presentCount;
                 try {
                     lifecycleLock.readLock().lock();
@@ -4689,7 +4703,30 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeDirectArenaMultiGetBatch32To63++;
         } else {
             nativeDirectArenaMultiGetBatch64++;
+            if (count < RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
+                nativeDirectArenaMultiGetBatch65To127++;
+            } else {
+                nativeDirectArenaMultiGetBatch128++;
+            }
         }
+    }
+
+    private int directArenaChunkSize() {
+        int configured =
+                nativeRequestPlaneCoordinator == null
+                        ? RocksDBBatchValueReader.DIRECT_ARENA_DEFAULT_BATCH
+                        : nativeRequestPlaneCoordinator.options().directArenaBatchSize();
+        return Math.min(configured, multiGetChunkSize);
+    }
+
+    private int directArenaChunkSize(RocksDBBatchValueReader<K, N, V> batchReader) {
+        return Math.min(
+                directArenaChunkSize(),
+                Math.max(
+                        1,
+                        Math.min(
+                                RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
+                                batchReader.directArenaMultiGetMaxBatch())));
     }
 
     /** Materializes only one rejected direct chunk and uses the existing authoritative reader. */

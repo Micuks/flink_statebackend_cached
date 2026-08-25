@@ -36,7 +36,10 @@ import java.util.List;
 public interface RocksDBBatchValueReader<K, N, V> {
 
     int DIRECT_ARENA_DESCRIPTOR_BYTES = 32;
-    int DIRECT_ARENA_MAX_BATCH = 64;
+    /** Legacy/default call geometry retained for backward-compatible experiment controls. */
+    int DIRECT_ARENA_DEFAULT_BATCH = 64;
+    /** Maximum count accepted by the extended FrocksDB direct-arena JNI ABI. */
+    int DIRECT_ARENA_MAX_BATCH = 128;
     int DIRECT_ARENA_STATE_ID_OFFSET = 0;
     int DIRECT_ARENA_ORIGINAL_INDEX_OFFSET = 4;
     int DIRECT_ARENA_GENERATION_OFFSET = 8;
@@ -93,6 +96,16 @@ public interface RocksDBBatchValueReader<K, N, V> {
      */
     default boolean supportsDirectArenaMultiGet() {
         return false;
+    }
+
+    /**
+     * Maximum direct-arena batch supported by the loaded native library.
+     *
+     * <p>The legacy fail-closed value is 64. Implementations backed by an extended JNI library
+     * should query its runtime capability instead of inferring it from Java constants.
+     */
+    default int directArenaMultiGetMaxBatch() {
+        return DIRECT_ARENA_DEFAULT_BATCH;
     }
 
     /**
