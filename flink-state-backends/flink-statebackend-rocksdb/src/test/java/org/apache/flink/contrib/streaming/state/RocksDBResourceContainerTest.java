@@ -308,15 +308,21 @@ public class RocksDBResourceContainerTest {
     public void testArmPointAuthorityIsStateAware() {
         assertEquals(
                 "scalar-flat",
-                RocksDBResourceContainer.armPointFactoryProbeMode("scalar", true));
+                RocksDBResourceContainer.armPointFactoryProbeMode("scalar", true, false));
         assertEquals(
                 "scalar",
-                RocksDBResourceContainer.armPointFactoryProbeMode("scalar", false));
+                RocksDBResourceContainer.armPointFactoryProbeMode("scalar", false, false));
+        assertEquals(
+                "scalar-keyhead",
+                RocksDBResourceContainer.armPointFactoryProbeMode("scalar", false, true));
     }
 
     @Test
     public void testArmPointMapFlatAuthorityIsDefaultOffAndConfigurable() {
         assertFalse(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_MAP_FLAT_AUTHORITY.defaultValue());
+        assertFalse(
+                RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_MAP_KEYHEAD_POINT_INDEX
+                        .defaultValue());
         assertTrue(RocksDBResourceContainer.armPointFlatAuthority(true, false, false));
         assertFalse(RocksDBResourceContainer.armPointFlatAuthority(false, true, false));
         assertTrue(RocksDBResourceContainer.armPointFlatAuthority(false, true, true));

@@ -65,7 +65,7 @@ under the License.
 				artifact. Keep a distinct coordinate so a clean build fails closed
 				instead of silently compiling or running against the stock binary.
 			-->
-			<version>6.20.3-ververica-1.0-cachekit-arm-point-keyhead-7a41d82e7</version>
+			<version>6.20.3-ververica-1.0-cachekit-arm-point-dual-bc2fa5636</version>
 		</dependency>
 
 		<!-- test dependencies -->

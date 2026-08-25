@@ -270,8 +270,15 @@ public final class RocksDBResourceContainer implements AutoCloseable {
         final boolean mapFlatAuthority =
                 internalGetOption(
                         RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_MAP_FLAT_AUTHORITY);
+        final boolean mapKeyHeadPointIndex =
+                internalGetOption(
+                        RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_MAP_KEYHEAD_POINT_INDEX);
+        Preconditions.checkArgument(
+                !(mapFlatAuthority && mapKeyHeadPointIndex),
+                "ArmPoint MapState flat authority and KeyHead point index are mutually exclusive");
         final boolean flatAuthority =
                 armPointFlatAuthority(valueState, mapState, mapFlatAuthority);
+        final boolean keyHeadPointIndex = mapState && mapKeyHeadPointIndex;
 
         if (selection.appliesTo(stateMetaInfo)) {
             final String previousFactory = options.memTableFactoryName();
@@ -286,7 +293,8 @@ public final class RocksDBResourceContainer implements AutoCloseable {
             // Flat append authority removes ordered-write maintenance. ValueState always uses
             // it. MapState may opt in experimentally; every other state retains ordered authority.
             final String factoryProbeMode =
-                    armPointFactoryProbeMode(selection.probeMode, flatAuthority);
+                    armPointFactoryProbeMode(
+                            selection.probeMode, flatAuthority, keyHeadPointIndex);
             options.setMemTableConfig(
                     new ArmPointMemTableConfig()
                             .setBucketCount(bucketCount)
@@ -300,7 +308,9 @@ public final class RocksDBResourceContainer implements AutoCloseable {
                     options.memTableFactoryName(),
                     bucketCount,
                     selection.probeMode,
-                    flatAuthority ? "flat" : "ordered",
+                    flatAuthority
+                            ? "flat"
+                            : (keyHeadPointIndex ? "ordered-keyhead" : "ordered"),
                     selection.allKeyValueStates ? "all-kv" : "value-only",
                     ArmPointMemTableConfig.isSveSupported());
         } else {
@@ -316,8 +326,14 @@ public final class RocksDBResourceContainer implements AutoCloseable {
     }
 
     @VisibleForTesting
-    static String armPointFactoryProbeMode(String probeMode, boolean flatAuthority) {
-        return flatAuthority ? probeMode + "-flat" : probeMode;
+    static String armPointFactoryProbeMode(
+            String probeMode, boolean flatAuthority, boolean keyHeadPointIndex) {
+        Preconditions.checkArgument(
+                !(flatAuthority && keyHeadPointIndex),
+                "ArmPoint flat authority and KeyHead point index are mutually exclusive");
+        return flatAuthority
+                ? probeMode + "-flat"
+                : (keyHeadPointIndex ? probeMode + "-keyhead" : probeMode);
     }
 
     @VisibleForTesting

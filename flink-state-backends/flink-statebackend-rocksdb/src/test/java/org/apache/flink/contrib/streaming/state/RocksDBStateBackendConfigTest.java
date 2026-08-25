@@ -182,6 +182,69 @@ public class RocksDBStateBackendConfigTest {
     }
 
     @Test
+    public void testArmPointMapKeyHeadPointIndexSemantics() throws Exception {
+        Assume.assumeTrue(
+                "Run this test with CACHEKIT_ROCKSDB_ARM_POINT_MEMTABLE=scalar",
+                "scalar"
+                        .equals(
+                                System.getenv(
+                                        ArmPointMemTableRuntime.ENVIRONMENT)));
+
+        final Configuration configuration = new Configuration();
+        configuration.set(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_ENABLED, true);
+        configuration.set(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_BUCKET_COUNT, 1);
+        configuration.set(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_PROBE_MODE, "scalar");
+        configuration.set(
+                RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_MAP_KEYHEAD_POINT_INDEX, true);
+
+        final EmbeddedRocksDBStateBackend configuredBackend =
+                new EmbeddedRocksDBStateBackend()
+                        .configure(configuration, Thread.currentThread().getContextClassLoader());
+        final MockEnvironment environment = new MockEnvironmentBuilder().build();
+        final RocksDBKeyedStateBackend<Integer> keyedBackend =
+                createKeyedStateBackend(configuredBackend, environment, IntSerializer.INSTANCE);
+        try {
+            final MapStateDescriptor<Integer, Integer> descriptor =
+                    new MapStateDescriptor<>(
+                            "arm-point-map-keyhead", Integer.class, Integer.class);
+            keyedBackend.setCurrentKey(1);
+            final MapState<Integer, Integer> state =
+                    keyedBackend.getPartitionedState(
+                            "namespace-a", StringSerializer.INSTANCE, descriptor);
+            for (int i = 0; i < 128; i++) {
+                state.put(i, i * 10);
+            }
+            state.put(7, 7000);
+            state.remove(8);
+
+            assertEquals(Integer.valueOf(7000), state.get(7));
+            assertFalse(state.contains(8));
+            final Map<Integer, Integer> observed = new HashMap<>();
+            for (Map.Entry<Integer, Integer> entry : state.entries()) {
+                observed.put(entry.getKey(), entry.getValue());
+            }
+            assertEquals(127, observed.size());
+            assertEquals(Integer.valueOf(7000), observed.get(7));
+            assertFalse(observed.containsKey(8));
+
+            final MapState<Integer, Integer> secondNamespace =
+                    keyedBackend.getPartitionedState(
+                            "namespace-b", StringSerializer.INSTANCE, descriptor);
+            secondNamespace.put(7, 77);
+            assertEquals(Integer.valueOf(77), secondNamespace.get(7));
+            keyedBackend.setCurrentKey(2);
+            final MapState<Integer, Integer> secondKey =
+                    keyedBackend.getPartitionedState(
+                            "namespace-a", StringSerializer.INSTANCE, descriptor);
+            secondKey.put(7, 27);
+            assertEquals(Integer.valueOf(27), secondKey.get(7));
+        } finally {
+            keyedBackend.dispose();
+            environment.close();
+        }
+    }
+
+    @Test
     public void testMapIteratorSingleKeyFetchConfigurationAndPagingSemantics() throws Exception {
         Configuration configuration = new Configuration();
         configuration.set(RocksDBOptions.MAP_ITERATOR_SINGLE_KEY_FETCH_ENABLED, true);

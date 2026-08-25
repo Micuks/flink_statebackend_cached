@@ -324,6 +324,14 @@ public class RocksDBConfigurableOptions implements Serializable {
                             "Experimentally use ArmPoint's append-and-KeyHead flat authority for MapState. "
                                     + "When false, MapState keeps the ordered InlineSkipList authority.");
 
+    public static final ConfigOption<Boolean> MEMTABLE_ARM_POINT_MAP_KEYHEAD_POINT_INDEX =
+            key("state.backend.rocksdb.memtable.arm-point.map-keyhead-point-index.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Keep MapState's ordered InlineSkipList for range iteration while maintaining "
+                                    + "an additional native per-user-key version chain for exact point lookups.");
+
     public static final ConfigOption<Double> RESTORE_OVERLAP_FRACTION_THRESHOLD =
             key("state.backend.rocksdb.restore-overlap-fraction-threshold")
                     .doubleType()
@@ -367,6 +375,7 @@ public class RocksDBConfigurableOptions implements Serializable {
                 MEMTABLE_ARM_POINT_BUCKET_COUNT,
                 MEMTABLE_ARM_POINT_PROBE_MODE,
                 MEMTABLE_ARM_POINT_MAP_FLAT_AUTHORITY,
+                MEMTABLE_ARM_POINT_MAP_KEYHEAD_POINT_INDEX,
                 RESTORE_OVERLAP_FRACTION_THRESHOLD
             };
 
