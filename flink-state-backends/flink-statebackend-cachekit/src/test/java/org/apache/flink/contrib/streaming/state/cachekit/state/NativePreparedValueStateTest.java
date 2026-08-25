@@ -1987,6 +1987,88 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testAdaptiveMailboxDensityBypassKeepsJavaPreparedMultiGetAndValues() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(null);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+        when(reader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
+                .thenAnswer(
+                        invocation ->
+                                Arrays.asList(
+                                        KvStateSerializer.serializeValue(
+                                                31, IntSerializer.INSTANCE),
+                                        KvStateSerializer.serializeValue(
+                                                42, IntSerializer.INSTANCE)));
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(compactSelectedOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true,
+                        8,
+                        1 << 20,
+                        false,
+                        coordinator,
+                        30);
+        state.setCurrentNamespace("window-mailbox-density-bypass");
+        AdaptiveNativeMailboxDensityController controller =
+                new AdaptiveNativeMailboxDensityController(2, 1, 1, 16, 0.10, 0.20);
+        controller.recordCompaction(2, 0);
+        assertEquals(AdaptiveNativeMailboxDensityController.Mode.BYPASS, controller.mode());
+        state.setAdaptiveNativeMailboxDensityControllerForTesting(controller);
+
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
+
+        assertEquals(0, fakePlane.compactCalls);
+        assertEquals(0, coordinator.probeCalls());
+        assertEquals(0, coordinator.fillCalls());
+        assertEquals(0, state.getNativeMailboxCompactBatchesForTesting());
+        assertEquals(1, controller.bypassedBatches());
+        assertEquals(2, controller.bypassedInputKeys());
+        verify(reader, times(1)).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+
+        currentKey.set("k1");
+        assertEquals(31, state.value());
+        currentKey.set("k2");
+        assertEquals(42, state.value());
+
+        state.close();
+        coordinator.close();
+        assertEquals(1, fakePlane.closeCalls);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testCompactSelectedNativeFiltersMailboxCancellationBeforeMissIoAndPublish()
             throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");

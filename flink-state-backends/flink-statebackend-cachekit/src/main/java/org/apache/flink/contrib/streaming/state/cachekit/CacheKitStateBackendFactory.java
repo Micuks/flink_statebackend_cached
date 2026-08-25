@@ -550,6 +550,57 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Serialize and compact a native mailbox batch before deep-copying Java reservation keys. "
                                                                         + "Only compacted unique keys receive KeyNamespaceKey objects; fallback and authoritative reads are unchanged.");
 
+        public static final ConfigOption<Boolean> NATIVE_MAILBOX_ADAPTIVE_DENSITY_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.mailbox-batch.adaptive-density.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Route duplicate-heavy ValueState lookahead batches through the existing Java prepared-MultiGet path. "
+                                                                        + "The decision uses sampled compacted-unique/input density and periodically re-samples native compaction for phase recovery.");
+
+        public static final ConfigOption<Integer>
+                        NATIVE_MAILBOX_ADAPTIVE_DENSITY_WINDOW_INPUT_KEYS =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.mailbox-batch.adaptive-density.window-input-keys")
+                                        .intType()
+                                        .defaultValue(8192);
+
+        public static final ConfigOption<Integer>
+                        NATIVE_MAILBOX_ADAPTIVE_DENSITY_WINDOW_BATCHES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.mailbox-batch.adaptive-density.window-batches")
+                                        .intType()
+                                        .defaultValue(64);
+
+        public static final ConfigOption<Integer>
+                        NATIVE_MAILBOX_ADAPTIVE_DENSITY_LOW_WINDOWS =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.mailbox-batch.adaptive-density.low-density-windows")
+                                        .intType()
+                                        .defaultValue(2);
+
+        public static final ConfigOption<Integer>
+                        NATIVE_MAILBOX_ADAPTIVE_DENSITY_COOLDOWN_BATCHES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.mailbox-batch.adaptive-density.cooldown-batches")
+                                        .intType()
+                                        .defaultValue(4096);
+
+        public static final ConfigOption<Double>
+                        NATIVE_MAILBOX_ADAPTIVE_DENSITY_MIN_UNIQUE_RATE =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.mailbox-batch.adaptive-density.min-unique-rate")
+                                        .doubleType()
+                                        .defaultValue(0.10);
+
+        public static final ConfigOption<Double>
+                        NATIVE_MAILBOX_ADAPTIVE_DENSITY_RECOVERY_UNIQUE_RATE =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.mailbox-batch.adaptive-density.recovery-unique-rate")
+                                        .doubleType()
+                                        .defaultValue(0.15);
+
         public static final ConfigOption<Boolean>
                         NATIVE_COMPACT_SELECTED_PROBE_ADAPTIVE_BYPASS_ENABLED =
                         ConfigOptions.key(

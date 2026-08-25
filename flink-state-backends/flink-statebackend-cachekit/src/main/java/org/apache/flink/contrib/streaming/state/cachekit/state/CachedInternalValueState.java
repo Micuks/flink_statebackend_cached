@@ -163,6 +163,45 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     256,
                     1,
                     1_000_000);
+    private static final boolean NATIVE_MAILBOX_ADAPTIVE_DENSITY_ENABLED =
+            loadBooleanConfig(
+                    "state.backend.cachekit.native.mailbox-batch.adaptive-density.enabled", false);
+    private static final int NATIVE_MAILBOX_ADAPTIVE_DENSITY_WINDOW_INPUT_KEYS =
+            loadIntConfig(
+                    "state.backend.cachekit.native.mailbox-batch.adaptive-density.window-input-keys",
+                    8192,
+                    1,
+                    1_000_000);
+    private static final int NATIVE_MAILBOX_ADAPTIVE_DENSITY_WINDOW_BATCHES =
+            loadIntConfig(
+                    "state.backend.cachekit.native.mailbox-batch.adaptive-density.window-batches",
+                    64,
+                    1,
+                    1_000_000);
+    private static final int NATIVE_MAILBOX_ADAPTIVE_DENSITY_LOW_WINDOWS =
+            loadIntConfig(
+                    "state.backend.cachekit.native.mailbox-batch.adaptive-density.low-density-windows",
+                    2,
+                    1,
+                    1000);
+    private static final int NATIVE_MAILBOX_ADAPTIVE_DENSITY_COOLDOWN_BATCHES =
+            loadIntConfig(
+                    "state.backend.cachekit.native.mailbox-batch.adaptive-density.cooldown-batches",
+                    4096,
+                    1,
+                    1_000_000);
+    private static final double NATIVE_MAILBOX_ADAPTIVE_DENSITY_MIN_UNIQUE_RATE =
+            loadDoubleConfig(
+                    "state.backend.cachekit.native.mailbox-batch.adaptive-density.min-unique-rate",
+                    0.10,
+                    0.0,
+                    1.0);
+    private static final double NATIVE_MAILBOX_ADAPTIVE_DENSITY_RECOVERY_UNIQUE_RATE =
+            loadDoubleConfig(
+                    "state.backend.cachekit.native.mailbox-batch.adaptive-density.recovery-unique-rate",
+                    0.15,
+                    0.0,
+                    1.0);
     private static final boolean NATIVE_ADAPTIVE_PROBE_BYPASS_ENABLED =
             loadBooleanConfig(
                     "state.backend.cachekit.native.compact-selected-probe.adaptive-bypass.enabled",
@@ -440,6 +479,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final java.util.concurrent.atomic.AtomicLong nativeWriteEpoch =
             new java.util.concurrent.atomic.AtomicLong();
     private AdaptiveNativeProbeController adaptiveNativeProbeController;
+    private AdaptiveNativeMailboxDensityController adaptiveNativeMailboxDensityController;
     private final PromotionYieldAdmissionController promotionYieldAdmissionController;
 
     // Worker-only serializers and scratch inputs. PrefetchExecutor serializes all tasks on its
@@ -1043,6 +1083,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 NATIVE_ADAPTIVE_PROBE_COOLDOWN_BATCHES,
                                 NATIVE_ADAPTIVE_PROBE_RECOVERY_MIN_USEFUL,
                                 NATIVE_ADAPTIVE_PROBE_RECOVERY_USEFUL_RATE)
+                        : null;
+        this.adaptiveNativeMailboxDensityController =
+                NATIVE_MAILBOX_ADAPTIVE_DENSITY_ENABLED
+                                && nativeRequestPlaneCoordinator != null
+                                && nativeRequestPlaneCoordinator.options().mailboxBatchEnabled()
+                        ? new AdaptiveNativeMailboxDensityController(
+                                NATIVE_MAILBOX_ADAPTIVE_DENSITY_WINDOW_INPUT_KEYS,
+                                NATIVE_MAILBOX_ADAPTIVE_DENSITY_WINDOW_BATCHES,
+                                NATIVE_MAILBOX_ADAPTIVE_DENSITY_LOW_WINDOWS,
+                                NATIVE_MAILBOX_ADAPTIVE_DENSITY_COOLDOWN_BATCHES,
+                                NATIVE_MAILBOX_ADAPTIVE_DENSITY_MIN_UNIQUE_RATE,
+                                NATIVE_MAILBOX_ADAPTIVE_DENSITY_RECOVERY_UNIQUE_RATE)
                         : null;
         this.promotionYieldAdmissionController =
                 PROMOTION_YIELD_ADMISSION_ENABLED
@@ -2037,6 +2089,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     adaptiveNativeProbeController.bypassedBatches(),
                     adaptiveNativeProbeController.bypassedKeys());
         }
+        if (adaptiveNativeMailboxDensityController != null) {
+            LOG.info(
+                    "[CACHEKIT NATIVE MAILBOX DENSITY] mode={} transitions={} windows={} "
+                            + "bypassedBatches={} bypassedInputKeys={}",
+                    adaptiveNativeMailboxDensityController.mode(),
+                    adaptiveNativeMailboxDensityController.transitions(),
+                    adaptiveNativeMailboxDensityController.completedWindows(),
+                    adaptiveNativeMailboxDensityController.bypassedBatches(),
+                    adaptiveNativeMailboxDensityController.bypassedInputKeys());
+        }
     }
 
     long getPrefetchMultiGetCallsForTesting() {
@@ -2066,6 +2128,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     void setAdaptiveNativeProbeControllerForTesting(
             AdaptiveNativeProbeController controller) {
         this.adaptiveNativeProbeController = controller;
+    }
+
+    void setAdaptiveNativeMailboxDensityControllerForTesting(
+            AdaptiveNativeMailboxDensityController controller) {
+        this.adaptiveNativeMailboxDensityController = controller;
     }
 
     long getPrefetchLazyValuesStagedForTesting() {
@@ -2628,12 +2695,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys = new java.util.ArrayList<>();
         final long gen = writeGen;
         final PrefetchReservation reservation = newPrefetchReservation(gen);
-        final boolean nativeMailboxBatch =
+        final boolean nativeMailboxConfigured =
                 nativeRequestPlaneCoordinator != null
                         && nativeRequestPlaneCoordinator.isActive()
                         && nativeRequestPlaneCoordinator.options().mailboxBatchEnabled();
+        final boolean nativeMailboxDensityBypassed =
+                nativeMailboxConfigured
+                        && adaptiveNativeMailboxDensityController != null
+                        && !adaptiveNativeMailboxDensityController.shouldUseNativeMailbox();
+        final boolean nativeMailboxBatch =
+                nativeMailboxConfigured && !nativeMailboxDensityBypassed;
         final boolean nativeDirectPrefetch =
-                !nativeMailboxBatch
+                !nativeMailboxConfigured
                         && nativeRequestPlaneCoordinator != null
                         && nativeRequestPlaneCoordinator.isActive()
                         && nativeRequestPlaneCoordinator.options().prefetchEnabled();
@@ -2687,6 +2760,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 deferReservationMaterialization ? deferredKeys.size() : storageKeys.size();
         if (initialCandidateCount == 0) {
             return null;
+        }
+        if (nativeMailboxDensityBypassed) {
+            adaptiveNativeMailboxDensityController.recordBypassedInputKeys(initialCandidateCount);
         }
         if (deferReservationMaterialization) {
             nativeDeferredReservationInputKeys += initialCandidateCount;
@@ -2831,7 +2907,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         prefetchTasksBuilt++;
         prefetchKeysPrepared += preparedRocksDBKeys.size();
-        if (nativeBatchSlot == null) {
+        if (nativeBatchSlot == null && !nativeMailboxDensityBypassed) {
             nativeBatchSlot = prepareNativeBatchSlot(preparedRocksDBKeys);
         }
         final java.util.List<byte[]> taskRocksDBKeys = preparedRocksDBKeys;
@@ -3033,6 +3109,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             int uniqueCount = nativeRequestPlaneCoordinator.compact(slot);
             nativeMailboxCompactBatches++;
             nativeMailboxCompactUniqueKeys += uniqueCount;
+            if (adaptiveNativeMailboxDensityController != null) {
+                adaptiveNativeMailboxDensityController.recordCompaction(
+                        storageKeys.size(), uniqueCount);
+            }
             rocksDBKeys.clear();
             boolean retainPreparedArena =
                     nativeRequestPlaneCoordinator.options().compactSelectedProbeEnabled()
@@ -3159,6 +3239,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             int uniqueCount = nativeRequestPlaneCoordinator.compact(slot);
             nativeMailboxCompactBatches++;
             nativeMailboxCompactUniqueKeys += uniqueCount;
+            if (adaptiveNativeMailboxDensityController != null) {
+                adaptiveNativeMailboxDensityController.recordCompaction(keys.size(), uniqueCount);
+            }
             rocksDBKeys.clear();
             boolean retainPreparedArena =
                     nativeRequestPlaneCoordinator.options().compactSelectedProbeEnabled()
