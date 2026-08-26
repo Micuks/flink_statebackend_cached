@@ -53,7 +53,6 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     private final boolean copyKeys;
     private final boolean copyValues;
     private final int minPrefetchUniqueKeys;
-    private final boolean longBitmaskTransactionEnabled;
     private final HashMap<EK, BufferedValue<EK, EV>> overlay = new HashMap<>();
     private final ArrayList<EK> pendingPrefetchKeys = new ArrayList<>();
     private final HashSet<EK> pendingPrefetchKeySet = new HashSet<>();
@@ -85,7 +84,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             StateMapView<N, EK, EV> delegate,
             TypeSerializer<EK> keySerializer,
             TypeSerializer<EV> valueSerializer) {
-        this(delegate, keySerializer, valueSerializer, 2, false);
+        this(delegate, keySerializer, valueSerializer, 2);
     }
 
     DistinctBatchStateMapView(
@@ -93,43 +92,12 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             TypeSerializer<EK> keySerializer,
             TypeSerializer<EV> valueSerializer,
             int minPrefetchUniqueKeys) {
-        this(delegate, keySerializer, valueSerializer, minPrefetchUniqueKeys, false);
-    }
-
-    DistinctBatchStateMapView(
-            StateMapView<N, EK, EV> delegate,
-            TypeSerializer<EK> keySerializer,
-            TypeSerializer<EV> valueSerializer,
-            int minPrefetchUniqueKeys,
-            boolean longBitmaskTransactionEnabled) {
         this.delegate = delegate;
         this.keySerializer = keySerializer;
         this.valueSerializer = valueSerializer;
         this.copyKeys = !keySerializer.isImmutableType();
         this.copyValues = !valueSerializer.isImmutableType();
         this.minPrefetchUniqueKeys = Math.max(2, minPrefetchUniqueKeys);
-        this.longBitmaskTransactionEnabled = longBitmaskTransactionEnabled;
-    }
-
-    boolean isLongBitmaskTransactionEnabled() {
-        return longBitmaskTransactionEnabled;
-    }
-
-    @Override
-    boolean supportsLongBitmaskMerge() {
-        return longBitmaskTransactionEnabled && delegate.supportsLongBitmaskMerge();
-    }
-
-    @Override
-    Map<EK, Long> mergeLongBitmasks(Map<EK, Long> desiredMasks) throws Exception {
-        if (active || prefetchActive || collectingPrefetchKeys || directValuesPrimed) {
-            throw new IllegalStateException(
-                    "Long bitmask transaction cannot overlap a DISTINCT batch scope");
-        }
-        if (!longBitmaskTransactionEnabled) {
-            throw new UnsupportedOperationException("Long bitmask transaction is disabled");
-        }
-        return delegate.mergeLongBitmasks(desiredMasks);
     }
 
     void beginBatch() {

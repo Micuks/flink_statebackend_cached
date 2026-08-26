@@ -20,7 +20,6 @@ package org.apache.flink.runtime.state;
 
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
-import org.apache.flink.runtime.state.internal.LongBitmaskMergeMapState;
 
 import java.util.Collections;
 import java.util.Iterator;
@@ -33,8 +32,7 @@ import java.util.Map;
  * @param <K> The type of keys in the map state.
  * @param <V> The type of values in the map state.
  */
-class UserFacingMapState<K, V>
-        implements MapState<K, V>, BatchPrefetchableMapState<K>, LongBitmaskMergeMapState<K> {
+class UserFacingMapState<K, V> implements MapState<K, V>, BatchPrefetchableMapState<K> {
 
     private final MapState<K, V> originalState;
 
@@ -72,23 +70,6 @@ class UserFacingMapState<K, V>
         if (originalState instanceof BatchPrefetchableMapState) {
             ((BatchPrefetchableMapState<K>) originalState).endPrefetchCurrentKeys();
         }
-    }
-
-    @Override
-    public boolean supportsLongBitmaskMerge() {
-        return originalState instanceof LongBitmaskMergeMapState
-                && ((LongBitmaskMergeMapState<?>) originalState).supportsLongBitmaskMerge();
-    }
-
-    @Override
-    @SuppressWarnings("unchecked")
-    public List<Long> mergeCurrentKeyLongBitmasks(List<? extends K> keys, List<Long> desiredMasks)
-            throws Exception {
-        if (!(originalState instanceof LongBitmaskMergeMapState)) {
-            throw new UnsupportedOperationException("Long bitmask merge is not supported");
-        }
-        return ((LongBitmaskMergeMapState<K>) originalState)
-                .mergeCurrentKeyLongBitmasks(keys, desiredMasks);
     }
 
     // ------------------------------------------------------------------------
