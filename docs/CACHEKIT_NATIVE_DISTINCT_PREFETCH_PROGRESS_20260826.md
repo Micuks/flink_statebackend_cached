@@ -35,10 +35,11 @@ MapSnapshot settings.
 
 ## Correctness and unit evidence
 
-- Source commit: `ce7501a4a78062d124c4ed1fc531e75ea6ef2d19`
+- Source commit after activation repair: `b322bcd2dfa8fb7a762c074055ca412bcdc90d44`
+- Initial implementation commit: `ce7501a4a78062d124c4ed1fc531e75ea6ef2d19`
 - Base commit: `0f89be98af6cda0271ef7ea0262d4d3b44bb1335`
 - FrocksDB commit: `335ecf7ce5156a3dd8ac5350e90832036065bba7`
-- Focused tests: 61 passed, 0 failures, 0 errors, 0 skipped
+- Focused tests: 62 passed, 0 failures, 0 errors, 0 skipped under JDK 11
 - Covered behavior: configuration default/plumbing, exact key collection,
   duplicate collapse, found/missing staging, read-your-write mutation handling,
   outer-key/namespace isolation, abort cleanup, planner code generation, and
@@ -54,6 +55,32 @@ fallbacks failures batchReaderAvailable
 Candidate legs require positive batches and staging hits, exact
 `found + missing == uniqueKeys` closure, zero failures and an available batch
 reader. Control legs require no candidate summary lines.
+
+## Activation failure and repair
+
+The first q15 candidate screen was rejected rather than reported as a result.
+Three completed candidate attempts all had an available backend batch reader,
+but every mechanism counter remained zero. The control leg was valid at
+`29.48 K/s/core`; candidate throughput from the invalid attempts is not used.
+
+Historical runtime logs prove that LocalPreagg itself was active: q15 executed
+more than 200,000 `KeyedProcessOperator` batch dispatches, with an observed
+collapse ratio around 22x. The fault was the next activation boundary:
+
+- the public treatment key enabled the CacheKit backend reader;
+- `PerKeyStateDataViewStore` only created `DistinctBatchStateMapView` when the
+  separate legacy `local-preagg.distinct-overlay` key was enabled;
+- the audited candidate configuration intentionally differed from control only
+  in the public treatment key, so the required view was never constructed and
+  generated prefetch calls were no-ops.
+
+Commit `b322bcd2dfa8fb7a762c074055ca412bcdc90d44` makes either public feature key
+activate the required batch-scoped exact-DISTINCT view. The treatment therefore
+remains a single default-off switch. The repair adds an explicit configuration
+test; the two affected view test classes pass 11/11. Together with the planner
+and CacheKit tests, the post-repair focused audit is 62/62. A temporary dispatch
+probe was removed before performance packaging, so the repaired candidate has
+no diagnostic atomic operation on its batch hot path.
 
 ## Benchmark protocol
 
