@@ -90,6 +90,25 @@ class DistinctBatchStateMapViewTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void skipsSingletonAndDuplicateOnlyCollectionsBeforeBackendPrefetch() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        DistinctBatchStateMapView<Void, String, Long> view = createView(delegate);
+
+        view.beginPrefetchKeyCollection(1);
+        view.addPrefetchKey("bidder-1");
+        assertFalse(view.finishPrefetchKeyCollection());
+
+        view.beginPrefetchKeyCollection(3);
+        view.addPrefetchKey("bidder-2");
+        view.addPrefetchKey("bidder-2");
+        view.addPrefetchKey("bidder-2");
+        assertFalse(view.finishPrefetchKeyCollection());
+
+        verify(delegate, never()).beginPrefetchKeys(any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void collapsesRepeatedGetAndPutToOneDelegateReadAndOneFinalWrite() throws Exception {
         StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
         when(delegate.get("bidder-7")).thenReturn(1L);

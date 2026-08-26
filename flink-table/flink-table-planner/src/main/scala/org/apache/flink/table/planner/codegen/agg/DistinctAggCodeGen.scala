@@ -320,12 +320,32 @@ class DistinctAggCodeGen(
       ""
     } else {
       val keyExpr = generateKeyExpression(ctx, generator)
-      s"""
-         |${keyExpr.code}
-         |if (!${keyExpr.nullTerm}) {
-         |  $DISTINCT_BATCH_PREFETCH_SUPPORT.add($distinctAccTerm, ${keyExpr.resultTerm});
-         |}
-       """.stripMargin
+      val filterResults = filterExpressions.map {
+        case None => None
+        case Some(f) => Some(generator.generateExpression(f.accept(rexNodeGen)).resultTerm)
+      }
+      val addKey =
+        s"""
+           |${keyExpr.code}
+           |if (!${keyExpr.nullTerm}) {
+           |  $DISTINCT_BATCH_PREFETCH_SUPPORT.add($distinctAccTerm, ${keyExpr.resultTerm});
+           |}
+         """.stripMargin
+
+      // Match accumulate()/retract() exactly: when every aggregate sharing this DISTINCT state
+      // has a FILTER, the state is not touched unless at least one filter accepts the record.
+      // Collecting filtered-out keys here wastes native MultiGet work and can evict useful staged
+      // values before the corresponding record is consumed.
+      if (filterResults.forall(_.isDefined)) {
+        val condition = filterResults.flatten.mkString(" || ")
+        s"""
+           |if ($condition) {
+           |  $addKey
+           |}
+         """.stripMargin
+      } else {
+        addKey
+      }
     }
   }
 

@@ -23,6 +23,7 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -52,6 +53,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     private final boolean copyValues;
     private final HashMap<EK, BufferedValue<EK, EV>> overlay = new HashMap<>();
     private final ArrayList<EK> pendingPrefetchKeys = new ArrayList<>();
+    private final HashSet<EK> pendingPrefetchKeySet = new HashSet<>();
 
     private boolean active;
     private boolean prefetchActive;
@@ -117,6 +119,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             throw new IllegalStateException("DISTINCT batch prefetch is already active");
         }
         pendingPrefetchKeys.clear();
+        pendingPrefetchKeySet.clear();
         pendingPrefetchKeys.ensureCapacity(Math.max(0, expectedKeys));
         collectingPrefetchKeys = true;
     }
@@ -127,7 +130,10 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             throw new IllegalStateException("DISTINCT prefetch key collection is not active");
         }
         if (key != null) {
-            pendingPrefetchKeys.add(copyKey(key));
+            EK stableKey = copyKey(key);
+            if (pendingPrefetchKeySet.add(stableKey)) {
+                pendingPrefetchKeys.add(stableKey);
+            }
         }
     }
 
@@ -138,9 +144,12 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         }
         collectingPrefetchKeys = false;
         try {
-            return !pendingPrefetchKeys.isEmpty() && beginPrefetchKeys(pendingPrefetchKeys);
+            // Native MultiGet has no batching benefit for a singleton. Stop before crossing the
+            // MapView/backend/JNI boundary; the ordinary state read remains authoritative.
+            return pendingPrefetchKeys.size() >= 2 && beginPrefetchKeys(pendingPrefetchKeys);
         } finally {
             pendingPrefetchKeys.clear();
+            pendingPrefetchKeySet.clear();
         }
     }
 
@@ -148,6 +157,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     public void abortPrefetchKeyCollection() {
         collectingPrefetchKeys = false;
         pendingPrefetchKeys.clear();
+        pendingPrefetchKeySet.clear();
         endPrefetchScope();
     }
 
