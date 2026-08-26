@@ -21,11 +21,13 @@ package org.apache.flink.table.runtime.operators.aggregate;
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
-import org.apache.flink.streaming.api.operators.ReusableBatchableKeyedFunction;
+import org.apache.flink.streaming.api.operators.PipelinedBatchableKeyedFunction;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.utils.JoinedRowData;
+import org.apache.flink.table.runtime.dataview.DistinctBatchPrefetchSupport;
 import org.apache.flink.table.runtime.dataview.PerKeyStateDataViewStore;
 import org.apache.flink.table.runtime.generated.AggsHandleFunction;
 import org.apache.flink.table.runtime.generated.GeneratedAggsHandleFunction;
@@ -48,7 +50,7 @@ import static org.apache.flink.table.runtime.util.StateConfigUtil.createTtlConfi
 
 /** Aggregate Function used for the groupby (without window) aggregate. */
 public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, RowData>
-        implements ReusableBatchableKeyedFunction<RowData, RowData> {
+        implements PipelinedBatchableKeyedFunction<RowData, RowData> {
 
     private static final long serialVersionUID = -4767158666069797704L;
     private static final Logger LOG = LoggerFactory.getLogger(GroupAggFunction.class);
@@ -82,6 +84,7 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
 
     // stores the accumulators
     private transient ValueState<RowData> accState = null;
+    private transient TypeSerializer<RowData> accSerializer = null;
 
     // Owns the exact-DISTINCT MapViews and their optional batch-scoped overlays.
     private transient PerKeyStateDataViewStore dataViewStore = null;
@@ -125,6 +128,7 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
         equaliser = genRecordEqualiser.newInstance(getRuntimeContext().getUserCodeClassLoader());
 
         InternalTypeInfo<RowData> accTypeInfo = InternalTypeInfo.ofFields(accTypes);
+        accSerializer = accTypeInfo.createSerializer(getRuntimeContext().getExecutionConfig());
         ValueStateDescriptor<RowData> accDesc = new ValueStateDescriptor<>("accState", accTypeInfo);
         if (ttlConfig.isEnabled()) {
             accDesc.enableTimeToLive(ttlConfig);
@@ -248,18 +252,98 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
             firstRow = true;
         }
 
-        // Generated DISTINCT MapView members are restored from the accumulator row. Bind them
-        // before asking the generated handler to collect and prefetch exact keys; otherwise the
-        // handler observes null views and silently skips the prefetch path. The prefetch must still
-        // happen before beginDistinctBatch(), because key collection is deliberately rejected once
-        // the write-collapsing overlay is active.
+        processBatchFromPreparation(
+                key, inputRows, new BatchPreparation(accumulators, firstRow, 0, false, null), out);
+    }
+
+    @Override
+    public Object prepareBatchForKey(Object currentKey, List<RowData> inputRows) throws Exception {
+        if (inputRows == null || inputRows.isEmpty()) {
+            return BatchPreparation.SKIP;
+        }
+        RowData accumulators = accState.value();
+        int inputStart = 0;
+        boolean firstRow = false;
+        if (accumulators == null) {
+            while (inputStart < inputRows.size() && isRetractMsg(inputRows.get(inputStart))) {
+                inputStart++;
+            }
+            if (inputStart == inputRows.size()) {
+                return BatchPreparation.SKIP;
+            }
+            accumulators = function.createAccumulators();
+            firstRow = true;
+        }
+
+        // Reading the next outer key may reuse backend deserialization buffers. Retain a stable
+        // accumulator while its immutable RocksDB keys execute off mailbox.
+        RowData stableAccumulators = accSerializer.copy(accumulators);
+        function.setAccumulators(stableAccumulators);
+        Object distinctPrepared = null;
+        boolean captureEnded = false;
+        DistinctBatchPrefetchSupport.beginPreparedCapture();
+        try {
+            function.prefetchDistinctBatch(
+                    inputStart == 0 ? inputRows : inputRows.subList(inputStart, inputRows.size()));
+            distinctPrepared = DistinctBatchPrefetchSupport.endPreparedCapture();
+            captureEnded = true;
+        } finally {
+            if (!captureEnded) {
+                DistinctBatchPrefetchSupport.abortPreparedCapture();
+            }
+        }
+        return new BatchPreparation(
+                stableAccumulators, firstRow, inputStart, false, distinctPrepared);
+    }
+
+    @Override
+    public void processPreparedBatchForKey(
+            Object currentKey, List<RowData> inputRows, Object prepared, Collector<RowData> out)
+            throws Exception {
+        if (!(prepared instanceof BatchPreparation)) {
+            processBatchForKey(currentKey, inputRows, out);
+            return;
+        }
+        BatchPreparation preparation = (BatchPreparation) prepared;
+        if (preparation.skip) {
+            return;
+        }
+        processBatchFromPreparation((RowData) currentKey, inputRows, preparation, out);
+    }
+
+    @Override
+    public void abortPreparedBatch(Object prepared) {
+        if (prepared instanceof BatchPreparation) {
+            DistinctBatchPrefetchSupport.abortPreparedCapture(
+                    ((BatchPreparation) prepared).distinctPrepared);
+        }
+    }
+
+    private void processBatchFromPreparation(
+            RowData key,
+            List<RowData> inputRows,
+            BatchPreparation preparation,
+            Collector<RowData> out)
+            throws Exception {
+        RowData accumulators = preparation.accumulators;
+        boolean firstRow = preparation.firstRow;
         function.setAccumulators(accumulators);
-        function.prefetchDistinctBatch(inputRows);
+        boolean installed =
+                DistinctBatchPrefetchSupport.installPreparedCapture(preparation.distinctPrepared);
+        if (!installed) {
+            function.prefetchDistinctBatch(
+                    preparation.inputStart == 0
+                            ? inputRows
+                            : inputRows.subList(preparation.inputStart, inputRows.size()));
+        }
         final boolean distinctBatch = dataViewStore.beginDistinctBatch();
         boolean distinctBatchCommitted = false;
         try {
             RowData prevAggValue = function.getValue();
-            for (RowData input : inputRows) {
+            for (int inputIndex = preparation.inputStart;
+                    inputIndex < inputRows.size();
+                    inputIndex++) {
+                RowData input = inputRows.get(inputIndex);
                 if (isAccumulateMsg(input)) {
                     function.accumulate(input);
                 } else {
@@ -303,6 +387,30 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
             if (distinctBatch && !distinctBatchCommitted) {
                 dataViewStore.abortDistinctBatch();
             }
+        }
+    }
+
+    private static final class BatchPreparation {
+        private static final BatchPreparation SKIP =
+                new BatchPreparation(null, false, 0, true, null);
+
+        private final RowData accumulators;
+        private final boolean firstRow;
+        private final int inputStart;
+        private final boolean skip;
+        private final Object distinctPrepared;
+
+        private BatchPreparation(
+                RowData accumulators,
+                boolean firstRow,
+                int inputStart,
+                boolean skip,
+                Object distinctPrepared) {
+            this.accumulators = accumulators;
+            this.firstRow = firstRow;
+            this.inputStart = inputStart;
+            this.skip = skip;
+            this.distinctPrepared = distinctPrepared;
         }
     }
 

@@ -27,6 +27,7 @@ import org.apache.flink.streaming.api.operators.AbstractUdfStreamOperator;
 import org.apache.flink.streaming.api.operators.BatchableKeyedFunction;
 import org.apache.flink.streaming.api.operators.Input;
 import org.apache.flink.streaming.api.operators.Output;
+import org.apache.flink.streaming.api.operators.PipelinedBatchableKeyedFunction;
 import org.apache.flink.streaming.api.operators.ReusableBatchableKeyedFunction;
 import org.apache.flink.streaming.api.operators.TimestampedCollector;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -72,6 +73,19 @@ public final class LocalPreagg {
     private static final boolean NATIVE_EXTRACTION_REUSE_ENABLED =
             GlobalConfiguration.loadConfiguration()
                     .getBoolean("state.backend.cachekit.native.local-preagg.enabled", false);
+    private static final boolean CROSS_KEY_PIPELINE_ENABLED =
+            GlobalConfiguration.loadConfiguration()
+                    .getBoolean(
+                            "state.backend.cachekit.native.map-distinct-batch-prefetch.cross-key-pipeline.enabled",
+                            false)
+                    && GlobalConfiguration.loadConfiguration()
+                            .getBoolean(
+                                    "state.backend.cachekit.native.map-distinct-batch-prefetch.enabled",
+                                    false)
+                    && GlobalConfiguration.loadConfiguration()
+                            .getBoolean(
+                                    "state.backend.cachekit.local-preagg.distinct-overlay.enabled",
+                                    false);
     private static final ThreadLocal<ExtractionBuffers> NATIVE_EXTRACTION_BUFFERS =
             ThreadLocal.withInitial(ExtractionBuffers::new);
     private static final ThreadLocal<NativeGroupingWorkspace> NATIVE_GROUPING_WORKSPACE =
@@ -291,10 +305,16 @@ public final class LocalPreagg {
             } else {
                 collector.eraseTimestamp();
             }
-            for (int group = 0; group < groups.keys.size(); group++) {
-                Object key = groups.keys.get(group);
-                op.setCurrentKey(key);
-                batchable.processBatchForKey(key, groups.values.get(group), collector);
+            if (CROSS_KEY_PIPELINE_ENABLED
+                    && batchable instanceof PipelinedBatchableKeyedFunction) {
+                dispatchMaterializedPipeline(
+                        op, (PipelinedBatchableKeyedFunction) batchable, groups, collector);
+            } else {
+                for (int group = 0; group < groups.keys.size(); group++) {
+                    Object key = groups.keys.get(group);
+                    op.setCurrentKey(key);
+                    batchable.processBatchForKey(key, groups.values.get(group), collector);
+                }
             }
             if (numRecordsIn != null) {
                 numRecordsIn.inc(n);
@@ -387,15 +407,26 @@ public final class LocalPreagg {
             }
 
             IndexedRecordValueList values = workspace.indexedValues;
-            for (int group = 0; group < groups.groupCount; group++) {
-                Object key = groups.groupKeys[group];
-                op.setCurrentKey(key);
-                values.reset(
+            if (CROSS_KEY_PIPELINE_ENABLED
+                    && batchable instanceof PipelinedBatchableKeyedFunction) {
+                dispatchIndexedPipeline(
+                        op,
+                        (PipelinedBatchableKeyedFunction) batchable,
+                        groups,
+                        values,
                         buf,
-                        groups.bufferIndexesByGroup,
-                        groups.groupOffsets[group],
-                        groups.groupOffsets[group + 1]);
-                batchable.processBatchForKey(key, values, collector);
+                        collector);
+            } else {
+                for (int group = 0; group < groups.groupCount; group++) {
+                    Object key = groups.groupKeys[group];
+                    op.setCurrentKey(key);
+                    values.reset(
+                            buf,
+                            groups.bufferIndexesByGroup,
+                            groups.groupOffsets[group],
+                            groups.groupOffsets[group + 1]);
+                    batchable.processBatchForKey(key, values, collector);
+                }
             }
 
             if (numRecordsIn != null) {
@@ -431,6 +462,91 @@ public final class LocalPreagg {
             }
             workspace.clearIndexed(sourceCount, groupCount);
         }
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    static void dispatchMaterializedPipeline(
+            AbstractStreamOperator<?> op,
+            PipelinedBatchableKeyedFunction pipelined,
+            GroupedInputs groups,
+            TimestampedCollector collector)
+            throws Exception {
+        Object currentPrepared = null;
+        Object nextPrepared = null;
+        try {
+            op.setCurrentKey(groups.keys.get(0));
+            currentPrepared =
+                    pipelined.prepareBatchForKey(groups.keys.get(0), groups.values.get(0));
+            for (int group = 0; group < groups.keys.size(); group++) {
+                if (group + 1 < groups.keys.size()) {
+                    op.setCurrentKey(groups.keys.get(group + 1));
+                    nextPrepared =
+                            pipelined.prepareBatchForKey(
+                                    groups.keys.get(group + 1), groups.values.get(group + 1));
+                }
+                Object key = groups.keys.get(group);
+                op.setCurrentKey(key);
+                pipelined.processPreparedBatchForKey(
+                        key, groups.values.get(group), currentPrepared, collector);
+                currentPrepared = nextPrepared;
+                nextPrepared = null;
+            }
+        } finally {
+            if (currentPrepared != null) {
+                pipelined.abortPreparedBatch(currentPrepared);
+            }
+            if (nextPrepared != null) {
+                pipelined.abortPreparedBatch(nextPrepared);
+            }
+        }
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static void dispatchIndexedPipeline(
+            AbstractStreamOperator<?> op,
+            PipelinedBatchableKeyedFunction pipelined,
+            IndexedGroups groups,
+            IndexedRecordValueList values,
+            StreamRecord<?>[] buf,
+            TimestampedCollector collector)
+            throws Exception {
+        Object currentPrepared = null;
+        Object nextPrepared = null;
+        try {
+            resetIndexedValues(values, buf, groups, 0);
+            op.setCurrentKey(groups.groupKeys[0]);
+            currentPrepared = pipelined.prepareBatchForKey(groups.groupKeys[0], values);
+            for (int group = 0; group < groups.groupCount; group++) {
+                if (group + 1 < groups.groupCount) {
+                    resetIndexedValues(values, buf, groups, group + 1);
+                    op.setCurrentKey(groups.groupKeys[group + 1]);
+                    nextPrepared =
+                            pipelined.prepareBatchForKey(groups.groupKeys[group + 1], values);
+                }
+                resetIndexedValues(values, buf, groups, group);
+                Object key = groups.groupKeys[group];
+                op.setCurrentKey(key);
+                pipelined.processPreparedBatchForKey(key, values, currentPrepared, collector);
+                currentPrepared = nextPrepared;
+                nextPrepared = null;
+            }
+        } finally {
+            if (currentPrepared != null) {
+                pipelined.abortPreparedBatch(currentPrepared);
+            }
+            if (nextPrepared != null) {
+                pipelined.abortPreparedBatch(nextPrepared);
+            }
+        }
+    }
+
+    private static void resetIndexedValues(
+            IndexedRecordValueList values, StreamRecord<?>[] buf, IndexedGroups groups, int group) {
+        values.reset(
+                buf,
+                groups.bufferIndexesByGroup,
+                groups.groupOffsets[group],
+                groups.groupOffsets[group + 1]);
     }
 
     private static final class ExtractionBuffers {

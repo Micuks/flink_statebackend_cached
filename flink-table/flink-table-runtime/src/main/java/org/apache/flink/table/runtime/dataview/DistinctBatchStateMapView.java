@@ -231,6 +231,76 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     }
 
     @Override
+    public Object finishPreparedPrefetchKeyCollection() throws Exception {
+        if (!collectingPrefetchKeys) {
+            return null;
+        }
+        collectingPrefetchKeys = false;
+        try {
+            int size = pendingPrefetchKeys.size();
+            recordPrefetchSize(size);
+            if (size < minPrefetchUniqueKeys || !delegate.supportsDirectPrefetchedValues()) {
+                prefetchRejectedBelowMinimum += size < minPrefetchUniqueKeys ? 1 : 0;
+                return null;
+            }
+            ArrayList<EK> stableKeys = new ArrayList<>(pendingPrefetchKeys);
+            Object backendPrepared = delegate.prepareUniqueKeyValues(stableKeys);
+            return backendPrepared == null
+                    ? null
+                    : new PreparedPrefetch<>(this, stableKeys, backendPrepared);
+        } finally {
+            pendingPrefetchKeys.clear();
+            pendingPrefetchKeySet.clear();
+        }
+    }
+
+    @Override
+    public boolean installPreparedPrefetch(Object prepared) throws Exception {
+        if (!(prepared instanceof PreparedPrefetch)) {
+            return false;
+        }
+        PreparedPrefetch<?, ?> token = (PreparedPrefetch<?, ?>) prepared;
+        if (token.owner != this || token.consumed) {
+            return false;
+        }
+        token.consumed = true;
+        @SuppressWarnings("unchecked")
+        List<EK> keys = (List<EK>) token.keys;
+        List<EV> values = delegate.awaitPreparedUniqueKeyValues(token.backendPrepared);
+        if (values == null || values.size() != keys.size()) {
+            overlay.clear();
+            directValuesPrimed = false;
+            return false;
+        }
+        for (int i = 0; i < keys.size(); i++) {
+            EK stableKey = keys.get(i);
+            EV stableValue = copyValue(values.get(i));
+            overlay.put(stableKey, new BufferedValue<>(stableKey, stableValue, false, false));
+        }
+        directValuesPrimed = true;
+        directOverlayValues += keys.size();
+        return true;
+    }
+
+    @Override
+    public void abortPreparedPrefetch(Object prepared) {
+        if (!(prepared instanceof PreparedPrefetch)) {
+            return;
+        }
+        PreparedPrefetch<?, ?> token = (PreparedPrefetch<?, ?>) prepared;
+        if (token.owner == this) {
+            if (!token.consumed) {
+                token.consumed = true;
+                delegate.abortPreparedUniqueKeyValues(token.backendPrepared);
+            }
+            if (!active && directValuesPrimed) {
+                overlay.clear();
+                directValuesPrimed = false;
+            }
+        }
+    }
+
+    @Override
     public void abortPrefetchKeyCollection() {
         collectingPrefetchKeys = false;
         pendingPrefetchKeys.clear();
@@ -240,6 +310,20 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             directValuesPrimed = false;
         }
         endPrefetchScope();
+    }
+
+    private static final class PreparedPrefetch<EK, EV> {
+        private final DistinctBatchStateMapView<?, EK, EV> owner;
+        private final List<EK> keys;
+        private final Object backendPrepared;
+        private boolean consumed;
+
+        private PreparedPrefetch(
+                DistinctBatchStateMapView<?, EK, EV> owner, List<EK> keys, Object backendPrepared) {
+            this.owner = owner;
+            this.keys = keys;
+            this.backendPrepared = backendPrepared;
+        }
     }
 
     /** Prefetches exact keys before the batch overlay starts recording reads and writes. */

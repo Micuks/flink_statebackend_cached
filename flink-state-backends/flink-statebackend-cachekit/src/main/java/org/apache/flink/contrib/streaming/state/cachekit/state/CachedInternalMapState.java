@@ -31,6 +31,7 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchMapReader;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
+import org.apache.flink.contrib.streaming.state.cachekit.PrefetchExecutor;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePolicy;
@@ -157,6 +158,27 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private long batchPrefetchDirectArenaFallbacks;
     private long batchPrefetchDirectArenaFailures;
     private long batchPrefetchDirectArenaProtocolFallbacks;
+    private final Object asyncBatchPrefetchMonitor = new Object();
+    private final Set<PrefetchExecutor.DropAwareTask> outstandingAsyncBatchPrefetchTasks =
+            Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchAttempts =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchSubmitted =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchCompleted =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchDropped =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchFailures =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchKeys =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchAwaits =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchReadyBeforeAwait =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchWaitNanos =
+            new java.util.concurrent.atomic.AtomicLong();
 
     // --- MapSnapshot cache (entries() fast path) ---
     private final CachePolicy<KeyNamespace<K, N>, MapSnapshot<UK>> mapSnapshotCache;
@@ -631,6 +653,157 @@ public final class CachedInternalMapState<K, N, UK, UV>
             batchPrefetchFailures++;
             batchPrefetchFallbacks++;
             return null;
+        }
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public PreparedValues prepareCurrentUniqueKeyValues(List<? extends UK> uniqueUserKeys)
+            throws Exception {
+        asyncBatchPrefetchAttempts.incrementAndGet();
+        if (!supportsDirectPrefetchedValues() || closed) {
+            return null;
+        }
+        K currentKey = currentKeyProvider.getCurrentKey();
+        N namespace = currentNamespace;
+        if (currentKey == null || namespace == null || uniqueUserKeys.size() < 2) {
+            return null;
+        }
+
+        // Generated code already supplies stable, de-duplicated keys. Serialize the complete
+        // RocksDB keys while this outer key/namespace is current; the worker never reads mutable
+        // Flink key context or serializers.
+        List<UK> orderedKeys = (List<UK>) (List<?>) uniqueUserKeys;
+        flushCurrentKey(currentKey);
+        ensureDelegateNamespace(currentKey);
+        List<byte[]> rocksDBKeys =
+                rocksDBBatchMapReader.serializeRocksDBKeysByUserKeys(orderedKeys);
+        if (rocksDBKeys.size() != orderedKeys.size()) {
+            return null;
+        }
+        PreparedMapValues prepared = new PreparedMapValues(rocksDBKeys, orderedKeys.size());
+        synchronized (asyncBatchPrefetchMonitor) {
+            if (closed) {
+                return null;
+            }
+            outstandingAsyncBatchPrefetchTasks.add(prepared);
+        }
+        asyncBatchPrefetchSubmitted.incrementAndGet();
+        asyncBatchPrefetchKeys.addAndGet(orderedKeys.size());
+        PrefetchExecutor.trySubmit(prepared);
+        return prepared;
+    }
+
+    private final class PreparedMapValues
+            implements PreparedValues, PrefetchExecutor.DropAwareTask {
+
+        private final List<byte[]> rocksDBKeys;
+        private final int expectedValues;
+        private final java.util.concurrent.CountDownLatch completed =
+                new java.util.concurrent.CountDownLatch(1);
+        private final java.util.concurrent.atomic.AtomicInteger state =
+                new java.util.concurrent.atomic.AtomicInteger();
+        private volatile List<byte[]> rawValues;
+        private volatile Throwable failure;
+        private volatile boolean dropped;
+        private volatile long completedNanos;
+
+        private PreparedMapValues(List<byte[]> rocksDBKeys, int expectedValues) {
+            this.rocksDBKeys = rocksDBKeys;
+            this.expectedValues = expectedValues;
+        }
+
+        @Override
+        public void run() {
+            if (!state.compareAndSet(0, 1)) {
+                return;
+            }
+            try {
+                lifecycleLock.readLock().lock();
+                try {
+                    if (!closed) {
+                        List<byte[]> values =
+                                rocksDBBatchMapReader.getSerializedValuesByRocksDBKeys(
+                                        rocksDBKeys, 0, rocksDBKeys.size());
+                        if (values.size() != expectedValues) {
+                            throw new IllegalStateException(
+                                    "Async MapState MultiGet returned "
+                                            + values.size()
+                                            + " values for "
+                                            + expectedValues
+                                            + " keys.");
+                        }
+                        rawValues = values;
+                    }
+                } finally {
+                    lifecycleLock.readLock().unlock();
+                }
+            } catch (Throwable currentFailure) {
+                failure = currentFailure;
+                asyncBatchPrefetchFailures.incrementAndGet();
+            } finally {
+                finish(false);
+            }
+        }
+
+        @Override
+        public void onDrop() {
+            if (state.compareAndSet(0, 1)) {
+                dropped = true;
+                asyncBatchPrefetchDropped.incrementAndGet();
+                finish(true);
+            }
+        }
+
+        private void finish(boolean wasDropped) {
+            completedNanos = System.nanoTime();
+            state.set(2);
+            if (!wasDropped && rawValues != null) {
+                asyncBatchPrefetchCompleted.incrementAndGet();
+            }
+            completed.countDown();
+            synchronized (asyncBatchPrefetchMonitor) {
+                outstandingAsyncBatchPrefetchTasks.remove(this);
+                asyncBatchPrefetchMonitor.notifyAll();
+            }
+        }
+
+        @Override
+        public List<?> awaitValues() throws Exception {
+            asyncBatchPrefetchAwaits.incrementAndGet();
+            long awaitStarted = System.nanoTime();
+            if (completed.getCount() == 0L
+                    || completedNanos > 0L && completedNanos <= awaitStarted) {
+                asyncBatchPrefetchReadyBeforeAwait.incrementAndGet();
+            }
+            try {
+                completed.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw interrupted;
+            } finally {
+                asyncBatchPrefetchWaitNanos.addAndGet(
+                        Math.max(0L, System.nanoTime() - awaitStarted));
+            }
+            if (dropped || failure != null || rawValues == null) {
+                return null;
+            }
+            ArrayList<UV> values = new ArrayList<>(rawValues.size());
+            for (byte[] rawValue : rawValues) {
+                if (rawValue == null) {
+                    values.add(null);
+                } else {
+                    batchPrefetchInput.setBuffer(rawValue);
+                    boolean isNull = batchPrefetchInput.readBoolean();
+                    values.add(isNull ? null : userValueSerializer.deserialize(batchPrefetchInput));
+                }
+            }
+            return values;
+        }
+
+        @Override
+        public void cancel() {
+            PrefetchExecutor.cancelIfQueued(this);
         }
     }
 
@@ -2070,11 +2243,37 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
     }
 
-    /** Quiesces dirty write-back before the backend releases its RocksDB delegate. */
+    private void cancelQueuedAndAwaitAsyncBatchPrefetchTasks() {
+        List<PrefetchExecutor.DropAwareTask> snapshot;
+        synchronized (asyncBatchPrefetchMonitor) {
+            snapshot = new ArrayList<>(outstandingAsyncBatchPrefetchTasks);
+        }
+        for (PrefetchExecutor.DropAwareTask task : snapshot) {
+            PrefetchExecutor.cancelIfQueued(task);
+        }
+
+        boolean interrupted = false;
+        synchronized (asyncBatchPrefetchMonitor) {
+            while (!outstandingAsyncBatchPrefetchTasks.isEmpty()) {
+                try {
+                    asyncBatchPrefetchMonitor.wait();
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** Quiesces dirty write-back and async reads before releasing the RocksDB delegate. */
     public void close() {
+        closed = true;
+        cancelQueuedAndAwaitAsyncBatchPrefetchTasks();
         lifecycleLock.writeLock().lock();
         try {
-            closed = true;
+            endPrefetchCurrentKeys();
         } finally {
             lifecycleLock.writeLock().unlock();
         }
@@ -2167,6 +2366,19 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     batchPrefetchDirectArenaFailures,
                     batchPrefetchDirectArenaProtocolFallbacks,
                     rocksDBBatchMapReader != null);
+            LOG.info(
+                    "[CACHEKIT NATIVE MAP DISTINCT ASYNC] attempts={} submitted={} completed={} "
+                            + "dropped={} failures={} keys={} awaits={} readyBeforeAwait={} "
+                            + "waitNanos={}",
+                    asyncBatchPrefetchAttempts.get(),
+                    asyncBatchPrefetchSubmitted.get(),
+                    asyncBatchPrefetchCompleted.get(),
+                    asyncBatchPrefetchDropped.get(),
+                    asyncBatchPrefetchFailures.get(),
+                    asyncBatchPrefetchKeys.get(),
+                    asyncBatchPrefetchAwaits.get(),
+                    asyncBatchPrefetchReadyBeforeAwait.get(),
+                    asyncBatchPrefetchWaitNanos.get());
         }
     }
 

@@ -48,6 +48,55 @@ class DistinctBatchStateMapViewTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void installsPreparedValuesIntoOverlayWithoutSynchronousLookup() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        Object backendPrepared = new Object();
+        when(delegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        when(delegate.prepareUniqueKeyValues(any())).thenReturn(backendPrepared);
+        when(delegate.awaitPreparedUniqueKeyValues(backendPrepared))
+                .thenReturn(java.util.Arrays.asList(7L, null));
+        DistinctBatchStateMapView<Void, String, Long> view = createView(delegate);
+
+        view.beginPrefetchKeyCollection(2);
+        view.addPrefetchKey("bidder-1");
+        view.addPrefetchKey("bidder-2");
+        Object prepared = view.finishPreparedPrefetchKeyCollection();
+        assertTrue(view.installPreparedPrefetch(prepared));
+        view.beginBatch();
+        assertEquals(7L, view.get("bidder-1"));
+        assertNull(view.get("bidder-2"));
+        view.commitBatch();
+
+        verify(delegate, never()).prefetchUniqueKeyValues(any());
+        verify(delegate, never()).get(any());
+        assertEquals(2, view.directOverlayValues());
+        assertEquals(2, view.overlayHits());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void compositePreparedCaptureIsAllOrNothingAcrossDistinctViews() throws Exception {
+        BatchPrefetchableMapView<Object> first = mock(BatchPrefetchableMapView.class);
+        BatchPrefetchableMapView<Object> second = mock(BatchPrefetchableMapView.class);
+        Object firstToken = new Object();
+        Object secondToken = new Object();
+        when(first.finishPreparedPrefetchKeyCollection()).thenReturn(firstToken);
+        when(second.finishPreparedPrefetchKeyCollection()).thenReturn(secondToken);
+        when(first.installPreparedPrefetch(firstToken)).thenReturn(true);
+        when(second.installPreparedPrefetch(secondToken)).thenReturn(false);
+
+        DistinctBatchPrefetchSupport.beginPreparedCapture();
+        assertTrue(DistinctBatchPrefetchSupport.finishSession(first));
+        assertTrue(DistinctBatchPrefetchSupport.finishSession(second));
+        Object capture = DistinctBatchPrefetchSupport.endPreparedCapture();
+
+        assertFalse(DistinctBatchPrefetchSupport.installPreparedCapture(capture));
+        verify(first, times(1)).abortPreparedPrefetch(firstToken);
+        verify(second, times(1)).abortPreparedPrefetch(secondToken);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void delegatesExactKeyPrefetchBeforeBatchStarts() throws Exception {
         StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
         List<String> keys = List.of("bidder-1", "bidder-2");

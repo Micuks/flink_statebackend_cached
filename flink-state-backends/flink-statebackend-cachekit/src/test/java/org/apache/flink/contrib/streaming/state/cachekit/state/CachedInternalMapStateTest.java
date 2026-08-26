@@ -33,7 +33,10 @@ import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
@@ -48,10 +51,140 @@ import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeReque
 import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneOptions;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.runtime.state.VoidNamespace;
+import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.junit.jupiter.api.Test;
 
 class CachedInternalMapStateTest {
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testPreparedExactDistinctReadUsesImmutableRocksDBKeysOffMailbox() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(new MapSerializer<>(
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        List<byte[]> immutableKeys = Arrays.asList(new byte[] {1}, new byte[] {2});
+        when(reader.serializeRocksDBKeysByUserKeys(Arrays.asList("u1", "u2")))
+                .thenReturn(immutableKeys);
+        CountDownLatch workerEntered = new CountDownLatch(1);
+        CountDownLatch releaseWorker = new CountDownLatch(1);
+        when(reader.getSerializedValuesByRocksDBKeys(immutableKeys, 0, 2))
+                .thenAnswer(
+                        ignored -> {
+                            workerEntered.countDown();
+                            assertTrue(releaseWorker.await(10, TimeUnit.SECONDS));
+                            return Arrays.asList(serializedMapValue(7), null);
+                        });
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0);
+        state.enableNativeDistinctBatchPrefetch(true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        BatchPrefetchableMapState.PreparedValues prepared =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+        assertTrue(workerEntered.await(10, TimeUnit.SECONDS));
+        releaseWorker.countDown();
+        assertEquals(Arrays.asList(7, null), prepared.awaitValues());
+        verify(reader, times(1)).serializeRocksDBKeysByUserKeys(Arrays.asList("u1", "u2"));
+        verify(reader, times(1)).getSerializedValuesByRocksDBKeys(immutableKeys, 0, 2);
+        verify(reader, times(0)).getSerializedValuesByUserKeys(any());
+        state.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testCloseWaitsForRunningPreparedExactDistinctRead() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(new MapSerializer<>(
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        List<byte[]> immutableKeys = Arrays.asList(new byte[] {1}, new byte[] {2});
+        when(reader.serializeRocksDBKeysByUserKeys(Arrays.asList("u1", "u2")))
+                .thenReturn(immutableKeys);
+        CountDownLatch workerEntered = new CountDownLatch(1);
+        CountDownLatch releaseWorker = new CountDownLatch(1);
+        when(reader.getSerializedValuesByRocksDBKeys(immutableKeys, 0, 2))
+                .thenAnswer(
+                        ignored -> {
+                            workerEntered.countDown();
+                            assertTrue(releaseWorker.await(10, TimeUnit.SECONDS));
+                            return Arrays.asList(null, null);
+                        });
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0);
+        state.enableNativeDistinctBatchPrefetch(true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        assertTrue(state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2")) != null);
+        assertTrue(workerEntered.await(10, TimeUnit.SECONDS));
+
+        CountDownLatch closeReturned = new CountDownLatch(1);
+        AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+        Thread closeThread =
+                new Thread(
+                        () -> {
+                            try {
+                                state.close();
+                            } catch (Throwable failure) {
+                                closeFailure.set(failure);
+                            } finally {
+                                closeReturned.countDown();
+                            }
+                        });
+        closeThread.setDaemon(true);
+        closeThread.start();
+        try {
+            assertFalse(closeReturned.await(200, TimeUnit.MILLISECONDS));
+        } finally {
+            releaseWorker.countDown();
+        }
+        assertTrue(closeReturned.await(10, TimeUnit.SECONDS));
+        assertNull(closeFailure.get());
+    }
 
     @Test
     @SuppressWarnings("unchecked")

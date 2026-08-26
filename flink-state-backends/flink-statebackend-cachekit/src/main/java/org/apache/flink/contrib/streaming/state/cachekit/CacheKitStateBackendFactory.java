@@ -692,6 +692,19 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                             + "per hit. Requires the native request plane and direct-arena "
                                             + "MultiGet; any rejected chunk falls back transactionally.");
 
+    public static final ConfigOption<Boolean>
+            NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ENABLED =
+                    ConfigOptions.key(
+                                    "state.backend.cachekit.native.map-distinct-batch-prefetch.cross-key-pipeline.enabled")
+                            .booleanType()
+                            .defaultValue(false)
+                            .withDescription(
+                                    "Prepare the next LocalPreAgg outer key's immutable exact-DISTINCT "
+                                            + "RocksDB keys and overlap its native MultiGet with mailbox-owned "
+                                            + "processing of the current key. Requires exact-DISTINCT batch "
+                                            + "prefetch and the DISTINCT batch overlay; failures fall back to "
+                                            + "the synchronous authoritative path.");
+
     public static final ConfigOption<String> DELEGATE_BACKEND =
             ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()

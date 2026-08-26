@@ -45,6 +45,22 @@ public interface BatchPrefetchableMapView<K> {
     /** Starts backend prefetch for the collected keys and clears the collection. */
     boolean finishPrefetchKeyCollection() throws Exception;
 
+    /**
+     * Detaches the collected keys into a backend read that may overlap another outer-key batch.
+     * Returns {@code null} when the backend cannot safely prepare such a read.
+     */
+    default Object finishPreparedPrefetchKeyCollection() throws Exception {
+        return null;
+    }
+
+    /** Awaits and installs one detached read into the next batch overlay. */
+    default boolean installPreparedPrefetch(Object prepared) throws Exception {
+        return false;
+    }
+
+    /** Cancels one detached read that will not be consumed. */
+    default void abortPreparedPrefetch(Object prepared) {}
+
     /** Clears an unfinished collection and any backend prefetch scope. */
     void abortPrefetchKeyCollection();
 }

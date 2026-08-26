@@ -22,6 +22,8 @@ import org.apache.flink.runtime.state.BatchKeyGroupingSupport;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.BatchableKeyedFunction;
 import org.apache.flink.streaming.api.operators.Input;
+import org.apache.flink.streaming.api.operators.PipelinedBatchableKeyedFunction;
+import org.apache.flink.streaming.api.operators.TimestampedCollector;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.LatencyMarker;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -47,6 +49,114 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 class LocalPreaggTest {
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testMaterializedPipelinePreparesNextKeyBeforeProcessingCurrentKey() throws Exception {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "a", "c"),
+                        Arrays.asList(1, 2, 3, 4),
+                        new int[] {3, 0, 1, 0, 2});
+        List<String> events = new ArrayList<>();
+        PipelinedBatchableKeyedFunction pipeline =
+                new PipelinedBatchableKeyedFunction<Object, Object>() {
+                    @Override
+                    public Object prepareBatchForKey(Object key, List<Object> inputs) {
+                        events.add("prepare:" + key + ":" + new ArrayList<>(inputs));
+                        return "token-" + key;
+                    }
+
+                    @Override
+                    public void processPreparedBatchForKey(
+                            Object key,
+                            List<Object> inputs,
+                            Object prepared,
+                            Collector<Object> out) {
+                        events.add(
+                                "process:" + key + ":" + new ArrayList<>(inputs) + ":" + prepared);
+                    }
+
+                    @Override
+                    public void abortPreparedBatch(Object prepared) {
+                        events.add("abort:" + prepared);
+                    }
+
+                    @Override
+                    public void processBatchForKey(
+                            Object currentKey, List<Object> inputs, Collector<Object> out) {
+                        throw new AssertionError("pipeline must use prepared dispatch");
+                    }
+                };
+
+        LocalPreagg.dispatchMaterializedPipeline(
+                mock(AbstractStreamOperator.class),
+                pipeline,
+                groups,
+                mock(TimestampedCollector.class));
+
+        assertEquals(
+                Arrays.asList(
+                        "prepare:a:[1, 3]",
+                        "prepare:b:[2]",
+                        "process:a:[1, 3]:token-a",
+                        "prepare:c:[4]",
+                        "process:b:[2]:token-b",
+                        "process:c:[4]:token-c"),
+                events);
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testMaterializedPipelineAbortsCurrentAndNextPreparationOnFailure() {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b"), Arrays.asList(1, 2), new int[] {2, 0, 1});
+        List<String> events = new ArrayList<>();
+        PipelinedBatchableKeyedFunction pipeline =
+                new PipelinedBatchableKeyedFunction<Object, Object>() {
+                    @Override
+                    public Object prepareBatchForKey(Object key, List<Object> inputs) {
+                        events.add("prepare:" + key);
+                        return "token-" + key;
+                    }
+
+                    @Override
+                    public void processPreparedBatchForKey(
+                            Object key,
+                            List<Object> inputs,
+                            Object prepared,
+                            Collector<Object> out) {
+                        events.add("process:" + key);
+                        throw new IllegalStateException("expected test failure");
+                    }
+
+                    @Override
+                    public void abortPreparedBatch(Object prepared) {
+                        events.add("abort:" + prepared);
+                    }
+
+                    @Override
+                    public void processBatchForKey(
+                            Object currentKey, List<Object> inputs, Collector<Object> out) {
+                        throw new AssertionError("pipeline must use prepared dispatch");
+                    }
+                };
+
+        assertThrows(
+                IllegalStateException.class,
+                () ->
+                        LocalPreagg.dispatchMaterializedPipeline(
+                                mock(AbstractStreamOperator.class),
+                                pipeline,
+                                groups,
+                                mock(TimestampedCollector.class)));
+
+        assertEquals(
+                Arrays.asList(
+                        "prepare:a", "prepare:b", "process:a", "abort:token-a", "abort:token-b"),
+                events);
+    }
 
     @Test
     void testDetectsDirectBatchableOperator() {

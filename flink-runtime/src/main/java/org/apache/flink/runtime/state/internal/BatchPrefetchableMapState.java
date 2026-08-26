@@ -27,6 +27,21 @@ import java.util.List;
 public interface BatchPrefetchableMapState<UK> {
 
     /**
+     * One fail-closed exact-key read prepared while the owning key/namespace is current.
+     *
+     * <p>The backend may execute only the immutable native read off mailbox. Awaiting and value
+     * materialization happen on mailbox when the corresponding outer-key batch is consumed.
+     */
+    interface PreparedValues {
+
+        /** Returns insertion-ordered values, or {@code null} when the async read was rejected. */
+        List<?> awaitValues() throws Exception;
+
+        /** Best-effort cancellation. Implementations must make this method idempotent. */
+        void cancel();
+    }
+
+    /**
      * Makes the current key/namespace's user keys available to subsequent point reads.
      * Implementations must preserve authoritative MapState semantics and fail closed.
      *
@@ -50,6 +65,15 @@ public interface BatchPrefetchableMapState<UK> {
      * org.apache.flink.api.common.state.MapState#get(Object)} semantics.
      */
     default List<?> prefetchCurrentUniqueKeyValues(List<? extends UK> uniqueUserKeys)
+            throws Exception {
+        return null;
+    }
+
+    /**
+     * Captures the current key/namespace and submits an immutable exact-key backend read.
+     * Implementations that cannot safely overlap the read return {@code null}.
+     */
+    default PreparedValues prepareCurrentUniqueKeyValues(List<? extends UK> uniqueUserKeys)
             throws Exception {
         return null;
     }

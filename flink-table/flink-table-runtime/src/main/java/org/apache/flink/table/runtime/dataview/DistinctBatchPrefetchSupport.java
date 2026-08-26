@@ -20,6 +20,8 @@ package org.apache.flink.table.runtime.dataview;
 
 import org.apache.flink.annotation.Internal;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -35,6 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class DistinctBatchPrefetchSupport {
 
     private static final AtomicBoolean REPORTED_UNSUPPORTED_VIEW = new AtomicBoolean();
+    private static final ThreadLocal<PreparedCapture> PREPARED_CAPTURE = new ThreadLocal<>();
 
     private DistinctBatchPrefetchSupport() {}
 
@@ -58,7 +61,90 @@ public final class DistinctBatchPrefetchSupport {
     }
 
     public static boolean finishSession(Object session) throws Exception {
+        PreparedCapture capture = PREPARED_CAPTURE.get();
+        if (capture != null) {
+            Object prepared = asSession(session).finishPreparedPrefetchKeyCollection();
+            if (prepared != null) {
+                capture.sessions.add(session);
+                capture.prepared.add(prepared);
+                return true;
+            }
+            return false;
+        }
         return asSession(session).finishPrefetchKeyCollection();
+    }
+
+    public static Object finishPreparedSession(Object session) throws Exception {
+        return asSession(session).finishPreparedPrefetchKeyCollection();
+    }
+
+    public static boolean installPreparedSession(Object session, Object prepared) throws Exception {
+        return asSession(session).installPreparedPrefetch(prepared);
+    }
+
+    public static void abortPreparedSession(Object session, Object prepared) {
+        if (session != null) {
+            asSession(session).abortPreparedPrefetch(prepared);
+        }
+    }
+
+    /** Captures existing generated prefetch calls as detached backend reads. */
+    public static void beginPreparedCapture() {
+        if (PREPARED_CAPTURE.get() != null) {
+            throw new IllegalStateException("DISTINCT prepared capture is already active");
+        }
+        PREPARED_CAPTURE.set(new PreparedCapture());
+    }
+
+    /** Ends capture and returns a composite token, or {@code null} when no read was submitted. */
+    public static Object endPreparedCapture() {
+        PreparedCapture capture = PREPARED_CAPTURE.get();
+        PREPARED_CAPTURE.remove();
+        return capture == null || capture.prepared.isEmpty() ? null : capture;
+    }
+
+    /** Cancels every detached read accumulated by the current, not-yet-ended capture. */
+    public static void abortPreparedCapture() {
+        PreparedCapture capture = PREPARED_CAPTURE.get();
+        PREPARED_CAPTURE.remove();
+        abortPreparedCapture(capture);
+    }
+
+    /** Installs every prepared DISTINCT view for one outer key. */
+    public static boolean installPreparedCapture(Object prepared) {
+        if (!(prepared instanceof PreparedCapture)) {
+            return false;
+        }
+        PreparedCapture capture = (PreparedCapture) prepared;
+        boolean allInstalled = !capture.prepared.isEmpty();
+        try {
+            for (int i = 0; i < capture.prepared.size(); i++) {
+                allInstalled &=
+                        asSession(capture.sessions.get(i))
+                                .installPreparedPrefetch(capture.prepared.get(i));
+            }
+            if (!allInstalled) {
+                abortPreparedCapture(capture);
+                return false;
+            }
+            return true;
+        } catch (Exception failure) {
+            // A speculative read is never authoritative. Clear any already-installed overlay and
+            // let GroupAgg execute the established synchronous prefetch path for the whole key.
+            abortPreparedCapture(capture);
+            return false;
+        }
+    }
+
+    /** Cancels or clears a composite token that will not be consumed. */
+    public static void abortPreparedCapture(Object prepared) {
+        if (!(prepared instanceof PreparedCapture)) {
+            return;
+        }
+        PreparedCapture capture = (PreparedCapture) prepared;
+        for (int i = 0; i < capture.prepared.size(); i++) {
+            asSession(capture.sessions.get(i)).abortPreparedPrefetch(capture.prepared.get(i));
+        }
     }
 
     public static void abortSession(Object session) {
@@ -114,5 +200,10 @@ public final class DistinctBatchPrefetchSupport {
             throw new IllegalArgumentException("Invalid DISTINCT prefetch session token");
         }
         return (BatchPrefetchableMapView<Object>) session;
+    }
+
+    private static final class PreparedCapture {
+        private final List<Object> sessions = new ArrayList<>();
+        private final List<Object> prepared = new ArrayList<>();
     }
 }
