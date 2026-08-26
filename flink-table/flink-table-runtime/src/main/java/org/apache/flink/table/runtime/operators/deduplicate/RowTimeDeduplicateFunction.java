@@ -64,12 +64,11 @@ public class RowTimeDeduplicateFunction
     }
 
     /**
-     * Local pre-aggregation fold: first collapse the batch to its dedup winner with the same
-     * {@code isDuplicate} chain the per-record path walks (a scan keeping the rowtime extremum;
-     * ties resolve by arrival order exactly as sequential processing would), then touch keyed
-     * state once. The skipped intermediate emissions are UPDATE_BEFORE/UPDATE_AFTER redundant
-     * pairs, so the CDC-replayed final state is unchanged — same argument as the
-     * GroupAggFunction fold.
+     * Local pre-aggregation fold: first collapse the batch to its dedup winner with the same {@code
+     * isDuplicate} chain the per-record path walks (a scan keeping the rowtime extremum; ties
+     * resolve by arrival order exactly as sequential processing would), then touch keyed state
+     * once. The skipped intermediate emissions are UPDATE_BEFORE/UPDATE_AFTER redundant pairs, so
+     * the CDC-replayed final state is unchanged — same argument as the GroupAggFunction fold.
      */
     @Override
     public void processBatchForKey(Object currentKey, List<RowData> inputs, Collector<RowData> out)

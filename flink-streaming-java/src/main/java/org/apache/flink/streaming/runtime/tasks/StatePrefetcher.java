@@ -100,8 +100,7 @@ public final class StatePrefetcher {
 
     /** Cache of optional resident-mutation batch end hooks per backend class. */
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
-            NATIVE_MUTATION_BATCH_END_METHOD_CACHE =
-                    new java.util.concurrent.ConcurrentHashMap<>();
+            NATIVE_MUTATION_BATCH_END_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
     /** Cache of resident-mutation batch capability probes per backend class. */
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
@@ -309,9 +308,7 @@ public final class StatePrefetcher {
     /** Opens an optional native mutation batch for an already-deduplicated dispatch key set. */
     public static boolean beginNativeResidentMutationBatch(
             Input<?> headOperator, java.util.Collection<?> keys) {
-        if (!(headOperator instanceof AbstractStreamOperator)
-                || keys == null
-                || keys.isEmpty()) {
+        if (!(headOperator instanceof AbstractStreamOperator) || keys == null || keys.isEmpty()) {
             return false;
         }
         try {
@@ -375,7 +372,8 @@ public final class StatePrefetcher {
                     ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
             Method method =
                     NATIVE_MUTATION_BATCH_END_METHOD_CACHE.computeIfAbsent(
-                            backend.getClass(), StatePrefetcher::lookupNativeMutationBatchEndMethod);
+                            backend.getClass(),
+                            StatePrefetcher::lookupNativeMutationBatchEndMethod);
             if (method != NO_METHOD) {
                 method.invoke(backend);
             }
@@ -469,9 +467,7 @@ public final class StatePrefetcher {
      */
     @SuppressWarnings({"rawtypes", "unchecked"})
     public static boolean prefetchKeysImmediately(
-            Input<?> headOperator,
-            java.util.Collection<?> keys,
-            boolean cancelPrefetchOnDispatch) {
+            Input<?> headOperator, java.util.Collection<?> keys, boolean cancelPrefetchOnDispatch) {
         if (headOperator == null
                 || keys == null
                 || keys.isEmpty()

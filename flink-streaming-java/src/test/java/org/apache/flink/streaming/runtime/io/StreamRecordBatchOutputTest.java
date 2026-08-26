@@ -122,7 +122,8 @@ class StreamRecordBatchOutputTest {
         StreamRecord<String> beforeStatus = new StreamRecord<>("before-status");
         StreamRecord<String> beforeLatency = new StreamRecord<>("before-latency");
         WatermarkStatus status = WatermarkStatus.IDLE;
-        LatencyMarker marker = new LatencyMarker(9L, new org.apache.flink.runtime.jobgraph.OperatorID(), 1);
+        LatencyMarker marker =
+                new LatencyMarker(9L, new org.apache.flink.runtime.jobgraph.OperatorID(), 1);
 
         output.emitRecord(beforeStatus);
         output.emitWatermarkStatus(status);

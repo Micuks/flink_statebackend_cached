@@ -120,8 +120,7 @@ class StatePrefetcherTest {
                                 .extraInterfaces(
                                         ImmediatePrefetchHook.class, DispatchCancelHook.class));
         Collection<Integer> keys = Arrays.asList(1, 2, 3);
-        org.mockito.Mockito.when(
-                        ((DispatchCancelHook) backend).cancelPrefetchForDispatch(keys))
+        org.mockito.Mockito.when(((DispatchCancelHook) backend).cancelPrefetchForDispatch(keys))
                 .thenReturn(2);
 
         assertTrue(StatePrefetcher.prefetchKeysImmediately(backend, keys, true));
@@ -137,8 +136,7 @@ class StatePrefetcherTest {
                         KeyedStateBackend.class,
                         withSettings().extraInterfaces(DispatchCancelHook.class));
         Collection<Integer> keys = Arrays.asList(1, 2, 3);
-        org.mockito.Mockito.when(
-                        ((DispatchCancelHook) backend).cancelPrefetchForDispatch(keys))
+        org.mockito.Mockito.when(((DispatchCancelHook) backend).cancelPrefetchForDispatch(keys))
                 .thenReturn(2);
 
         assertEquals(2, StatePrefetcher.cancelPrefetchForDispatch(backend, keys));
@@ -164,9 +162,7 @@ class StatePrefetcherTest {
         org.mockito.Mockito.when(operator.getKeyedStateBackend()).thenReturn(backend);
 
         assertEquals(
-                2,
-                StatePrefetcher.cancelPrefetchKeysForDispatch(
-                        (Input<?>) operator, groupedKeys));
+                2, StatePrefetcher.cancelPrefetchKeysForDispatch((Input<?>) operator, groupedKeys));
         verify((DispatchCancelHook) backend).cancelPrefetchForDispatch(groupedKeys);
     }
 
@@ -182,17 +178,14 @@ class StatePrefetcherTest {
                                         NativeMutationBatchHook.class));
         NativeMutationBatchCapability capability = (NativeMutationBatchCapability) backend;
         NativeMutationBatchHook hook = (NativeMutationBatchHook) backend;
-        org.mockito.Mockito.when(capability.nativeResidentMutationBatchEnabled())
-                .thenReturn(true);
+        org.mockito.Mockito.when(capability.nativeResidentMutationBatchEnabled()).thenReturn(true);
         Collection<Integer> keys = Arrays.asList(1, 2, 3);
         org.mockito.Mockito.when(hook.beginNativeResidentMutationBatch(keys)).thenReturn(1);
         AbstractStreamOperator operator =
                 mock(AbstractStreamOperator.class, withSettings().extraInterfaces(Input.class));
         org.mockito.Mockito.when(operator.getKeyedStateBackend()).thenReturn(backend);
 
-        assertTrue(
-                StatePrefetcher.beginNativeResidentMutationBatch(
-                        (Input<?>) operator, keys));
+        assertTrue(StatePrefetcher.beginNativeResidentMutationBatch((Input<?>) operator, keys));
         StatePrefetcher.endNativeResidentMutationBatch((Input<?>) operator);
 
         verify(hook).beginNativeResidentMutationBatch(keys);

@@ -75,9 +75,9 @@ public final class LocalPreagg {
                     .getBoolean("state.backend.cachekit.native.local-preagg.enabled", false);
     private static final boolean CROSS_KEY_PIPELINE_ENABLED =
             GlobalConfiguration.loadConfiguration()
-                    .getBoolean(
-                            "state.backend.cachekit.native.map-distinct-batch-prefetch.cross-key-pipeline.enabled",
-                            false)
+                            .getBoolean(
+                                    "state.backend.cachekit.native.map-distinct-batch-prefetch.cross-key-pipeline.enabled",
+                                    false)
                     && GlobalConfiguration.loadConfiguration()
                             .getBoolean(
                                     "state.backend.cachekit.native.map-distinct-batch-prefetch.enabled",
@@ -296,8 +296,7 @@ public final class LocalPreagg {
             StatePrefetcher.prefetchKeysImmediately(
                     headOperator, groups.keys, cancelPrefetchOnDispatch);
             nativeMutationBatchStarted =
-                    StatePrefetcher.beginNativeResidentMutationBatch(
-                            headOperator, groups.keys);
+                    StatePrefetcher.beginNativeResidentMutationBatch(headOperator, groups.keys);
             // Preserve the batch's timestamp context for emitted rows (agg results are not
             // event-time keyed downstream, but keep parity with the per-record path).
             if (lastRec != null && lastRec.hasTimestamp()) {
@@ -398,8 +397,7 @@ public final class LocalPreagg {
             StatePrefetcher.prefetchKeysImmediately(
                     headOperator, groups.keys, cancelPrefetchOnDispatch);
             nativeMutationBatchStarted =
-                    StatePrefetcher.beginNativeResidentMutationBatch(
-                            headOperator, groups.keys);
+                    StatePrefetcher.beginNativeResidentMutationBatch(headOperator, groups.keys);
             if (lastRecord != null && lastRecord.hasTimestamp()) {
                 collector.setAbsoluteTimestamp(lastRecord.getTimestamp());
             } else {

@@ -293,10 +293,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 !this.asyncPrefetchChunks
                         ? 0
                         : Math.max(
-                                0,
-                                Math.min(
-                                        this.batchSize - 1,
-                                        asyncPrefetchSlidingDrainRecords));
+                                0, Math.min(this.batchSize - 1, asyncPrefetchSlidingDrainRecords));
         this.cancelPrefetchOnDispatch = cancelPrefetchOnDispatch && this.asyncPrefetchChunks;
         @SuppressWarnings({"unchecked", "rawtypes"})
         StreamRecord<T>[] tmp = new StreamRecord[this.batchSize];
@@ -431,8 +428,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         // the matching prepared-MultiGet reservation before LocalPreagg or ordinary per-record
         // execution can race the worker. Already-published staging remains usable; unsupported
         // backends fail closed inside StatePrefetcher.
-        if (LocalPreagg.dispatch(
-                headOperator, buf, n, numRecordsIn, cancelPrefetchOnDispatch)) {
+        if (LocalPreagg.dispatch(headOperator, buf, n, numRecordsIn, cancelPrefetchOnDispatch)) {
             return;
         }
         // LocalPreagg reuses its already-deduplicated group keys for cancellation. Only the
@@ -467,8 +463,8 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 }
                 batchOperator.processElementBatch(buf, n);
             } else if (commutativeKeySort) {
-                org.apache.flink.streaming.runtime.tasks.BatchedKeyedOperatorAdapter
-                        .dispatchSorted(headOperator, buf, n, numRecordsIn);
+                org.apache.flink.streaming.runtime.tasks.BatchedKeyedOperatorAdapter.dispatchSorted(
+                        headOperator, buf, n, numRecordsIn);
             } else {
                 for (int i = 0; i < n; i++) {
                     wrapped.emitRecord(buf[i]);
@@ -484,8 +480,8 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
 
     /** Test seam for proving that revocation precedes any state-consuming dispatch path. */
     int cancelPrefetchForDispatch(int n) {
-        return org.apache.flink.streaming.runtime.tasks.StatePrefetcher
-                .cancelPrefetchForDispatch(headOperator, buf, 0, n);
+        return org.apache.flink.streaming.runtime.tasks.StatePrefetcher.cancelPrefetchForDispatch(
+                headOperator, buf, 0, n);
     }
 
     /** Remove a dispatched prefix while preserving arrival order and scheduled-tail ownership. */
@@ -507,10 +503,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
     }
 
     private void scheduleAsyncPrefetchChunks(boolean includeRemainder) {
-        if (!enabled
-                || !prefetchMode
-                || !asyncPrefetchChunks
-                || count <= 1) {
+        if (!enabled || !prefetchMode || !asyncPrefetchChunks || count <= 1) {
             return;
         }
         if (backpressureGated && (backpressured == null || !backpressured.getAsBoolean())) {
