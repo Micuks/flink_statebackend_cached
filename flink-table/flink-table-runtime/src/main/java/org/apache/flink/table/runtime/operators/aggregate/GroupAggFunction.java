@@ -248,11 +248,16 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
             firstRow = true;
         }
 
+        // Generated DISTINCT MapView members are restored from the accumulator row. Bind them
+        // before asking the generated handler to collect and prefetch exact keys; otherwise the
+        // handler observes null views and silently skips the prefetch path. The prefetch must still
+        // happen before beginDistinctBatch(), because key collection is deliberately rejected once
+        // the write-collapsing overlay is active.
+        function.setAccumulators(accumulators);
         function.prefetchDistinctBatch(inputRows);
         final boolean distinctBatch = dataViewStore.beginDistinctBatch();
         boolean distinctBatchCommitted = false;
         try {
-            function.setAccumulators(accumulators);
             RowData prevAggValue = function.getValue();
             for (RowData input : inputRows) {
                 if (isAccumulateMsg(input)) {
