@@ -106,3 +106,48 @@ At the time of this update, the audited payload had been staged and hash
 verified on the target. Runtime assembly and benchmark launch were deliberately
 held while an unrelated experiment payload was actively transferring to the
 same host. No performance result is claimed yet.
+
+## 2026-08-26 continuation: measured bottleneck and bounded follow-ups
+
+The repaired direct-overlay implementation (fix7, commit
+`5770b46835b3ea21a892343903dafd968a9012f0`) completed a valid q15 ABBA on
+Kunpeng. Arithmetic-mean K/s/core changed from `33.175` to `33.705`, or
+`+1.60%`; the paired legs were `-0.27%` and `+3.45%`, with `4.83%` drift. The
+mechanism counters closed, so this is a valid negative gate rather than an
+activation failure. CPU profiles show that the direct overlay removed about
+`1.89 pp` from the repeated point-read path, but added about `2.76 pp` in
+distinct-key collection, `2.66 pp` in the MapState batch reader, and `2.17 pp`
+in synchronous RocksDB MultiGet. The read moved earlier without overlapping
+useful work, so heap/JNI preparation replaced most of the saved point Gets.
+
+Fix8, commit `407d6252b290633d8a23227041c8df2d5ab69e55`, therefore gates collection
+before generated key extraction and exposes an independently auditable minimum
+unique-key threshold. Its sealed q15/50M screen is:
+
+```text
+off_a -> min2 -> min4 -> min8 -> off_b
+```
+
+Only the threshold differs. The first canary is `min4`; all legs retain the
+same 2-container/8-TM/16-slot topology and disable checkpointing. The payload
+is ready locally but has not been transferred because the target is still
+running the unrelated `cknecrc826` q4 campaign on all 16 slots.
+
+Fix9 is a separate, default-off CPU/allocation treatment on top of fix8. It
+keeps exact key preparation and RocksDB semantics unchanged, but lets MapState
+consume each returned value directly from the bounded native arena instead of
+allocating one JNI-returned `byte[]` per hit:
+
+```yaml
+state.backend.cachekit.native.map-distinct-batch-prefetch.direct-arena.enabled: false
+```
+
+The direct path validates every descriptor, present count, missing status,
+overflow status and value length before returning any result. A linkage or ABI
+failure disables only the direct transport; an overflow or rejected batch
+falls back transactionally to the existing authoritative heap MultiGet path.
+Prepared-key ordering and duplicate semantics are covered by a real RocksDB
+test; direct found/missing materialization is covered through the same bounded
+arena ABI used in production. Fix9 is not yet a performance result and will be
+screened only if fix8 fails to reach the 10% q15 gate or profiles still show
+return-value allocation as material.

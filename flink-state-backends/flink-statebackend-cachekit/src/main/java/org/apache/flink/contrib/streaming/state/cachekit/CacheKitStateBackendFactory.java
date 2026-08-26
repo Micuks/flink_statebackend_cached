@@ -680,6 +680,18 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                     + "before crossing the MapView/backend/JNI MultiGet boundary. "
                                     + "Values below two are clamped to two.");
 
+    public static final ConfigOption<Boolean>
+            NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED =
+                    ConfigOptions.key(
+                                    "state.backend.cachekit.native.map-distinct-batch-prefetch.direct-arena.enabled")
+                            .booleanType()
+                            .defaultValue(false)
+                            .withDescription(
+                                    "Consume exact-DISTINCT MapState MultiGet values from the bounded "
+                                            + "native direct arena instead of allocating one returned byte array "
+                                            + "per hit. Requires the native request plane and direct-arena "
+                                            + "MultiGet; any rejected chunk falls back transactionally.");
+
     public static final ConfigOption<String> DELEGATE_BACKEND =
             ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
@@ -836,7 +848,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 								nativeRequestPlaneOptions,
 								keyScopedPrefetchInvalidationEnabled,
                 config.get(NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED),
-                config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED));
+				config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED),
+				config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED));
 	}
 
         static NativeRequestPlaneOptions nativeRequestPlaneOptions(ReadableConfig config) {

@@ -83,13 +83,20 @@ class NativeRequestPlaneConfigurationTest {
                 new CacheKitStateBackendFactory()
                         .createFromConfig(disabled, getClass().getClassLoader());
         assertFalse(disabledBackend.nativeMapDistinctBatchPrefetchEnabledForTesting());
+        assertFalse(
+                disabledBackend.nativeMapDistinctBatchPrefetchDirectArenaEnabledForTesting());
 
         Configuration enabled = new Configuration(disabled);
         enabled.set(CacheKitStateBackendFactory.NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED, true);
+        enabled.set(
+                CacheKitStateBackendFactory
+                        .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED,
+                true);
         CacheKitStateBackend enabledBackend =
                 new CacheKitStateBackendFactory()
                         .createFromConfig(enabled, getClass().getClassLoader());
         assertTrue(enabledBackend.nativeMapDistinctBatchPrefetchEnabledForTesting());
+        assertTrue(enabledBackend.nativeMapDistinctBatchPrefetchDirectArenaEnabledForTesting());
     }
 
     @Test

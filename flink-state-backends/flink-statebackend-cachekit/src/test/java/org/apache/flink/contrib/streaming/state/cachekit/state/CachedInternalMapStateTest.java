@@ -28,6 +28,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -38,8 +40,12 @@ import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
 import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchMapReader;
+import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlane;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneCoordinator;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneOptions;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.internal.InternalMapState;
@@ -144,6 +150,97 @@ class CachedInternalMapStateTest {
         assertEquals(2, state.getBatchPrefetchDirectOverlayValuesForTesting());
         assertEquals(0, state.getBatchPrefetchHitsForTesting());
         verify(delegate, times(0)).get(any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testExactDistinctDirectArenaMaterializesFoundAndMissingWithoutHeapValueList()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(new MapSerializer<>(
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        when(reader.directArenaMultiGetMaxBatch())
+                .thenReturn(RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
+        when(reader.serializeRocksDBKeysByUserKeys(Arrays.asList("u1", "u2")))
+                .thenReturn(Arrays.asList(new byte[] {1}, new byte[] {2}));
+        byte[] present = serializedMapValue(7);
+        doAnswer(
+                        invocation -> {
+                            ByteBuffer descriptors =
+                                    ((ByteBuffer) invocation.getArgument(1))
+                                            .duplicate()
+                                            .order(ByteOrder.nativeOrder());
+                            int count = invocation.getArgument(2);
+                            ByteBuffer values = ((ByteBuffer) invocation.getArgument(3)).duplicate();
+                            int stride = invocation.getArgument(4);
+                            assertEquals(2, count);
+                            assertTrue(stride >= present.length);
+                            values.position(0);
+                            values.put(present);
+                            descriptors.putInt(
+                                    RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET,
+                                    present.length);
+                            descriptors.putInt(
+                                    RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES
+                                            + RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET,
+                                    RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND);
+                            return 1;
+                        })
+                .when(reader)
+                .getSerializedValuesByRocksDBKeyArena(
+                        any(ByteBuffer.class),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.eq(2),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.anyInt());
+
+        NativeRequestPlane plane = mock(NativeRequestPlane.class);
+        when(plane.selectedKernel()).thenReturn("test");
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0,
+                        MapSnapshotCacheMetrics.disabled(),
+                        coordinator,
+                        31,
+                        false,
+                        0,
+                        false);
+        state.enableNativeDistinctBatchPrefetch(true, true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        assertEquals(
+                Arrays.asList(7, null),
+                state.prefetchCurrentUniqueKeyValues(Arrays.asList("u1", "u2")));
+        assertEquals(2, state.getBatchPrefetchDirectArenaCompletedKeysForTesting());
+        assertEquals(0, state.getBatchPrefetchDirectArenaFallbacksForTesting());
+        verify(reader, times(0)).getSerializedValuesByUserKeys(any());
+
+        state.close();
+        coordinator.close();
     }
 
     @Test
@@ -1222,6 +1319,35 @@ class CachedInternalMapStateTest {
             IntSerializer.INSTANCE.serialize(value, out);
         }
         return out.getCopyOfBuffer();
+    }
+
+    private static NativeRequestPlaneOptions directArenaOptions() {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                128,
+                1 << 20,
+                1 << 20,
+                16,
+                1 << 20,
+                1 << 20,
+                1,
+                2,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                true,
+                false,
+                true,
+                true,
+                false,
+                8192,
+                0.02,
+                262144);
     }
 
     private static final class MutableKey {

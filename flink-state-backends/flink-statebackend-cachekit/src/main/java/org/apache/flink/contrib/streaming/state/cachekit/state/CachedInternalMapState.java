@@ -30,6 +30,7 @@ import javax.annotation.Nonnull;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchMapReader;
+import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePolicy;
@@ -40,6 +41,7 @@ import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeReque
 import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneCoordinator;
 import org.apache.flink.contrib.streaming.state.cachekit.util.MurmurHash3;
 import org.apache.flink.core.memory.DataInputDeserializer;
+import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
@@ -129,6 +131,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private final DataInputDeserializer batchPrefetchInput = new DataInputDeserializer();
     private final Map<UK, PrefetchedMapValue<UV>> batchPrefetchStaging = new HashMap<>();
     private boolean nativeDistinctBatchPrefetchEnabled;
+    private boolean nativeDistinctBatchDirectArenaEnabled;
+    private boolean nativeDistinctBatchDirectArenaDisabled;
     private boolean batchPrefetchActive;
     private K batchPrefetchOuterKey;
     private N batchPrefetchNamespace;
@@ -142,6 +146,17 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private long batchPrefetchDirectOverlayValues;
     private long batchPrefetchFallbacks;
     private long batchPrefetchFailures;
+    private long batchPrefetchDirectArenaAttempts;
+    private long batchPrefetchDirectArenaBatches;
+    private long batchPrefetchDirectArenaKeys;
+    private long batchPrefetchDirectArenaCompletedBatches;
+    private long batchPrefetchDirectArenaCompletedKeys;
+    private long batchPrefetchDirectArenaFound;
+    private long batchPrefetchDirectArenaMissing;
+    private long batchPrefetchDirectArenaOverflows;
+    private long batchPrefetchDirectArenaFallbacks;
+    private long batchPrefetchDirectArenaFailures;
+    private long batchPrefetchDirectArenaProtocolFallbacks;
 
     // --- MapSnapshot cache (entries() fast path) ---
     private final CachePolicy<KeyNamespace<K, N>, MapSnapshot<UK>> mapSnapshotCache;
@@ -538,7 +553,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     /** Enables the separately gated exact-DISTINCT native RocksDB MultiGet path. */
     public void enableNativeDistinctBatchPrefetch(boolean enabled) {
+        enableNativeDistinctBatchPrefetch(enabled, false);
+    }
+
+    /** Enables the exact-DISTINCT path and its independently gated direct-arena value transport. */
+    public void enableNativeDistinctBatchPrefetch(boolean enabled, boolean directArenaEnabled) {
         this.nativeDistinctBatchPrefetchEnabled = enabled;
+        this.nativeDistinctBatchDirectArenaEnabled = enabled && directArenaEnabled;
     }
 
     @Override
@@ -572,6 +593,15 @@ public final class CachedInternalMapState<K, N, UK, UV>
         try {
             flushCurrentKey(currentKey);
             ensureDelegateNamespace(currentKey);
+            if (nativeDistinctBatchDirectArenaEnabled) {
+                List<UV> directValues = tryDirectArenaPrefetch(orderedKeys);
+                if (directValues != null) {
+                    batchPrefetchBatches++;
+                    batchPrefetchDirectOverlayValues += directValues.size();
+                    return directValues;
+                }
+                batchPrefetchDirectArenaFallbacks++;
+            }
             List<byte[]> rawValues =
                     rocksDBBatchMapReader.getSerializedValuesByUserKeys(orderedKeys);
             if (rawValues.size() != orderedKeys.size()) {
@@ -600,6 +630,129 @@ public final class CachedInternalMapState<K, N, UK, UV>
         } catch (Exception | LinkageError failure) {
             batchPrefetchFailures++;
             batchPrefetchFallbacks++;
+            return null;
+        }
+    }
+
+    private List<UV> tryDirectArenaPrefetch(List<UK> orderedKeys) {
+        batchPrefetchDirectArenaAttempts++;
+        if (nativeDistinctBatchDirectArenaDisabled
+                || nativeRequestPlaneCoordinator == null
+                || !nativeRequestPlaneCoordinator.isActive()
+                || !nativeRequestPlaneCoordinator.options().directArenaMultiGetEnabled()
+                || !rocksDBBatchMapReader.supportsDirectArenaMultiGet()
+                || nativeStateId <= 0) {
+            return null;
+        }
+
+        NativeRequestPlaneCoordinator.BatchSlot slot =
+                nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
+        if (slot == null) {
+            return null;
+        }
+        try (NativeRequestPlaneCoordinator.BatchSlot ignored = slot) {
+            List<byte[]> rocksDBKeys =
+                    rocksDBBatchMapReader.serializeRocksDBKeysByUserKeys(orderedKeys);
+            if (rocksDBKeys.size() != orderedKeys.size()) {
+                throw new IllegalStateException(
+                        "MapState prepared "
+                                + rocksDBKeys.size()
+                                + " RocksDB keys for "
+                                + orderedKeys.size()
+                                + " user keys.");
+            }
+            slot.prepareLatest(nativeStateId, nativeGeneration, rocksDBKeys);
+            int[] preparedIndices = new int[rocksDBKeys.size()];
+            for (int index = 0; index < preparedIndices.length; index++) {
+                preparedIndices[index] = index;
+            }
+
+            int configuredChunk = nativeRequestPlaneCoordinator.options().directArenaBatchSize();
+            int chunkSize =
+                    Math.max(
+                            1,
+                            Math.min(
+                                    RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
+                                    Math.min(
+                                            configuredChunk,
+                                            rocksDBBatchMapReader.directArenaMultiGetMaxBatch())));
+            ArrayList<UV> values = new ArrayList<>(orderedKeys.size());
+            int totalFound = 0;
+            int totalMissing = 0;
+            for (int start = 0; start < orderedKeys.size(); start += chunkSize) {
+                int count = Math.min(chunkSize, orderedKeys.size() - start);
+                slot.prepareDirectArenaMultiGet(
+                        preparedIndices,
+                        start,
+                        count,
+                        RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
+                batchPrefetchDirectArenaBatches++;
+                batchPrefetchDirectArenaKeys += count;
+                int presentCount =
+                        rocksDBBatchMapReader.getSerializedValuesByRocksDBKeyArena(
+                                slot.directMultiGetKeyArena(),
+                                slot.directMultiGetDescriptors(),
+                                count,
+                                slot.directMultiGetValueArena(),
+                                slot.directMultiGetValueStride());
+                int observedPresent = 0;
+                int observedMissing = 0;
+                boolean overflow = false;
+                boolean invalidProtocol = presentCount < 0 || presentCount > count;
+                for (int index = 0; index < count && !invalidProtocol; index++) {
+                    int result = slot.directMultiGetResult(index);
+                    if (result >= 0 && result <= slot.directMultiGetValueStride()) {
+                        observedPresent++;
+                    } else if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
+                        observedMissing++;
+                    } else if (result == RocksDBBatchValueReader.DIRECT_ARENA_OVERFLOW) {
+                        observedPresent++;
+                        overflow = true;
+                    } else {
+                        invalidProtocol = true;
+                    }
+                }
+                if (observedPresent != presentCount) {
+                    invalidProtocol = true;
+                }
+                if (invalidProtocol) {
+                    batchPrefetchDirectArenaProtocolFallbacks++;
+                    nativeDistinctBatchDirectArenaDisabled = true;
+                    return null;
+                }
+                if (overflow) {
+                    batchPrefetchDirectArenaOverflows++;
+                    return null;
+                }
+                for (int index = 0; index < count; index++) {
+                    int result = slot.directMultiGetResult(index);
+                    if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
+                        values.add(null);
+                    } else {
+                        DataInputView input = slot.directMultiGetValueInput(index);
+                        boolean isNull = input.readBoolean();
+                        values.add(
+                                isNull ? null : userValueSerializer.deserialize(input));
+                    }
+                }
+                batchPrefetchDirectArenaCompletedBatches++;
+                batchPrefetchDirectArenaCompletedKeys += count;
+                batchPrefetchDirectArenaFound += observedPresent;
+                batchPrefetchDirectArenaMissing += observedMissing;
+                totalFound += observedPresent;
+                totalMissing += observedMissing;
+            }
+            batchPrefetchFound += totalFound;
+            batchPrefetchMissing += totalMissing;
+            return values;
+        } catch (LinkageError
+                | UnsupportedOperationException
+                | IllegalArgumentException invalidDirectArenaAbi) {
+            batchPrefetchDirectArenaFailures++;
+            nativeDistinctBatchDirectArenaDisabled = true;
+            return null;
+        } catch (Exception failure) {
+            batchPrefetchDirectArenaFailures++;
             return null;
         }
     }
@@ -1983,7 +2136,12 @@ public final class CachedInternalMapState<K, N, UK, UV>
             LOG.info(
                     "[CACHEKIT NATIVE MAP DISTINCT PREFETCH] attempts={} batches={} inputKeys={} "
                             + "uniqueKeys={} found={} missing={} stagingHits={} directOverlayValues={} "
-                            + "fallbacks={} failures={} "
+                            + "fallbacks={} failures={} directArenaEnabled={} directArenaDisabled={} "
+                            + "directArenaAttempts={} directArenaBatches={} directArenaKeys={} "
+                            + "directArenaCompletedBatches={} directArenaCompletedKeys={} "
+                            + "directArenaFound={} directArenaMissing={} directArenaOverflows={} "
+                            + "directArenaFallbacks={} directArenaFailures={} "
+                            + "directArenaProtocolFallbacks={} "
                             + "batchReaderAvailable={}",
                     batchPrefetchAttempts,
                     batchPrefetchBatches,
@@ -1995,6 +2153,19 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     batchPrefetchDirectOverlayValues,
                     batchPrefetchFallbacks,
                     batchPrefetchFailures,
+                    nativeDistinctBatchDirectArenaEnabled,
+                    nativeDistinctBatchDirectArenaDisabled,
+                    batchPrefetchDirectArenaAttempts,
+                    batchPrefetchDirectArenaBatches,
+                    batchPrefetchDirectArenaKeys,
+                    batchPrefetchDirectArenaCompletedBatches,
+                    batchPrefetchDirectArenaCompletedKeys,
+                    batchPrefetchDirectArenaFound,
+                    batchPrefetchDirectArenaMissing,
+                    batchPrefetchDirectArenaOverflows,
+                    batchPrefetchDirectArenaFallbacks,
+                    batchPrefetchDirectArenaFailures,
+                    batchPrefetchDirectArenaProtocolFallbacks,
                     rocksDBBatchMapReader != null);
         }
     }
@@ -2077,6 +2248,14 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     long getBatchPrefetchFallbacksForTesting() {
         return batchPrefetchFallbacks;
+    }
+
+    long getBatchPrefetchDirectArenaCompletedKeysForTesting() {
+        return batchPrefetchDirectArenaCompletedKeys;
+    }
+
+    long getBatchPrefetchDirectArenaFallbacksForTesting() {
+        return batchPrefetchDirectArenaFallbacks;
     }
 
     private static final class PrefetchedMapValue<V> {
