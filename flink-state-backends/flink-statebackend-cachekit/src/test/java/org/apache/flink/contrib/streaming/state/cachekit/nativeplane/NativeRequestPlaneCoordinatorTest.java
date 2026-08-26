@@ -190,6 +190,33 @@ class NativeRequestPlaneCoordinatorTest {
     }
 
     @Test
+    void testMapDistinctReadSlotIsIndependentFromRegularAsyncSlots() {
+        FakePlane plane = new FakePlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(1), plane);
+
+        NativeRequestPlaneCoordinator.BatchSlot regular = coordinator.tryAcquireBatchSlot();
+        assertNotNull(regular);
+        assertNull(coordinator.tryAcquireBatchSlot());
+
+        NativeRequestPlaneCoordinator.BatchSlot distinct =
+                coordinator.tryAcquireMapDistinctReadSlot();
+        assertNotNull(distinct);
+        assertNull(coordinator.tryAcquireMapDistinctReadSlot());
+        assertEquals(1, coordinator.mapDistinctReadLeases());
+        assertEquals(1, coordinator.mapDistinctReadLeaseMisses());
+
+        distinct.close();
+        NativeRequestPlaneCoordinator.BatchSlot reusedDistinct =
+                coordinator.tryAcquireMapDistinctReadSlot();
+        assertNotNull(reusedDistinct);
+        reusedDistinct.close();
+        regular.close();
+        coordinator.close();
+        assertEquals(1, plane.closeCalls);
+    }
+
+    @Test
     void testCompactionScratchSlotIsIndependentBoundedAndLightweight() throws Exception {
         FakePlane plane = new FakePlane();
         plane.compactIndexes = new int[] {0, 2};

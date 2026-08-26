@@ -819,7 +819,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
 
         NativeRequestPlaneCoordinator.BatchSlot slot =
-                nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
+                nativeRequestPlaneCoordinator.tryAcquireMapDistinctReadSlot();
         if (slot == null) {
             return null;
         }

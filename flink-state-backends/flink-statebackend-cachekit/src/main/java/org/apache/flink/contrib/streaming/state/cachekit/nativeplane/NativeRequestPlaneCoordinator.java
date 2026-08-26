@@ -53,6 +53,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private final NativeRequestPlaneOptions options;
     private final NativeRequestPlane plane;
     private final ArrayDeque<BatchSlot> availableSlots;
+    private final ArrayDeque<BatchSlot> availableMapDistinctReadSlots;
     private final ArrayDeque<BatchSlot> availableCompactionScratchSlots;
     private final BatchSlot mutationSlot;
     private final ResidentKeyHint residentKeyHint;
@@ -66,6 +67,8 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private boolean planeClosed;
     private long leases;
     private long leaseMisses;
+    private long mapDistinctReadLeases;
+    private long mapDistinctReadLeaseMisses;
     private long compactionScratchLeases;
     private long compactionScratchLeaseMisses;
     private long probeCalls;
@@ -132,6 +135,11 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         for (int i = 0; i < options.batchSlots(); i++) {
             availableSlots.addLast(new BatchSlot(this, options));
         }
+        this.availableMapDistinctReadSlots = new ArrayDeque<>(1);
+        if (options.directArenaMultiGetEnabled()) {
+            availableMapDistinctReadSlots.addLast(
+                    new BatchSlot(this, options, SlotKind.MAP_DISTINCT_READ));
+        }
         this.availableCompactionScratchSlots = new ArrayDeque<>(1);
         if (options.compactionScratchSlotEnabled()) {
             availableCompactionScratchSlots.addLast(
@@ -187,6 +195,31 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             }
             slot.markLeased();
             leases++;
+            return slot;
+        }
+    }
+
+    /**
+     * Leases the synchronous exact-DISTINCT direct-arena slot.
+     *
+     * <p>The mailbox thread must not compete with queued asynchronous prefetch tasks for the
+     * regular slot pool: a transient miss there would send a small subset of exact-key batches
+     * back through the heap-value transport and defeat an otherwise closed treatment. A keyed
+     * backend executes this path serially, so one dedicated slot is sufficient and remains
+     * bounded.
+     */
+    public BatchSlot tryAcquireMapDistinctReadSlot() {
+        synchronized (availableMapDistinctReadSlots) {
+            if (!active || !options.directArenaMultiGetEnabled()) {
+                return null;
+            }
+            BatchSlot slot = availableMapDistinctReadSlots.pollFirst();
+            if (slot == null) {
+                mapDistinctReadLeaseMisses++;
+                return null;
+            }
+            slot.markLeased();
+            mapDistinctReadLeases++;
             return slot;
         }
     }
@@ -800,6 +833,14 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         return leaseMisses;
     }
 
+    public long mapDistinctReadLeases() {
+        return mapDistinctReadLeases;
+    }
+
+    public long mapDistinctReadLeaseMisses() {
+        return mapDistinctReadLeaseMisses;
+    }
+
     public long compactionScratchLeases() {
         return compactionScratchLeases;
     }
@@ -878,6 +919,16 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 }
             }
         }
+        int expectedMapDistinctReadSlots = options.directArenaMultiGetEnabled() ? 1 : 0;
+        synchronized (availableMapDistinctReadSlots) {
+            while (availableMapDistinctReadSlots.size() != expectedMapDistinctReadSlots) {
+                try {
+                    availableMapDistinctReadSlots.wait();
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        }
         int expectedScratchSlots = options.compactionScratchSlotEnabled() ? 1 : 0;
         synchronized (availableCompactionScratchSlots) {
             while (availableCompactionScratchSlots.size() != expectedScratchSlots) {
@@ -928,7 +979,9 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         ArrayDeque<BatchSlot> pool =
                 slot.kind == SlotKind.COMPACTION_SCRATCH
                         ? availableCompactionScratchSlots
-                        : availableSlots;
+                        : (slot.kind == SlotKind.MAP_DISTINCT_READ
+                                ? availableMapDistinctReadSlots
+                                : availableSlots);
         synchronized (pool) {
             slot.leased = false;
             pool.addLast(slot);
@@ -938,6 +991,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
 
     private enum SlotKind {
         REGULAR,
+        MAP_DISTINCT_READ,
         COMPACTION_SCRATCH,
         MUTATION
     }
