@@ -226,6 +226,7 @@ public final class LocalPreagg {
             int n,
             Counter numRecordsIn,
             boolean cancelPrefetchOnDispatch) {
+        diagnoseBatchTarget(headOperator);
         if (!ENABLED || n <= 0 || headOperator == null) {
             return false;
         }
