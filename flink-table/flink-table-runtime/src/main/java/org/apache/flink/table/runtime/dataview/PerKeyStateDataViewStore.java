@@ -28,6 +28,7 @@ import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.GlobalConfiguration;
 
 import java.util.ArrayList;
@@ -44,6 +45,8 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
     private static final String DISTINCT_STATE_PREFIX = "distinctAcc_";
     private static final String DISTINCT_BATCH_OVERLAY_KEY =
             "state.backend.cachekit.local-preagg.distinct-overlay.enabled";
+    private static final String NATIVE_MAP_DISTINCT_BATCH_PREFETCH_KEY =
+            "state.backend.cachekit.native.map-distinct-batch-prefetch.enabled";
 
     private final RuntimeContext ctx;
     private final StateTtlConfig stateTtlConfig;
@@ -58,8 +61,12 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
         this(
                 ctx,
                 stateTtlConfig,
-                GlobalConfiguration.loadConfiguration()
-                        .getBoolean(DISTINCT_BATCH_OVERLAY_KEY, false));
+                isDistinctBatchEnabled(GlobalConfiguration.loadConfiguration()));
+    }
+
+    static boolean isDistinctBatchEnabled(Configuration configuration) {
+        return configuration.getBoolean(DISTINCT_BATCH_OVERLAY_KEY, false)
+                || configuration.getBoolean(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_KEY, false);
     }
 
     PerKeyStateDataViewStore(

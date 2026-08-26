@@ -72,13 +72,6 @@ public final class LocalPreagg {
     private static final boolean NATIVE_EXTRACTION_REUSE_ENABLED =
             GlobalConfiguration.loadConfiguration()
                     .getBoolean("state.backend.cachekit.native.local-preagg.enabled", false);
-    private static final boolean DISTINCT_PREFETCH_DIAGNOSTICS =
-            GlobalConfiguration.loadConfiguration()
-                    .getBoolean(
-                            "state.backend.cachekit.native.map-distinct-batch-prefetch.enabled",
-                            false);
-    private static final AtomicLong DISTINCT_PREFETCH_DIAGNOSTIC_BUDGET =
-            new AtomicLong(64L);
     private static final ThreadLocal<ExtractionBuffers> NATIVE_EXTRACTION_BUFFERS =
             ThreadLocal.withInitial(ExtractionBuffers::new);
     private static final ThreadLocal<NativeGroupingWorkspace> NATIVE_GROUPING_WORKSPACE =
@@ -133,7 +126,6 @@ public final class LocalPreagg {
     }
 
     static boolean hasBatchableTarget(Input<?> headOperator) {
-        diagnoseBatchTarget(headOperator);
         if (!(headOperator instanceof AbstractStreamOperator)) {
             return false;
         }
@@ -149,62 +141,6 @@ public final class LocalPreagg {
         } catch (Throwable t) {
             return false;
         }
-    }
-
-    private static void diagnoseBatchTarget(Input<?> headOperator) {
-        if (!DISTINCT_PREFETCH_DIAGNOSTICS
-                || DISTINCT_PREFETCH_DIAGNOSTIC_BUDGET.getAndDecrement() <= 0L) {
-            return;
-        }
-        Object userFunction = null;
-        Throwable failure = null;
-        if (headOperator instanceof AbstractUdfStreamOperator) {
-            try {
-                userFunction =
-                        ((AbstractUdfStreamOperator<?, ?>) headOperator).getUserFunction();
-            } catch (Throwable t) {
-                failure = t;
-            }
-        }
-        System.err.println(
-                "[CACHEKIT DISTINCT DISPATCH DIAGNOSTIC] enabled="
-                        + ENABLED
-                        + " head="
-                        + describeClass(headOperator)
-                        + " headBatchable="
-                        + (headOperator instanceof BatchableKeyedFunction)
-                        + " udfOperator="
-                        + (headOperator instanceof AbstractUdfStreamOperator)
-                        + " userFunction="
-                        + describeClass(userFunction)
-                        + " userBatchable="
-                        + (userFunction instanceof BatchableKeyedFunction)
-                        + " batchableInterface="
-                        + describeClass(BatchableKeyedFunction.class)
-                        + " failure="
-                        + (failure == null ? "none" : failure.getClass().getName()));
-    }
-
-    private static String describeClass(Object value) {
-        if (value == null) {
-            return "null";
-        }
-        final Class<?> clazz = value instanceof Class ? (Class<?>) value : value.getClass();
-        String source = "unknown";
-        try {
-            if (clazz.getProtectionDomain() != null
-                    && clazz.getProtectionDomain().getCodeSource() != null
-                    && clazz.getProtectionDomain().getCodeSource().getLocation() != null) {
-                source = clazz.getProtectionDomain().getCodeSource().getLocation().toString();
-            }
-        } catch (Throwable ignored) {
-            // Diagnostics must never alter dispatch behavior.
-        }
-        return clazz.getName()
-                + "@loader="
-                + String.valueOf(clazz.getClassLoader())
-                + "@source="
-                + source;
     }
 
     /**
@@ -226,7 +162,6 @@ public final class LocalPreagg {
             int n,
             Counter numRecordsIn,
             boolean cancelPrefetchOnDispatch) {
-        diagnoseBatchTarget(headOperator);
         if (!ENABLED || n <= 0 || headOperator == null) {
             return false;
         }

@@ -24,6 +24,7 @@ import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.api.common.time.Time;
+import org.apache.flink.configuration.Configuration;
 
 import org.junit.jupiter.api.Test;
 
@@ -34,6 +35,21 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class PerKeyStateDataViewStoreDistinctOverlayTest {
+
+    @Test
+    void eitherPublicFeatureKeyEnablesTheRequiredDistinctBatchView() {
+        Configuration configuration = new Configuration();
+        assertFalse(PerKeyStateDataViewStore.isDistinctBatchEnabled(configuration));
+
+        configuration.setBoolean(
+                "state.backend.cachekit.native.map-distinct-batch-prefetch.enabled", true);
+        assertTrue(PerKeyStateDataViewStore.isDistinctBatchEnabled(configuration));
+
+        configuration = new Configuration();
+        configuration.setBoolean(
+                "state.backend.cachekit.local-preagg.distinct-overlay.enabled", true);
+        assertTrue(PerKeyStateDataViewStore.isDistinctBatchEnabled(configuration));
+    }
 
     @Test
     @SuppressWarnings("unchecked")
