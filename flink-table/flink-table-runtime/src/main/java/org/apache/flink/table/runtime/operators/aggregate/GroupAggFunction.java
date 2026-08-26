@@ -86,9 +86,6 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
     // Owns the exact-DISTINCT MapViews and their optional batch-scoped overlays.
     private transient PerKeyStateDataViewStore dataViewStore = null;
 
-    // One-shot diagnostic for proving what the submitting planner serialized into the handler.
-    private transient boolean distinctPrefetchInvocationReported;
-
     /**
      * Creates a {@link GroupAggFunction}.
      *
@@ -119,29 +116,6 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
     @Override
     public void open(Configuration parameters) throws Exception {
         super.open(parameters);
-        String generatedCode = genAggsHandler.getCode();
-        int methodStart = generatedCode.indexOf("public boolean prefetchDistinctBatch");
-        int methodEnd =
-                methodStart < 0
-                        ? -1
-                        : generatedCode.indexOf("public ", methodStart + "public ".length());
-        if (methodEnd < 0 && methodStart >= 0) {
-            methodEnd = Math.min(generatedCode.length(), methodStart + 4096);
-        }
-        String prefetchMethod =
-                methodStart < 0
-                        ? "<absent>"
-                        : generatedCode
-                                .substring(methodStart, methodEnd)
-                                .replace('\n', ' ')
-                                .replace('\r', ' ');
-        LOG.info(
-                "[CACHEKIT DISTINCT PREFETCH CODEGEN] class={} codeLength={} methodPresent={} bridgePresent={} method={}",
-                genAggsHandler.getClassName(),
-                generatedCode.length(),
-                methodStart >= 0,
-                generatedCode.contains("DistinctBatchPrefetchSupport"),
-                prefetchMethod);
         // instantiate function
         StateTtlConfig ttlConfig = createTtlConfig(stateRetentionTime);
         function = genAggsHandler.newInstance(getRuntimeContext().getUserCodeClassLoader());
@@ -280,15 +254,7 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
         // happen before beginDistinctBatch(), because key collection is deliberately rejected once
         // the write-collapsing overlay is active.
         function.setAccumulators(accumulators);
-        boolean distinctPrefetchExercised = function.prefetchDistinctBatch(inputRows);
-        if (!distinctPrefetchInvocationReported) {
-            distinctPrefetchInvocationReported = true;
-            LOG.info(
-                    "[CACHEKIT DISTINCT PREFETCH INVOCATION] function={} exercised={} batchSize={}",
-                    function.getClass().getName(),
-                    distinctPrefetchExercised,
-                    inputRows.size());
-        }
+        function.prefetchDistinctBatch(inputRows);
         final boolean distinctBatch = dataViewStore.beginDistinctBatch();
         boolean distinctBatchCommitted = false;
         try {
