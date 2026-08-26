@@ -1005,21 +1005,43 @@ class AggsHandlerCodeGenerator(
       ctx.startNewLocalVariableStatement(methodName)
       val exprGenerator = new ExprCodeGenerator(ctx, INPUT_NOT_NULL)
         .bindInput(inputType, inputTerm = inputTerm)
-      val beginCode = distinctCodeGens.map(_.beginBatchPrefetch("prefetchInputs.size()"))
+      val sessionTerms = distinctCodeGens.map(_ => newName("distinct_prefetch_session"))
+      val sessionDeclarations = sessionTerms
+        .map(term => s"java.lang.Object $term = null;")
         .mkString("\n")
-      val addCode = distinctCodeGens.map(_.addBatchPrefetchKey(exprGenerator)).mkString("\n")
-      val finishCode = distinctCodeGens.map(_.finishBatchPrefetch(resultTerm)).mkString("\n")
-      val abortCode = distinctCodeGens.map(_.abortBatchPrefetch()).mkString("\n")
+      val beginCode = distinctCodeGens
+        .zip(sessionTerms)
+        .map {
+          case (codegen, term) =>
+            codegen.beginBatchPrefetch("prefetchInputs.size()", term)
+        }
+        .mkString("\n")
+      val addCode = distinctCodeGens
+        .zip(sessionTerms)
+        .map { case (codegen, term) => codegen.addBatchPrefetchKey(exprGenerator, term) }
+        .mkString("\n")
+      val finishCode = distinctCodeGens
+        .zip(sessionTerms)
+        .map { case (codegen, term) => codegen.finishBatchPrefetch(resultTerm, term) }
+        .mkString("\n")
+      val abortCode = distinctCodeGens
+        .zip(sessionTerms)
+        .map { case (codegen, term) => codegen.abortBatchPrefetch(term) }
+        .mkString("\n")
+      val anySession = sessionTerms.map(term => s"$term != null").mkString(" || ")
       s"""
          |if (prefetchInputs == null || prefetchInputs.isEmpty()) {
          |  return false;
          |}
          |${ctx.reuseLocalVariableCode(methodName)}
+         |$sessionDeclarations
          |try {
          |  $beginCode
-         |  for ($ROW_DATA $inputTerm : prefetchInputs) {
-         |    ${ctx.reuseInputUnboxingCode(inputTerm)}
-         |    $addCode
+         |  if ($anySession) {
+         |    for ($ROW_DATA $inputTerm : prefetchInputs) {
+         |      ${ctx.reuseInputUnboxingCode(inputTerm)}
+         |      $addCode
+         |    }
          |  }
          |  boolean $resultTerm = false;
          |  $finishCode

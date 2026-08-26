@@ -53,6 +53,7 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
     private final RuntimeContext ctx;
     private final StateTtlConfig stateTtlConfig;
     private final boolean distinctBatchOverlayEnabled;
+    private final boolean distinctBatchPrefetchEnabled;
     private final int distinctBatchPrefetchMinUniqueKeys;
     private final List<DistinctBatchStateMapView<?, ?, ?>> distinctBatchViews = new ArrayList<>();
 
@@ -70,6 +71,7 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
                 ctx,
                 stateTtlConfig,
                 isDistinctBatchEnabled(configuration),
+                configuration.getBoolean(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_KEY, false),
                 Math.max(
                         2,
                         configuration.getInteger(
@@ -85,7 +87,7 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
             RuntimeContext ctx,
             StateTtlConfig stateTtlConfig,
             boolean distinctBatchOverlayEnabled) {
-        this(ctx, stateTtlConfig, distinctBatchOverlayEnabled, 2);
+        this(ctx, stateTtlConfig, distinctBatchOverlayEnabled, false, 2);
     }
 
     PerKeyStateDataViewStore(
@@ -93,12 +95,28 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
             StateTtlConfig stateTtlConfig,
             boolean distinctBatchOverlayEnabled,
             int distinctBatchPrefetchMinUniqueKeys) {
+        this(
+                ctx,
+                stateTtlConfig,
+                distinctBatchOverlayEnabled,
+                false,
+                distinctBatchPrefetchMinUniqueKeys);
+    }
+
+    PerKeyStateDataViewStore(
+            RuntimeContext ctx,
+            StateTtlConfig stateTtlConfig,
+            boolean distinctBatchOverlayEnabled,
+            boolean distinctBatchPrefetchEnabled,
+            int distinctBatchPrefetchMinUniqueKeys) {
         this.ctx = ctx;
         this.stateTtlConfig = stateTtlConfig;
         // Batching across TTL reads would change access-time refresh semantics. Keep the first
         // implementation deliberately fail-closed until a TTL-specific contract is proven.
         this.distinctBatchOverlayEnabled =
                 distinctBatchOverlayEnabled && !stateTtlConfig.isEnabled();
+        this.distinctBatchPrefetchEnabled =
+                distinctBatchPrefetchEnabled && this.distinctBatchOverlayEnabled;
         this.distinctBatchPrefetchMinUniqueKeys = Math.max(2, distinctBatchPrefetchMinUniqueKeys);
     }
 
@@ -133,7 +151,11 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
         }
         DistinctBatchStateMapView<N, EK, EV> batchingView =
                 new DistinctBatchStateMapView<>(
-                        view, keySerializer, valueSerializer, distinctBatchPrefetchMinUniqueKeys);
+                        view,
+                        keySerializer,
+                        valueSerializer,
+                        distinctBatchPrefetchEnabled,
+                        distinctBatchPrefetchMinUniqueKeys);
         distinctBatchViews.add(batchingView);
         return batchingView;
     }
@@ -200,6 +222,7 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
         long prefetchCollections = 0;
         long prefetchKeysCollected = 0;
         long prefetchRejectedBelowMinimum = 0;
+        long prefetchRejectedBeforeKeyScan = 0;
         long directOverlayValues = 0;
         long prefetchSize2 = 0;
         long prefetchSize3 = 0;
@@ -219,6 +242,7 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
             prefetchCollections += view.prefetchCollections();
             prefetchKeysCollected += view.prefetchKeysCollected();
             prefetchRejectedBelowMinimum += view.prefetchRejectedBelowMinimum();
+            prefetchRejectedBeforeKeyScan += view.prefetchRejectedBeforeKeyScan();
             directOverlayValues += view.directOverlayValues();
             prefetchSize2 += view.prefetchSize2();
             prefetchSize3 += view.prefetchSize3();
@@ -252,6 +276,8 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
                 + prefetchKeysCollected
                 + " prefetchRejectedBelowMinimum="
                 + prefetchRejectedBelowMinimum
+                + " prefetchRejectedBeforeKeyScan="
+                + prefetchRejectedBeforeKeyScan
                 + " directOverlayValues="
                 + directOverlayValues
                 + " prefetchSize2="

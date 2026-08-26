@@ -305,17 +305,18 @@ class DistinctAggCodeGen(
     }
   }
 
-  def beginBatchPrefetch(expectedKeysTerm: String): String = {
+  def beginBatchPrefetch(expectedKeysTerm: String, sessionTerm: String): String = {
     if (distinctInfo.dataViewSpec.isEmpty) {
       ""
     } else {
       s"""
-         |$DISTINCT_BATCH_PREFETCH_SUPPORT.begin($distinctAccTerm, $expectedKeysTerm);
+         |$sessionTerm = $DISTINCT_BATCH_PREFETCH_SUPPORT.beginSession(
+         |  $distinctAccTerm, $expectedKeysTerm);
        """.stripMargin
     }
   }
 
-  def addBatchPrefetchKey(generator: ExprCodeGenerator): String = {
+  def addBatchPrefetchKey(generator: ExprCodeGenerator, sessionTerm: String): String = {
     if (distinctInfo.dataViewSpec.isEmpty) {
       ""
     } else {
@@ -326,9 +327,12 @@ class DistinctAggCodeGen(
       }
       val addKey =
         s"""
-           |${keyExpr.code}
-           |if (!${keyExpr.nullTerm}) {
-           |  $DISTINCT_BATCH_PREFETCH_SUPPORT.add($distinctAccTerm, ${keyExpr.resultTerm});
+           |if ($sessionTerm != null) {
+           |  ${keyExpr.code}
+           |  if (!${keyExpr.nullTerm}) {
+           |    $DISTINCT_BATCH_PREFETCH_SUPPORT.addSession(
+           |      $sessionTerm, ${keyExpr.resultTerm});
+           |  }
            |}
          """.stripMargin
 
@@ -349,22 +353,24 @@ class DistinctAggCodeGen(
     }
   }
 
-  def finishBatchPrefetch(resultTerm: String): String = {
+  def finishBatchPrefetch(resultTerm: String, sessionTerm: String): String = {
     if (distinctInfo.dataViewSpec.isEmpty) {
       ""
     } else {
       s"""
-         |$resultTerm |= $DISTINCT_BATCH_PREFETCH_SUPPORT.finish($distinctAccTerm);
+         |if ($sessionTerm != null) {
+         |  $resultTerm |= $DISTINCT_BATCH_PREFETCH_SUPPORT.finishSession($sessionTerm);
+         |}
        """.stripMargin
     }
   }
 
-  def abortBatchPrefetch(): String = {
+  def abortBatchPrefetch(sessionTerm: String): String = {
     if (distinctInfo.dataViewSpec.isEmpty) {
       ""
     } else {
       s"""
-         |$DISTINCT_BATCH_PREFETCH_SUPPORT.abort($distinctAccTerm);
+         |$DISTINCT_BATCH_PREFETCH_SUPPORT.abortSession($sessionTerm);
        """.stripMargin
     }
   }

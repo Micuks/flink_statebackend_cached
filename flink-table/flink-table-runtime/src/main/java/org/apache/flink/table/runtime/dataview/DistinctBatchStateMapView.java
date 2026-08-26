@@ -52,6 +52,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     private final TypeSerializer<EV> valueSerializer;
     private final boolean copyKeys;
     private final boolean copyValues;
+    private final boolean prefetchEnabled;
     private final int minPrefetchUniqueKeys;
     private final HashMap<EK, BufferedValue<EK, EV>> overlay = new HashMap<>();
     private final ArrayList<EK> pendingPrefetchKeys = new ArrayList<>();
@@ -73,6 +74,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     private long prefetchCollections;
     private long prefetchKeysCollected;
     private long prefetchRejectedBelowMinimum;
+    private long prefetchRejectedBeforeKeyScan;
     private long directOverlayValues;
     private long prefetchSize2;
     private long prefetchSize3;
@@ -84,7 +86,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             StateMapView<N, EK, EV> delegate,
             TypeSerializer<EK> keySerializer,
             TypeSerializer<EV> valueSerializer) {
-        this(delegate, keySerializer, valueSerializer, 2);
+        this(delegate, keySerializer, valueSerializer, true, 2);
     }
 
     DistinctBatchStateMapView(
@@ -92,11 +94,21 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             TypeSerializer<EK> keySerializer,
             TypeSerializer<EV> valueSerializer,
             int minPrefetchUniqueKeys) {
+        this(delegate, keySerializer, valueSerializer, true, minPrefetchUniqueKeys);
+    }
+
+    DistinctBatchStateMapView(
+            StateMapView<N, EK, EV> delegate,
+            TypeSerializer<EK> keySerializer,
+            TypeSerializer<EV> valueSerializer,
+            boolean prefetchEnabled,
+            int minPrefetchUniqueKeys) {
         this.delegate = delegate;
         this.keySerializer = keySerializer;
         this.valueSerializer = valueSerializer;
         this.copyKeys = !keySerializer.isImmutableType();
         this.copyValues = !valueSerializer.isImmutableType();
+        this.prefetchEnabled = prefetchEnabled;
         this.minPrefetchUniqueKeys = Math.max(2, minPrefetchUniqueKeys);
     }
 
@@ -145,6 +157,27 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         pendingPrefetchKeySet.clear();
         pendingPrefetchKeys.ensureCapacity(Math.max(0, expectedKeys));
         collectingPrefetchKeys = true;
+    }
+
+    @Override
+    public boolean tryBeginPrefetchKeyCollection(int expectedKeys) {
+        if (active || prefetchActive || collectingPrefetchKeys) {
+            throw new IllegalStateException("DISTINCT batch prefetch is already active");
+        }
+        pendingPrefetchKeys.clear();
+        pendingPrefetchKeySet.clear();
+        if (!prefetchEnabled) {
+            return false;
+        }
+        if (expectedKeys < minPrefetchUniqueKeys) {
+            prefetchCollections++;
+            prefetchRejectedBelowMinimum++;
+            prefetchRejectedBeforeKeyScan++;
+            return false;
+        }
+        pendingPrefetchKeys.ensureCapacity(expectedKeys);
+        collectingPrefetchKeys = true;
+        return true;
     }
 
     @Override
@@ -460,6 +493,10 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
 
     long prefetchRejectedBelowMinimum() {
         return prefetchRejectedBelowMinimum;
+    }
+
+    long prefetchRejectedBeforeKeyScan() {
+        return prefetchRejectedBeforeKeyScan;
     }
 
     long directOverlayValues() {

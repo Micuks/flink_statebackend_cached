@@ -27,6 +27,18 @@ public interface BatchPrefetchableMapView<K> {
     /** Starts collecting keys for the next exact-DISTINCT batch. */
     void beginPrefetchKeyCollection(int expectedKeys);
 
+    /**
+     * Starts a generated collection only when its input cardinality can reach the configured
+     * minimum.
+     *
+     * <p>The default preserves the original contract. Implementations with a minimum useful batch
+     * size can reject before generated code evaluates and copies every DISTINCT key a second time.
+     */
+    default boolean tryBeginPrefetchKeyCollection(int expectedKeys) {
+        beginPrefetchKeyCollection(expectedKeys);
+        return true;
+    }
+
     /** Adds one exact, non-null key. */
     void addPrefetchKey(K key);
 

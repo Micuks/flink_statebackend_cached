@@ -29,6 +29,7 @@ import org.apache.flink.configuration.Configuration;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -70,6 +71,38 @@ class PerKeyStateDataViewStoreDistinctOverlayTest {
         ordinaryStore.getStateMapView(
                 "ordinaryMap", false, StringSerializer.INSTANCE, LongSerializer.INSTANCE);
         assertFalse(ordinaryStore.beginDistinctBatch());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void localOverlayDoesNotCollectPrefetchKeysWhenNativePrefetchIsDisabled() {
+        RuntimeContext context = mock(RuntimeContext.class);
+        when(context.getMapState(any())).thenReturn(mock(MapState.class));
+        PerKeyStateDataViewStore store =
+                new PerKeyStateDataViewStore(context, StateTtlConfig.DISABLED, true, false, 2);
+
+        StateMapView<?, String, Long> view =
+                store.getStateMapView(
+                        "distinctAcc_0", false, StringSerializer.INSTANCE, LongSerializer.INSTANCE);
+
+        assertNull(DistinctBatchPrefetchSupport.beginSession(view, 8));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void nativePrefetchFeatureEnablesGeneratedKeyCollection() {
+        RuntimeContext context = mock(RuntimeContext.class);
+        when(context.getMapState(any())).thenReturn(mock(MapState.class));
+        PerKeyStateDataViewStore store =
+                new PerKeyStateDataViewStore(context, StateTtlConfig.DISABLED, true, true, 2);
+
+        StateMapView<?, String, Long> view =
+                store.getStateMapView(
+                        "distinctAcc_0", false, StringSerializer.INSTANCE, LongSerializer.INSTANCE);
+
+        Object session = DistinctBatchPrefetchSupport.beginSession(view, 8);
+        assertTrue(session instanceof BatchPrefetchableMapView);
+        DistinctBatchPrefetchSupport.abortSession(session);
     }
 
     @Test

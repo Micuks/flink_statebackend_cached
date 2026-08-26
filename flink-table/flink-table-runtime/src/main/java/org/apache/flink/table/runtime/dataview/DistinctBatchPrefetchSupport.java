@@ -38,6 +38,35 @@ public final class DistinctBatchPrefetchSupport {
 
     private DistinctBatchPrefetchSupport() {}
 
+    /**
+     * Returns a runtime-owned collection token, or {@code null} when the batch cannot reach the
+     * configured useful-key threshold.
+     *
+     * <p>Generated code keeps this token for the complete collection scope. This performs the
+     * class-loader-sensitive interface check once per outer-key batch instead of once per input
+     * record, and lets it skip DISTINCT key extraction entirely for undersized groups.
+     */
+    public static Object beginSession(Object view, int expectedKeys) {
+        BatchPrefetchableMapView<Object> prefetchable = asPrefetchable(view);
+        return prefetchable != null && prefetchable.tryBeginPrefetchKeyCollection(expectedKeys)
+                ? prefetchable
+                : null;
+    }
+
+    public static void addSession(Object session, Object key) {
+        asSession(session).addPrefetchKey(key);
+    }
+
+    public static boolean finishSession(Object session) throws Exception {
+        return asSession(session).finishPrefetchKeyCollection();
+    }
+
+    public static void abortSession(Object session) {
+        if (session != null) {
+            asSession(session).abortPrefetchKeyCollection();
+        }
+    }
+
     public static void begin(Object view, int expectedKeys) {
         BatchPrefetchableMapView<Object> prefetchable = asPrefetchable(view);
         if (prefetchable != null) {
@@ -77,5 +106,13 @@ public final class DistinctBatchPrefetchSupport {
                     DistinctBatchPrefetchSupport.class.getClassLoader());
         }
         return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static BatchPrefetchableMapView<Object> asSession(Object session) {
+        if (!(session instanceof BatchPrefetchableMapView)) {
+            throw new IllegalArgumentException("Invalid DISTINCT prefetch session token");
+        }
+        return (BatchPrefetchableMapView<Object>) session;
     }
 }

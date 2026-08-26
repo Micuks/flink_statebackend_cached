@@ -154,6 +154,23 @@ class DistinctBatchStateMapViewTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void configurableMinimumRejectsByInputCountBeforeCopyingAnyKey() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        DistinctBatchStateMapView<Void, String, Long> view =
+                new DistinctBatchStateMapView<>(
+                        delegate, StringSerializer.INSTANCE, LongSerializer.INSTANCE, 4);
+
+        assertFalse(view.tryBeginPrefetchKeyCollection(3));
+
+        verify(delegate, never()).beginPrefetchKeys(any());
+        verify(delegate, never()).prefetchUniqueKeyValues(any());
+        assertEquals(1, view.prefetchRejectedBelowMinimum());
+        assertEquals(1, view.prefetchRejectedBeforeKeyScan());
+        assertEquals(0, view.prefetchKeysCollected());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void collapsesRepeatedGetAndPutToOneDelegateReadAndOneFinalWrite() throws Exception {
         StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
         when(delegate.get("bidder-7")).thenReturn(1L);

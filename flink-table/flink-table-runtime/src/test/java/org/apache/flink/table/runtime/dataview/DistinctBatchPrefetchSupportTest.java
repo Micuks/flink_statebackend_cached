@@ -49,8 +49,38 @@ class DistinctBatchPrefetchSupportTest {
         DistinctBatchPrefetchSupport.abort(unsupported);
     }
 
+    @Test
+    void sessionTokenSkipsTheGeneratedKeyLoopWhenTheViewRejectsEarly() throws Exception {
+        RecordingView view = new RecordingView();
+        view.acceptSession = false;
+
+        Object session = DistinctBatchPrefetchSupport.beginSession(view, 1);
+
+        assertThat(session).isNull();
+        assertThat(view.calls).containsExactly("tryBegin:1");
+    }
+
+    @Test
+    void sessionTokenAvoidsRepeatedRuntimeInterfaceChecks() throws Exception {
+        RecordingView view = new RecordingView();
+
+        Object session = DistinctBatchPrefetchSupport.beginSession(view, 4);
+        DistinctBatchPrefetchSupport.addSession(session, "a");
+        DistinctBatchPrefetchSupport.addSession(session, "b");
+
+        assertThat(DistinctBatchPrefetchSupport.finishSession(session)).isTrue();
+        assertThat(view.calls).containsExactly("tryBegin:4", "add:a", "add:b", "finish");
+    }
+
     private static final class RecordingView implements BatchPrefetchableMapView<String> {
         private final List<String> calls = new ArrayList<>();
+        private boolean acceptSession = true;
+
+        @Override
+        public boolean tryBeginPrefetchKeyCollection(int expectedKeys) {
+            calls.add("tryBegin:" + expectedKeys);
+            return acceptSession;
+        }
 
         @Override
         public void beginPrefetchKeyCollection(int expectedKeys) {
