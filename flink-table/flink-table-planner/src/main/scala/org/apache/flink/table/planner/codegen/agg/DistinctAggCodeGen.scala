@@ -28,7 +28,7 @@ import org.apache.flink.table.planner.codegen.GenerateUtils.{generateFieldAccess
 import org.apache.flink.table.planner.codegen.agg.AggsHandlerCodeGenerator._
 import org.apache.flink.table.planner.expressions.converter.ExpressionConverter
 import org.apache.flink.table.planner.plan.utils.DistinctInfo
-import org.apache.flink.table.runtime.dataview.BatchPrefetchableMapView
+import org.apache.flink.table.runtime.dataview.DistinctBatchPrefetchSupport
 import org.apache.flink.table.types.DataType
 import org.apache.flink.table.types.logical.{LogicalType, RowType}
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks
@@ -92,7 +92,7 @@ class DistinctAggCodeGen(
   val MAP_VIEW: String = className[MapView[_, _]]
   val MAP_ENTRY: String = className[java.util.Map.Entry[_, _]]
   val ITERABLE: String = className[java.lang.Iterable[_]]
-  val BATCH_PREFETCHABLE_MAP_VIEW: String = className[BatchPrefetchableMapView[_]]
+  val DISTINCT_BATCH_PREFETCH_SUPPORT: String = className[DistinctBatchPrefetchSupport]
 
   val aggCount: Int = innerAggCodeGens.length
   val externalAccType: DataType = distinctInfo.accType
@@ -310,10 +310,7 @@ class DistinctAggCodeGen(
       ""
     } else {
       s"""
-         |if ($distinctAccTerm instanceof $BATCH_PREFETCHABLE_MAP_VIEW) {
-         |  (($BATCH_PREFETCHABLE_MAP_VIEW) $distinctAccTerm)
-         |    .beginPrefetchKeyCollection($expectedKeysTerm);
-         |}
+         |$DISTINCT_BATCH_PREFETCH_SUPPORT.begin($distinctAccTerm, $expectedKeysTerm);
        """.stripMargin
     }
   }
@@ -325,10 +322,8 @@ class DistinctAggCodeGen(
       val keyExpr = generateKeyExpression(ctx, generator)
       s"""
          |${keyExpr.code}
-         |if (!${keyExpr.nullTerm} &&
-         |    $distinctAccTerm instanceof $BATCH_PREFETCHABLE_MAP_VIEW) {
-         |  (($BATCH_PREFETCHABLE_MAP_VIEW) $distinctAccTerm)
-         |    .addPrefetchKey(${keyExpr.resultTerm});
+         |if (!${keyExpr.nullTerm}) {
+         |  $DISTINCT_BATCH_PREFETCH_SUPPORT.add($distinctAccTerm, ${keyExpr.resultTerm});
          |}
        """.stripMargin
     }
@@ -339,10 +334,7 @@ class DistinctAggCodeGen(
       ""
     } else {
       s"""
-         |if ($distinctAccTerm instanceof $BATCH_PREFETCHABLE_MAP_VIEW) {
-         |  $resultTerm |= (($BATCH_PREFETCHABLE_MAP_VIEW) $distinctAccTerm)
-         |    .finishPrefetchKeyCollection();
-         |}
+         |$resultTerm |= $DISTINCT_BATCH_PREFETCH_SUPPORT.finish($distinctAccTerm);
        """.stripMargin
     }
   }
@@ -352,10 +344,7 @@ class DistinctAggCodeGen(
       ""
     } else {
       s"""
-         |if ($distinctAccTerm instanceof $BATCH_PREFETCHABLE_MAP_VIEW) {
-         |  (($BATCH_PREFETCHABLE_MAP_VIEW) $distinctAccTerm)
-         |    .abortPrefetchKeyCollection();
-         |}
+         |$DISTINCT_BATCH_PREFETCH_SUPPORT.abort($distinctAccTerm);
        """.stripMargin
     }
   }
