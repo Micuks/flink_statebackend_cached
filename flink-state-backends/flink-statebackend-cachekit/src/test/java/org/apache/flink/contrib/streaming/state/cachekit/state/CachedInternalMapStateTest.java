@@ -232,9 +232,14 @@ class CachedInternalMapStateTest {
         state.enableNativeDistinctBatchPrefetch(true, true);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
-        assertEquals(
-                Arrays.asList(7, null),
-                state.prefetchCurrentUniqueKeyValues(Arrays.asList("u1", "u2")));
+        // An asynchronous prefetch may occupy every regular slot. Exact-DISTINCT direct-arena
+        // transport owns a separate bounded mailbox-thread slot and must remain closed.
+        try (NativeRequestPlaneCoordinator.BatchSlot regular =
+                coordinator.tryAcquireBatchSlot()) {
+            assertEquals(
+                    Arrays.asList(7, null),
+                    state.prefetchCurrentUniqueKeyValues(Arrays.asList("u1", "u2")));
+        }
         assertEquals(2, state.getBatchPrefetchDirectArenaCompletedKeysForTesting());
         assertEquals(0, state.getBatchPrefetchDirectArenaFallbacksForTesting());
         verify(reader, times(0)).getSerializedValuesByUserKeys(any());
