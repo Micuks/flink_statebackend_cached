@@ -21,9 +21,9 @@ package org.apache.flink.table.runtime.dataview;
 import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.StateTtlConfig;
+import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
-import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 
 import org.junit.jupiter.api.Test;

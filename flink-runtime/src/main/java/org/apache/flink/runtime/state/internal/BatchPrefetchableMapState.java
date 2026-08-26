@@ -20,6 +20,8 @@ package org.apache.flink.runtime.state.internal;
 
 import org.apache.flink.annotation.Internal;
 
+import java.util.List;
+
 /** Optional exact-key batch-prefetch capability exposed by an internal MapState wrapper. */
 @Internal
 public interface BatchPrefetchableMapState<UK> {
@@ -31,6 +33,26 @@ public interface BatchPrefetchableMapState<UK> {
      * @return true only when a backend batch-prefetch path was exercised
      */
     boolean beginPrefetchCurrentKeys(Iterable<? extends UK> userKeys) throws Exception;
+
+    /**
+     * Whether this state can return values aligned with an already de-duplicated key list. This
+     * lets a batch-scoped caller seed its own read overlay directly instead of staging values in a
+     * second map and looking them up again one by one.
+     */
+    default boolean supportsDirectPrefetchedValues() {
+        return false;
+    }
+
+    /**
+     * Returns values aligned with {@code uniqueUserKeys}, or {@code null} after a fail-closed
+     * backend failure. The caller must supply stable, non-null, insertion-ordered unique keys.
+     * Missing entries and stored null values are both represented by {@code null}, matching {@link
+     * org.apache.flink.api.common.state.MapState#get(Object)} semantics.
+     */
+    default List<?> prefetchCurrentUniqueKeyValues(List<? extends UK> uniqueUserKeys)
+            throws Exception {
+        return null;
+    }
 
     /**
      * Ends the current batch-prefetch scope and discards every transient staged value. This method

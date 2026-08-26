@@ -139,6 +139,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private long batchPrefetchFound;
     private long batchPrefetchMissing;
     private long batchPrefetchHits;
+    private long batchPrefetchDirectOverlayValues;
     private long batchPrefetchFallbacks;
     private long batchPrefetchFailures;
 
@@ -538,6 +539,69 @@ public final class CachedInternalMapState<K, N, UK, UV>
     /** Enables the separately gated exact-DISTINCT native RocksDB MultiGet path. */
     public void enableNativeDistinctBatchPrefetch(boolean enabled) {
         this.nativeDistinctBatchPrefetchEnabled = enabled;
+    }
+
+    @Override
+    public boolean supportsDirectPrefetchedValues() {
+        return nativeDistinctBatchPrefetchEnabled && rocksDBBatchMapReader != null;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public List<UV> prefetchCurrentUniqueKeyValues(List<? extends UK> uniqueUserKeys)
+            throws Exception {
+        endPrefetchCurrentKeys();
+        batchPrefetchAttempts++;
+        if (!supportsDirectPrefetchedValues()) {
+            batchPrefetchFallbacks++;
+            return null;
+        }
+        K currentKey = currentKeyProvider.getCurrentKey();
+        N namespace = currentNamespace;
+        if (currentKey == null || namespace == null || uniqueUserKeys.size() < 2) {
+            batchPrefetchFallbacks++;
+            return null;
+        }
+
+        // The generated MapView layer already copied, de-duplicated and insertion-ordered this
+        // list. RocksDBBatchMapReader is read-only with respect to it, so retain the same list and
+        // avoid a second LinkedHashSet plus ArrayList allocation on every tiny outer-key batch.
+        List<UK> orderedKeys = (List<UK>) (List<?>) uniqueUserKeys;
+        batchPrefetchInputKeys += orderedKeys.size();
+        batchPrefetchUniqueKeys += orderedKeys.size();
+        try {
+            flushCurrentKey(currentKey);
+            ensureDelegateNamespace(currentKey);
+            List<byte[]> rawValues =
+                    rocksDBBatchMapReader.getSerializedValuesByUserKeys(orderedKeys);
+            if (rawValues.size() != orderedKeys.size()) {
+                throw new IllegalStateException(
+                        "MapState MultiGet returned "
+                                + rawValues.size()
+                                + " values for "
+                                + orderedKeys.size()
+                                + " keys.");
+            }
+            ArrayList<UV> values = new ArrayList<>(rawValues.size());
+            for (byte[] rawValue : rawValues) {
+                if (rawValue == null) {
+                    values.add(null);
+                    batchPrefetchMissing++;
+                } else {
+                    batchPrefetchInput.setBuffer(rawValue);
+                    boolean isNull = batchPrefetchInput.readBoolean();
+                    values.add(isNull ? null : userValueSerializer.deserialize(batchPrefetchInput));
+                    batchPrefetchFound++;
+                }
+            }
+            batchPrefetchBatches++;
+            batchPrefetchDirectOverlayValues += values.size();
+            return values;
+        } catch (Exception | LinkageError failure) {
+            batchPrefetchFailures++;
+            batchPrefetchFallbacks++;
+            return null;
+        }
     }
 
     @Override
@@ -1918,7 +1982,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
         if (nativeDistinctBatchPrefetchEnabled) {
             LOG.info(
                     "[CACHEKIT NATIVE MAP DISTINCT PREFETCH] attempts={} batches={} inputKeys={} "
-                            + "uniqueKeys={} found={} missing={} stagingHits={} fallbacks={} failures={} "
+                            + "uniqueKeys={} found={} missing={} stagingHits={} directOverlayValues={} "
+                            + "fallbacks={} failures={} "
                             + "batchReaderAvailable={}",
                     batchPrefetchAttempts,
                     batchPrefetchBatches,
@@ -1927,6 +1992,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     batchPrefetchFound,
                     batchPrefetchMissing,
                     batchPrefetchHits,
+                    batchPrefetchDirectOverlayValues,
                     batchPrefetchFallbacks,
                     batchPrefetchFailures,
                     rocksDBBatchMapReader != null);
@@ -2003,6 +2069,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     long getBatchPrefetchHitsForTesting() {
         return batchPrefetchHits;
+    }
+
+    long getBatchPrefetchDirectOverlayValuesForTesting() {
+        return batchPrefetchDirectOverlayValues;
     }
 
     long getBatchPrefetchFallbacksForTesting() {

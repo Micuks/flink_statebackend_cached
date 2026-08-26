@@ -670,6 +670,16 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                     + "MultiGet per outer-key batch. Results are scoped staging only and "
                                     + "fail closed to authoritative MapState reads.");
 
+    public static final ConfigOption<Integer> NATIVE_MAP_DISTINCT_BATCH_PREFETCH_MIN_UNIQUE_KEYS =
+            ConfigOptions.key(
+                            "state.backend.cachekit.native.map-distinct-batch-prefetch.min-unique-keys")
+                    .intType()
+                    .defaultValue(2)
+                    .withDescription(
+                            "Minimum number of stable unique exact-DISTINCT user keys required "
+                                    + "before crossing the MapView/backend/JNI MultiGet boundary. "
+                                    + "Values below two are clamped to two.");
+
     public static final ConfigOption<String> DELEGATE_BACKEND =
             ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()

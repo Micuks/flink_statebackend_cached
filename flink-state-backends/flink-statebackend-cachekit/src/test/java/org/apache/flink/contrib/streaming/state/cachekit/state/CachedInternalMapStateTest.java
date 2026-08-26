@@ -99,6 +99,55 @@ class CachedInternalMapStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testExactDistinctDirectValuesAvoidSecondStagingMap() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer
+                                        .INSTANCE,
+                                IntSerializer.INSTANCE));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        when(reader.getSerializedValuesByUserKeys(Arrays.asList("u1", "u2")))
+                .thenReturn(Arrays.asList(serializedMapValue(7), null));
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0);
+        state.enableNativeDistinctBatchPrefetch(true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        assertTrue(state.supportsDirectPrefetchedValues());
+        assertEquals(
+                Arrays.asList(7, null),
+                state.prefetchCurrentUniqueKeyValues(Arrays.asList("u1", "u2")));
+        assertEquals(1, state.getBatchPrefetchBatchesForTesting());
+        assertEquals(2, state.getBatchPrefetchUniqueKeysForTesting());
+        assertEquals(2, state.getBatchPrefetchDirectOverlayValuesForTesting());
+        assertEquals(0, state.getBatchPrefetchHitsForTesting());
+        verify(delegate, times(0)).get(any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testExactDistinctBatchPrefetchInvalidatesOnOuterKeyChangeAndTracksWrites()
             throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");

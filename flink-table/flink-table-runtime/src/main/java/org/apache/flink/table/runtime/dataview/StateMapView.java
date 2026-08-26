@@ -24,6 +24,7 @@ import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
+import org.apache.flink.runtime.state.internal.LongBitmaskMergeMapState;
 import org.apache.flink.table.api.dataview.MapView;
 import org.apache.flink.util.IterableIterator;
 
@@ -31,6 +32,9 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -46,6 +50,26 @@ public abstract class StateMapView<N, EK, EV> extends MapView<EK, EV> implements
     /** Optional exact-key prefetch hook used by a batch-scoped DISTINCT overlay. */
     boolean beginPrefetchKeys(Iterable<? extends EK> keys) throws Exception {
         return false;
+    }
+
+    /** Whether exact-key prefetch can return values directly to this MapView layer. */
+    boolean supportsDirectPrefetchedValues() {
+        return false;
+    }
+
+    /** Returns values aligned with stable insertion-ordered unique keys, or null on failure. */
+    List<EV> prefetchUniqueKeyValues(List<? extends EK> keys) throws Exception {
+        return null;
+    }
+
+    /** Whether this view can perform an authoritative Long bitmask read-modify-write batch. */
+    boolean supportsLongBitmaskMerge() {
+        return false;
+    }
+
+    /** Returns old masks aligned by key after atomically publishing {@code old | desired}. */
+    Map<EK, Long> mergeLongBitmasks(Map<EK, Long> desiredMasks) throws Exception {
+        throw new UnsupportedOperationException("Long bitmask merge is not supported");
     }
 
     /** Ends an optional batch-scoped exact-key prefetch. */
@@ -94,6 +118,60 @@ public abstract class StateMapView<N, EK, EV> extends MapView<EK, EV> implements
             MapState<EK, EV> state = getMapState();
             return state instanceof BatchPrefetchableMapState
                     && ((BatchPrefetchableMapState<EK>) state).beginPrefetchCurrentKeys(keys);
+        }
+
+        @Override
+        boolean supportsDirectPrefetchedValues() {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof BatchPrefetchableMapState
+                    && ((BatchPrefetchableMapState<?>) state).supportsDirectPrefetchedValues();
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        List<EV> prefetchUniqueKeyValues(List<? extends EK> keys) throws Exception {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof BatchPrefetchableMapState
+                    ? (List<EV>)
+                            ((BatchPrefetchableMapState<EK>) state)
+                                    .prefetchCurrentUniqueKeyValues(keys)
+                    : null;
+        }
+
+        @Override
+        boolean supportsLongBitmaskMerge() {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof LongBitmaskMergeMapState
+                    && ((LongBitmaskMergeMapState<?>) state).supportsLongBitmaskMerge();
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        Map<EK, Long> mergeLongBitmasks(Map<EK, Long> desiredMasks) throws Exception {
+            MapState<EK, EV> state = getMapState();
+            if (!(state instanceof LongBitmaskMergeMapState)) {
+                throw new UnsupportedOperationException("Long bitmask merge is not supported");
+            }
+            ArrayList<EK> keys = new ArrayList<>(desiredMasks.size());
+            ArrayList<Long> desired = new ArrayList<>(desiredMasks.size());
+            for (Map.Entry<EK, Long> entry : desiredMasks.entrySet()) {
+                if (entry.getKey() == null || entry.getValue() == null) {
+                    throw new IllegalArgumentException("Long bitmask merge requires non-null keys and masks");
+                }
+                keys.add(entry.getKey());
+                desired.add(entry.getValue());
+            }
+            List<Long> old =
+                    ((LongBitmaskMergeMapState<EK>) state)
+                            .mergeCurrentKeyLongBitmasks(keys, desired);
+            if (old == null || old.size() != keys.size()) {
+                throw new IllegalStateException("Long bitmask merge returned a misaligned result");
+            }
+            LinkedHashMap<EK, Long> oldByKey = new LinkedHashMap<>();
+            for (int i = 0; i < keys.size(); i++) {
+                oldByKey.put(keys.get(i), old.get(i));
+            }
+            return oldByKey;
         }
 
         @Override
@@ -279,6 +357,60 @@ public abstract class StateMapView<N, EK, EV> extends MapView<EK, EV> implements
             MapState<EK, EV> state = getMapState();
             return state instanceof BatchPrefetchableMapState
                     && ((BatchPrefetchableMapState<EK>) state).beginPrefetchCurrentKeys(keys);
+        }
+
+        @Override
+        boolean supportsDirectPrefetchedValues() {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof BatchPrefetchableMapState
+                    && ((BatchPrefetchableMapState<?>) state).supportsDirectPrefetchedValues();
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        List<EV> prefetchUniqueKeyValues(List<? extends EK> keys) throws Exception {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof BatchPrefetchableMapState
+                    ? (List<EV>)
+                            ((BatchPrefetchableMapState<EK>) state)
+                                    .prefetchCurrentUniqueKeyValues(keys)
+                    : null;
+        }
+
+        @Override
+        boolean supportsLongBitmaskMerge() {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof LongBitmaskMergeMapState
+                    && ((LongBitmaskMergeMapState<?>) state).supportsLongBitmaskMerge();
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        Map<EK, Long> mergeLongBitmasks(Map<EK, Long> desiredMasks) throws Exception {
+            MapState<EK, EV> state = getMapState();
+            if (!(state instanceof LongBitmaskMergeMapState)) {
+                throw new UnsupportedOperationException("Long bitmask merge is not supported");
+            }
+            ArrayList<EK> keys = new ArrayList<>(desiredMasks.size());
+            ArrayList<Long> desired = new ArrayList<>(desiredMasks.size());
+            for (Map.Entry<EK, Long> entry : desiredMasks.entrySet()) {
+                if (entry.getKey() == null || entry.getValue() == null) {
+                    throw new IllegalArgumentException("Long bitmask merge requires non-null keys and masks");
+                }
+                keys.add(entry.getKey());
+                desired.add(entry.getValue());
+            }
+            List<Long> old =
+                    ((LongBitmaskMergeMapState<EK>) state)
+                            .mergeCurrentKeyLongBitmasks(keys, desired);
+            if (old == null || old.size() != keys.size()) {
+                throw new IllegalStateException("Long bitmask merge returned a misaligned result");
+            }
+            LinkedHashMap<EK, Long> oldByKey = new LinkedHashMap<>();
+            for (int i = 0; i < keys.size(); i++) {
+                oldByKey.put(keys.get(i), old.get(i));
+            }
+            return oldByKey;
         }
 
         @Override

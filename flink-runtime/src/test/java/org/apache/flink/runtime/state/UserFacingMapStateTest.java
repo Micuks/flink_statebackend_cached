@@ -25,6 +25,7 @@ import org.junit.Test;
 
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
@@ -44,6 +45,17 @@ public class UserFacingMapStateTest {
         assertEquals(2, original.prefetchedKeys);
         state.endPrefetchCurrentKeys();
         assertTrue(original.prefetchEnded);
+    }
+
+    @Test
+    public void testDelegatesDirectPrefetchedValuesCapability() throws Exception {
+        RecordingMapState original = new RecordingMapState();
+        UserFacingMapState<String, Long> state = new UserFacingMapState<>(original);
+
+        assertTrue(state.supportsDirectPrefetchedValues());
+        assertEquals(
+                java.util.Arrays.asList(1L, null),
+                state.prefetchCurrentUniqueKeyValues(java.util.Arrays.asList("a", "b")));
     }
 
     @Test
@@ -67,6 +79,16 @@ public class UserFacingMapStateTest {
                 prefetchedKeys++;
             }
             return true;
+        }
+
+        @Override
+        public boolean supportsDirectPrefetchedValues() {
+            return true;
+        }
+
+        @Override
+        public List<?> prefetchCurrentUniqueKeyValues(List<? extends String> keys) {
+            return java.util.Arrays.asList(1L, null);
         }
 
         @Override

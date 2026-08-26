@@ -69,8 +69,7 @@ class DistinctBatchStateMapViewTest {
         doAnswer(
                         invocation -> {
                             assertEquals(
-                                    List.of("bidder-1", "bidder-2"),
-                                    invocation.getArgument(0));
+                                    List.of("bidder-1", "bidder-2"), invocation.getArgument(0));
                             return true;
                         })
                 .when(delegate)
@@ -105,6 +104,52 @@ class DistinctBatchStateMapViewTest {
         assertFalse(view.finishPrefetchKeyCollection());
 
         verify(delegate, never()).beginPrefetchKeys(any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void directPrefetchedValuesPrimeOverlayWithoutSecondMapStateLookup() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        when(delegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        when(delegate.prefetchUniqueKeyValues(any())).thenReturn(java.util.Arrays.asList(7L, null));
+        DistinctBatchStateMapView<Void, String, Long> view = createView(delegate);
+
+        view.beginPrefetchKeyCollection(2);
+        view.addPrefetchKey("bidder-1");
+        view.addPrefetchKey("bidder-2");
+        assertTrue(view.finishPrefetchKeyCollection());
+        view.beginBatch();
+        assertEquals(7L, view.get("bidder-1"));
+        assertNull(view.get("bidder-2"));
+        view.commitBatch();
+
+        verify(delegate, times(1)).prefetchUniqueKeyValues(any());
+        verify(delegate, never()).beginPrefetchKeys(any());
+        verify(delegate, never()).get(any());
+        verify(delegate, never()).putAll(anyMap());
+        assertEquals(2, view.directOverlayValues());
+        assertEquals(2, view.overlayHits());
+        assertEquals(0, view.delegateGets());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void configurableMinimumRejectsTinyUniqueBatchesBeforeBackendBoundary() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        DistinctBatchStateMapView<Void, String, Long> view =
+                new DistinctBatchStateMapView<>(
+                        delegate, StringSerializer.INSTANCE, LongSerializer.INSTANCE, 4);
+
+        view.beginPrefetchKeyCollection(3);
+        view.addPrefetchKey("bidder-1");
+        view.addPrefetchKey("bidder-2");
+        view.addPrefetchKey("bidder-3");
+        assertFalse(view.finishPrefetchKeyCollection());
+
+        verify(delegate, never()).beginPrefetchKeys(any());
+        verify(delegate, never()).prefetchUniqueKeyValues(any());
+        assertEquals(1, view.prefetchRejectedBelowMinimum());
+        assertEquals(1, view.prefetchSize3());
     }
 
     @Test

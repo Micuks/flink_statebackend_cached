@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -51,6 +52,8 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     private final TypeSerializer<EV> valueSerializer;
     private final boolean copyKeys;
     private final boolean copyValues;
+    private final int minPrefetchUniqueKeys;
+    private final boolean longBitmaskTransactionEnabled;
     private final HashMap<EK, BufferedValue<EK, EV>> overlay = new HashMap<>();
     private final ArrayList<EK> pendingPrefetchKeys = new ArrayList<>();
     private final HashSet<EK> pendingPrefetchKeySet = new HashSet<>();
@@ -58,6 +61,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     private boolean active;
     private boolean prefetchActive;
     private boolean collectingPrefetchKeys;
+    private boolean directValuesPrimed;
     private long logicalGets;
     private long delegateGets;
     private long overlayHits;
@@ -67,20 +71,69 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     private long committedBatches;
     private long abortedBatches;
     private long forcedFlushes;
+    private long prefetchCollections;
+    private long prefetchKeysCollected;
+    private long prefetchRejectedBelowMinimum;
+    private long directOverlayValues;
+    private long prefetchSize2;
+    private long prefetchSize3;
+    private long prefetchSize4To7;
+    private long prefetchSize8To15;
+    private long prefetchSize16Plus;
 
     DistinctBatchStateMapView(
             StateMapView<N, EK, EV> delegate,
             TypeSerializer<EK> keySerializer,
             TypeSerializer<EV> valueSerializer) {
+        this(delegate, keySerializer, valueSerializer, 2, false);
+    }
+
+    DistinctBatchStateMapView(
+            StateMapView<N, EK, EV> delegate,
+            TypeSerializer<EK> keySerializer,
+            TypeSerializer<EV> valueSerializer,
+            int minPrefetchUniqueKeys) {
+        this(delegate, keySerializer, valueSerializer, minPrefetchUniqueKeys, false);
+    }
+
+    DistinctBatchStateMapView(
+            StateMapView<N, EK, EV> delegate,
+            TypeSerializer<EK> keySerializer,
+            TypeSerializer<EV> valueSerializer,
+            int minPrefetchUniqueKeys,
+            boolean longBitmaskTransactionEnabled) {
         this.delegate = delegate;
         this.keySerializer = keySerializer;
         this.valueSerializer = valueSerializer;
         this.copyKeys = !keySerializer.isImmutableType();
         this.copyValues = !valueSerializer.isImmutableType();
+        this.minPrefetchUniqueKeys = Math.max(2, minPrefetchUniqueKeys);
+        this.longBitmaskTransactionEnabled = longBitmaskTransactionEnabled;
+    }
+
+    boolean isLongBitmaskTransactionEnabled() {
+        return longBitmaskTransactionEnabled;
+    }
+
+    @Override
+    boolean supportsLongBitmaskMerge() {
+        return longBitmaskTransactionEnabled && delegate.supportsLongBitmaskMerge();
+    }
+
+    @Override
+    Map<EK, Long> mergeLongBitmasks(Map<EK, Long> desiredMasks) throws Exception {
+        if (active || prefetchActive || collectingPrefetchKeys || directValuesPrimed) {
+            throw new IllegalStateException(
+                    "Long bitmask transaction cannot overlap a DISTINCT batch scope");
+        }
+        if (!longBitmaskTransactionEnabled) {
+            throw new UnsupportedOperationException("Long bitmask transaction is disabled");
+        }
+        return delegate.mergeLongBitmasks(desiredMasks);
     }
 
     void beginBatch() {
-        if (active || !overlay.isEmpty()) {
+        if (active || (!overlay.isEmpty() && !directValuesPrimed)) {
             throw new IllegalStateException("DISTINCT batch overlay is already active");
         }
         active = true;
@@ -96,6 +149,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         } finally {
             overlay.clear();
             active = false;
+            directValuesPrimed = false;
             endPrefetchScope();
         }
     }
@@ -106,6 +160,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         }
         overlay.clear();
         active = false;
+        directValuesPrimed = false;
         endPrefetchScope();
     }
 
@@ -144,9 +199,30 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         }
         collectingPrefetchKeys = false;
         try {
-            // Native MultiGet has no batching benefit for a singleton. Stop before crossing the
-            // MapView/backend/JNI boundary; the ordinary state read remains authoritative.
-            return pendingPrefetchKeys.size() >= 2 && beginPrefetchKeys(pendingPrefetchKeys);
+            int size = pendingPrefetchKeys.size();
+            recordPrefetchSize(size);
+            if (size < minPrefetchUniqueKeys) {
+                prefetchRejectedBelowMinimum++;
+                return false;
+            }
+            if (delegate.supportsDirectPrefetchedValues()) {
+                List<EV> values = delegate.prefetchUniqueKeyValues(pendingPrefetchKeys);
+                if (values == null || values.size() != size) {
+                    overlay.clear();
+                    directValuesPrimed = false;
+                    return false;
+                }
+                for (int i = 0; i < size; i++) {
+                    EK stableKey = pendingPrefetchKeys.get(i);
+                    EV stableValue = copyValue(values.get(i));
+                    overlay.put(
+                            stableKey, new BufferedValue<>(stableKey, stableValue, false, false));
+                }
+                directValuesPrimed = true;
+                directOverlayValues += size;
+                return true;
+            }
+            return beginPrefetchKeys(pendingPrefetchKeys);
         } finally {
             pendingPrefetchKeys.clear();
             pendingPrefetchKeySet.clear();
@@ -158,6 +234,10 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         collectingPrefetchKeys = false;
         pendingPrefetchKeys.clear();
         pendingPrefetchKeySet.clear();
+        if (!active && directValuesPrimed) {
+            overlay.clear();
+            directValuesPrimed = false;
+        }
         endPrefetchScope();
     }
 
@@ -200,9 +280,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         BufferedValue<EK, EV> buffered = overlay.get(key);
         if (buffered == null) {
             EK stableKey = copyKey(key);
-            overlay.put(
-                    stableKey,
-                    new BufferedValue<>(stableKey, copyValue(value), true, false));
+            overlay.put(stableKey, new BufferedValue<>(stableKey, copyValue(value), true, false));
         } else {
             buffered.value = copyValue(value);
             buffered.dirty = true;
@@ -285,6 +363,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     @Override
     public void clear() {
         overlay.clear();
+        directValuesPrimed = false;
         abortPrefetchKeyCollection();
         endPrefetchScope();
         delegate.clear();
@@ -296,8 +375,28 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             throw new IllegalStateException(
                     "Cannot change namespace with an uncommitted DISTINCT batch overlay");
         }
+        if (!active && directValuesPrimed) {
+            overlay.clear();
+            directValuesPrimed = false;
+        }
         endPrefetchScope();
         delegate.setCurrentNamespace(namespace);
+    }
+
+    private void recordPrefetchSize(int size) {
+        prefetchCollections++;
+        prefetchKeysCollected += size;
+        if (size == 2) {
+            prefetchSize2++;
+        } else if (size == 3) {
+            prefetchSize3++;
+        } else if (size >= 4 && size <= 7) {
+            prefetchSize4To7++;
+        } else if (size >= 8 && size <= 15) {
+            prefetchSize8To15++;
+        } else if (size >= 16) {
+            prefetchSize16Plus++;
+        }
     }
 
     private void endPrefetchScope() {
@@ -381,6 +480,42 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
 
     long forcedFlushes() {
         return forcedFlushes;
+    }
+
+    long prefetchCollections() {
+        return prefetchCollections;
+    }
+
+    long prefetchKeysCollected() {
+        return prefetchKeysCollected;
+    }
+
+    long prefetchRejectedBelowMinimum() {
+        return prefetchRejectedBelowMinimum;
+    }
+
+    long directOverlayValues() {
+        return directOverlayValues;
+    }
+
+    long prefetchSize2() {
+        return prefetchSize2;
+    }
+
+    long prefetchSize3() {
+        return prefetchSize3;
+    }
+
+    long prefetchSize4To7() {
+        return prefetchSize4To7;
+    }
+
+    long prefetchSize8To15() {
+        return prefetchSize8To15;
+    }
+
+    long prefetchSize16Plus() {
+        return prefetchSize16Plus;
     }
 
     private static final class BufferedValue<K, V> {

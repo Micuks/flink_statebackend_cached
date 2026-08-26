@@ -47,10 +47,13 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
             "state.backend.cachekit.local-preagg.distinct-overlay.enabled";
     private static final String NATIVE_MAP_DISTINCT_BATCH_PREFETCH_KEY =
             "state.backend.cachekit.native.map-distinct-batch-prefetch.enabled";
+    private static final String NATIVE_MAP_DISTINCT_BATCH_PREFETCH_MIN_UNIQUE_KEYS_KEY =
+            "state.backend.cachekit.native.map-distinct-batch-prefetch.min-unique-keys";
 
     private final RuntimeContext ctx;
     private final StateTtlConfig stateTtlConfig;
     private final boolean distinctBatchOverlayEnabled;
+    private final int distinctBatchPrefetchMinUniqueKeys;
     private final List<DistinctBatchStateMapView<?, ?, ?>> distinctBatchViews = new ArrayList<>();
 
     public PerKeyStateDataViewStore(RuntimeContext ctx) {
@@ -58,10 +61,19 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
     }
 
     public PerKeyStateDataViewStore(RuntimeContext ctx, StateTtlConfig stateTtlConfig) {
+        this(ctx, stateTtlConfig, GlobalConfiguration.loadConfiguration());
+    }
+
+    private PerKeyStateDataViewStore(
+            RuntimeContext ctx, StateTtlConfig stateTtlConfig, Configuration configuration) {
         this(
                 ctx,
                 stateTtlConfig,
-                isDistinctBatchEnabled(GlobalConfiguration.loadConfiguration()));
+                isDistinctBatchEnabled(configuration),
+                Math.max(
+                        2,
+                        configuration.getInteger(
+                                NATIVE_MAP_DISTINCT_BATCH_PREFETCH_MIN_UNIQUE_KEYS_KEY, 2)));
     }
 
     static boolean isDistinctBatchEnabled(Configuration configuration) {
@@ -73,12 +85,21 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
             RuntimeContext ctx,
             StateTtlConfig stateTtlConfig,
             boolean distinctBatchOverlayEnabled) {
+        this(ctx, stateTtlConfig, distinctBatchOverlayEnabled, 2);
+    }
+
+    PerKeyStateDataViewStore(
+            RuntimeContext ctx,
+            StateTtlConfig stateTtlConfig,
+            boolean distinctBatchOverlayEnabled,
+            int distinctBatchPrefetchMinUniqueKeys) {
         this.ctx = ctx;
         this.stateTtlConfig = stateTtlConfig;
         // Batching across TTL reads would change access-time refresh semantics. Keep the first
         // implementation deliberately fail-closed until a TTL-specific contract is proven.
         this.distinctBatchOverlayEnabled =
                 distinctBatchOverlayEnabled && !stateTtlConfig.isEnabled();
+        this.distinctBatchPrefetchMinUniqueKeys = Math.max(2, distinctBatchPrefetchMinUniqueKeys);
     }
 
     @Override
@@ -111,7 +132,8 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
             return view;
         }
         DistinctBatchStateMapView<N, EK, EV> batchingView =
-                new DistinctBatchStateMapView<>(view, keySerializer, valueSerializer);
+                new DistinctBatchStateMapView<>(
+                        view, keySerializer, valueSerializer, distinctBatchPrefetchMinUniqueKeys);
         distinctBatchViews.add(batchingView);
         return batchingView;
     }
@@ -162,7 +184,9 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
         }
     }
 
-    /** Stable close-time counters used to prove that the optimization reached real DISTINCT state. */
+    /**
+     * Stable close-time counters used to prove that the optimization reached real DISTINCT state.
+     */
     public String distinctBatchDiagnosticSummary() {
         long logicalGets = 0;
         long delegateGets = 0;
@@ -173,6 +197,15 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
         long committedBatches = 0;
         long abortedBatches = 0;
         long forcedFlushes = 0;
+        long prefetchCollections = 0;
+        long prefetchKeysCollected = 0;
+        long prefetchRejectedBelowMinimum = 0;
+        long directOverlayValues = 0;
+        long prefetchSize2 = 0;
+        long prefetchSize3 = 0;
+        long prefetchSize4To7 = 0;
+        long prefetchSize8To15 = 0;
+        long prefetchSize16Plus = 0;
         for (DistinctBatchStateMapView<?, ?, ?> view : distinctBatchViews) {
             logicalGets += view.logicalGets();
             delegateGets += view.delegateGets();
@@ -183,6 +216,15 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
             committedBatches += view.committedBatches();
             abortedBatches += view.abortedBatches();
             forcedFlushes += view.forcedFlushes();
+            prefetchCollections += view.prefetchCollections();
+            prefetchKeysCollected += view.prefetchKeysCollected();
+            prefetchRejectedBelowMinimum += view.prefetchRejectedBelowMinimum();
+            directOverlayValues += view.directOverlayValues();
+            prefetchSize2 += view.prefetchSize2();
+            prefetchSize3 += view.prefetchSize3();
+            prefetchSize4To7 += view.prefetchSize4To7();
+            prefetchSize8To15 += view.prefetchSize8To15();
+            prefetchSize16Plus += view.prefetchSize16Plus();
         }
         return "views="
                 + distinctBatchViews.size()
@@ -203,7 +245,25 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
                 + " abortedBatches="
                 + abortedBatches
                 + " forcedFlushes="
-                + forcedFlushes;
+                + forcedFlushes
+                + " prefetchCollections="
+                + prefetchCollections
+                + " prefetchKeysCollected="
+                + prefetchKeysCollected
+                + " prefetchRejectedBelowMinimum="
+                + prefetchRejectedBelowMinimum
+                + " directOverlayValues="
+                + directOverlayValues
+                + " prefetchSize2="
+                + prefetchSize2
+                + " prefetchSize3="
+                + prefetchSize3
+                + " prefetchSize4To7="
+                + prefetchSize4To7
+                + " prefetchSize8To15="
+                + prefetchSize8To15
+                + " prefetchSize16Plus="
+                + prefetchSize16Plus;
     }
 
     @Override
