@@ -21,9 +21,12 @@ package org.apache.flink.contrib.streaming.state;
 import static org.apache.flink.util.Preconditions.checkArgument;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import javax.annotation.Nonnegative;
 import javax.annotation.Nonnull;
@@ -133,14 +136,88 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
         if (userKeys.isEmpty()) {
             return java.util.Collections.emptyList();
         }
-        java.util.List<byte[]> rocksDBKeys = new java.util.ArrayList<>(userKeys.size());
+        java.util.List<byte[]> rocksDBKeys = serializeRocksDBKeysByUserKeys(userKeys);
+        return getSerializedValuesByRocksDBKeys(rocksDBKeys, 0, rocksDBKeys.size());
+    }
+
+    @Override
+    public List<byte[]> serializeRocksDBKeysByUserKeys(List<UK> userKeys) throws Exception {
+        if (userKeys.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<byte[]> rocksDBKeys = new ArrayList<>(userKeys.size());
         for (UK userKey : userKeys) {
             rocksDBKeys.add(
                     serializeCurrentKeyWithGroupAndNamespacePlusUserKey(
                             userKey, userKeySerializer));
         }
+        return rocksDBKeys;
+    }
+
+    @Override
+    public List<byte[]> getSerializedValuesByRocksDBKeys(
+            List<byte[]> rocksDBKeys, int fromIndex, int toIndex) throws Exception {
+        if (fromIndex < 0 || toIndex < fromIndex || toIndex > rocksDBKeys.size()) {
+            throw new IndexOutOfBoundsException(
+                    "Invalid RocksDB key range ["
+                            + fromIndex
+                            + ", "
+                            + toIndex
+                            + ") for size "
+                            + rocksDBKeys.size());
+        }
+        if (fromIndex == toIndex) {
+            return Collections.emptyList();
+        }
+        List<byte[]> keyRange = rocksDBKeys.subList(fromIndex, toIndex);
         return backend.db.multiGetAsList(
-                java.util.Collections.nCopies(userKeys.size(), columnFamily), rocksDBKeys);
+                Collections.nCopies(keyRange.size(), columnFamily), keyRange);
+    }
+
+    @Override
+    public boolean supportsDirectArenaMultiGet() {
+        return true;
+    }
+
+    @Override
+    public int directArenaMultiGetMaxBatch() {
+        try {
+            Object advertised =
+                    backend.db
+                            .getClass()
+                            .getMethod("directMultiGetMaxBatch")
+                            .invoke(backend.db);
+            if (!(advertised instanceof Number)) {
+                return RocksDBBatchValueReader.DIRECT_ARENA_DEFAULT_BATCH;
+            }
+            return Math.max(
+                    1,
+                    Math.min(
+                            RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
+                            ((Number) advertised).intValue()));
+        } catch (ReflectiveOperationException
+                | LinkageError
+                | SecurityException incompatibleWrapperOrNativeLibrary) {
+            return RocksDBBatchValueReader.DIRECT_ARENA_DEFAULT_BATCH;
+        }
+    }
+
+    @Override
+    public int getSerializedValuesByRocksDBKeyArena(
+            ByteBuffer keyArena,
+            ByteBuffer descriptors,
+            int count,
+            ByteBuffer valueArena,
+            int valueStride)
+            throws RocksDBException {
+        return backend.db.multiGetDirectArena(
+                columnFamily,
+                backend.getReadOptions(),
+                keyArena,
+                descriptors,
+                count,
+                valueArena,
+                valueStride);
     }
 
     @Override
