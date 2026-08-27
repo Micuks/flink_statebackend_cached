@@ -58,6 +58,16 @@ public interface BatchPrefetchableMapView<K> {
         return false;
     }
 
+    /** Returns the backend token represented by one prepared view token, or {@code null}. */
+    default Object preparedBackendValueForWave(Object prepared) {
+        return null;
+    }
+
+    /** Whether this prepared token is an intentional successful no-op for wave formation. */
+    default boolean isPreparedWaveNoOp(Object prepared) {
+        return false;
+    }
+
     /** Cancels one detached read that will not be consumed. */
     default void abortPreparedPrefetch(Object prepared) {}
 

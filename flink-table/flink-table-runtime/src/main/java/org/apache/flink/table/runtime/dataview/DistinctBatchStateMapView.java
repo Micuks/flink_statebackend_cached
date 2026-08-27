@@ -297,6 +297,20 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     }
 
     @Override
+    public Object preparedBackendValueForWave(Object prepared) {
+        if (!(prepared instanceof PreparedPrefetch)) {
+            return null;
+        }
+        PreparedPrefetch<?, ?> token = (PreparedPrefetch<?, ?>) prepared;
+        return token.owner == this && !token.consumed && !token.noOp ? token.backendPrepared : null;
+    }
+
+    @Override
+    public boolean isPreparedWaveNoOp(Object prepared) {
+        return prepared == noOpPreparedPrefetch;
+    }
+
+    @Override
     public void abortPreparedPrefetch(Object prepared) {
         if (prepared == noOpPreparedPrefetch) {
             return;

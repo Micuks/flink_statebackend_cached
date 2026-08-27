@@ -22,10 +22,13 @@ import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
+import org.apache.flink.streaming.api.operators.PipelinedBatchableKeyedFunction.BatchWindowPreparationResult;
 
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -45,6 +48,90 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class DistinctBatchStateMapViewTest {
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void executesSingleOwnerPreparedWaveWithoutInstallingOrConsumingCaptures() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        BatchPrefetchableMapState.PreparedValues first =
+                mock(BatchPrefetchableMapState.PreparedValues.class);
+        BatchPrefetchableMapState.PreparedValues second =
+                mock(BatchPrefetchableMapState.PreparedValues.class);
+        Object owner = new Object();
+        when(delegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        when(delegate.prepareUniqueKeyValues(List.of("a", "b"))).thenReturn(first);
+        when(delegate.prepareUniqueKeyValues(List.of("c", "d"))).thenReturn(second);
+        when(first.waveOwner()).thenReturn(owner);
+        when(second.waveOwner()).thenReturn(owner);
+        when(first.waveParticipation())
+                .thenReturn(BatchPrefetchableMapState.PreparedValues.WaveParticipation.ELIGIBLE);
+        when(second.waveParticipation())
+                .thenReturn(BatchPrefetchableMapState.PreparedValues.WaveParticipation.ELIGIBLE);
+        List<BatchPrefetchableMapState.PreparedValues> invokedWave = new ArrayList<>();
+        doAnswer(
+                        invocation -> {
+                            invokedWave.addAll(invocation.getArgument(0));
+                            return true;
+                        })
+                .when(first)
+                .executeWave(any());
+        DistinctBatchStateMapView<Void, String, Long> view = createView(delegate);
+
+        Object firstCapture = capturePrepared(view, List.of("a", "b"));
+        Object secondCapture = capturePrepared(view, List.of("c", "d"));
+
+        assertEquals(
+                BatchWindowPreparationResult.EXECUTED,
+                DistinctBatchPrefetchSupport.executePreparedWave(
+                        new Object[] {firstCapture, secondCapture}, 2));
+        verify(first, times(1)).executeWave(any());
+        assertEquals(List.of(first, second), invokedWave);
+        verify(delegate, never()).awaitPreparedUniqueKeyValues(any());
+
+        DistinctBatchPrefetchSupport.abortPreparedCapture(firstCapture);
+        DistinctBatchPrefetchSupport.abortPreparedCapture(secondCapture);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void distinguishesDisabledWaveFromIneligibleHeavyToken() throws Exception {
+        StateMapView<Void, String, Long> disabledDelegate = mock(StateMapView.class);
+        BatchPrefetchableMapState.PreparedValues disabled =
+                mock(BatchPrefetchableMapState.PreparedValues.class);
+        when(disabledDelegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        when(disabledDelegate.prepareUniqueKeyValues(any())).thenReturn(disabled);
+        when(disabled.waveParticipation())
+                .thenReturn(BatchPrefetchableMapState.PreparedValues.WaveParticipation.DISABLED);
+        DistinctBatchStateMapView<Void, String, Long> disabledView = createView(disabledDelegate);
+        Object disabledFirst = capturePrepared(disabledView, List.of("a", "b"));
+        Object disabledSecond = capturePrepared(disabledView, List.of("c", "d"));
+
+        assertEquals(
+                BatchWindowPreparationResult.UNSUPPORTED,
+                DistinctBatchPrefetchSupport.executePreparedWave(
+                        new Object[] {disabledFirst, disabledSecond}, 2));
+
+        StateMapView<Void, String, Long> heavyDelegate = mock(StateMapView.class);
+        BatchPrefetchableMapState.PreparedValues heavy =
+                mock(BatchPrefetchableMapState.PreparedValues.class);
+        when(heavyDelegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        when(heavyDelegate.prepareUniqueKeyValues(any())).thenReturn(heavy);
+        when(heavy.waveParticipation())
+                .thenReturn(BatchPrefetchableMapState.PreparedValues.WaveParticipation.INELIGIBLE);
+        DistinctBatchStateMapView<Void, String, Long> heavyView = createView(heavyDelegate);
+        Object heavyFirst = capturePrepared(heavyView, List.of("e", "f"));
+        Object heavySecond = capturePrepared(heavyView, List.of("g", "h"));
+
+        assertEquals(
+                BatchWindowPreparationResult.RETRY_AFTER_COHORT,
+                DistinctBatchPrefetchSupport.executePreparedWave(
+                        new Object[] {heavyFirst, heavySecond}, 2));
+
+        DistinctBatchPrefetchSupport.abortPreparedCapture(disabledFirst);
+        DistinctBatchPrefetchSupport.abortPreparedCapture(disabledSecond);
+        DistinctBatchPrefetchSupport.abortPreparedCapture(heavyFirst);
+        DistinctBatchPrefetchSupport.abortPreparedCapture(heavySecond);
+    }
 
     @Test
     @SuppressWarnings("unchecked")
@@ -71,6 +158,18 @@ class DistinctBatchStateMapViewTest {
         verify(delegate, never()).get(any());
         assertEquals(2, view.directOverlayValues());
         assertEquals(2, view.overlayHits());
+    }
+
+    private static Object capturePrepared(
+            DistinctBatchStateMapView<Void, String, Long> view, List<String> keys)
+            throws Exception {
+        Object session = DistinctBatchPrefetchSupport.beginSession(view, keys.size());
+        DistinctBatchPrefetchSupport.beginPreparedCapture();
+        for (String key : keys) {
+            DistinctBatchPrefetchSupport.addSession(session, key);
+        }
+        assertTrue(DistinctBatchPrefetchSupport.finishSession(session));
+        return DistinctBatchPrefetchSupport.endPreparedCapture();
     }
 
     @Test

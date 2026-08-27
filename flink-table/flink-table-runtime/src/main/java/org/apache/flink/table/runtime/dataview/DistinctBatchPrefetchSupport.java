@@ -19,6 +19,8 @@
 package org.apache.flink.table.runtime.dataview;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
+import org.apache.flink.streaming.api.operators.PipelinedBatchableKeyedFunction.BatchWindowPreparationResult;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -40,6 +42,8 @@ public final class DistinctBatchPrefetchSupport {
     private static final AtomicBoolean REPORTED_UNSUPPORTED_VIEW = new AtomicBoolean();
     private static final ThreadLocal<CaptureContext> PREPARED_CAPTURE =
             ThreadLocal.withInitial(CaptureContext::new);
+    private static final ThreadLocal<ArrayList<BatchPrefetchableMapState.PreparedValues>>
+            PREPARED_WAVE_VALUES = ThreadLocal.withInitial(ArrayList::new);
 
     private DistinctBatchPrefetchSupport() {}
 
@@ -173,6 +177,86 @@ public final class DistinctBatchPrefetchSupport {
             asSession(capture.sessions.get(i)).abortPreparedPrefetch(capture.prepared.get(i));
         }
         releaseCapture(capture);
+    }
+
+    /**
+     * Executes one bounded, single-owner read wave for a set of prepared outer-key captures.
+     *
+     * <p>No capture is consumed or installed here. Any unsupported view, multiple prepared views in
+     * one capture, owner mismatch, or backend rejection leaves every token on its existing
+     * fail-closed per-group path.
+     */
+    public static BatchWindowPreparationResult executePreparedWave(
+            Object[] preparedCaptures, int count) throws Exception {
+        if (preparedCaptures == null || count < 2 || count > preparedCaptures.length) {
+            return BatchWindowPreparationResult.UNSUPPORTED;
+        }
+        ArrayList<BatchPrefetchableMapState.PreparedValues> values = PREPARED_WAVE_VALUES.get();
+        values.clear();
+        Object owner = null;
+        try {
+            for (int index = 0; index < count; index++) {
+                Object candidate = preparedCaptures[index];
+                if (!(candidate instanceof PreparedCapture)) {
+                    return BatchWindowPreparationResult.UNSUPPORTED;
+                }
+                PreparedCapture capture = (PreparedCapture) candidate;
+                if (!capture.leased
+                        || capture.preparationFailed
+                        || capture.prepared.size() != capture.acceptedSessions
+                        || capture.prepared.size() > 1) {
+                    return BatchWindowPreparationResult.RETRY_AFTER_COHORT;
+                }
+                if (capture.prepared.isEmpty()) {
+                    continue;
+                }
+                BatchPrefetchableMapView<Object> session = asSession(capture.sessions.get(0));
+                Object viewPrepared = capture.prepared.get(0);
+                Object backendPrepared = session.preparedBackendValueForWave(viewPrepared);
+                if (backendPrepared == null && session.isPreparedWaveNoOp(viewPrepared)) {
+                    continue;
+                }
+                if (!(backendPrepared instanceof BatchPrefetchableMapState.PreparedValues)) {
+                    return BatchWindowPreparationResult.UNSUPPORTED;
+                }
+                BatchPrefetchableMapState.PreparedValues preparedValue =
+                        (BatchPrefetchableMapState.PreparedValues) backendPrepared;
+                BatchPrefetchableMapState.PreparedValues.WaveParticipation participation =
+                        preparedValue.waveParticipation();
+                if (participation
+                        == BatchPrefetchableMapState.PreparedValues.WaveParticipation.DISABLED) {
+                    return BatchWindowPreparationResult.UNSUPPORTED;
+                }
+                if (participation
+                        == BatchPrefetchableMapState.PreparedValues.WaveParticipation.INELIGIBLE) {
+                    return BatchWindowPreparationResult.RETRY_AFTER_COHORT;
+                }
+                Object currentOwner = preparedValue.waveOwner();
+                if (currentOwner == null) {
+                    return BatchWindowPreparationResult.RETRY_AFTER_COHORT;
+                }
+                if (owner != null && owner != currentOwner) {
+                    return BatchWindowPreparationResult.RETRY_AFTER_COHORT;
+                }
+                owner = currentOwner;
+                values.add(preparedValue);
+            }
+            if (values.size() < 2) {
+                return BatchWindowPreparationResult.RETRY_AFTER_COHORT;
+            }
+            try {
+                return values.get(0).executeWave(values)
+                        ? BatchWindowPreparationResult.EXECUTED
+                        : BatchWindowPreparationResult.RETRY_AFTER_COHORT;
+            } catch (Exception | LinkageError ignored) {
+                // A speculative wave is never authoritative. Backend implementations publish
+                // only after validating the complete window, so retaining the original tokens
+                // here preserves their established per-group fallback.
+                return BatchWindowPreparationResult.RETRY_AFTER_COHORT;
+            }
+        } finally {
+            values.clear();
+        }
     }
 
     public static void abortSession(Object session) {

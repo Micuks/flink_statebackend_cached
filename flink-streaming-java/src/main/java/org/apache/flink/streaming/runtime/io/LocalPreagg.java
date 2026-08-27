@@ -28,6 +28,7 @@ import org.apache.flink.streaming.api.operators.BatchableKeyedFunction;
 import org.apache.flink.streaming.api.operators.Input;
 import org.apache.flink.streaming.api.operators.Output;
 import org.apache.flink.streaming.api.operators.PipelinedBatchableKeyedFunction;
+import org.apache.flink.streaming.api.operators.PipelinedBatchableKeyedFunction.BatchWindowPreparationResult;
 import org.apache.flink.streaming.api.operators.ReusableBatchableKeyedFunction;
 import org.apache.flink.streaming.api.operators.TimestampedCollector;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
@@ -656,6 +657,9 @@ public final class LocalPreagg {
         long exceptionAborts = 0L;
         int head = 0;
         int preparedCount = 0;
+        int waveRemaining = 0;
+        int waveRetryRemaining = 0;
+        boolean waveSupported = true;
         int nextGroupToClassify = 0;
         boolean failed = false;
         try {
@@ -678,7 +682,9 @@ public final class LocalPreagg {
 
                 boolean currentPrepared = preparedCount > 0 && preparedGroupIndexes[head] == group;
                 int desiredPrepared = lookahead + (currentPrepared ? 1 : 0);
-                while (nextGroupToClassify < groupCount && preparedCount < desiredPrepared) {
+                while (waveRemaining == 0
+                        && nextGroupToClassify < groupCount
+                        && preparedCount < desiredPrepared) {
                     int futureGroup = nextGroupToClassify++;
                     if (groupSizer.size(futureGroup) < minimumPreparationInputs) {
                         bypassedGroups++;
@@ -693,6 +699,24 @@ public final class LocalPreagg {
                     preparedAheadGroups++;
                 }
 
+                if (waveRemaining == 0
+                        && waveRetryRemaining == 0
+                        && waveSupported
+                        && preparedCount >= 2) {
+                    BatchWindowPreparationResult waveResult =
+                            pipelined.prepareBatchWindow(prepared, head, preparedCount);
+                    if (waveResult == BatchWindowPreparationResult.EXECUTED) {
+                        // A successful all-or-none wave owns exactly this prepared cohort. Do not
+                        // slide new tokens into the ring until every represented group is
+                        // consumed; the next cohort then receives its own bounded wave.
+                        waveRemaining = preparedCount;
+                    } else if (waveResult == BatchWindowPreparationResult.RETRY_AFTER_COHORT) {
+                        waveRetryRemaining = preparedCount;
+                    } else {
+                        waveSupported = false;
+                    }
+                }
+
                 int futurePrepared = preparedCount - (currentPrepared ? 1 : 0);
                 peakPreparedAhead = Math.max(peakPreparedAhead, futurePrepared);
                 if (futurePrepared > 0) {
@@ -705,6 +729,12 @@ public final class LocalPreagg {
                     preparedGroupIndexes[head] = -1;
                     head = (head + 1) % capacity;
                     preparedCount--;
+                    if (waveRemaining > 0) {
+                        waveRemaining--;
+                    }
+                    if (waveRetryRemaining > 0) {
+                        waveRetryRemaining--;
+                    }
                 } else {
                     syncConsumer.process(group);
                 }
@@ -803,6 +833,9 @@ public final class LocalPreagg {
         long cancelledGroups = 0L;
         long processWithFutureInFlight = 0L;
         int occupiedCount = 0;
+        int waveRemaining = 0;
+        int waveRetryRemaining = 0;
+        boolean waveSupported = true;
         int peakPreparedAhead = 0;
         long exceptionAborts = 0L;
         boolean failed = false;
@@ -818,6 +851,20 @@ public final class LocalPreagg {
             }
             for (int group = 0; group < groupCount; group++) {
                 int slot = group % capacity;
+                if (waveRemaining == 0
+                        && waveRetryRemaining == 0
+                        && waveSupported
+                        && occupiedCount >= 2) {
+                    BatchWindowPreparationResult waveResult =
+                            pipelined.prepareBatchWindow(prepared, slot, occupiedCount);
+                    if (waveResult == BatchWindowPreparationResult.EXECUTED) {
+                        waveRemaining = occupiedCount;
+                    } else if (waveResult == BatchWindowPreparationResult.RETRY_AFTER_COHORT) {
+                        waveRetryRemaining = occupiedCount;
+                    } else {
+                        waveSupported = false;
+                    }
+                }
                 if (occupiedCount > 1) {
                     processWithFutureInFlight++;
                 }
@@ -827,13 +874,31 @@ public final class LocalPreagg {
                 occupiedCount--;
                 consumedGroups++;
 
-                int tail = group + capacity;
-                if (tail < groupCount) {
-                    prepareWindowGroup(preparer, prepared, occupied, capacity, tail);
-                    occupiedCount++;
-                    preparedGroups++;
-                    preparedAheadGroups++;
-                    peakPreparedAhead = Math.max(peakPreparedAhead, occupiedCount - 1);
+                if (waveRemaining > 0) {
+                    waveRemaining--;
+                    if (waveRemaining == 0) {
+                        int first = group + 1;
+                        int limit = Math.min(groupCount, first + capacity);
+                        for (int next = first; next < limit; next++) {
+                            prepareWindowGroup(preparer, prepared, occupied, capacity, next);
+                            occupiedCount++;
+                            preparedGroups++;
+                            preparedAheadGroups++;
+                        }
+                        peakPreparedAhead = Math.max(peakPreparedAhead, occupiedCount - 1);
+                    }
+                } else {
+                    int tail = group + capacity;
+                    if (tail < groupCount) {
+                        prepareWindowGroup(preparer, prepared, occupied, capacity, tail);
+                        occupiedCount++;
+                        preparedGroups++;
+                        preparedAheadGroups++;
+                        peakPreparedAhead = Math.max(peakPreparedAhead, occupiedCount - 1);
+                    }
+                }
+                if (waveRetryRemaining > 0) {
+                    waveRetryRemaining--;
                 }
             }
         } catch (Exception | Error failure) {

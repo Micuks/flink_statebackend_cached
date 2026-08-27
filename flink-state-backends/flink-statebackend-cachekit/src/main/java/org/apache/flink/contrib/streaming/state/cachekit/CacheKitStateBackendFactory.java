@@ -742,6 +742,18 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                             + "lookahead on the mailbox caller. This keeps one queued unit "
                                             + "while bounding queue delay; disabled by default.");
 
+    public static final ConfigOption<Boolean>
+            NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_ENABLED =
+                    ConfigOptions.key(
+                                    "state.backend.cachekit.native.map-distinct-batch-prefetch.cross-key-deferred-wave.enabled")
+                            .booleanType()
+                            .defaultValue(false)
+                            .withDescription(
+                                    "Fuse one bounded LocalPreAgg window of exact-DISTINCT reads "
+                                            + "owned by the same MapState/column family into one mailbox-owned "
+                                            + "direct-arena MultiGet. Any owner, capacity, lifecycle, or protocol "
+                                            + "mismatch fails closed to the existing per-group path.");
+
     public static final ConfigOption<String> DELEGATE_BACKEND =
             ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
@@ -908,6 +920,12 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                         && config.get(DISTINCT_BATCH_OVERLAY_ENABLED)
                         && config.get(
                                 NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_WORK_FIRST_ENABLED),
+					config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED)
+							&& config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED)
+							&& config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ENABLED)
+							&& config.get(DISTINCT_BATCH_OVERLAY_ENABLED)
+							&& config.get(
+									NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_ENABLED),
 					Math.max(
 							2,
 							config.get(

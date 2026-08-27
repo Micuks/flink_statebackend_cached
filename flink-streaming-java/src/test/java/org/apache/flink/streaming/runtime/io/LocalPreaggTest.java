@@ -23,6 +23,7 @@ import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.BatchableKeyedFunction;
 import org.apache.flink.streaming.api.operators.Input;
 import org.apache.flink.streaming.api.operators.PipelinedBatchableKeyedFunction;
+import org.apache.flink.streaming.api.operators.PipelinedBatchableKeyedFunction.BatchWindowPreparationResult;
 import org.apache.flink.streaming.api.operators.TimestampedCollector;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.LatencyMarker;
@@ -417,6 +418,107 @@ class LocalPreaggTest {
                 pipeline.events);
         assertEquals(2L, pipelineCounter("PIPELINE_CANCELLED_GROUPS") - cancelled);
         assertEquals(1L, pipelineCounter("PIPELINE_EXCEPTION_ABORTS") - exceptionAborts);
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testSuccessfulPreparedWaveKeepsEachCohortStableUntilConsumed() throws Exception {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "c", "d", "e", "f"),
+                        Arrays.asList(1, 2, 3, 4, 5, 6),
+                        null);
+        WaveRecordingPipeline pipeline = new WaveRecordingPipeline();
+
+        LocalPreagg.dispatchMaterializedPipeline(
+                mock(AbstractStreamOperator.class),
+                pipeline,
+                groups,
+                mock(TimestampedCollector.class),
+                4);
+
+        assertEquals(
+                Arrays.asList(
+                        "prepare:a",
+                        "prepare:b",
+                        "prepare:c",
+                        "prepare:d",
+                        "prepare:e",
+                        "wave:token-a,token-b,token-c,token-d,token-e",
+                        "process:a:token-a",
+                        "process:b:token-b",
+                        "process:c:token-c",
+                        "process:d:token-d",
+                        "process:e:token-e",
+                        "prepare:f",
+                        "process:f:token-f"),
+                pipeline.events);
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testUnsupportedPreparedWaveIsNotRetriedForEverySlidingGroup() throws Exception {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "c", "d", "e", "f"),
+                        Arrays.asList(1, 2, 3, 4, 5, 6),
+                        null);
+        WaveResultPipeline pipeline =
+                new WaveResultPipeline(BatchWindowPreparationResult.UNSUPPORTED);
+
+        LocalPreagg.dispatchMaterializedPipeline(
+                mock(AbstractStreamOperator.class),
+                pipeline,
+                groups,
+                mock(TimestampedCollector.class),
+                2);
+
+        assertEquals(1, pipeline.waveAttempts);
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testRejectedPreparedWaveRetriesOnlyAfterRepresentedCohortDrains() throws Exception {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "c", "d", "e", "f"),
+                        Arrays.asList(1, 2, 3, 4, 5, 6),
+                        null);
+        WaveResultPipeline pipeline =
+                new WaveResultPipeline(BatchWindowPreparationResult.RETRY_AFTER_COHORT);
+
+        LocalPreagg.dispatchMaterializedPipeline(
+                mock(AbstractStreamOperator.class),
+                pipeline,
+                groups,
+                mock(TimestampedCollector.class),
+                2);
+
+        assertEquals(2, pipeline.waveAttempts);
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testSparseRejectedWaveDoesNotConsumeCooldownAcrossLightGroups() throws Exception {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList(
+                                "a", "a", "a", "b", "c", "c", "c", "d", "e", "e", "e", "f", "g",
+                                "g", "g", "h", "i", "i", "i"),
+                        Arrays.asList(
+                                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19),
+                        null);
+        WaveResultPipeline pipeline =
+                new WaveResultPipeline(BatchWindowPreparationResult.RETRY_AFTER_COHORT, 3);
+
+        LocalPreagg.dispatchMaterializedPipeline(
+                mock(AbstractStreamOperator.class),
+                pipeline,
+                groups,
+                mock(TimestampedCollector.class),
+                2);
+
+        assertEquals(2, pipeline.waveAttempts);
     }
 
     @Test
@@ -854,6 +956,92 @@ class LocalPreaggTest {
                 throw new IllegalStateException("expected synchronous failure");
             }
         }
+    }
+
+    private static final class WaveRecordingPipeline
+            implements PipelinedBatchableKeyedFunction<Object, Object> {
+        private final List<String> events = new ArrayList<>();
+
+        @Override
+        public Object prepareBatchForKey(Object key, List<Object> inputs) {
+            events.add("prepare:" + key);
+            return "token-" + key;
+        }
+
+        @Override
+        public BatchWindowPreparationResult prepareBatchWindow(
+                Object[] prepared, int head, int count) {
+            StringBuilder event = new StringBuilder("wave:");
+            for (int index = 0; index < count; index++) {
+                if (index > 0) {
+                    event.append(',');
+                }
+                event.append(prepared[(head + index) % prepared.length]);
+            }
+            events.add(event.toString());
+            return BatchWindowPreparationResult.EXECUTED;
+        }
+
+        @Override
+        public void processPreparedBatchForKey(
+                Object key, List<Object> inputs, Object prepared, Collector<Object> out) {
+            events.add("process:" + key + ":" + prepared);
+        }
+
+        @Override
+        public void abortPreparedBatch(Object prepared) {
+            events.add("abort:" + prepared);
+        }
+
+        @Override
+        public void processBatchForKey(
+                Object currentKey, List<Object> inputs, Collector<Object> out) {
+            throw new AssertionError("pipeline must use prepared dispatch");
+        }
+    }
+
+    private static final class WaveResultPipeline
+            implements PipelinedBatchableKeyedFunction<Object, Object> {
+        private final BatchWindowPreparationResult result;
+        private final int minimumInputs;
+        private int waveAttempts;
+
+        private WaveResultPipeline(BatchWindowPreparationResult result) {
+            this(result, 1);
+        }
+
+        private WaveResultPipeline(BatchWindowPreparationResult result, int minimumInputs) {
+            this.result = result;
+            this.minimumInputs = minimumInputs;
+        }
+
+        @Override
+        public int minimumBatchPreparationInputCount() {
+            return minimumInputs;
+        }
+
+        @Override
+        public Object prepareBatchForKey(Object key, List<Object> inputs) {
+            return "token-" + key;
+        }
+
+        @Override
+        public BatchWindowPreparationResult prepareBatchWindow(
+                Object[] prepared, int head, int count) {
+            waveAttempts++;
+            return result;
+        }
+
+        @Override
+        public void processPreparedBatchForKey(
+                Object key, List<Object> inputs, Object prepared, Collector<Object> out) {}
+
+        @Override
+        public void abortPreparedBatch(Object prepared) {}
+
+        @Override
+        public void processBatchForKey(
+                Object currentKey, List<Object> inputs, Collector<Object> out) {}
     }
 
     private static final class BatchableInputOperator extends AbstractStreamOperator<Object>

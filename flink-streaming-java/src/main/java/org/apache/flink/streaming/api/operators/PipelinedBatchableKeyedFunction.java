@@ -32,6 +32,16 @@ import java.util.List;
 public interface PipelinedBatchableKeyedFunction<IN, OUT>
         extends ReusableBatchableKeyedFunction<IN, OUT> {
 
+    /** Outcome of one optional shared read-wave dispatch attempt. */
+    enum BatchWindowPreparationResult {
+        /** The complete represented cohort now owns one shared read wave. */
+        EXECUTED,
+        /** This cohort was rejected; retry only after all its members have drained. */
+        RETRY_AFTER_COHORT,
+        /** Shared read waves are unavailable for this dispatch. */
+        UNSUPPORTED
+    }
+
     /**
      * Cheap lower bound for batches that can profitably create a prepared read.
      *
@@ -46,6 +56,23 @@ public interface PipelinedBatchableKeyedFunction<IN, OUT>
 
     /** Captures one batch and starts its best-effort read. The input list must not be retained. */
     Object prepareBatchForKey(Object currentKey, List<IN> inputs) throws Exception;
+
+    /**
+     * Gives a bounded ring of already prepared outer-key tokens one chance to execute a shared
+     * mailbox-owned backend read before any represented group is consumed.
+     *
+     * <p>The ring starts at {@code head} and contains {@code count} entries. {@link
+     * BatchWindowPreparationResult#EXECUTED} asks the runtime to consume that cohort without
+     * sliding in additional prepared groups. {@link
+     * BatchWindowPreparationResult#RETRY_AFTER_COHORT} preserves the ordinary sliding pipeline and
+     * suppresses another attempt until the represented cohort has drained. {@link
+     * BatchWindowPreparationResult#UNSUPPORTED} disables attempts for the rest of this dispatch, so
+     * a disabled control does not pay repeated cohort-inspection overhead.
+     */
+    default BatchWindowPreparationResult prepareBatchWindow(Object[] prepared, int head, int count)
+            throws Exception {
+        return BatchWindowPreparationResult.UNSUPPORTED;
+    }
 
     /** Consumes one prepared token under the same current key. */
     void processPreparedBatchForKey(

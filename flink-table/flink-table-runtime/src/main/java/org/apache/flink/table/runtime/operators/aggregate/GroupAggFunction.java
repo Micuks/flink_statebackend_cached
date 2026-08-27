@@ -25,6 +25,7 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.streaming.api.operators.PipelinedBatchableKeyedFunction;
+import org.apache.flink.streaming.api.operators.PipelinedBatchableKeyedFunction.BatchWindowPreparationResult;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.utils.JoinedRowData;
 import org.apache.flink.table.runtime.dataview.DistinctBatchPrefetchSupport;
@@ -88,6 +89,7 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
     private transient ValueState<RowData> accState = null;
     private transient TypeSerializer<RowData> accSerializer = null;
     private transient ArrayDeque<BatchPreparation> batchPreparationPool;
+    private transient Object[] preparedWaveCaptures;
     private transient long batchPreparationCalls;
     private transient long batchPreparationAccumulatorCopies;
 
@@ -361,6 +363,33 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
         }
         preparation.leased = true;
         return preparation;
+    }
+
+    @Override
+    public BatchWindowPreparationResult prepareBatchWindow(Object[] prepared, int head, int count)
+            throws Exception {
+        if (count < 2 || prepared == null || prepared.length == 0) {
+            return BatchWindowPreparationResult.UNSUPPORTED;
+        }
+        if (preparedWaveCaptures == null || preparedWaveCaptures.length < count) {
+            preparedWaveCaptures = new Object[Math.max(9, count)];
+        }
+        try {
+            for (int index = 0; index < count; index++) {
+                Object candidate = prepared[(head + index) % prepared.length];
+                if (!(candidate instanceof BatchPreparation)) {
+                    return BatchWindowPreparationResult.UNSUPPORTED;
+                }
+                BatchPreparation preparation = (BatchPreparation) candidate;
+                if (preparation.skip || !preparation.leased) {
+                    return BatchWindowPreparationResult.RETRY_AFTER_COHORT;
+                }
+                preparedWaveCaptures[index] = preparation.distinctPrepared;
+            }
+            return DistinctBatchPrefetchSupport.executePreparedWave(preparedWaveCaptures, count);
+        } finally {
+            java.util.Arrays.fill(preparedWaveCaptures, 0, count, null);
+        }
     }
 
     private void releaseBatchPreparation(BatchPreparation preparation) {

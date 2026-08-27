@@ -34,11 +34,47 @@ public interface BatchPrefetchableMapState<UK> {
      */
     interface PreparedValues {
 
+        /** Whether this token can take part in the optional cross-key read wave. */
+        enum WaveParticipation {
+            /** The owning backend has the feature disabled for this dispatch. */
+            DISABLED,
+            /** The feature is enabled, but this token must retain its established path. */
+            INELIGIBLE,
+            /** This token is eligible for a shared read wave. */
+            ELIGIBLE
+        }
+
         /** Returns insertion-ordered values, or {@code null} when the async read was rejected. */
         List<?> awaitValues() throws Exception;
 
         /** Best-effort cancellation. Implementations must make this method idempotent. */
         void cancel();
+
+        /**
+         * Stable identity for a bounded mailbox-owned read wave, or {@code null} when this token
+         * cannot participate.
+         *
+         * <p>Tokens may share a wave only when this identity is reference-equal. Backends normally
+         * return the state wrapper that owns one RocksDB reader and column family.
+         */
+        default Object waveOwner() {
+            return null;
+        }
+
+        /** Distinguishes global disablement from a temporarily ineligible token. */
+        default WaveParticipation waveParticipation() {
+            return WaveParticipation.DISABLED;
+        }
+
+        /**
+         * Executes one all-or-none read wave for tokens with the same {@link #waveOwner()}.
+         *
+         * <p>The method is invoked on the mailbox thread before any represented outer-key batch is
+         * consumed. A false result leaves every token usable through its authoritative fallback.
+         */
+        default boolean executeWave(List<? extends PreparedValues> tokens) throws Exception {
+            return false;
+        }
     }
 
     /**
