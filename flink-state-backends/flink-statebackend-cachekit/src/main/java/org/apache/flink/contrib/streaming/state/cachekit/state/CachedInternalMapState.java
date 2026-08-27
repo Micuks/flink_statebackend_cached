@@ -135,6 +135,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private boolean nativeDistinctBatchDirectArenaEnabled;
     private boolean nativeDistinctBatchDirectArenaDisabled;
     private int nativeDistinctBatchAsyncMinUniqueKeys = 2;
+    private boolean nativeDistinctBatchWorkFirstEnabled;
     private boolean batchPrefetchActive;
     private K batchPrefetchOuterKey;
     private N batchPrefetchNamespace;
@@ -184,6 +185,22 @@ public final class CachedInternalMapState<K, N, UK, UV>
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchServiceNanos =
             new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchCallerRuns =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchWorkFirstEligible =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchCallerRunKeys =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchCallerRunNanos =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchWorkFirstWorkerIdle =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchWorkFirstBacklogEmpty =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchWorkFirstPermitBusy =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchQueuedSubmissions =
+            new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchReadySlackNanos =
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong asyncDirectArenaBatches =
@@ -214,7 +231,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong deferredSyncBatchPrefetchFallbacks =
             new java.util.concurrent.atomic.AtomicLong();
-    private final java.util.concurrent.atomic.AtomicLong deferredSyncBatchPrefetchContextMismatches =
+    private final java.util.concurrent.atomic.AtomicLong
+            deferredSyncBatchPrefetchContextMismatches =
             new java.util.concurrent.atomic.AtomicLong();
 
     // --- MapSnapshot cache (entries() fast path) ---
@@ -623,9 +641,20 @@ public final class CachedInternalMapState<K, N, UK, UV>
     /** Enables async preparation only above a separately tunable exact-key threshold. */
     public void enableNativeDistinctBatchPrefetch(
             boolean enabled, boolean directArenaEnabled, int asyncMinUniqueKeys) {
+        enableNativeDistinctBatchPrefetch(enabled, directArenaEnabled, asyncMinUniqueKeys, false);
+    }
+
+    /** Enables the backlog-triggered work-first policy for direct-arena async preparation. */
+    public void enableNativeDistinctBatchPrefetch(
+            boolean enabled,
+            boolean directArenaEnabled,
+            int asyncMinUniqueKeys,
+            boolean workFirstEnabled) {
         this.nativeDistinctBatchPrefetchEnabled = enabled;
         this.nativeDistinctBatchDirectArenaEnabled = enabled && directArenaEnabled;
         this.nativeDistinctBatchAsyncMinUniqueKeys = Math.max(2, asyncMinUniqueKeys);
+        this.nativeDistinctBatchWorkFirstEnabled =
+                enabled && directArenaEnabled && workFirstEnabled;
     }
 
     @Override
@@ -722,8 +751,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 && orderedKeys.size() < nativeDistinctBatchAsyncMinUniqueKeys) {
             deferredSyncBatchPrefetchBatches.incrementAndGet();
             deferredSyncBatchPrefetchKeys.addAndGet(orderedKeys.size());
-            return new DeferredDirectMapValues(
-                    currentKey, namespace, new ArrayList<>(orderedKeys));
+            return new DeferredDirectMapValues(currentKey, namespace, new ArrayList<>(orderedKeys));
         }
         flushCurrentKey(currentKey);
         ensureDelegateNamespace(currentKey);
@@ -767,12 +795,42 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
         asyncBatchPrefetchSubmitted.incrementAndGet();
         asyncBatchPrefetchKeys.addAndGet(orderedKeys.size());
+        if (nativeDistinctBatchWorkFirstEnabled && directSlot != null) {
+            asyncBatchPrefetchWorkFirstEligible.incrementAndGet();
+            long submitStartedNanos = System.nanoTime();
+            PrefetchExecutor.WorkFirstSubmission submission =
+                    PrefetchExecutor.trySubmitWorkFirst(prepared);
+            switch (submission) {
+                case CALLER_RUN:
+                    asyncBatchPrefetchCallerRuns.incrementAndGet();
+                    asyncBatchPrefetchCallerRunKeys.addAndGet(orderedKeys.size());
+                    asyncBatchPrefetchCallerRunNanos.addAndGet(
+                            Math.max(0L, System.nanoTime() - submitStartedNanos));
+                    break;
+                case QUEUED_WORKER_IDLE:
+                    asyncBatchPrefetchWorkFirstWorkerIdle.incrementAndGet();
+                    asyncBatchPrefetchQueuedSubmissions.incrementAndGet();
+                    break;
+                case QUEUED_BACKLOG_EMPTY:
+                    asyncBatchPrefetchWorkFirstBacklogEmpty.incrementAndGet();
+                    asyncBatchPrefetchQueuedSubmissions.incrementAndGet();
+                    break;
+                case QUEUED_PERMIT_BUSY:
+                    asyncBatchPrefetchWorkFirstPermitBusy.incrementAndGet();
+                    asyncBatchPrefetchQueuedSubmissions.incrementAndGet();
+                    break;
+                default:
+                    throw new IllegalStateException("Unknown work-first submission " + submission);
+            }
+        } else {
         PrefetchExecutor.trySubmit(prepared);
+            asyncBatchPrefetchQueuedSubmissions.incrementAndGet();
+        }
         return prepared;
     }
 
     private final class PreparedMapValues
-            implements PreparedValues, PrefetchExecutor.DropAwareTask {
+            implements PreparedValues, PrefetchExecutor.WorkFirstEligibleTask {
 
         private final List<byte[]> rocksDBKeys;
         private final NativeRequestPlaneCoordinator.BatchSlot directSlot;
@@ -922,8 +980,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             long observedCompletedNanos = completedNanos;
             if (observedCompletedNanos > 0L && observedCompletedNanos <= awaitStarted) {
                 asyncBatchPrefetchReadyBeforeAwait.incrementAndGet();
-                asyncBatchPrefetchReadySlackNanos.addAndGet(
-                        awaitStarted - observedCompletedNanos);
+                asyncBatchPrefetchReadySlackNanos.addAndGet(awaitStarted - observedCompletedNanos);
             }
             try {
                 completed.await();
@@ -950,10 +1007,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
                         } else {
                             DataInputView input = directSlot.directMultiGetValueInput(index);
                             boolean isNull = input.readBoolean();
-                            values.add(
-                                    isNull
-                                            ? null
-                                            : userValueSerializer.deserialize(input));
+                            values.add(isNull ? null : userValueSerializer.deserialize(input));
                         }
                     }
                 } else {
@@ -1141,8 +1195,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     } else {
                         DataInputView input = slot.directMultiGetValueInput(index);
                         boolean isNull = input.readBoolean();
-                        values.add(
-                                isNull ? null : userValueSerializer.deserialize(input));
+                        values.add(isNull ? null : userValueSerializer.deserialize(input));
                     }
                 }
                 batchPrefetchDirectArenaCompletedBatches++;
@@ -2607,6 +2660,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     "[CACHEKIT NATIVE MAP DISTINCT ASYNC] attempts={} submitted={} completed={} "
                             + "dropped={} failures={} keys={} awaits={} readyBeforeAwait={} "
                             + "waitNanos={} queueNanos={} serviceNanos={} readySlackNanos={} "
+                            + "workFirstEnabled={} workFirstEligible={} callerRuns={} "
+                            + "callerRunKeys={} callerRunNanos={} workerIdle={} backlogEmpty={} "
+                            + "permitBusy={} queuedSubmissions={} executorMaxActive={} "
                             + "asyncMinUniqueKeys={} deferredSyncBatches={} "
                             + "deferredSyncKeys={} deferredSyncCompleted={} "
                             + "deferredSyncFallbacks={} deferredSyncContextMismatches={} "
@@ -2629,6 +2685,16 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     asyncBatchPrefetchQueueNanos.get(),
                     asyncBatchPrefetchServiceNanos.get(),
                     asyncBatchPrefetchReadySlackNanos.get(),
+                    nativeDistinctBatchWorkFirstEnabled,
+                    asyncBatchPrefetchWorkFirstEligible.get(),
+                    asyncBatchPrefetchCallerRuns.get(),
+                    asyncBatchPrefetchCallerRunKeys.get(),
+                    asyncBatchPrefetchCallerRunNanos.get(),
+                    asyncBatchPrefetchWorkFirstWorkerIdle.get(),
+                    asyncBatchPrefetchWorkFirstBacklogEmpty.get(),
+                    asyncBatchPrefetchWorkFirstPermitBusy.get(),
+                    asyncBatchPrefetchQueuedSubmissions.get(),
+                    PrefetchExecutor.maxActiveExecutions(),
                     nativeDistinctBatchAsyncMinUniqueKeys,
                     deferredSyncBatchPrefetchBatches.get(),
                     deferredSyncBatchPrefetchKeys.get(),
@@ -2760,6 +2826,14 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     long getAsyncBatchPrefetchSubmittedForTesting() {
         return asyncBatchPrefetchSubmitted.get();
+    }
+
+    long getAsyncBatchPrefetchCallerRunsForTesting() {
+        return asyncBatchPrefetchCallerRuns.get();
+    }
+
+    long getAsyncBatchPrefetchQueuedSubmissionsForTesting() {
+        return asyncBatchPrefetchQueuedSubmissions.get();
     }
 
     private static final class PrefetchedMapValue<V> {

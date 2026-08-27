@@ -730,6 +730,18 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                             + "to the bounded range one through eight when the pipeline "
                                             + "is enabled.");
 
+    public static final ConfigOption<Boolean>
+            NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_WORK_FIRST_ENABLED =
+                    ConfigOptions.key(
+                                    "state.backend.cachekit.native.map-distinct-batch-prefetch.cross-key-pipeline.work-first-on-backlog.enabled")
+                            .booleanType()
+                            .defaultValue(false)
+                            .withDescription(
+                                    "When the shared native MapState prefetch worker is active and "
+                                            + "already has queued work, execute the newest direct-arena "
+                                            + "lookahead on the mailbox caller. This keeps one queued unit "
+                                            + "while bounding queue delay; disabled by default.");
+
     public static final ConfigOption<String> DELEGATE_BACKEND =
             ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
@@ -890,6 +902,12 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 					config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED),
 					config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ENABLED)
 							&& config.get(DISTINCT_BATCH_OVERLAY_ENABLED),
+                config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED)
+                        && config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED)
+                        && config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ENABLED)
+                        && config.get(DISTINCT_BATCH_OVERLAY_ENABLED)
+                        && config.get(
+                                NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_WORK_FIRST_ENABLED),
 					Math.max(
 							2,
 							config.get(

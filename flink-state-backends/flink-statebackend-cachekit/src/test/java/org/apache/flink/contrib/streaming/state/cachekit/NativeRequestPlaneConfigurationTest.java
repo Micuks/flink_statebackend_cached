@@ -83,29 +83,38 @@ class NativeRequestPlaneConfigurationTest {
                 new CacheKitStateBackendFactory()
                         .createFromConfig(disabled, getClass().getClassLoader());
         assertFalse(disabledBackend.nativeMapDistinctBatchPrefetchEnabledForTesting());
-        assertFalse(
-                disabledBackend.nativeMapDistinctBatchPrefetchDirectArenaEnabledForTesting());
-        assertEquals(8, disabledBackend.nativeMapDistinctBatchPrefetchAsyncMinUniqueKeysForTesting());
+        assertFalse(disabledBackend.nativeMapDistinctBatchPrefetchDirectArenaEnabledForTesting());
+        assertFalse(disabledBackend.nativeMapDistinctBatchPrefetchWorkFirstEnabledForTesting());
+        assertEquals(
+                8, disabledBackend.nativeMapDistinctBatchPrefetchAsyncMinUniqueKeysForTesting());
         assertEquals(1, disabledBackend.nativeMapDistinctBatchPrefetchLookaheadGroupsForTesting());
         assertEquals(
                 8,
                 CacheKitStateBackend.normalizeNativeMapDistinctBatchPrefetchAsyncMinUniqueKeys(0));
         assertEquals(
-                1,
-                CacheKitStateBackend.normalizeNativeMapDistinctBatchPrefetchLookaheadGroups(0));
+                1, CacheKitStateBackend.normalizeNativeMapDistinctBatchPrefetchLookaheadGroups(0));
         assertEquals(
-                8,
-                CacheKitStateBackend.normalizeNativeMapDistinctBatchPrefetchLookaheadGroups(99));
+                8, CacheKitStateBackend.normalizeNativeMapDistinctBatchPrefetchLookaheadGroups(99));
         assertFalse(
                 disabled.get(
                         CacheKitStateBackendFactory
                                 .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ENABLED));
 
+        Configuration incomplete = new Configuration(disabled);
+        incomplete.set(
+                CacheKitStateBackendFactory
+                        .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_WORK_FIRST_ENABLED,
+                true);
+        CacheKitStateBackend incompleteBackend =
+                new CacheKitStateBackendFactory()
+                        .createFromConfig(incomplete, getClass().getClassLoader());
+        assertFalse(incompleteBackend.nativeMapDistinctBatchPrefetchWorkFirstEnabledForTesting());
+
         Configuration enabled = new Configuration(disabled);
         enabled.set(CacheKitStateBackendFactory.NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED, true);
+        enabled.set(CacheKitStateBackendFactory.DISTINCT_BATCH_OVERLAY_ENABLED, true);
         enabled.set(
-                CacheKitStateBackendFactory
-                        .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED,
+                CacheKitStateBackendFactory.NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED,
                 true);
         enabled.set(
                 CacheKitStateBackendFactory
@@ -119,14 +128,18 @@ class NativeRequestPlaneConfigurationTest {
                 CacheKitStateBackendFactory
                         .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS,
                 4);
+        enabled.set(
+                CacheKitStateBackendFactory
+                        .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_WORK_FIRST_ENABLED,
+                true);
         CacheKitStateBackend enabledBackend =
                 new CacheKitStateBackendFactory()
                         .createFromConfig(enabled, getClass().getClassLoader());
         assertTrue(enabledBackend.nativeMapDistinctBatchPrefetchEnabledForTesting());
         assertTrue(enabledBackend.nativeMapDistinctBatchPrefetchDirectArenaEnabledForTesting());
+        assertTrue(enabledBackend.nativeMapDistinctBatchPrefetchWorkFirstEnabledForTesting());
         assertEquals(
-                16,
-                enabledBackend.nativeMapDistinctBatchPrefetchAsyncMinUniqueKeysForTesting());
+                16, enabledBackend.nativeMapDistinctBatchPrefetchAsyncMinUniqueKeysForTesting());
         assertEquals(4, enabledBackend.nativeMapDistinctBatchPrefetchLookaheadGroupsForTesting());
         assertTrue(
                 enabled.get(

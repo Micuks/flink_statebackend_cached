@@ -17,17 +17,20 @@ package org.apache.flink.contrib.streaming.state.cachekit;
 
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionHandler;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Shared single-thread executor for backpressure-driven async state prefetch.
  *
  * <p>One daemon thread per TaskManager JVM, shared by all CacheKit backends, so the prefetch
  * side-work stays bounded no matter how many operators enable it (the benchmark's primary metric is
- * throughput <em>per core</em>). Submission never blocks the mailbox thread: when the queue is
- * full, the oldest pending prefetch is discarded — a fresher lookahead window is always worth more
- * than a stale one.
+ * throughput <em>per core</em>). Generic submission never blocks the mailbox thread: when the queue
+ * is full, the oldest pending prefetch is discarded — a fresher lookahead window is always worth
+ * more than a stale one. The explicit work-first path may instead execute one eligible direct-arena
+ * task on a mailbox caller while the worker has backlog.
  */
 public final class PrefetchExecutor {
 
@@ -36,10 +39,20 @@ public final class PrefetchExecutor {
         void onDrop();
     }
 
+    /** Marker for a task whose state and native buffers are safe on a mailbox caller. */
+    public interface WorkFirstEligibleTask extends DropAwareTask {}
+
+    public enum WorkFirstSubmission {
+        CALLER_RUN,
+        QUEUED_WORKER_IDLE,
+        QUEUED_BACKLOG_EMPTY,
+        QUEUED_PERMIT_BUSY
+    }
+
     /**
-     * Keeps the newest lookahead without leaking per-state in-flight reservations. The JDK's
-     * {@link ThreadPoolExecutor.DiscardOldestPolicy} silently forgets the evicted task; CacheKit
-     * needs a callback so a later chunk can prefetch those keys again.
+     * Keeps the newest lookahead without leaking per-state in-flight reservations. The JDK's {@link
+     * ThreadPoolExecutor.DiscardOldestPolicy} silently forgets the evicted task; CacheKit needs a
+     * callback so a later chunk can prefetch those keys again.
      */
     private static final RejectedExecutionHandler DISCARD_OLDEST_WITH_NOTIFICATION =
             (incoming, executor) -> {
@@ -57,6 +70,9 @@ public final class PrefetchExecutor {
             };
 
     private static final ThreadPoolExecutor EXECUTOR;
+    private static final Semaphore CALLER_RUN_PERMIT = new Semaphore(1);
+    private static final AtomicInteger ACTIVE_EXECUTIONS = new AtomicInteger();
+    private static final AtomicInteger MAX_ACTIVE_EXECUTIONS = new AtomicInteger();
 
     static {
         EXECUTOR =
@@ -71,7 +87,22 @@ public final class PrefetchExecutor {
                             t.setDaemon(true);
                             return t;
                         },
-                        DISCARD_OLDEST_WITH_NOTIFICATION);
+                        DISCARD_OLDEST_WITH_NOTIFICATION) {
+                    @Override
+                    protected void beforeExecute(Thread thread, Runnable task) {
+                        super.beforeExecute(thread, task);
+                        recordExecutionStarted();
+                    }
+
+                    @Override
+                    protected void afterExecute(Runnable task, Throwable failure) {
+                        try {
+                            recordExecutionFinished();
+                        } finally {
+                            super.afterExecute(task, failure);
+                        }
+                    }
+                };
         EXECUTOR.allowCoreThreadTimeOut(true);
     }
 
@@ -85,6 +116,62 @@ public final class PrefetchExecutor {
             notifyDropped(task);
             // Best-effort: dropping a prefetch is always safe once reservations are released.
         }
+    }
+
+    /**
+     * Runs a fresh lookahead on the caller when the shared worker already has both active and
+     * queued work; otherwise submits it normally.
+     *
+     * <p>This work-first policy keeps one unit of queued lookahead while allowing the mailbox and
+     * the prefetch worker to make progress concurrently. It is deliberately opt-in at the state
+     * wrapper: generic prefetch users retain the non-blocking submission contract.
+     *
+     * @return whether the task ran on the caller or why it retained normal queue submission
+     */
+    public static WorkFirstSubmission trySubmitWorkFirst(WorkFirstEligibleTask task) {
+        int activeCount = EXECUTOR.getActiveCount();
+        int queuedCount = EXECUTOR.getQueue().size();
+        if (activeCount <= 0) {
+            trySubmit(task);
+            return WorkFirstSubmission.QUEUED_WORKER_IDLE;
+        }
+        if (!shouldRunInline(activeCount, queuedCount)) {
+            trySubmit(task);
+            return WorkFirstSubmission.QUEUED_BACKLOG_EMPTY;
+        }
+        if (!CALLER_RUN_PERMIT.tryAcquire()) {
+            trySubmit(task);
+            return WorkFirstSubmission.QUEUED_PERMIT_BUSY;
+        }
+        recordExecutionStarted();
+        try {
+            try {
+                task.run();
+            } catch (Throwable ignored) {
+                notifyDropped(task);
+            }
+        } finally {
+            recordExecutionFinished();
+            CALLER_RUN_PERMIT.release();
+        }
+        return WorkFirstSubmission.CALLER_RUN;
+    }
+
+    static boolean shouldRunInline(int activeCount, int queuedCount) {
+        return activeCount > 0 && queuedCount > 0;
+    }
+
+    public static int maxActiveExecutions() {
+        return MAX_ACTIVE_EXECUTIONS.get();
+    }
+
+    private static void recordExecutionStarted() {
+        int active = ACTIVE_EXECUTIONS.incrementAndGet();
+        MAX_ACTIVE_EXECUTIONS.accumulateAndGet(active, Math::max);
+    }
+
+    private static void recordExecutionFinished() {
+        ACTIVE_EXECUTIONS.decrementAndGet();
     }
 
     /**
