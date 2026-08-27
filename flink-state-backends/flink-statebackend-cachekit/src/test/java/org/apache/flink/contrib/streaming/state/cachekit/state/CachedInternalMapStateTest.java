@@ -50,6 +50,8 @@ class CachedInternalMapStateTest {
     void testNativeSnapshotSingleBackfillAndShortCircuit() throws Exception {
         String library = System.getProperty("cachekit.native.snapshot.library");
         Assumptions.assumeTrue(library != null && Files.isRegularFile(Path.of(library)));
+        Assumptions.assumeTrue(
+                NativeMapSnapshotCache.snapshotFeatureAvailable(library, true));
 
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
         InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);

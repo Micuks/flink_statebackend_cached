@@ -367,14 +367,17 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             this.l2ValueCache = new NoOpCachePolicy<>();
         }
 
-        // MapSnapshot cache initialization
-        this.mapSnapshotCacheEnabled = mapSnapshotCacheMaxEntries > 0;
-        this.nativeMapSnapshotCacheEnabled =
-                this.mapSnapshotCacheEnabled && nativeMapSnapshotCacheEnabled;
         if (nativeSnapshotClassifierEnabled) {
             throw new IllegalArgumentException(
                     "Native snapshot classifier is unavailable without RocksDB backend changes");
         }
+        // MapSnapshot cache initialization
+        this.mapSnapshotCacheEnabled =
+                mapSnapshotCacheMaxEntries > 0
+                        && NativeMapSnapshotCache.snapshotFeatureAvailable(
+                                nativeMapSnapshotLibraryPath, nativeMapSnapshotCacheEnabled);
+        this.nativeMapSnapshotCacheEnabled =
+                this.mapSnapshotCacheEnabled && nativeMapSnapshotCacheEnabled;
         if (mapSnapshotCacheEnabled) {
             if (this.nativeMapSnapshotCacheEnabled) {
                 this.mapSnapshotCache = new NoOpCachePolicy<>();
