@@ -717,6 +717,19 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                             + "the synchronous direct-arena transport at consumption time. "
                                             + "Values below two are clamped to two.");
 
+    public static final ConfigOption<Integer>
+            NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS =
+                    ConfigOptions.key(
+                                    "state.backend.cachekit.native.map-distinct-batch-prefetch.cross-key-pipeline.lookahead-groups")
+                            .intType()
+                            .defaultValue(1)
+                            .withDescription(
+                                    "Maximum number of future LocalPreAgg outer-key groups prepared "
+                                            + "while the current group is consumed. One preserves the "
+                                            + "original current-plus-next pipeline; values are clamped "
+                                            + "to the bounded range one through eight when the pipeline "
+                                            + "is enabled.");
+
     public static final ConfigOption<String> DELEGATE_BACKEND =
             ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
@@ -875,10 +888,18 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 					config.get(NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED),
 					config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED),
 					config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED),
+					config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ENABLED)
+							&& config.get(DISTINCT_BATCH_OVERLAY_ENABLED),
 					Math.max(
 							2,
 							config.get(
-									NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ASYNC_MIN_UNIQUE_KEYS)));
+									NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ASYNC_MIN_UNIQUE_KEYS)),
+					Math.max(
+							1,
+							Math.min(
+									8,
+									config.get(
+											NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS))));
 		}
 
         static NativeRequestPlaneOptions nativeRequestPlaneOptions(ReadableConfig config) {

@@ -22,6 +22,7 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -57,6 +58,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     private final HashMap<EK, BufferedValue<EK, EV>> overlay = new HashMap<>();
     private final ArrayList<EK> pendingPrefetchKeys = new ArrayList<>();
     private final HashSet<EK> pendingPrefetchKeySet = new HashSet<>();
+    private final PreparedPrefetch<EK, EV> noOpPreparedPrefetch;
 
     private boolean active;
     private boolean prefetchActive;
@@ -110,6 +112,8 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         this.copyValues = !valueSerializer.isImmutableType();
         this.prefetchEnabled = prefetchEnabled;
         this.minPrefetchUniqueKeys = Math.max(2, minPrefetchUniqueKeys);
+        this.noOpPreparedPrefetch =
+                new PreparedPrefetch<>(this, Collections.emptyList(), null, true);
     }
 
     void beginBatch() {
@@ -245,7 +249,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
                 // can leave fewer useful keys than the backend threshold. This is a successful
                 // per-view no-op, not a preparation failure: invalidating the composite capture
                 // here would cancel useful tokens already prepared by sibling DISTINCT views.
-                return new PreparedPrefetch<>(this, java.util.Collections.emptyList(), null, true);
+                return noOpPreparedPrefetch;
             }
             if (!delegate.supportsDirectPrefetchedValues()) {
                 return null;
@@ -263,17 +267,17 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
 
     @Override
     public boolean installPreparedPrefetch(Object prepared) throws Exception {
+        if (prepared == noOpPreparedPrefetch) {
+            return true;
+        }
         if (!(prepared instanceof PreparedPrefetch)) {
             return false;
         }
         PreparedPrefetch<?, ?> token = (PreparedPrefetch<?, ?>) prepared;
-        if (token.owner != this || token.consumed) {
+        if (token.owner != this || token.consumed || token.noOp) {
             return false;
         }
         token.consumed = true;
-        if (token.noOp) {
-            return true;
-        }
         @SuppressWarnings("unchecked")
         List<EK> keys = (List<EK>) token.keys;
         List<EV> values = delegate.awaitPreparedUniqueKeyValues(token.backendPrepared);
@@ -294,6 +298,9 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
 
     @Override
     public void abortPreparedPrefetch(Object prepared) {
+        if (prepared == noOpPreparedPrefetch) {
+            return;
+        }
         if (!(prepared instanceof PreparedPrefetch)) {
             return;
         }
@@ -301,9 +308,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         if (token.owner == this) {
             if (!token.consumed) {
                 token.consumed = true;
-                if (!token.noOp) {
-                    delegate.abortPreparedUniqueKeyValues(token.backendPrepared);
-                }
+                delegate.abortPreparedUniqueKeyValues(token.backendPrepared);
             }
             if (!active && directValuesPrimed) {
                 overlay.clear();

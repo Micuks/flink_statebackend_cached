@@ -48,6 +48,11 @@ public interface BatchKeyGroupingSupport {
         return false;
     }
 
+    /** Number of future outer-key groups prepared by the job-scoped LocalPreAgg pipeline. */
+    default int crossKeyPipelineLookaheadGroups() {
+        return 0;
+    }
+
     /**
      * Groups {@code count} native-order 32-bit tokens and writes a packed plan.
      *

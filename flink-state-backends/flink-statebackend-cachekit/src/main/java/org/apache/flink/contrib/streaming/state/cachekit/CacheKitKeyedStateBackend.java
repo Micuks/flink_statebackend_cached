@@ -111,7 +111,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
     private final boolean nativePrefetchAccessGuidedStateEnabled;
     private final boolean nativeMapDistinctBatchPrefetchEnabled;
     private final boolean nativeMapDistinctBatchPrefetchDirectArenaEnabled;
+    private final boolean nativeMapDistinctBatchPrefetchCrossKeyPipelineEnabled;
     private final int nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys;
+    private final int nativeMapDistinctBatchPrefetchLookaheadGroups;
     private int nextNativeStateId = 1;
     private long nativePreaggGroupBatches;
     private long nativePreaggInputKeys;
@@ -278,7 +280,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 false,
                 false,
                 false,
-                8);
+                false,
+                8,
+                1);
     }
 
     public CacheKitKeyedStateBackend(
@@ -353,7 +357,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 false,
                 false,
                 false,
-                8);
+                false,
+                8,
+                1);
     }
 
     public CacheKitKeyedStateBackend(
@@ -394,7 +400,9 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
             boolean nativePrefetchAccessGuidedStateEnabled,
             boolean nativeMapDistinctBatchPrefetchEnabled,
             boolean nativeMapDistinctBatchPrefetchDirectArenaEnabled,
-            int nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys) {
+            boolean nativeMapDistinctBatchPrefetchCrossKeyPipelineEnabled,
+            int nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys,
+            int nativeMapDistinctBatchPrefetchLookaheadGroups) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -434,8 +442,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
         this.nativeMapDistinctBatchPrefetchEnabled = nativeMapDistinctBatchPrefetchEnabled;
         this.nativeMapDistinctBatchPrefetchDirectArenaEnabled =
                 nativeMapDistinctBatchPrefetchDirectArenaEnabled;
+        this.nativeMapDistinctBatchPrefetchCrossKeyPipelineEnabled =
+                nativeMapDistinctBatchPrefetchCrossKeyPipelineEnabled;
         this.nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys =
                 Math.max(2, nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys);
+        this.nativeMapDistinctBatchPrefetchLookaheadGroups =
+                Math.max(1, Math.min(8, nativeMapDistinctBatchPrefetchLookaheadGroups));
         this.mapSnapshotCacheMetrics =
                 MapSnapshotCacheMetrics.create(metricGroup, diagnosticsEnabled);
         Preconditions.checkNotNull(nativeRequestPlaneOptions, "nativeRequestPlaneOptions");
@@ -1151,6 +1163,14 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 && coordinator.isActive()
                 && coordinator.options().preaggEnabled()
                 && coordinator.options().indexedFoldEnabled();
+    }
+
+    @Override
+    public int crossKeyPipelineLookaheadGroups() {
+        return nativeMapDistinctBatchPrefetchEnabled
+                        && nativeMapDistinctBatchPrefetchCrossKeyPipelineEnabled
+                ? nativeMapDistinctBatchPrefetchLookaheadGroups
+                : 0;
     }
 
     /**

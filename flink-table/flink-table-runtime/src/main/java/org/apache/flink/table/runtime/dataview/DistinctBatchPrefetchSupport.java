@@ -20,6 +20,7 @@ package org.apache.flink.table.runtime.dataview;
 
 import org.apache.flink.annotation.Internal;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -37,7 +38,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class DistinctBatchPrefetchSupport {
 
     private static final AtomicBoolean REPORTED_UNSUPPORTED_VIEW = new AtomicBoolean();
-    private static final ThreadLocal<PreparedCapture> PREPARED_CAPTURE = new ThreadLocal<>();
+    private static final ThreadLocal<CaptureContext> PREPARED_CAPTURE =
+            ThreadLocal.withInitial(CaptureContext::new);
 
     private DistinctBatchPrefetchSupport() {}
 
@@ -61,16 +63,17 @@ public final class DistinctBatchPrefetchSupport {
     }
 
     public static boolean finishSession(Object session) throws Exception {
-        PreparedCapture capture = PREPARED_CAPTURE.get();
-        if (capture != null) {
-            capture.acceptedSessions++;
+        CaptureContext context = PREPARED_CAPTURE.get();
+        if (context.active != null) {
+            PreparedCapture active = context.active;
+            active.acceptedSessions++;
             Object prepared = asSession(session).finishPreparedPrefetchKeyCollection();
             if (prepared != null) {
-                capture.sessions.add(session);
-                capture.prepared.add(prepared);
+                active.sessions.add(session);
+                active.prepared.add(prepared);
                 return true;
             }
-            capture.preparationFailed = true;
+            active.preparationFailed = true;
             return false;
         }
         return asSession(session).finishPrefetchKeyCollection();
@@ -92,16 +95,23 @@ public final class DistinctBatchPrefetchSupport {
 
     /** Captures existing generated prefetch calls as detached backend reads. */
     public static void beginPreparedCapture() {
-        if (PREPARED_CAPTURE.get() != null) {
+        CaptureContext context = PREPARED_CAPTURE.get();
+        if (context.active != null) {
             throw new IllegalStateException("DISTINCT prepared capture is already active");
         }
-        PREPARED_CAPTURE.set(new PreparedCapture());
+        PreparedCapture capture = context.available.pollFirst();
+        if (capture == null) {
+            capture = new PreparedCapture();
+        }
+        capture.resetForLease();
+        context.active = capture;
     }
 
     /** Ends capture and returns a composite token, including a rejected-session no-op token. */
     public static Object endPreparedCapture() {
-        PreparedCapture capture = PREPARED_CAPTURE.get();
-        PREPARED_CAPTURE.remove();
+        CaptureContext context = PREPARED_CAPTURE.get();
+        PreparedCapture capture = context.active;
+        context.active = null;
         // A capture with no accepted sessions is a successful no-op. This happens when generated
         // DISTINCT code rejects an undersized group before scanning its keys. Keep it distinct
         // from an accepted session whose backend preparation failed, which must retain the
@@ -111,8 +121,9 @@ public final class DistinctBatchPrefetchSupport {
 
     /** Cancels every detached read accumulated by the current, not-yet-ended capture. */
     public static void abortPreparedCapture() {
-        PreparedCapture capture = PREPARED_CAPTURE.get();
-        PREPARED_CAPTURE.remove();
+        CaptureContext context = PREPARED_CAPTURE.get();
+        PreparedCapture capture = context.active;
+        context.active = null;
         abortPreparedCapture(capture);
     }
 
@@ -122,7 +133,9 @@ public final class DistinctBatchPrefetchSupport {
             return false;
         }
         PreparedCapture capture = (PreparedCapture) prepared;
-        if (capture.preparationFailed || capture.prepared.size() != capture.acceptedSessions) {
+        if (!capture.leased
+                || capture.preparationFailed
+                || capture.prepared.size() != capture.acceptedSessions) {
             abortPreparedCapture(capture);
             return false;
         }
@@ -137,6 +150,7 @@ public final class DistinctBatchPrefetchSupport {
                 abortPreparedCapture(capture);
                 return false;
             }
+            releaseCapture(capture);
             return true;
         } catch (Exception failure) {
             // A speculative read is never authoritative. Clear any already-installed overlay and
@@ -152,9 +166,13 @@ public final class DistinctBatchPrefetchSupport {
             return;
         }
         PreparedCapture capture = (PreparedCapture) prepared;
+        if (!capture.leased) {
+            return;
+        }
         for (int i = 0; i < capture.prepared.size(); i++) {
             asSession(capture.sessions.get(i)).abortPreparedPrefetch(capture.prepared.get(i));
         }
+        releaseCapture(capture);
     }
 
     public static void abortSession(Object session) {
@@ -212,10 +230,39 @@ public final class DistinctBatchPrefetchSupport {
         return (BatchPrefetchableMapView<Object>) session;
     }
 
+    private static void releaseCapture(PreparedCapture capture) {
+        if (capture == null || !capture.leased) {
+            return;
+        }
+        capture.sessions.clear();
+        capture.prepared.clear();
+        capture.acceptedSessions = 0;
+        capture.preparationFailed = false;
+        capture.leased = false;
+        PREPARED_CAPTURE.get().available.addLast(capture);
+    }
+
+    private static final class CaptureContext {
+        private final ArrayDeque<PreparedCapture> available = new ArrayDeque<>();
+        private PreparedCapture active;
+    }
+
     private static final class PreparedCapture {
         private final List<Object> sessions = new ArrayList<>();
         private final List<Object> prepared = new ArrayList<>();
         private int acceptedSessions;
         private boolean preparationFailed;
+        private boolean leased;
+
+        private void resetForLease() {
+            if (leased) {
+                throw new IllegalStateException("DISTINCT prepared capture is already leased");
+            }
+            sessions.clear();
+            prepared.clear();
+            acceptedSessions = 0;
+            preparationFailed = false;
+            leased = true;
+        }
     }
 }

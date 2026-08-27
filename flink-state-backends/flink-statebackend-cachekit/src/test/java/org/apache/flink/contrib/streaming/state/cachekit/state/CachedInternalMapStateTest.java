@@ -17,6 +17,7 @@ package org.apache.flink.contrib.streaming.state.cachekit.state;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -56,6 +57,193 @@ import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.junit.jupiter.api.Test;
 
 class CachedInternalMapStateTest {
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testPreparedExactDistinctAsyncDirectResultReturnsSlotAfterMaterialization()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(new MapSerializer<>(
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        List<String> userKeys = eightUserKeys();
+        List<byte[]> rocksDBKeys = eightSerializedKeys();
+        when(reader.serializeRocksDBKeysByUserKeys(userKeys)).thenReturn(rocksDBKeys);
+        byte[] present = serializedMapValue(7);
+        doAnswer(
+                        invocation -> {
+                            writeDirectResults(invocation, present, false);
+                            return 1;
+                        })
+                .when(reader)
+                .getSerializedValuesByRocksDBKeyArena(
+                        any(ByteBuffer.class),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.eq(8),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.anyInt());
+
+        NativeRequestPlane plane = mock(NativeRequestPlane.class);
+        when(plane.selectedKernel()).thenReturn("test");
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createDirectAsyncState(delegate, currentKey, coordinator);
+
+        BatchPrefetchableMapState.PreparedValues prepared =
+                state.prepareCurrentUniqueKeyValues(userKeys);
+        assertEquals(
+                Arrays.asList(7, null, null, null, null, null, null, null), prepared.awaitValues());
+        assertEquals(1, coordinator.mapDistinctAsyncReadLeases());
+        assertEquals(0, coordinator.mapDistinctAsyncReadLeaseMisses());
+        verify(reader, times(0))
+                .getSerializedValuesByRocksDBKeys(
+                        any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.anyInt());
+        verify(reader, times(0)).getSerializedValuesByUserKeys(any());
+
+        NativeRequestPlaneCoordinator.BatchSlot returned =
+                coordinator.tryAcquireMapDistinctAsyncReadSlot();
+        assertNotNull(returned);
+        returned.close();
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testPreparedExactDistinctAsyncLeaseMissFallsBackToHeapBatchRead() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(new MapSerializer<>(
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        List<String> userKeys = eightUserKeys();
+        List<byte[]> rocksDBKeys = eightSerializedKeys();
+        when(reader.serializeRocksDBKeysByUserKeys(userKeys)).thenReturn(rocksDBKeys);
+        when(reader.getSerializedValuesByRocksDBKeys(
+                        any(),
+                        org.mockito.ArgumentMatchers.eq(0),
+                        org.mockito.ArgumentMatchers.eq(8)))
+                .thenAnswer(
+                        invocation -> {
+                            List<byte[]> actualKeys = invocation.getArgument(0);
+                            assertEquals(8, actualKeys.size());
+                            for (int index = 0; index < actualKeys.size(); index++) {
+                                assertArrayEquals(rocksDBKeys.get(index), actualKeys.get(index));
+                            }
+                            return Arrays.asList(
+                                    serializedMapValue(11),
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    null);
+                        });
+
+        NativeRequestPlane plane = mock(NativeRequestPlane.class);
+        when(plane.selectedKernel()).thenReturn("test");
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createDirectAsyncState(delegate, currentKey, coordinator);
+
+        try (NativeRequestPlaneCoordinator.BatchSlot occupiedFirst =
+                        coordinator.tryAcquireMapDistinctAsyncReadSlot();
+                NativeRequestPlaneCoordinator.BatchSlot occupiedSecond =
+                        coordinator.tryAcquireMapDistinctAsyncReadSlot()) {
+            assertNotNull(occupiedFirst);
+            assertNotNull(occupiedSecond);
+            BatchPrefetchableMapState.PreparedValues prepared =
+                    state.prepareCurrentUniqueKeyValues(userKeys);
+            List<?> values = prepared.awaitValues();
+            verify(reader, times(1))
+                    .getSerializedValuesByRocksDBKeys(
+                            any(),
+                            org.mockito.ArgumentMatchers.eq(0),
+                            org.mockito.ArgumentMatchers.eq(8));
+            assertEquals(Arrays.asList(11, null, null, null, null, null, null, null), values);
+        }
+        assertEquals(1, coordinator.mapDistinctAsyncReadLeaseMisses());
+        verify(reader, times(0))
+                .getSerializedValuesByRocksDBKeyArena(
+                        any(ByteBuffer.class),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.anyInt());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testPreparedExactDistinctAsyncOverflowFailsClosedAndReleasesSlot() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(new MapSerializer<>(
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        List<String> userKeys = eightUserKeys();
+        List<byte[]> rocksDBKeys = eightSerializedKeys();
+        when(reader.serializeRocksDBKeysByUserKeys(userKeys)).thenReturn(rocksDBKeys);
+        byte[] oversized = serializedMapValue(23);
+        doAnswer(
+                        invocation -> {
+                            writeDirectResults(invocation, oversized, true);
+                            return 1;
+                        })
+                .when(reader)
+                .getSerializedValuesByRocksDBKeyArena(
+                        any(ByteBuffer.class),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.eq(8),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.anyInt());
+
+        NativeRequestPlane plane = mock(NativeRequestPlane.class);
+        when(plane.selectedKernel()).thenReturn("test");
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createDirectAsyncState(delegate, currentKey, coordinator);
+
+        BatchPrefetchableMapState.PreparedValues prepared =
+                state.prepareCurrentUniqueKeyValues(userKeys);
+        assertNull(prepared.awaitValues());
+        verify(reader, times(0))
+                .getSerializedValuesByRocksDBKeys(
+                        any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.anyInt());
+
+        NativeRequestPlaneCoordinator.BatchSlot returned =
+                coordinator.tryAcquireMapDistinctAsyncReadSlot();
+        assertNotNull(returned);
+        returned.close();
+        state.close();
+        coordinator.close();
+    }
 
     @Test
     @SuppressWarnings("unchecked")
@@ -245,11 +433,9 @@ class CachedInternalMapStateTest {
                         InternalMapState.class,
                         withSettings().extraInterfaces(RocksDBBatchMapReader.class));
         when(delegate.getValueSerializer())
-                .thenReturn(
-                        new MapSerializer<>(
-                                org.apache.flink.api.common.typeutils.base.StringSerializer
-                                        .INSTANCE,
-                                IntSerializer.INSTANCE));
+                .thenReturn(new MapSerializer<>(
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE));
         RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
         when(reader.getSerializedValuesByUserKeys(Arrays.asList("u1", "u2")))
                 .thenReturn(Arrays.asList(serializedMapValue(7), null));
@@ -647,21 +833,21 @@ class CachedInternalMapStateTest {
 
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =
                 new CachedInternalMapState<>(
-                delegate,
-                currentKey::get,
-                currentKey::set,
-                100,
-                CachePolicyType.LRU,
-                0,
-                PresenceCacheImplementation.PRIMITIVE,
-                0,
-                CachePolicyType.LRU,
-                0,
-                false,
-                0.0,
-                1,
-                true,
-                0);
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        true,
+                        0);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         assertFalse(state.contains("uk1"));
@@ -678,21 +864,21 @@ class CachedInternalMapStateTest {
 
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =
                 new CachedInternalMapState<>(
-                delegate,
-                currentKey::get,
-                currentKey::set,
-                100,
-                CachePolicyType.LRU,
-                0,
-                PresenceCacheImplementation.PRIMITIVE,
-                0,
-                CachePolicyType.LRU,
-                0,
-                false,
-                0.0,
-                1,
-                true,
-                0);
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        true,
+                        0);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.put("uk1", 1);
@@ -714,21 +900,21 @@ class CachedInternalMapStateTest {
 
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =
                 new CachedInternalMapState<>(
-                delegate,
-                currentKey::get,
-                currentKey::set,
-                100,
-                CachePolicyType.LRU,
-                0,
-                PresenceCacheImplementation.PRIMITIVE,
-                0,
-                CachePolicyType.LRU,
-                0,
-                false,
-                0.0,
-                1,
-                true,
-                0);
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        true,
+                        0);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         assertFalse(state.contains("uk1"));
@@ -747,21 +933,21 @@ class CachedInternalMapStateTest {
 
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =
                 new CachedInternalMapState<>(
-                delegate,
-                currentKey::get,
-                currentKey::set,
-                0,
-                CachePolicyType.LRU,
-                0,
-                PresenceCacheImplementation.PRIMITIVE,
-                100,
-                CachePolicyType.LRU,
-                0,
-                true,
-                0.5,
-                1,
-                true,
-                0);
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        true,
+                        0.5,
+                        1,
+                        true,
+                        0);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.get("u1");
@@ -795,21 +981,21 @@ class CachedInternalMapStateTest {
 
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =
                 new CachedInternalMapState<>(
-                delegate,
-                currentKey::get,
-                currentKey::set,
-                100,
-                CachePolicyType.LRU,
-                0,
-                PresenceCacheImplementation.PRIMITIVE,
-                0,
-                CachePolicyType.LRU,
-                0,
-                false,
-                0.0,
-                1,
-                false,
-                0);
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         for (Map.Entry<String, Integer> ignored : state.entries()) {
@@ -828,21 +1014,21 @@ class CachedInternalMapStateTest {
 
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =
                 new CachedInternalMapState<>(
-                delegate,
-                currentKey::get,
-                currentKey::set,
-                0,
-                CachePolicyType.LRU,
-                0,
-                PresenceCacheImplementation.PRIMITIVE,
-                100,
-                CachePolicyType.LRU,
-                0,
-                false,
-                0.0,
-                1,
-                true,
-                0);
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        true,
+                        0);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         state.put("uk1", 42);
@@ -1628,33 +1814,78 @@ class CachedInternalMapStateTest {
         return out.getCopyOfBuffer();
     }
 
+    private static List<String> eightUserKeys() {
+        return Arrays.asList("u1", "u2", "u3", "u4", "u5", "u6", "u7", "u8");
+    }
+
+    private static List<byte[]> eightSerializedKeys() {
+        return Arrays.asList(
+                new byte[] {1},
+                new byte[] {2},
+                new byte[] {3},
+                new byte[] {4},
+                new byte[] {5},
+                new byte[] {6},
+                new byte[] {7},
+                new byte[] {8});
+    }
+
+    private static void writeDirectResults(
+            org.mockito.invocation.InvocationOnMock invocation, byte[] present, boolean overflow) {
+        ByteBuffer descriptors =
+                ((ByteBuffer) invocation.getArgument(1)).duplicate().order(ByteOrder.nativeOrder());
+        ByteBuffer values = ((ByteBuffer) invocation.getArgument(3)).duplicate();
+        values.position(0);
+        values.put(present);
+        for (int index = 0; index < 8; index++) {
+            descriptors.putInt(
+                    index * RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES
+                            + RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET,
+                    index == 0
+                            ? (overflow
+                                    ? RocksDBBatchValueReader.DIRECT_ARENA_OVERFLOW
+                                    : present.length)
+                            : RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND);
+        }
+    }
+
+    private static CachedInternalMapState<String, VoidNamespace, String, Integer>
+            createDirectAsyncState(
+                    InternalMapState<String, VoidNamespace, String, Integer> delegate,
+                    AtomicReference<String> currentKey,
+                    NativeRequestPlaneCoordinator coordinator) {
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0,
+                        MapSnapshotCacheMetrics.disabled(),
+                        coordinator,
+                        31,
+                        false,
+                        0,
+                        false);
+        state.enableNativeDistinctBatchPrefetch(true, true, 8);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        return state;
+    }
+
     private static NativeRequestPlaneOptions directArenaOptions() {
         return new NativeRequestPlaneOptions(
-                true,
-                "",
-                "auto",
-                128,
-                1 << 20,
-                1 << 20,
-                16,
-                1 << 20,
-                1 << 20,
-                1,
-                2,
-                false,
-                false,
-                false,
-                false,
-                false,
-                true,
-                true,
-                false,
-                true,
-                true,
-                false,
-                8192,
-                0.02,
-                262144);
+                true, "", "auto", 128, 1 << 20, 1 << 20, 16, 1 << 20, 1 << 20, 1, 2, false, false,
+                false, false, false, true, true, false, true, true, false, 8192, 0.02, 262144);
     }
 
     private static final class MutableKey {

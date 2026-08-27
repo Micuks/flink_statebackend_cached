@@ -608,6 +608,28 @@ public final class StatePrefetcher {
                 && ((BatchKeyGroupingSupport) backend).indexedBatchFoldEnabled();
     }
 
+    /** Returns the bounded, job-scoped cross-key pipeline distance. */
+    public static int crossKeyPipelineLookaheadGroups(Input<?> headOperator) {
+        if (!(headOperator instanceof AbstractStreamOperator)) {
+            return 0;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            return crossKeyPipelineLookaheadGroups(backend);
+        } catch (Throwable failure) {
+            return 0;
+        }
+    }
+
+    static int crossKeyPipelineLookaheadGroups(KeyedStateBackend<?> backend) {
+        if (!(backend instanceof BatchKeyGroupingSupport)) {
+            return 0;
+        }
+        int configured = ((BatchKeyGroupingSupport) backend).crossKeyPipelineLookaheadGroups();
+        return Math.max(0, Math.min(8, configured));
+    }
+
     static int groupHashTokensNatively(
             KeyedStateBackend<?> backend, ByteBuffer tokens, int count, ByteBuffer packedPlan) {
         if (!(backend instanceof BatchKeyGroupingSupport)) {

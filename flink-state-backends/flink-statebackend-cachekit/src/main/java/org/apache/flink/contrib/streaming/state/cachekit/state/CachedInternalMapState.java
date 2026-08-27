@@ -180,6 +180,32 @@ public final class CachedInternalMapState<K, N, UK, UV>
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchWaitNanos =
             new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchQueueNanos =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchServiceNanos =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchReadySlackNanos =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncDirectArenaBatches =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncDirectArenaKeys =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncDirectArenaCompletedBatches =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncDirectArenaCompletedKeys =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncDirectArenaFound =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncDirectArenaMissing =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncDirectArenaLeaseMisses =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncDirectArenaOverflows =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncDirectArenaProtocolFailures =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncDirectArenaPreparationFallbacks =
+            new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong deferredSyncBatchPrefetchBatches =
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong deferredSyncBatchPrefetchKeys =
@@ -706,9 +732,35 @@ public final class CachedInternalMapState<K, N, UK, UV>
         if (rocksDBKeys.size() != orderedKeys.size()) {
             return null;
         }
-        PreparedMapValues prepared = new PreparedMapValues(rocksDBKeys, orderedKeys.size());
+        NativeRequestPlaneCoordinator.BatchSlot directSlot = null;
+        if (nativeDistinctBatchDirectArenaEnabled
+                && nativeRequestPlaneCoordinator != null
+                && nativeRequestPlaneCoordinator.isActive()
+                && orderedKeys.size() <= RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
+            directSlot = nativeRequestPlaneCoordinator.tryAcquireMapDistinctAsyncReadSlot();
+            if (directSlot == null) {
+                asyncDirectArenaLeaseMisses.incrementAndGet();
+            } else {
+                try {
+                    directSlot.prepareLatest(nativeStateId, nativeGeneration, rocksDBKeys);
+                    directSlot.prepareContiguousDirectArenaMultiGet(
+                            orderedKeys.size(), RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
+                    asyncDirectArenaBatches.incrementAndGet();
+                    asyncDirectArenaKeys.addAndGet(orderedKeys.size());
+                } catch (Exception | LinkageError directPreparationFailure) {
+                    directSlot.close();
+                    directSlot = null;
+                    asyncDirectArenaPreparationFallbacks.incrementAndGet();
+                }
+            }
+        }
+        PreparedMapValues prepared =
+                directSlot == null
+                        ? new PreparedMapValues(rocksDBKeys, orderedKeys.size())
+                        : new PreparedMapValues(directSlot, orderedKeys.size());
         synchronized (asyncBatchPrefetchMonitor) {
             if (closed) {
+                prepared.releaseDirectSlotOnce();
                 return null;
             }
             outstandingAsyncBatchPrefetchTasks.add(prepared);
@@ -723,18 +775,32 @@ public final class CachedInternalMapState<K, N, UK, UV>
             implements PreparedValues, PrefetchExecutor.DropAwareTask {
 
         private final List<byte[]> rocksDBKeys;
+        private final NativeRequestPlaneCoordinator.BatchSlot directSlot;
         private final int expectedValues;
         private final java.util.concurrent.CountDownLatch completed =
                 new java.util.concurrent.CountDownLatch(1);
         private final java.util.concurrent.atomic.AtomicInteger state =
                 new java.util.concurrent.atomic.AtomicInteger();
         private volatile List<byte[]> rawValues;
+        private volatile boolean directValuesReady;
         private volatile Throwable failure;
         private volatile boolean dropped;
+        private volatile boolean cancelled;
         private volatile long completedNanos;
+        private final long submittedNanos = System.nanoTime();
+        private final java.util.concurrent.atomic.AtomicBoolean directSlotReleased =
+                new java.util.concurrent.atomic.AtomicBoolean();
 
         private PreparedMapValues(List<byte[]> rocksDBKeys, int expectedValues) {
             this.rocksDBKeys = rocksDBKeys;
+            this.directSlot = null;
+            this.expectedValues = expectedValues;
+        }
+
+        private PreparedMapValues(
+                NativeRequestPlaneCoordinator.BatchSlot directSlot, int expectedValues) {
+            this.rocksDBKeys = null;
+            this.directSlot = directSlot;
             this.expectedValues = expectedValues;
         }
 
@@ -743,22 +809,29 @@ public final class CachedInternalMapState<K, N, UK, UV>
             if (!state.compareAndSet(0, 1)) {
                 return;
             }
+            long workerStartedNanos = System.nanoTime();
+            asyncBatchPrefetchQueueNanos.addAndGet(
+                    Math.max(0L, workerStartedNanos - submittedNanos));
             try {
                 lifecycleLock.readLock().lock();
                 try {
                     if (!closed) {
-                        List<byte[]> values =
-                                rocksDBBatchMapReader.getSerializedValuesByRocksDBKeys(
-                                        rocksDBKeys, 0, rocksDBKeys.size());
-                        if (values.size() != expectedValues) {
-                            throw new IllegalStateException(
-                                    "Async MapState MultiGet returned "
-                                            + values.size()
-                                            + " values for "
-                                            + expectedValues
-                                            + " keys.");
+                        if (directSlot == null) {
+                            List<byte[]> values =
+                                    rocksDBBatchMapReader.getSerializedValuesByRocksDBKeys(
+                                            rocksDBKeys, 0, rocksDBKeys.size());
+                            if (values.size() != expectedValues) {
+                                throw new IllegalStateException(
+                                        "Async MapState MultiGet returned "
+                                                + values.size()
+                                                + " values for "
+                                                + expectedValues
+                                                + " keys.");
+                            }
+                            rawValues = values;
+                        } else {
+                            directValuesReady = executeDirectArenaRead();
                         }
-                        rawValues = values;
                     }
                 } finally {
                     lifecycleLock.readLock().unlock();
@@ -767,8 +840,56 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 failure = currentFailure;
                 asyncBatchPrefetchFailures.incrementAndGet();
             } finally {
+                asyncBatchPrefetchServiceNanos.addAndGet(
+                        Math.max(0L, System.nanoTime() - workerStartedNanos));
                 finish(false);
+                if (cancelled) {
+                    releaseDirectSlotOnce();
+                }
             }
+        }
+
+        private boolean executeDirectArenaRead() throws Exception {
+            int presentCount =
+                    rocksDBBatchMapReader.getSerializedValuesByRocksDBKeyArena(
+                            directSlot.directMultiGetKeyArena(),
+                            directSlot.directMultiGetDescriptors(),
+                            expectedValues,
+                            directSlot.directMultiGetValueArena(),
+                            directSlot.directMultiGetValueStride());
+            int observedPresent = 0;
+            int observedMissing = 0;
+            boolean overflow = false;
+            boolean invalidProtocol = presentCount < 0 || presentCount > expectedValues;
+            for (int index = 0; index < expectedValues && !invalidProtocol; index++) {
+                int result = directSlot.directMultiGetResult(index);
+                if (result >= 0 && result <= directSlot.directMultiGetValueStride()) {
+                    observedPresent++;
+                } else if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
+                    observedMissing++;
+                } else if (result == RocksDBBatchValueReader.DIRECT_ARENA_OVERFLOW) {
+                    observedPresent++;
+                    overflow = true;
+                } else {
+                    invalidProtocol = true;
+                }
+            }
+            if (observedPresent != presentCount) {
+                invalidProtocol = true;
+            }
+            if (invalidProtocol) {
+                asyncDirectArenaProtocolFailures.incrementAndGet();
+                return false;
+            }
+            if (overflow) {
+                asyncDirectArenaOverflows.incrementAndGet();
+                return false;
+            }
+            asyncDirectArenaCompletedBatches.incrementAndGet();
+            asyncDirectArenaCompletedKeys.addAndGet(expectedValues);
+            asyncDirectArenaFound.addAndGet(observedPresent);
+            asyncDirectArenaMissing.addAndGet(observedMissing);
+            return true;
         }
 
         @Override
@@ -777,13 +898,14 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 dropped = true;
                 asyncBatchPrefetchDropped.incrementAndGet();
                 finish(true);
+                releaseDirectSlotOnce();
             }
         }
 
         private void finish(boolean wasDropped) {
             completedNanos = System.nanoTime();
             state.set(2);
-            if (!wasDropped && rawValues != null) {
+            if (!wasDropped && (rawValues != null || directValuesReady)) {
                 asyncBatchPrefetchCompleted.incrementAndGet();
             }
             completed.countDown();
@@ -797,9 +919,11 @@ public final class CachedInternalMapState<K, N, UK, UV>
         public List<?> awaitValues() throws Exception {
             asyncBatchPrefetchAwaits.incrementAndGet();
             long awaitStarted = System.nanoTime();
-            if (completed.getCount() == 0L
-                    || completedNanos > 0L && completedNanos <= awaitStarted) {
+            long observedCompletedNanos = completedNanos;
+            if (observedCompletedNanos > 0L && observedCompletedNanos <= awaitStarted) {
                 asyncBatchPrefetchReadyBeforeAwait.incrementAndGet();
+                asyncBatchPrefetchReadySlackNanos.addAndGet(
+                        awaitStarted - observedCompletedNanos);
             }
             try {
                 completed.await();
@@ -810,25 +934,61 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 asyncBatchPrefetchWaitNanos.addAndGet(
                         Math.max(0L, System.nanoTime() - awaitStarted));
             }
-            if (dropped || failure != null || rawValues == null) {
-                return null;
-            }
-            ArrayList<UV> values = new ArrayList<>(rawValues.size());
-            for (byte[] rawValue : rawValues) {
-                if (rawValue == null) {
-                    values.add(null);
-                } else {
-                    batchPrefetchInput.setBuffer(rawValue);
-                    boolean isNull = batchPrefetchInput.readBoolean();
-                    values.add(isNull ? null : userValueSerializer.deserialize(batchPrefetchInput));
+            try {
+                if (dropped
+                        || failure != null
+                        || directSlot == null && rawValues == null
+                        || directSlot != null && !directValuesReady) {
+                    return null;
                 }
+                ArrayList<UV> values = new ArrayList<>(expectedValues);
+                if (directSlot != null) {
+                    for (int index = 0; index < expectedValues; index++) {
+                        int result = directSlot.directMultiGetResult(index);
+                        if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
+                            values.add(null);
+                        } else {
+                            DataInputView input = directSlot.directMultiGetValueInput(index);
+                            boolean isNull = input.readBoolean();
+                            values.add(
+                                    isNull
+                                            ? null
+                                            : userValueSerializer.deserialize(input));
+                        }
+                    }
+                } else {
+                    for (byte[] rawValue : rawValues) {
+                        if (rawValue == null) {
+                            values.add(null);
+                        } else {
+                            batchPrefetchInput.setBuffer(rawValue);
+                            boolean isNull = batchPrefetchInput.readBoolean();
+                            values.add(
+                                    isNull
+                                            ? null
+                                            : userValueSerializer.deserialize(batchPrefetchInput));
+                        }
+                    }
+                }
+                return values;
+            } finally {
+                releaseDirectSlotOnce();
             }
-            return values;
         }
 
         @Override
         public void cancel() {
+            cancelled = true;
             PrefetchExecutor.cancelIfQueued(this);
+            if (state.get() == 2) {
+                releaseDirectSlotOnce();
+            }
+        }
+
+        private void releaseDirectSlotOnce() {
+            if (directSlot != null && directSlotReleased.compareAndSet(false, true)) {
+                directSlot.close();
+            }
         }
     }
 
@@ -2446,9 +2606,17 @@ public final class CachedInternalMapState<K, N, UK, UV>
             LOG.info(
                     "[CACHEKIT NATIVE MAP DISTINCT ASYNC] attempts={} submitted={} completed={} "
                             + "dropped={} failures={} keys={} awaits={} readyBeforeAwait={} "
-                            + "waitNanos={} asyncMinUniqueKeys={} deferredSyncBatches={} "
+                            + "waitNanos={} queueNanos={} serviceNanos={} readySlackNanos={} "
+                            + "asyncMinUniqueKeys={} deferredSyncBatches={} "
                             + "deferredSyncKeys={} deferredSyncCompleted={} "
-                            + "deferredSyncFallbacks={} deferredSyncContextMismatches={}",
+                            + "deferredSyncFallbacks={} deferredSyncContextMismatches={} "
+                            + "asyncDirectArenaBatches={} asyncDirectArenaKeys={} "
+                            + "asyncDirectArenaCompletedBatches={} asyncDirectArenaCompletedKeys={} "
+                            + "asyncDirectArenaFound={} asyncDirectArenaMissing={} "
+                            + "asyncDirectArenaLeaseMisses={} asyncDirectArenaOverflows={} "
+                            + "asyncDirectArenaProtocolFailures={} "
+                            + "asyncDirectArenaPreparationFallbacks={} "
+                            + "coordinatorAsyncSlotLeases={} coordinatorAsyncSlotLeaseMisses={}",
                     asyncBatchPrefetchAttempts.get(),
                     asyncBatchPrefetchSubmitted.get(),
                     asyncBatchPrefetchCompleted.get(),
@@ -2458,12 +2626,31 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     asyncBatchPrefetchAwaits.get(),
                     asyncBatchPrefetchReadyBeforeAwait.get(),
                     asyncBatchPrefetchWaitNanos.get(),
+                    asyncBatchPrefetchQueueNanos.get(),
+                    asyncBatchPrefetchServiceNanos.get(),
+                    asyncBatchPrefetchReadySlackNanos.get(),
                     nativeDistinctBatchAsyncMinUniqueKeys,
                     deferredSyncBatchPrefetchBatches.get(),
                     deferredSyncBatchPrefetchKeys.get(),
                     deferredSyncBatchPrefetchCompleted.get(),
                     deferredSyncBatchPrefetchFallbacks.get(),
-                    deferredSyncBatchPrefetchContextMismatches.get());
+                    deferredSyncBatchPrefetchContextMismatches.get(),
+                    asyncDirectArenaBatches.get(),
+                    asyncDirectArenaKeys.get(),
+                    asyncDirectArenaCompletedBatches.get(),
+                    asyncDirectArenaCompletedKeys.get(),
+                    asyncDirectArenaFound.get(),
+                    asyncDirectArenaMissing.get(),
+                    asyncDirectArenaLeaseMisses.get(),
+                    asyncDirectArenaOverflows.get(),
+                    asyncDirectArenaProtocolFailures.get(),
+                    asyncDirectArenaPreparationFallbacks.get(),
+                    nativeRequestPlaneCoordinator == null
+                            ? 0L
+                            : nativeRequestPlaneCoordinator.mapDistinctAsyncReadLeases(),
+                    nativeRequestPlaneCoordinator == null
+                            ? 0L
+                            : nativeRequestPlaneCoordinator.mapDistinctAsyncReadLeaseMisses());
         }
     }
 

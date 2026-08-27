@@ -54,6 +54,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private final NativeRequestPlane plane;
     private final ArrayDeque<BatchSlot> availableSlots;
     private final ArrayDeque<BatchSlot> availableMapDistinctReadSlots;
+    private final ArrayDeque<BatchSlot> availableMapDistinctAsyncReadSlots;
     private final ArrayDeque<BatchSlot> availableCompactionScratchSlots;
     private final BatchSlot mutationSlot;
     private final ResidentKeyHint residentKeyHint;
@@ -69,6 +70,8 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private long leaseMisses;
     private long mapDistinctReadLeases;
     private long mapDistinctReadLeaseMisses;
+    private long mapDistinctAsyncReadLeases;
+    private long mapDistinctAsyncReadLeaseMisses;
     private long compactionScratchLeases;
     private long compactionScratchLeaseMisses;
     private long probeCalls;
@@ -139,6 +142,13 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         if (options.directArenaMultiGetEnabled()) {
             availableMapDistinctReadSlots.addLast(
                     new BatchSlot(this, options, SlotKind.MAP_DISTINCT_READ));
+        }
+        this.availableMapDistinctAsyncReadSlots = new ArrayDeque<>(options.batchSlots());
+        if (options.directArenaMultiGetEnabled()) {
+            for (int i = 0; i < options.batchSlots(); i++) {
+                availableMapDistinctAsyncReadSlots.addLast(
+                        new BatchSlot(this, options, SlotKind.MAP_DISTINCT_ASYNC_READ));
+            }
         }
         this.availableCompactionScratchSlots = new ArrayDeque<>(1);
         if (options.compactionScratchSlotEnabled()) {
@@ -220,6 +230,30 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             }
             slot.markLeased();
             mapDistinctReadLeases++;
+            return slot;
+        }
+    }
+
+    /**
+     * Leases one bounded result arena for an asynchronous exact-DISTINCT read.
+     *
+     * <p>The worker writes the immutable RocksDB result into the slot and the mailbox thread
+     * releases it after deserialization. Keeping this pool separate from the synchronous
+     * exact-DISTINCT slot prevents a future read from forcing the current group onto the heap
+     * fallback path. The pool size follows the already bounded regular batch-slot setting.
+     */
+    public BatchSlot tryAcquireMapDistinctAsyncReadSlot() {
+        synchronized (availableMapDistinctAsyncReadSlots) {
+            if (!active || !options.directArenaMultiGetEnabled()) {
+                return null;
+            }
+            BatchSlot slot = availableMapDistinctAsyncReadSlots.pollFirst();
+            if (slot == null) {
+                mapDistinctAsyncReadLeaseMisses++;
+                return null;
+            }
+            slot.markLeased();
+            mapDistinctAsyncReadLeases++;
             return slot;
         }
     }
@@ -841,6 +875,14 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         return mapDistinctReadLeaseMisses;
     }
 
+    public long mapDistinctAsyncReadLeases() {
+        return mapDistinctAsyncReadLeases;
+    }
+
+    public long mapDistinctAsyncReadLeaseMisses() {
+        return mapDistinctAsyncReadLeaseMisses;
+    }
+
     public long compactionScratchLeases() {
         return compactionScratchLeases;
     }
@@ -929,6 +971,18 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 }
             }
         }
+        int expectedMapDistinctAsyncReadSlots =
+                options.directArenaMultiGetEnabled() ? options.batchSlots() : 0;
+        synchronized (availableMapDistinctAsyncReadSlots) {
+            while (availableMapDistinctAsyncReadSlots.size()
+                    != expectedMapDistinctAsyncReadSlots) {
+                try {
+                    availableMapDistinctAsyncReadSlots.wait();
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        }
         int expectedScratchSlots = options.compactionScratchSlotEnabled() ? 1 : 0;
         synchronized (availableCompactionScratchSlots) {
             while (availableCompactionScratchSlots.size() != expectedScratchSlots) {
@@ -981,7 +1035,9 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                         ? availableCompactionScratchSlots
                         : (slot.kind == SlotKind.MAP_DISTINCT_READ
                                 ? availableMapDistinctReadSlots
-                                : availableSlots);
+                                : (slot.kind == SlotKind.MAP_DISTINCT_ASYNC_READ
+                                        ? availableMapDistinctAsyncReadSlots
+                                        : availableSlots));
         synchronized (pool) {
             slot.leased = false;
             pool.addLast(slot);
@@ -992,6 +1048,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private enum SlotKind {
         REGULAR,
         MAP_DISTINCT_READ,
+        MAP_DISTINCT_ASYNC_READ,
         COMPACTION_SCRATCH,
         MUTATION
     }
@@ -1160,6 +1217,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             this.kind = kind;
             boolean mutationOnly = kind == SlotKind.MUTATION;
             boolean compactionOnly = kind == SlotKind.COMPACTION_SCRATCH;
+            boolean asyncReadOnly = kind == SlotKind.MAP_DISTINCT_ASYNC_READ;
             int entries =
                     mutationOnly
                             ? 1
@@ -1176,27 +1234,30 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                     mutationOnly
                             ? 0
                             : Math.multiplyExact(entries, SerializedKeyBatch.METADATA_RECORD_BYTES);
-            int missArenaBytes = compactionOnly ? 0 : options.batchKeyArenaBytes();
+            int missArenaBytes =
+                    compactionOnly || asyncReadOnly ? 0 : options.batchKeyArenaBytes();
             int missMetadataBytes =
-                    compactionOnly
+                    compactionOnly || asyncReadOnly
                             ? 0
                             : Math.multiplyExact(
                                     entries, SerializedKeyBatch.METADATA_RECORD_BYTES);
             int probeValueBytes =
-                    mutationOnly || compactionOnly ? 0 : options.batchValueArenaBytes();
+                    mutationOnly || compactionOnly || asyncReadOnly
+                            ? 0
+                            : options.batchValueArenaBytes();
             int probeResultBytes =
-                    mutationOnly || compactionOnly
+                    mutationOnly || compactionOnly || asyncReadOnly
                             ? 0
                             : Math.multiplyExact(
                                     entries, NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
             int valueArenaBytes = compactionOnly ? 0 : options.batchValueArenaBytes();
             int valueMetadataBytes =
-                    compactionOnly
+                    compactionOnly || asyncReadOnly
                             ? 0
                             : Math.multiplyExact(
                                     entries, NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES);
             int fillResultBytes =
-                    compactionOnly
+                    compactionOnly || asyncReadOnly
                             ? 0
                             : Math.multiplyExact(
                                     entries, NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES);
@@ -1206,8 +1267,9 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                             : Math.multiplyExact(
                                     RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
                                     RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES);
-            int uniqueIndexBytes = mutationOnly ? 0 : Math.multiplyExact(entries, Integer.BYTES);
-            int groupIndexBytes = compactionOnly ? 0 : uniqueIndexBytes;
+            int uniqueIndexBytes =
+                    mutationOnly || asyncReadOnly ? 0 : Math.multiplyExact(entries, Integer.BYTES);
+            int groupIndexBytes = compactionOnly || asyncReadOnly ? 0 : uniqueIndexBytes;
 
             ByteBuffer preparedArena = ByteBuffer.allocateDirect(preparedArenaBytes);
             ByteBuffer preparedMetadata = ByteBuffer.allocateDirect(preparedMetadataBytes);
@@ -1418,6 +1480,54 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 directMultiGetDescriptors.putInt(
                         base + RocksDBBatchValueReader.DIRECT_ARENA_KEY_LENGTH_OFFSET,
                         preparedKeys.serializedLength(source));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_VALUE_OFFSET,
+                        target * stride);
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET,
+                        Integer.MIN_VALUE);
+            }
+            directMultiGetCount = count;
+            directMultiGetValueStride = stride;
+        }
+
+        /** Builds descriptors for a contiguous prefix without allocating an index vector. */
+        public void prepareContiguousDirectArenaMultiGet(int count, int valueSlotCount) {
+            requireLeased();
+            if (count <= 0
+                    || count > preparedKeys.entryCount()
+                    || count > RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
+                throw new IllegalArgumentException("Invalid contiguous direct-arena MultiGet chunk.");
+            }
+            if (valueSlotCount < count
+                    || valueSlotCount > RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
+                throw new IllegalArgumentException("Invalid direct-arena value-slot count.");
+            }
+            int stride = valueArena.capacity() / valueSlotCount;
+            if (stride <= 0) {
+                throw new IllegalStateException(
+                        "Native batch value arena is too small for direct MultiGet slots.");
+            }
+            directMultiGetDescriptors.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            for (int target = 0; target < count; target++) {
+                int base = target * RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES;
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_STATE_ID_OFFSET,
+                        preparedKeys.stateId(target));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_ORIGINAL_INDEX_OFFSET,
+                        target);
+                directMultiGetDescriptors.putLong(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_GENERATION_OFFSET,
+                        preparedKeys.generation(target));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_KEY_OFFSET,
+                        preparedKeys.arenaOffset(target));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_KEY_LENGTH_OFFSET,
+                        preparedKeys.serializedLength(target));
                 directMultiGetDescriptors.putInt(
                         base + RocksDBBatchValueReader.DIRECT_ARENA_VALUE_OFFSET,
                         target * stride);

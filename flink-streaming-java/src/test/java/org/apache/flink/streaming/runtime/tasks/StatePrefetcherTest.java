@@ -259,6 +259,23 @@ class StatePrefetcherTest {
         verify(grouping).indexedBatchFoldEnabled();
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void testCrossKeyPipelineLookaheadUsesBoundedJobScopedBackendCapability() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(BatchKeyGroupingSupport.class));
+        BatchKeyGroupingSupport grouping = (BatchKeyGroupingSupport) backend;
+
+        org.mockito.Mockito.when(grouping.crossKeyPipelineLookaheadGroups()).thenReturn(4, 99, -1);
+
+        assertEquals(4, StatePrefetcher.crossKeyPipelineLookaheadGroups(backend));
+        assertEquals(8, StatePrefetcher.crossKeyPipelineLookaheadGroups(backend));
+        assertEquals(0, StatePrefetcher.crossKeyPipelineLookaheadGroups(backend));
+        verify(grouping, org.mockito.Mockito.times(3)).crossKeyPipelineLookaheadGroups();
+    }
+
     public interface ImmediatePrefetchHook {
         void prefetchForImmediateUse(Collection<?> keys);
     }

@@ -41,6 +41,7 @@ import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayDeque;
 import java.util.Iterator;
 import java.util.List;
 
@@ -85,6 +86,7 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
     // stores the accumulators
     private transient ValueState<RowData> accState = null;
     private transient TypeSerializer<RowData> accSerializer = null;
+    private transient ArrayDeque<BatchPreparation> batchPreparationPool;
 
     // Owns the exact-DISTINCT MapViews and their optional batch-scoped overlays.
     private transient PerKeyStateDataViewStore dataViewStore = null;
@@ -277,23 +279,31 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
 
         // Reading the next outer key may reuse backend deserialization buffers. Retain a stable
         // accumulator while its immutable RocksDB keys execute off mailbox.
-        RowData stableAccumulators = accSerializer.copy(accumulators);
-        function.setAccumulators(stableAccumulators);
-        Object distinctPrepared = null;
+        BatchPreparation preparation = acquireBatchPreparation();
+        boolean captureStarted = false;
         boolean captureEnded = false;
-        DistinctBatchPrefetchSupport.beginPreparedCapture();
         try {
+            RowData stableAccumulators =
+                    preparation.accumulators == null
+                            ? accSerializer.copy(accumulators)
+                            : accSerializer.copy(accumulators, preparation.accumulators);
+            function.setAccumulators(stableAccumulators);
+            DistinctBatchPrefetchSupport.beginPreparedCapture();
+            captureStarted = true;
             function.prefetchDistinctBatch(
                     inputStart == 0 ? inputRows : inputRows.subList(inputStart, inputRows.size()));
-            distinctPrepared = DistinctBatchPrefetchSupport.endPreparedCapture();
+            Object distinctPrepared = DistinctBatchPrefetchSupport.endPreparedCapture();
             captureEnded = true;
+            preparation.reset(stableAccumulators, firstRow, inputStart, distinctPrepared);
+            return preparation;
         } finally {
             if (!captureEnded) {
-                DistinctBatchPrefetchSupport.abortPreparedCapture();
+                if (captureStarted) {
+                    DistinctBatchPrefetchSupport.abortPreparedCapture();
+                }
+                releaseBatchPreparation(preparation);
             }
         }
-        return new BatchPreparation(
-                stableAccumulators, firstRow, inputStart, false, distinctPrepared);
     }
 
     @Override
@@ -308,15 +318,48 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
         if (preparation.skip) {
             return;
         }
-        processBatchFromPreparation((RowData) currentKey, inputRows, preparation, out);
+        try {
+            processBatchFromPreparation((RowData) currentKey, inputRows, preparation, out);
+        } finally {
+            releaseBatchPreparation(preparation);
+        }
     }
 
     @Override
     public void abortPreparedBatch(Object prepared) {
         if (prepared instanceof BatchPreparation) {
-            DistinctBatchPrefetchSupport.abortPreparedCapture(
-                    ((BatchPreparation) prepared).distinctPrepared);
+            BatchPreparation preparation = (BatchPreparation) prepared;
+            if (preparation.leased) {
+                DistinctBatchPrefetchSupport.abortPreparedCapture(preparation.distinctPrepared);
+                releaseBatchPreparation(preparation);
+            }
         }
+    }
+
+    private BatchPreparation acquireBatchPreparation() {
+        if (batchPreparationPool == null) {
+            batchPreparationPool = new ArrayDeque<>();
+        }
+        BatchPreparation preparation = batchPreparationPool.pollFirst();
+        if (preparation == null) {
+            preparation = new BatchPreparation();
+        }
+        if (preparation.leased) {
+            throw new IllegalStateException("Batch preparation slot is already leased");
+        }
+        preparation.leased = true;
+        return preparation;
+    }
+
+    private void releaseBatchPreparation(BatchPreparation preparation) {
+        if (preparation == null || preparation.skip || !preparation.leased) {
+            return;
+        }
+        preparation.firstRow = false;
+        preparation.inputStart = 0;
+        preparation.distinctPrepared = null;
+        preparation.leased = false;
+        batchPreparationPool.addLast(preparation);
     }
 
     private void processBatchFromPreparation(
@@ -391,14 +434,22 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
     }
 
     private static final class BatchPreparation {
-        private static final BatchPreparation SKIP =
-                new BatchPreparation(null, false, 0, true, null);
+        private static final BatchPreparation SKIP = new BatchPreparation(true);
 
-        private final RowData accumulators;
-        private final boolean firstRow;
-        private final int inputStart;
+        private RowData accumulators;
+        private boolean firstRow;
+        private int inputStart;
         private final boolean skip;
-        private final Object distinctPrepared;
+        private Object distinctPrepared;
+        private boolean leased;
+
+        private BatchPreparation() {
+            this(false);
+        }
+
+        private BatchPreparation(boolean skip) {
+            this.skip = skip;
+        }
 
         private BatchPreparation(
                 RowData accumulators,
@@ -410,6 +461,17 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
             this.firstRow = firstRow;
             this.inputStart = inputStart;
             this.skip = skip;
+            this.distinctPrepared = distinctPrepared;
+        }
+
+        private void reset(
+                RowData accumulators, boolean firstRow, int inputStart, Object distinctPrepared) {
+            if (!leased || skip) {
+                throw new IllegalStateException("Batch preparation slot is not leased");
+            }
+            this.accumulators = accumulators;
+            this.firstRow = firstRow;
+            this.inputStart = inputStart;
             this.distinctPrepared = distinctPrepared;
         }
     }

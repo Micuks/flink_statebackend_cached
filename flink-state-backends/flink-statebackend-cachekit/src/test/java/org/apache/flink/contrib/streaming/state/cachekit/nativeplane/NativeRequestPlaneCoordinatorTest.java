@@ -217,6 +217,39 @@ class NativeRequestPlaneCoordinatorTest {
     }
 
     @Test
+    void testMapDistinctAsyncReadSlotIsIndependentBoundedAndReusable() {
+        FakePlane plane = new FakePlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(1), plane);
+
+        NativeRequestPlaneCoordinator.BatchSlot regular = coordinator.tryAcquireBatchSlot();
+        NativeRequestPlaneCoordinator.BatchSlot mailboxDistinct =
+                coordinator.tryAcquireMapDistinctReadSlot();
+        assertNotNull(regular);
+        assertNotNull(mailboxDistinct);
+
+        NativeRequestPlaneCoordinator.BatchSlot asyncDistinct =
+                coordinator.tryAcquireMapDistinctAsyncReadSlot();
+        assertNotNull(asyncDistinct);
+        assertNull(coordinator.tryAcquireMapDistinctAsyncReadSlot());
+        assertEquals(1, coordinator.mapDistinctAsyncReadLeases());
+        assertEquals(1, coordinator.mapDistinctAsyncReadLeaseMisses());
+
+        asyncDistinct.close();
+        asyncDistinct.close();
+        NativeRequestPlaneCoordinator.BatchSlot reusedAsyncDistinct =
+                coordinator.tryAcquireMapDistinctAsyncReadSlot();
+        assertNotNull(reusedAsyncDistinct);
+        assertEquals(2, coordinator.mapDistinctAsyncReadLeases());
+        reusedAsyncDistinct.close();
+
+        mailboxDistinct.close();
+        regular.close();
+        coordinator.close();
+        assertEquals(1, plane.closeCalls);
+    }
+
+    @Test
     void testCompactionScratchSlotIsIndependentBoundedAndLightweight() throws Exception {
         FakePlane plane = new FakePlane();
         plane.compactIndexes = new int[] {0, 2};

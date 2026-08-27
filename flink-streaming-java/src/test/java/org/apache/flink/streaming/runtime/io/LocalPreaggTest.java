@@ -159,6 +159,131 @@ class LocalPreaggTest {
     }
 
     @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testMaterializedPipelineLookaheadFourKeepsFiveGroupsPrepared() throws Exception {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "c", "d", "e", "f"),
+                        Arrays.asList(1, 2, 3, 4, 5, 6),
+                        null);
+        RecordingPipeline pipeline = new RecordingPipeline(null, null);
+
+        LocalPreagg.dispatchMaterializedPipeline(
+                mock(AbstractStreamOperator.class),
+                pipeline,
+                groups,
+                mock(TimestampedCollector.class),
+                4);
+
+        assertEquals(
+                Arrays.asList(
+                        "prepare:a",
+                        "prepare:b",
+                        "prepare:c",
+                        "prepare:d",
+                        "prepare:e",
+                        "process:a:token-a",
+                        "prepare:f",
+                        "process:b:token-b",
+                        "process:c:token-c",
+                        "process:d:token-d",
+                        "process:e:token-e",
+                        "process:f:token-f"),
+                pipeline.events);
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testMaterializedPipelineLookaheadFourHandlesFewerGroupsThanWindow() throws Exception {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(Arrays.asList("a", "b"), Arrays.asList(1, 2), null);
+        RecordingPipeline pipeline = new RecordingPipeline(null, null);
+
+        LocalPreagg.dispatchMaterializedPipeline(
+                mock(AbstractStreamOperator.class),
+                pipeline,
+                groups,
+                mock(TimestampedCollector.class),
+                4);
+
+        assertEquals(
+                Arrays.asList("prepare:a", "prepare:b", "process:a:token-a", "process:b:token-b"),
+                pipeline.events);
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testMaterializedPipelineLookaheadFourAbortsOutstandingGroupsOnTailPrepareFailure() {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "c", "d", "e", "f"),
+                        Arrays.asList(1, 2, 3, 4, 5, 6),
+                        null);
+        RecordingPipeline pipeline = new RecordingPipeline("f", null);
+
+        assertThrows(
+                IllegalStateException.class,
+                () ->
+                        LocalPreagg.dispatchMaterializedPipeline(
+                                mock(AbstractStreamOperator.class),
+                                pipeline,
+                                groups,
+                                mock(TimestampedCollector.class),
+                                4));
+
+        assertEquals(
+                Arrays.asList(
+                        "prepare:a",
+                        "prepare:b",
+                        "prepare:c",
+                        "prepare:d",
+                        "prepare:e",
+                        "process:a:token-a",
+                        "prepare:f",
+                        "abort:token-b",
+                        "abort:token-c",
+                        "abort:token-d",
+                        "abort:token-e"),
+                pipeline.events);
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testMaterializedPipelineLookaheadFourAbortsWholeWindowOnProcessFailure() {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "c", "d", "e", "f"),
+                        Arrays.asList(1, 2, 3, 4, 5, 6),
+                        null);
+        RecordingPipeline pipeline = new RecordingPipeline(null, "a");
+
+        assertThrows(
+                IllegalStateException.class,
+                () ->
+                        LocalPreagg.dispatchMaterializedPipeline(
+                                mock(AbstractStreamOperator.class),
+                                pipeline,
+                                groups,
+                                mock(TimestampedCollector.class),
+                                4));
+
+        assertEquals(
+                Arrays.asList(
+                        "prepare:a",
+                        "prepare:b",
+                        "prepare:c",
+                        "prepare:d",
+                        "prepare:e",
+                        "process:a:token-a",
+                        "abort:token-a",
+                        "abort:token-b",
+                        "abort:token-c",
+                        "abort:token-d",
+                        "abort:token-e"),
+                pipeline.events);
+    }
+
+    @Test
     void testDetectsDirectBatchableOperator() {
         assertTrue(LocalPreagg.hasBatchableTarget(new BatchableInputOperator()));
         assertFalse(LocalPreagg.hasBatchableTarget(mock(Input.class)));
@@ -508,6 +633,47 @@ class LocalPreaggTest {
         @Override
         public boolean equals(Object other) {
             return other instanceof CollisionKey && value.equals(((CollisionKey) other).value);
+        }
+    }
+
+    private static final class RecordingPipeline
+            implements PipelinedBatchableKeyedFunction<Object, Object> {
+        private final Object failPrepareKey;
+        private final Object failProcessKey;
+        private final List<String> events = new ArrayList<>();
+
+        private RecordingPipeline(Object failPrepareKey, Object failProcessKey) {
+            this.failPrepareKey = failPrepareKey;
+            this.failProcessKey = failProcessKey;
+        }
+
+        @Override
+        public Object prepareBatchForKey(Object key, List<Object> inputs) {
+            events.add("prepare:" + key);
+            if (key.equals(failPrepareKey)) {
+                throw new IllegalStateException("expected prepare failure");
+            }
+            return "token-" + key;
+        }
+
+        @Override
+        public void processPreparedBatchForKey(
+                Object key, List<Object> inputs, Object prepared, Collector<Object> out) {
+            events.add("process:" + key + ":" + prepared);
+            if (key.equals(failProcessKey)) {
+                throw new IllegalStateException("expected process failure");
+            }
+        }
+
+        @Override
+        public void abortPreparedBatch(Object prepared) {
+            events.add("abort:" + prepared);
+        }
+
+        @Override
+        public void processBatchForKey(
+                Object currentKey, List<Object> inputs, Collector<Object> out) {
+            throw new AssertionError("pipeline must use prepared dispatch");
         }
     }
 

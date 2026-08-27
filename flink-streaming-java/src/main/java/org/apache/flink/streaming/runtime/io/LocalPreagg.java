@@ -73,23 +73,12 @@ public final class LocalPreagg {
     private static final boolean NATIVE_EXTRACTION_REUSE_ENABLED =
             GlobalConfiguration.loadConfiguration()
                     .getBoolean("state.backend.cachekit.native.local-preagg.enabled", false);
-    private static final boolean CROSS_KEY_PIPELINE_ENABLED =
-            GlobalConfiguration.loadConfiguration()
-                            .getBoolean(
-                                    "state.backend.cachekit.native.map-distinct-batch-prefetch.cross-key-pipeline.enabled",
-                                    false)
-                    && GlobalConfiguration.loadConfiguration()
-                            .getBoolean(
-                                    "state.backend.cachekit.native.map-distinct-batch-prefetch.enabled",
-                                    false)
-                    && GlobalConfiguration.loadConfiguration()
-                            .getBoolean(
-                                    "state.backend.cachekit.local-preagg.distinct-overlay.enabled",
-                                    false);
     private static final ThreadLocal<ExtractionBuffers> NATIVE_EXTRACTION_BUFFERS =
             ThreadLocal.withInitial(ExtractionBuffers::new);
     private static final ThreadLocal<NativeGroupingWorkspace> NATIVE_GROUPING_WORKSPACE =
             ThreadLocal.withInitial(NativeGroupingWorkspace::new);
+    private static final ThreadLocal<PreparedWindowWorkspace> PREPARED_WINDOW_WORKSPACE =
+            ThreadLocal.withInitial(PreparedWindowWorkspace::new);
 
     private static final ConcurrentHashMap<Class<?>, Field> KEY_SELECTOR_FIELD_CACHE =
             new ConcurrentHashMap<>();
@@ -106,6 +95,16 @@ public final class LocalPreagg {
     private static final AtomicLong INDEXED_FOLD_RECORDS = new AtomicLong();
     private static final AtomicLong INDEXED_FOLD_GROUPS = new AtomicLong();
     private static final AtomicLong INDEXED_FOLD_PLAN_FALLBACKS = new AtomicLong();
+    private static final AtomicLong PIPELINE_WINDOWS = new AtomicLong();
+    private static final AtomicLong PIPELINE_GROUPS = new AtomicLong();
+    private static final AtomicLong PIPELINE_PREPARED_GROUPS = new AtomicLong();
+    private static final AtomicLong PIPELINE_PREPARED_AHEAD_GROUPS = new AtomicLong();
+    private static final AtomicLong PIPELINE_CONSUMED_GROUPS = new AtomicLong();
+    private static final AtomicLong PIPELINE_CANCELLED_GROUPS = new AtomicLong();
+    private static final AtomicLong PIPELINE_PROCESS_WITH_FUTURE_IN_FLIGHT = new AtomicLong();
+    private static final AtomicLong PIPELINE_EXCEPTION_ABORTS = new AtomicLong();
+    private static final AtomicLong PIPELINE_PEAK_PREPARED_AHEAD = new AtomicLong();
+    private static final AtomicLong PIPELINE_MAX_CONFIGURED_LOOKAHEAD = new AtomicLong();
     // RuntimeMXBean reports the PID inside the container PID namespace.  The 2x4 benchmark
     // topology launches four TaskManager JVMs in each container, and every nested JVM therefore
     // reports the same value (for example, "1@taskmanager1").  Append a process-lifetime nonce so
@@ -304,10 +303,14 @@ public final class LocalPreagg {
             } else {
                 collector.eraseTimestamp();
             }
-            if (CROSS_KEY_PIPELINE_ENABLED
-                    && batchable instanceof PipelinedBatchableKeyedFunction) {
+            int pipelineLookahead = StatePrefetcher.crossKeyPipelineLookaheadGroups(headOperator);
+            if (pipelineLookahead > 0 && batchable instanceof PipelinedBatchableKeyedFunction) {
                 dispatchMaterializedPipeline(
-                        op, (PipelinedBatchableKeyedFunction) batchable, groups, collector);
+                        op,
+                        (PipelinedBatchableKeyedFunction) batchable,
+                        groups,
+                        collector,
+                        pipelineLookahead);
             } else {
                 for (int group = 0; group < groups.keys.size(); group++) {
                     Object key = groups.keys.get(group);
@@ -405,15 +408,16 @@ public final class LocalPreagg {
             }
 
             IndexedRecordValueList values = workspace.indexedValues;
-            if (CROSS_KEY_PIPELINE_ENABLED
-                    && batchable instanceof PipelinedBatchableKeyedFunction) {
+            int pipelineLookahead = StatePrefetcher.crossKeyPipelineLookaheadGroups(headOperator);
+            if (pipelineLookahead > 0 && batchable instanceof PipelinedBatchableKeyedFunction) {
                 dispatchIndexedPipeline(
                         op,
                         (PipelinedBatchableKeyedFunction) batchable,
                         groups,
                         values,
                         buf,
-                        collector);
+                        collector,
+                        pipelineLookahead);
             } else {
                 for (int group = 0; group < groups.groupCount; group++) {
                     Object key = groups.groupKeys[group];
@@ -440,7 +444,7 @@ public final class LocalPreagg {
                 double collapse = groupTotal == 0 ? 0 : (double) records / groupTotal;
                 System.err.println(
                         String.format(
-                                "[LOCAL-PREAGG INDEXED] jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx planFallbacks=%d materializedValueCopiesAvoided=%d allDispatches=%d allRecords=%d allGroups=%d",
+                                "[LOCAL-PREAGG INDEXED] jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx planFallbacks=%d materializedValueCopiesAvoided=%d allDispatches=%d allRecords=%d allGroups=%d pipelineLookahead=%d pipelineWindows=%d pipelineGroups=%d pipelinePreparedGroups=%d pipelinePreparedAheadGroups=%d pipelineConsumedGroups=%d pipelineCancelledGroups=%d pipelineProcessWithFutureInFlight=%d pipelinePeakPreparedAhead=%d pipelineExceptionAborts=%d",
                                 JVM_ID,
                                 op.getClass().getSimpleName(),
                                 dispatches,
@@ -451,7 +455,17 @@ public final class LocalPreagg {
                                 records,
                                 allDispatches,
                                 allRecords,
-                                allGroups));
+                                allGroups,
+                                PIPELINE_MAX_CONFIGURED_LOOKAHEAD.get(),
+                                PIPELINE_WINDOWS.get(),
+                                PIPELINE_GROUPS.get(),
+                                PIPELINE_PREPARED_GROUPS.get(),
+                                PIPELINE_PREPARED_AHEAD_GROUPS.get(),
+                                PIPELINE_CONSUMED_GROUPS.get(),
+                                PIPELINE_CANCELLED_GROUPS.get(),
+                                PIPELINE_PROCESS_WITH_FUTURE_IN_FLIGHT.get(),
+                                PIPELINE_PEAK_PREPARED_AHEAD.get(),
+                                PIPELINE_EXCEPTION_ABORTS.get()));
             }
             return true;
         } finally {
@@ -469,34 +483,32 @@ public final class LocalPreagg {
             GroupedInputs groups,
             TimestampedCollector collector)
             throws Exception {
-        Object currentPrepared = null;
-        Object nextPrepared = null;
-        try {
-            op.setCurrentKey(groups.keys.get(0));
-            currentPrepared =
-                    pipelined.prepareBatchForKey(groups.keys.get(0), groups.values.get(0));
-            for (int group = 0; group < groups.keys.size(); group++) {
-                if (group + 1 < groups.keys.size()) {
-                    op.setCurrentKey(groups.keys.get(group + 1));
-                    nextPrepared =
-                            pipelined.prepareBatchForKey(
-                                    groups.keys.get(group + 1), groups.values.get(group + 1));
-                }
-                Object key = groups.keys.get(group);
-                op.setCurrentKey(key);
-                pipelined.processPreparedBatchForKey(
-                        key, groups.values.get(group), currentPrepared, collector);
-                currentPrepared = nextPrepared;
-                nextPrepared = null;
-            }
-        } finally {
-            if (currentPrepared != null) {
-                pipelined.abortPreparedBatch(currentPrepared);
-            }
-            if (nextPrepared != null) {
-                pipelined.abortPreparedBatch(nextPrepared);
-            }
-        }
+        dispatchMaterializedPipeline(op, pipelined, groups, collector, 1);
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    static void dispatchMaterializedPipeline(
+            AbstractStreamOperator<?> op,
+            PipelinedBatchableKeyedFunction pipelined,
+            GroupedInputs groups,
+            TimestampedCollector collector,
+            int lookaheadGroups)
+            throws Exception {
+        runPreparedWindow(
+                pipelined,
+                groups.keys.size(),
+                lookaheadGroups,
+                group -> {
+                    Object key = groups.keys.get(group);
+                    op.setCurrentKey(key);
+                    return pipelined.prepareBatchForKey(key, groups.values.get(group));
+                },
+                (group, prepared) -> {
+                    Object key = groups.keys.get(group);
+                    op.setCurrentKey(key);
+                    pipelined.processPreparedBatchForKey(
+                            key, groups.values.get(group), prepared, collector);
+                });
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})
@@ -506,34 +518,165 @@ public final class LocalPreagg {
             IndexedGroups groups,
             IndexedRecordValueList values,
             StreamRecord<?>[] buf,
-            TimestampedCollector collector)
+            TimestampedCollector collector,
+            int lookaheadGroups)
             throws Exception {
-        Object currentPrepared = null;
-        Object nextPrepared = null;
+        runPreparedWindow(
+                pipelined,
+                groups.groupCount,
+                lookaheadGroups,
+                group -> {
+                    resetIndexedValues(values, buf, groups, group);
+                    Object key = groups.groupKeys[group];
+                    op.setCurrentKey(key);
+                    return pipelined.prepareBatchForKey(key, values);
+                },
+                (group, prepared) -> {
+                    resetIndexedValues(values, buf, groups, group);
+                    Object key = groups.groupKeys[group];
+                    op.setCurrentKey(key);
+                    pipelined.processPreparedBatchForKey(key, values, prepared, collector);
+                });
+    }
+
+    @SuppressWarnings("rawtypes")
+    private static void runPreparedWindow(
+            PipelinedBatchableKeyedFunction pipelined,
+            int groupCount,
+            int requestedLookahead,
+            GroupPreparer preparer,
+            GroupConsumer consumer)
+            throws Exception {
+        if (groupCount <= 0) {
+            return;
+        }
+        int lookahead = Math.max(1, Math.min(8, requestedLookahead));
+        int capacity = Math.min(groupCount, lookahead + 1);
+        PreparedWindowWorkspace workspace = PREPARED_WINDOW_WORKSPACE.get();
+        workspace.prepare(capacity);
+        Object[] prepared = workspace.prepared;
+        boolean[] occupied = workspace.occupied;
+        PIPELINE_WINDOWS.incrementAndGet();
+        PIPELINE_GROUPS.addAndGet(groupCount);
+        PIPELINE_MAX_CONFIGURED_LOOKAHEAD.accumulateAndGet(lookahead, Math::max);
+        boolean failed = false;
         try {
-            resetIndexedValues(values, buf, groups, 0);
-            op.setCurrentKey(groups.groupKeys[0]);
-            currentPrepared = pipelined.prepareBatchForKey(groups.groupKeys[0], values);
-            for (int group = 0; group < groups.groupCount; group++) {
-                if (group + 1 < groups.groupCount) {
-                    resetIndexedValues(values, buf, groups, group + 1);
-                    op.setCurrentKey(groups.groupKeys[group + 1]);
-                    nextPrepared =
-                            pipelined.prepareBatchForKey(groups.groupKeys[group + 1], values);
+            for (int group = 0; group < capacity; group++) {
+                prepareWindowGroup(preparer, prepared, occupied, capacity, group, group > 0);
+            }
+            for (int group = 0; group < groupCount; group++) {
+                int slot = group % capacity;
+                int futurePrepared = countOccupied(occupied) - 1;
+                if (futurePrepared > 0) {
+                    PIPELINE_PROCESS_WITH_FUTURE_IN_FLIGHT.incrementAndGet();
                 }
-                resetIndexedValues(values, buf, groups, group);
-                Object key = groups.groupKeys[group];
-                op.setCurrentKey(key);
-                pipelined.processPreparedBatchForKey(key, values, currentPrepared, collector);
-                currentPrepared = nextPrepared;
-                nextPrepared = null;
+                consumer.process(group, prepared[slot]);
+                prepared[slot] = null;
+                occupied[slot] = false;
+                PIPELINE_CONSUMED_GROUPS.incrementAndGet();
+
+                int tail = group + capacity;
+                if (tail < groupCount) {
+                    prepareWindowGroup(preparer, prepared, occupied, capacity, tail, true);
+                }
             }
+        } catch (Exception | Error failure) {
+            failed = true;
+            PIPELINE_EXCEPTION_ABORTS.incrementAndGet();
+            throw failure;
         } finally {
-            if (currentPrepared != null) {
-                pipelined.abortPreparedBatch(currentPrepared);
+            Throwable abortFailure = null;
+            try {
+                for (int slot = 0; slot < capacity; slot++) {
+                    if (occupied[slot]) {
+                        try {
+                            pipelined.abortPreparedBatch(prepared[slot]);
+                        } catch (Throwable currentAbortFailure) {
+                            if (!failed) {
+                                if (abortFailure == null) {
+                                    abortFailure = currentAbortFailure;
+                                } else {
+                                    abortFailure.addSuppressed(currentAbortFailure);
+                                }
+                            }
+                        } finally {
+                            prepared[slot] = null;
+                            occupied[slot] = false;
+                            PIPELINE_CANCELLED_GROUPS.incrementAndGet();
+                        }
+                    }
+                }
+            } finally {
+                workspace.clear(capacity);
             }
-            if (nextPrepared != null) {
-                pipelined.abortPreparedBatch(nextPrepared);
+            if (abortFailure instanceof Error) {
+                throw (Error) abortFailure;
+            }
+            if (abortFailure instanceof Exception) {
+                throw (Exception) abortFailure;
+            }
+            if (abortFailure != null) {
+                throw new RuntimeException(abortFailure);
+            }
+        }
+    }
+
+    private static void prepareWindowGroup(
+            GroupPreparer preparer,
+            Object[] prepared,
+            boolean[] occupied,
+            int capacity,
+            int group,
+            boolean ahead)
+            throws Exception {
+        int slot = group % capacity;
+        if (occupied[slot]) {
+            throw new IllegalStateException("Cross-key pipeline ring slot is still occupied");
+        }
+        prepared[slot] = preparer.prepare(group);
+        occupied[slot] = true;
+        PIPELINE_PREPARED_GROUPS.incrementAndGet();
+        if (ahead) {
+            PIPELINE_PREPARED_AHEAD_GROUPS.incrementAndGet();
+        }
+        PIPELINE_PEAK_PREPARED_AHEAD.accumulateAndGet(capacity - 1, Math::max);
+    }
+
+    private static int countOccupied(boolean[] occupied) {
+        int count = 0;
+        for (boolean present : occupied) {
+            if (present) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    @FunctionalInterface
+    private interface GroupPreparer {
+        Object prepare(int group) throws Exception;
+    }
+
+    @FunctionalInterface
+    private interface GroupConsumer {
+        void process(int group, Object prepared) throws Exception;
+    }
+
+    private static final class PreparedWindowWorkspace {
+        private Object[] prepared = new Object[2];
+        private boolean[] occupied = new boolean[2];
+
+        private void prepare(int requiredCapacity) {
+            if (prepared.length < requiredCapacity) {
+                prepared = new Object[requiredCapacity];
+                occupied = new boolean[requiredCapacity];
+            }
+        }
+
+        private void clear(int capacity) {
+            for (int index = 0; index < capacity; index++) {
+                prepared[index] = null;
+                occupied[index] = false;
             }
         }
     }
