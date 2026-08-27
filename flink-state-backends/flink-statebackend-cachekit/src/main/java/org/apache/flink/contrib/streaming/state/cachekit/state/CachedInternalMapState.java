@@ -134,6 +134,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private boolean nativeDistinctBatchPrefetchEnabled;
     private boolean nativeDistinctBatchDirectArenaEnabled;
     private boolean nativeDistinctBatchDirectArenaDisabled;
+    private int nativeDistinctBatchAsyncMinUniqueKeys = 2;
     private boolean batchPrefetchActive;
     private K batchPrefetchOuterKey;
     private N batchPrefetchNamespace;
@@ -178,6 +179,16 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchReadyBeforeAwait =
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchWaitNanos =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredSyncBatchPrefetchBatches =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredSyncBatchPrefetchKeys =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredSyncBatchPrefetchCompleted =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredSyncBatchPrefetchFallbacks =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredSyncBatchPrefetchContextMismatches =
             new java.util.concurrent.atomic.AtomicLong();
 
     // --- MapSnapshot cache (entries() fast path) ---
@@ -580,8 +591,15 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     /** Enables the exact-DISTINCT path and its independently gated direct-arena value transport. */
     public void enableNativeDistinctBatchPrefetch(boolean enabled, boolean directArenaEnabled) {
+        enableNativeDistinctBatchPrefetch(enabled, directArenaEnabled, 2);
+    }
+
+    /** Enables async preparation only above a separately tunable exact-key threshold. */
+    public void enableNativeDistinctBatchPrefetch(
+            boolean enabled, boolean directArenaEnabled, int asyncMinUniqueKeys) {
         this.nativeDistinctBatchPrefetchEnabled = enabled;
         this.nativeDistinctBatchDirectArenaEnabled = enabled && directArenaEnabled;
+        this.nativeDistinctBatchAsyncMinUniqueKeys = Math.max(2, asyncMinUniqueKeys);
     }
 
     @Override
@@ -674,6 +692,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
         // RocksDB keys while this outer key/namespace is current; the worker never reads mutable
         // Flink key context or serializers.
         List<UK> orderedKeys = (List<UK>) (List<?>) uniqueUserKeys;
+        if (nativeDistinctBatchDirectArenaEnabled
+                && orderedKeys.size() < nativeDistinctBatchAsyncMinUniqueKeys) {
+            deferredSyncBatchPrefetchBatches.incrementAndGet();
+            deferredSyncBatchPrefetchKeys.addAndGet(orderedKeys.size());
+            return new DeferredDirectMapValues(
+                    currentKey, namespace, new ArrayList<>(orderedKeys));
+        }
         flushCurrentKey(currentKey);
         ensureDelegateNamespace(currentKey);
         List<byte[]> rocksDBKeys =
@@ -804,6 +829,58 @@ public final class CachedInternalMapState<K, N, UK, UV>
         @Override
         public void cancel() {
             PrefetchExecutor.cancelIfQueued(this);
+        }
+    }
+
+    /**
+     * Keeps small exact-key batches on the mailbox-owned direct-arena path.
+     *
+     * <p>The key list was already copied and de-duplicated by the generated DISTINCT view. The
+     * token therefore retains it without another scan and performs no work until LocalPreagg
+     * installs the same outer key for consumption. The normal synchronous routine may fall back
+     * from direct-arena transport to its heap MultiGet before returning {@code null}; either way,
+     * the existing caller falls back to authoritative state reads if no complete vector is
+     * produced.
+     */
+    private final class DeferredDirectMapValues implements PreparedValues {
+
+        private final K preparedOuterKey;
+        private final N preparedNamespace;
+        private final List<UK> orderedKeys;
+        private boolean consumed;
+
+        private DeferredDirectMapValues(
+                K preparedOuterKey, N preparedNamespace, List<UK> orderedKeys) {
+            this.preparedOuterKey = preparedOuterKey;
+            this.preparedNamespace = preparedNamespace;
+            this.orderedKeys = orderedKeys;
+        }
+
+        @Override
+        public List<?> awaitValues() throws Exception {
+            if (consumed) {
+                return null;
+            }
+            consumed = true;
+            if (closed
+                    || !Objects.equals(preparedOuterKey, currentKeyProvider.getCurrentKey())
+                    || !Objects.equals(preparedNamespace, currentNamespace)) {
+                deferredSyncBatchPrefetchFallbacks.incrementAndGet();
+                deferredSyncBatchPrefetchContextMismatches.incrementAndGet();
+                return null;
+            }
+            List<UV> values = prefetchCurrentUniqueKeyValues(orderedKeys);
+            if (values == null || values.size() != orderedKeys.size()) {
+                deferredSyncBatchPrefetchFallbacks.incrementAndGet();
+                return null;
+            }
+            deferredSyncBatchPrefetchCompleted.incrementAndGet();
+            return values;
+        }
+
+        @Override
+        public void cancel() {
+            consumed = true;
         }
     }
 
@@ -2369,7 +2446,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
             LOG.info(
                     "[CACHEKIT NATIVE MAP DISTINCT ASYNC] attempts={} submitted={} completed={} "
                             + "dropped={} failures={} keys={} awaits={} readyBeforeAwait={} "
-                            + "waitNanos={}",
+                            + "waitNanos={} asyncMinUniqueKeys={} deferredSyncBatches={} "
+                            + "deferredSyncKeys={} deferredSyncCompleted={} "
+                            + "deferredSyncFallbacks={} deferredSyncContextMismatches={}",
                     asyncBatchPrefetchAttempts.get(),
                     asyncBatchPrefetchSubmitted.get(),
                     asyncBatchPrefetchCompleted.get(),
@@ -2378,7 +2457,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     asyncBatchPrefetchKeys.get(),
                     asyncBatchPrefetchAwaits.get(),
                     asyncBatchPrefetchReadyBeforeAwait.get(),
-                    asyncBatchPrefetchWaitNanos.get());
+                    asyncBatchPrefetchWaitNanos.get(),
+                    nativeDistinctBatchAsyncMinUniqueKeys,
+                    deferredSyncBatchPrefetchBatches.get(),
+                    deferredSyncBatchPrefetchKeys.get(),
+                    deferredSyncBatchPrefetchCompleted.get(),
+                    deferredSyncBatchPrefetchFallbacks.get(),
+                    deferredSyncBatchPrefetchContextMismatches.get());
         }
     }
 
@@ -2468,6 +2553,26 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     long getBatchPrefetchDirectArenaFallbacksForTesting() {
         return batchPrefetchDirectArenaFallbacks;
+    }
+
+    long getDeferredSyncBatchPrefetchBatchesForTesting() {
+        return deferredSyncBatchPrefetchBatches.get();
+    }
+
+    long getDeferredSyncBatchPrefetchCompletedForTesting() {
+        return deferredSyncBatchPrefetchCompleted.get();
+    }
+
+    long getDeferredSyncBatchPrefetchFallbacksForTesting() {
+        return deferredSyncBatchPrefetchFallbacks.get();
+    }
+
+    long getDeferredSyncBatchPrefetchContextMismatchesForTesting() {
+        return deferredSyncBatchPrefetchContextMismatches.get();
+    }
+
+    long getAsyncBatchPrefetchSubmittedForTesting() {
+        return asyncBatchPrefetchSubmitted.get();
     }
 
     private static final class PrefetchedMapValue<V> {

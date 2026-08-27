@@ -90,6 +90,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final boolean nativePrefetchAccessGuidedStateEnabled;
     private final boolean nativeMapDistinctBatchPrefetchEnabled;
     private final boolean nativeMapDistinctBatchPrefetchDirectArenaEnabled;
+    private final int nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -200,7 +201,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 false,
                 false,
                 false,
-                false);
+                false,
+                8);
     }
 
     public CacheKitStateBackend(
@@ -260,7 +262,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 false,
                 false,
                 false,
-                false);
+                false,
+                8);
     }
 
     public CacheKitStateBackend(
@@ -293,7 +296,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
             boolean keyScopedPrefetchInvalidationEnabled,
             boolean nativePrefetchAccessGuidedStateEnabled,
             boolean nativeMapDistinctBatchPrefetchEnabled,
-            boolean nativeMapDistinctBatchPrefetchDirectArenaEnabled) {
+            boolean nativeMapDistinctBatchPrefetchDirectArenaEnabled,
+            int nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -327,6 +331,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.nativeMapDistinctBatchPrefetchEnabled = nativeMapDistinctBatchPrefetchEnabled;
         this.nativeMapDistinctBatchPrefetchDirectArenaEnabled =
                 nativeMapDistinctBatchPrefetchDirectArenaEnabled;
+        this.nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys =
+                Math.max(2, nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys);
     }
 
     boolean keyScopedPrefetchInvalidationEnabledForTesting() {
@@ -343,6 +349,10 @@ public class CacheKitStateBackend extends AbstractStateBackend
 
     boolean nativeMapDistinctBatchPrefetchDirectArenaEnabledForTesting() {
         return nativeMapDistinctBatchPrefetchDirectArenaEnabled;
+    }
+
+    int nativeMapDistinctBatchPrefetchAsyncMinUniqueKeysForTesting() {
+        return effectiveNativeMapDistinctBatchPrefetchAsyncMinUniqueKeys();
     }
 
     @Override
@@ -437,7 +447,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
                     keyScopedPrefetchInvalidationEnabled,
                     nativePrefetchAccessGuidedStateEnabled,
                     nativeMapDistinctBatchPrefetchEnabled,
-                    nativeMapDistinctBatchPrefetchDirectArenaEnabled);
+                    nativeMapDistinctBatchPrefetchDirectArenaEnabled,
+                    effectiveNativeMapDistinctBatchPrefetchAsyncMinUniqueKeys());
         } catch (RuntimeException | LinkageError failure) {
             disposeAfterInitializationFailure(delegated, failure);
             throw new IOException(
@@ -563,6 +574,12 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 config.get(
                         CacheKitStateBackendFactory
                                 .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED);
+        final int nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys =
+                Math.max(
+                        2,
+                        config.get(
+                                CacheKitStateBackendFactory
+                                        .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ASYNC_MIN_UNIQUE_KEYS));
 
         return new CacheKitStateBackend(
                 configuredDelegate,
@@ -594,7 +611,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 keyScopedPrefetchInvalidationEnabled,
                 nativePrefetchAccessGuidedStateEnabled,
                 nativeMapDistinctBatchPrefetchEnabled,
-                nativeMapDistinctBatchPrefetchDirectArenaEnabled);
+                nativeMapDistinctBatchPrefetchDirectArenaEnabled,
+                nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys);
     }
 
     private NativeRequestPlaneOptions effectiveNativeRequestPlaneOptions() {
@@ -602,6 +620,18 @@ public class CacheKitStateBackend extends AbstractStateBackend
         // serialVersionUID compatibility by treating a deserialized null as the historical
         // disabled behavior.
         return normalizeNativeRequestPlaneOptions(nativeRequestPlaneOptions);
+    }
+
+    private int effectiveNativeMapDistinctBatchPrefetchAsyncMinUniqueKeys() {
+        // This field did not exist in older serialized CacheKitStateBackend instances. A missing
+        // field is restored as zero by Java serialization, so preserve the new default rather than
+        // accidentally changing old jobs to the minimum legal threshold of two.
+        return normalizeNativeMapDistinctBatchPrefetchAsyncMinUniqueKeys(
+                nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys);
+    }
+
+    static int normalizeNativeMapDistinctBatchPrefetchAsyncMinUniqueKeys(int configuredValue) {
+        return configuredValue <= 0 ? 8 : Math.max(2, configuredValue);
     }
 
     static NativeRequestPlaneOptions normalizeNativeRequestPlaneOptions(

@@ -383,6 +383,175 @@ class CachedInternalMapStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testPreparedSmallBatchDefersToMailboxDirectArenaInsteadOfAsyncWorker()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(new MapSerializer<>(
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        when(reader.directArenaMultiGetMaxBatch())
+                .thenReturn(RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
+        when(reader.serializeRocksDBKeysByUserKeys(Arrays.asList("u1", "u2")))
+                .thenReturn(Arrays.asList(new byte[] {1}, new byte[] {2}));
+        byte[] present = serializedMapValue(7);
+        doAnswer(
+                        invocation -> {
+                            ByteBuffer descriptors =
+                                    ((ByteBuffer) invocation.getArgument(1))
+                                            .duplicate()
+                                            .order(ByteOrder.nativeOrder());
+                            ByteBuffer values = ((ByteBuffer) invocation.getArgument(3)).duplicate();
+                            values.position(0);
+                            values.put(present);
+                            descriptors.putInt(
+                                    RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET,
+                                    present.length);
+                            descriptors.putInt(
+                                    RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES
+                                            + RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET,
+                                    RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND);
+                            return 1;
+                        })
+                .when(reader)
+                .getSerializedValuesByRocksDBKeyArena(
+                        any(ByteBuffer.class),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.eq(2),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.anyInt());
+
+        NativeRequestPlane plane = mock(NativeRequestPlane.class);
+        when(plane.selectedKernel()).thenReturn("test");
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0,
+                        MapSnapshotCacheMetrics.disabled(),
+                        coordinator,
+                        31,
+                        false,
+                        0,
+                        false);
+        state.enableNativeDistinctBatchPrefetch(true, true, 8);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        BatchPrefetchableMapState.PreparedValues prepared =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+
+        assertEquals(Arrays.asList(7, null), prepared.awaitValues());
+        assertEquals(1, state.getDeferredSyncBatchPrefetchBatchesForTesting());
+        assertEquals(1, state.getDeferredSyncBatchPrefetchCompletedForTesting());
+        assertEquals(0, state.getAsyncBatchPrefetchSubmittedForTesting());
+        assertEquals(2, state.getBatchPrefetchDirectArenaCompletedKeysForTesting());
+        verify(reader, times(0))
+                .getSerializedValuesByRocksDBKeys(
+                        any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.anyInt());
+        verify(reader, times(0)).getSerializedValuesByUserKeys(any());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testDeferredDirectBatchFailsClosedAfterOuterKeyOrNamespaceChange() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, String, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                                IntSerializer.INSTANCE));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        NativeRequestPlane plane = mock(NativeRequestPlane.class);
+        when(plane.selectedKernel()).thenReturn("test");
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(), plane);
+        CachedInternalMapState<String, String, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0,
+                        MapSnapshotCacheMetrics.disabled(),
+                        coordinator,
+                        31,
+                        false,
+                        0,
+                        false);
+        state.enableNativeDistinctBatchPrefetch(true, true, 8);
+        state.setCurrentNamespace("n1");
+
+        BatchPrefetchableMapState.PreparedValues wrongKey =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+        currentKey.set("k2");
+        assertNull(wrongKey.awaitValues());
+
+        currentKey.set("k1");
+        state.setCurrentNamespace("n1");
+        BatchPrefetchableMapState.PreparedValues wrongNamespace =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+        state.setCurrentNamespace("n2");
+        assertNull(wrongNamespace.awaitValues());
+
+        assertEquals(2, state.getDeferredSyncBatchPrefetchBatchesForTesting());
+        assertEquals(0, state.getDeferredSyncBatchPrefetchCompletedForTesting());
+        assertEquals(2, state.getDeferredSyncBatchPrefetchFallbacksForTesting());
+        assertEquals(2, state.getDeferredSyncBatchPrefetchContextMismatchesForTesting());
+        assertEquals(0, state.getAsyncBatchPrefetchSubmittedForTesting());
+        verify(reader, times(0))
+                .getSerializedValuesByRocksDBKeyArena(
+                        any(ByteBuffer.class),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.anyInt());
+        verify(reader, times(0)).getSerializedValuesByUserKeys(any());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testExactDistinctBatchPrefetchInvalidatesOnOuterKeyChangeAndTracksWrites()
             throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");

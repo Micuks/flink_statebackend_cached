@@ -85,6 +85,10 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(disabledBackend.nativeMapDistinctBatchPrefetchEnabledForTesting());
         assertFalse(
                 disabledBackend.nativeMapDistinctBatchPrefetchDirectArenaEnabledForTesting());
+        assertEquals(8, disabledBackend.nativeMapDistinctBatchPrefetchAsyncMinUniqueKeysForTesting());
+        assertEquals(
+                8,
+                CacheKitStateBackend.normalizeNativeMapDistinctBatchPrefetchAsyncMinUniqueKeys(0));
         assertFalse(
                 disabled.get(
                         CacheKitStateBackendFactory
@@ -100,11 +104,18 @@ class NativeRequestPlaneConfigurationTest {
                 CacheKitStateBackendFactory
                         .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ENABLED,
                 true);
+        enabled.set(
+                CacheKitStateBackendFactory
+                        .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ASYNC_MIN_UNIQUE_KEYS,
+                16);
         CacheKitStateBackend enabledBackend =
                 new CacheKitStateBackendFactory()
                         .createFromConfig(enabled, getClass().getClassLoader());
         assertTrue(enabledBackend.nativeMapDistinctBatchPrefetchEnabledForTesting());
         assertTrue(enabledBackend.nativeMapDistinctBatchPrefetchDirectArenaEnabledForTesting());
+        assertEquals(
+                16,
+                enabledBackend.nativeMapDistinctBatchPrefetchAsyncMinUniqueKeysForTesting());
         assertTrue(
                 enabled.get(
                         CacheKitStateBackendFactory

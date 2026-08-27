@@ -72,6 +72,29 @@ class DistinctBatchPrefetchSupportTest {
         assertThat(view.calls).containsExactly("tryBegin:4", "add:a", "add:b", "finish");
     }
 
+    @Test
+    void emptyPreparedCaptureIsAnInstallableNoOp() {
+        DistinctBatchPrefetchSupport.beginPreparedCapture();
+
+        Object capture = DistinctBatchPrefetchSupport.endPreparedCapture();
+
+        assertThat(capture).isNotNull();
+        assertThat(DistinctBatchPrefetchSupport.installPreparedCapture(capture)).isTrue();
+    }
+
+    @Test
+    void acceptedSessionWithFailedPreparationRetainsSynchronousFallback() throws Exception {
+        RecordingView view = new RecordingView();
+        Object session = DistinctBatchPrefetchSupport.beginSession(view, 4);
+        DistinctBatchPrefetchSupport.beginPreparedCapture();
+
+        DistinctBatchPrefetchSupport.addSession(session, "a");
+        assertThat(DistinctBatchPrefetchSupport.finishSession(session)).isFalse();
+        Object capture = DistinctBatchPrefetchSupport.endPreparedCapture();
+
+        assertThat(DistinctBatchPrefetchSupport.installPreparedCapture(capture)).isFalse();
+    }
+
     private static final class RecordingView implements BatchPrefetchableMapView<String> {
         private final List<String> calls = new ArrayList<>();
         private boolean acceptSession = true;

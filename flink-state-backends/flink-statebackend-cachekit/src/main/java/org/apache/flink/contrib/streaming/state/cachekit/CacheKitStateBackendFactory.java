@@ -705,6 +705,18 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                             + "prefetch and the DISTINCT batch overlay; failures fall back to "
                                             + "the synchronous authoritative path.");
 
+    public static final ConfigOption<Integer>
+            NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ASYNC_MIN_UNIQUE_KEYS =
+                    ConfigOptions.key(
+                                    "state.backend.cachekit.native.map-distinct-batch-prefetch.cross-key-pipeline.async-min-unique-keys")
+                            .intType()
+                            .defaultValue(8)
+                            .withDescription(
+                                    "Minimum exact-key count for submitting one outer-key read to "
+                                            + "the cross-key async worker. Smaller eligible batches retain "
+                                            + "the synchronous direct-arena transport at consumption time. "
+                                            + "Values below two are clamped to two.");
+
     public static final ConfigOption<String> DELEGATE_BACKEND =
             ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
@@ -860,10 +872,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 								diagnosticsEnabled,
 								nativeRequestPlaneOptions,
 								keyScopedPrefetchInvalidationEnabled,
-                config.get(NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED),
-				config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED),
-				config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED));
-	}
+					config.get(NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED),
+					config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED),
+					config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED),
+					Math.max(
+							2,
+							config.get(
+									NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ASYNC_MIN_UNIQUE_KEYS)));
+		}
 
         static NativeRequestPlaneOptions nativeRequestPlaneOptions(ReadableConfig config) {
                 if (config.get(NATIVE_LOCAL_PREAGG_INDEXED_FOLD_ENABLED)

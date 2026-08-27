@@ -81,7 +81,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
 
     private static final long serialVersionUID = 1L;
     private static final Logger LOG = LoggerFactory.getLogger(CacheKitKeyedStateBackend.class);
-
     private final AbstractKeyedStateBackend<K> delegate;
     private final int valueCacheMaxEntries;
     private final CachePolicyType valueCachePolicy;
@@ -112,6 +111,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
     private final boolean nativePrefetchAccessGuidedStateEnabled;
     private final boolean nativeMapDistinctBatchPrefetchEnabled;
     private final boolean nativeMapDistinctBatchPrefetchDirectArenaEnabled;
+    private final int nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys;
     private int nextNativeStateId = 1;
     private long nativePreaggGroupBatches;
     private long nativePreaggInputKeys;
@@ -277,7 +277,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 false,
                 false,
                 false,
-                false);
+                false,
+                8);
     }
 
     public CacheKitKeyedStateBackend(
@@ -351,7 +352,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 false,
                 false,
                 false,
-                false);
+                false,
+                8);
     }
 
     public CacheKitKeyedStateBackend(
@@ -391,7 +393,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
             boolean keyScopedPrefetchInvalidationEnabled,
             boolean nativePrefetchAccessGuidedStateEnabled,
             boolean nativeMapDistinctBatchPrefetchEnabled,
-            boolean nativeMapDistinctBatchPrefetchDirectArenaEnabled) {
+            boolean nativeMapDistinctBatchPrefetchDirectArenaEnabled,
+            int nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -431,6 +434,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
         this.nativeMapDistinctBatchPrefetchEnabled = nativeMapDistinctBatchPrefetchEnabled;
         this.nativeMapDistinctBatchPrefetchDirectArenaEnabled =
                 nativeMapDistinctBatchPrefetchDirectArenaEnabled;
+        this.nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys =
+                Math.max(2, nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys);
         this.mapSnapshotCacheMetrics =
                 MapSnapshotCacheMetrics.create(metricGroup, diagnosticsEnabled);
         Preconditions.checkNotNull(nativeRequestPlaneOptions, "nativeRequestPlaneOptions");
@@ -653,7 +658,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                                             .mapSnapshotAdaptiveResampleIntervalProbes());
             wrapped.enableNativeDistinctBatchPrefetch(
                     nativeMapDistinctBatchPrefetchEnabled,
-                    nativeMapDistinctBatchPrefetchDirectArenaEnabled);
+                    nativeMapDistinctBatchPrefetchDirectArenaEnabled,
+                    nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -856,7 +862,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                                             .mapSnapshotAdaptiveResampleIntervalProbes());
             wrapped.enableNativeDistinctBatchPrefetch(
                     nativeMapDistinctBatchPrefetchEnabled,
-                    nativeMapDistinctBatchPrefetchDirectArenaEnabled);
+                    nativeMapDistinctBatchPrefetchDirectArenaEnabled,
+                    nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }

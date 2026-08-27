@@ -63,12 +63,14 @@ public final class DistinctBatchPrefetchSupport {
     public static boolean finishSession(Object session) throws Exception {
         PreparedCapture capture = PREPARED_CAPTURE.get();
         if (capture != null) {
+            capture.acceptedSessions++;
             Object prepared = asSession(session).finishPreparedPrefetchKeyCollection();
             if (prepared != null) {
                 capture.sessions.add(session);
                 capture.prepared.add(prepared);
                 return true;
             }
+            capture.preparationFailed = true;
             return false;
         }
         return asSession(session).finishPrefetchKeyCollection();
@@ -96,11 +98,15 @@ public final class DistinctBatchPrefetchSupport {
         PREPARED_CAPTURE.set(new PreparedCapture());
     }
 
-    /** Ends capture and returns a composite token, or {@code null} when no read was submitted. */
+    /** Ends capture and returns a composite token, including a rejected-session no-op token. */
     public static Object endPreparedCapture() {
         PreparedCapture capture = PREPARED_CAPTURE.get();
         PREPARED_CAPTURE.remove();
-        return capture == null || capture.prepared.isEmpty() ? null : capture;
+        // A capture with no accepted sessions is a successful no-op. This happens when generated
+        // DISTINCT code rejects an undersized group before scanning its keys. Keep it distinct
+        // from an accepted session whose backend preparation failed, which must retain the
+        // established synchronous fallback at consumption time.
+        return capture;
     }
 
     /** Cancels every detached read accumulated by the current, not-yet-ended capture. */
@@ -116,7 +122,11 @@ public final class DistinctBatchPrefetchSupport {
             return false;
         }
         PreparedCapture capture = (PreparedCapture) prepared;
-        boolean allInstalled = !capture.prepared.isEmpty();
+        if (capture.preparationFailed || capture.prepared.size() != capture.acceptedSessions) {
+            abortPreparedCapture(capture);
+            return false;
+        }
+        boolean allInstalled = true;
         try {
             for (int i = 0; i < capture.prepared.size(); i++) {
                 allInstalled &=
@@ -205,5 +215,7 @@ public final class DistinctBatchPrefetchSupport {
     private static final class PreparedCapture {
         private final List<Object> sessions = new ArrayList<>();
         private final List<Object> prepared = new ArrayList<>();
+        private int acceptedSessions;
+        private boolean preparationFailed;
     }
 }
