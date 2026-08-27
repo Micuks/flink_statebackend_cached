@@ -32,6 +32,18 @@ import java.util.List;
 public interface PipelinedBatchableKeyedFunction<IN, OUT>
         extends ReusableBatchableKeyedFunction<IN, OUT> {
 
+    /**
+     * Cheap lower bound for batches that can profitably create a prepared read.
+     *
+     * <p>The runtime uses only the already-materialized record count for this gate. Implementations
+     * must return {@code 1} unless fewer records mathematically cannot reach their backend's useful
+     * key threshold. A rejected batch is processed through {@link #processBatchForKey} in original
+     * key order and never calls {@link #prepareBatchForKey}.
+     */
+    default int minimumBatchPreparationInputCount() {
+        return 1;
+    }
+
     /** Captures one batch and starts its best-effort read. The input list must not be retained. */
     Object prepareBatchForKey(Object currentKey, List<IN> inputs) throws Exception;
 

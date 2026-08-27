@@ -55,6 +55,7 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
 
     private static final long serialVersionUID = -4767158666069797704L;
     private static final Logger LOG = LoggerFactory.getLogger(GroupAggFunction.class);
+    private static final int MIN_SPARSE_PREPARATION_INPUTS = 8;
 
     /** The code generated function used to handle aggregates. */
     private final GeneratedAggsHandleFunction genAggsHandler;
@@ -87,6 +88,8 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
     private transient ValueState<RowData> accState = null;
     private transient TypeSerializer<RowData> accSerializer = null;
     private transient ArrayDeque<BatchPreparation> batchPreparationPool;
+    private transient long batchPreparationCalls;
+    private transient long batchPreparationAccumulatorCopies;
 
     // Owns the exact-DISTINCT MapViews and their optional batch-scoped overlays.
     private transient PerKeyStateDataViewStore dataViewStore = null;
@@ -259,7 +262,15 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
     }
 
     @Override
+    public int minimumBatchPreparationInputCount() {
+        // unique DISTINCT keys cannot exceed input rows. This is a zero-allocation lower-bound
+        // gate; exact de-duplication remains in the generated prepared-capture path.
+        return MIN_SPARSE_PREPARATION_INPUTS;
+    }
+
+    @Override
     public Object prepareBatchForKey(Object currentKey, List<RowData> inputRows) throws Exception {
+        batchPreparationCalls++;
         if (inputRows == null || inputRows.isEmpty()) {
             return BatchPreparation.SKIP;
         }
@@ -287,6 +298,7 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
                     preparation.accumulators == null
                             ? accSerializer.copy(accumulators)
                             : accSerializer.copy(accumulators, preparation.accumulators);
+            batchPreparationAccumulatorCopies++;
             function.setAccumulators(stableAccumulators);
             DistinctBatchPrefetchSupport.beginPreparedCapture();
             captureStarted = true;
@@ -486,5 +498,10 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
                     "[CACHEKIT DISTINCT BATCH OVERLAY] {}",
                     dataViewStore.distinctBatchDiagnosticSummary());
         }
+        LOG.info(
+                "[CACHEKIT DISTINCT SPARSE PREPARE] minInputRecords={} preparationCalls={} accumulatorCopies={}",
+                MIN_SPARSE_PREPARATION_INPUTS,
+                batchPreparationCalls,
+                batchPreparationAccumulatorCopies);
     }
 }

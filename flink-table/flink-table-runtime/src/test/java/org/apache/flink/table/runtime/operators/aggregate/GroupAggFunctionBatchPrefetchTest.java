@@ -37,11 +37,26 @@ import org.mockito.InOrder;
 import java.lang.reflect.Field;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class GroupAggFunctionBatchPrefetchTest {
+
+    @Test
+    void exposesEightRecordsAsSparsePreparationLowerBound() {
+        GroupAggFunction function =
+                new GroupAggFunction(
+                        mock(GeneratedAggsHandleFunction.class),
+                        mock(GeneratedRecordEqualiser.class),
+                        new LogicalType[0],
+                        -1,
+                        false,
+                        0L);
+
+        assertEquals(8, function.minimumBatchPreparationInputCount());
+    }
 
     @Test
     @SuppressWarnings("unchecked")

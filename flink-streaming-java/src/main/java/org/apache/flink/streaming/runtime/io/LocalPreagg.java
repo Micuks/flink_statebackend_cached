@@ -39,6 +39,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.AbstractList;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Objects;
@@ -97,6 +98,8 @@ public final class LocalPreagg {
     private static final AtomicLong INDEXED_FOLD_PLAN_FALLBACKS = new AtomicLong();
     private static final AtomicLong PIPELINE_WINDOWS = new AtomicLong();
     private static final AtomicLong PIPELINE_GROUPS = new AtomicLong();
+    private static final AtomicLong PIPELINE_PREPARATION_CANDIDATE_GROUPS = new AtomicLong();
+    private static final AtomicLong PIPELINE_BYPASSED_GROUPS = new AtomicLong();
     private static final AtomicLong PIPELINE_PREPARED_GROUPS = new AtomicLong();
     private static final AtomicLong PIPELINE_PREPARED_AHEAD_GROUPS = new AtomicLong();
     private static final AtomicLong PIPELINE_CONSUMED_GROUPS = new AtomicLong();
@@ -328,7 +331,7 @@ public final class LocalPreagg {
                 double collapse = grps == 0 ? 0 : (double) recs / grps;
                 System.err.println(
                         String.format(
-                                "[LOCAL-PREAGG MATERIALIZED] [CACHEKIT DISTINCT PIPELINE] mode=materialized jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx pipelineLookahead=%d pipelineWindows=%d pipelineGroups=%d pipelinePreparedGroups=%d pipelinePreparedAheadGroups=%d pipelineConsumedGroups=%d pipelineCancelledGroups=%d pipelineProcessWithFutureInFlight=%d pipelinePeakPreparedAhead=%d pipelineExceptionAborts=%d",
+                                "[LOCAL-PREAGG MATERIALIZED] [CACHEKIT DISTINCT PIPELINE] mode=materialized jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx pipelineLookahead=%d pipelineWindows=%d pipelineGroups=%d pipelinePreparationCandidateGroups=%d pipelineBypassedGroups=%d pipelinePreparedGroups=%d pipelinePreparedAheadGroups=%d pipelineConsumedGroups=%d pipelineCancelledGroups=%d pipelineProcessWithFutureInFlight=%d pipelinePeakPreparedAhead=%d pipelineExceptionAborts=%d",
                                 JVM_ID,
                                 op.getClass().getSimpleName(),
                                 c,
@@ -338,6 +341,8 @@ public final class LocalPreagg {
                                 PIPELINE_MAX_CONFIGURED_LOOKAHEAD.get(),
                                 PIPELINE_WINDOWS.get(),
                                 PIPELINE_GROUPS.get(),
+                                PIPELINE_PREPARATION_CANDIDATE_GROUPS.get(),
+                                PIPELINE_BYPASSED_GROUPS.get(),
                                 PIPELINE_PREPARED_GROUPS.get(),
                                 PIPELINE_PREPARED_AHEAD_GROUPS.get(),
                                 PIPELINE_CONSUMED_GROUPS.get(),
@@ -459,7 +464,7 @@ public final class LocalPreagg {
                 double collapse = groupTotal == 0 ? 0 : (double) records / groupTotal;
                 System.err.println(
                         String.format(
-                                "[LOCAL-PREAGG INDEXED] [CACHEKIT DISTINCT PIPELINE] mode=indexed jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx planFallbacks=%d materializedValueCopiesAvoided=%d allDispatches=%d allRecords=%d allGroups=%d pipelineLookahead=%d pipelineWindows=%d pipelineGroups=%d pipelinePreparedGroups=%d pipelinePreparedAheadGroups=%d pipelineConsumedGroups=%d pipelineCancelledGroups=%d pipelineProcessWithFutureInFlight=%d pipelinePeakPreparedAhead=%d pipelineExceptionAborts=%d",
+                                "[LOCAL-PREAGG INDEXED] [CACHEKIT DISTINCT PIPELINE] mode=indexed jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx planFallbacks=%d materializedValueCopiesAvoided=%d allDispatches=%d allRecords=%d allGroups=%d pipelineLookahead=%d pipelineWindows=%d pipelineGroups=%d pipelinePreparationCandidateGroups=%d pipelineBypassedGroups=%d pipelinePreparedGroups=%d pipelinePreparedAheadGroups=%d pipelineConsumedGroups=%d pipelineCancelledGroups=%d pipelineProcessWithFutureInFlight=%d pipelinePeakPreparedAhead=%d pipelineExceptionAborts=%d",
                                 JVM_ID,
                                 op.getClass().getSimpleName(),
                                 dispatches,
@@ -474,6 +479,8 @@ public final class LocalPreagg {
                                 PIPELINE_MAX_CONFIGURED_LOOKAHEAD.get(),
                                 PIPELINE_WINDOWS.get(),
                                 PIPELINE_GROUPS.get(),
+                                PIPELINE_PREPARATION_CANDIDATE_GROUPS.get(),
+                                PIPELINE_BYPASSED_GROUPS.get(),
                                 PIPELINE_PREPARED_GROUPS.get(),
                                 PIPELINE_PREPARED_AHEAD_GROUPS.get(),
                                 PIPELINE_CONSUMED_GROUPS.get(),
@@ -509,6 +516,32 @@ public final class LocalPreagg {
             TimestampedCollector collector,
             int lookaheadGroups)
             throws Exception {
+        int minimumPreparationInputs = Math.max(1, pipelined.minimumBatchPreparationInputCount());
+        if (minimumPreparationInputs > 1) {
+            runSparsePreparedWindow(
+                    pipelined,
+                    groups.keys.size(),
+                    lookaheadGroups,
+                    minimumPreparationInputs,
+                    group -> groups.values.get(group).size(),
+                    group -> {
+                        Object key = groups.keys.get(group);
+                        op.setCurrentKey(key);
+                        return pipelined.prepareBatchForKey(key, groups.values.get(group));
+                    },
+                    (group, prepared) -> {
+                        Object key = groups.keys.get(group);
+                        op.setCurrentKey(key);
+                        pipelined.processPreparedBatchForKey(
+                                key, groups.values.get(group), prepared, collector);
+                    },
+                    group -> {
+                        Object key = groups.keys.get(group);
+                        op.setCurrentKey(key);
+                        pipelined.processBatchForKey(key, groups.values.get(group), collector);
+                    });
+            return;
+        }
         runPreparedWindow(
                 pipelined,
                 groups.keys.size(),
@@ -536,6 +569,34 @@ public final class LocalPreagg {
             TimestampedCollector collector,
             int lookaheadGroups)
             throws Exception {
+        int minimumPreparationInputs = Math.max(1, pipelined.minimumBatchPreparationInputCount());
+        if (minimumPreparationInputs > 1) {
+            runSparsePreparedWindow(
+                    pipelined,
+                    groups.groupCount,
+                    lookaheadGroups,
+                    minimumPreparationInputs,
+                    group -> groups.groupOffsets[group + 1] - groups.groupOffsets[group],
+                    group -> {
+                        resetIndexedValues(values, buf, groups, group);
+                        Object key = groups.groupKeys[group];
+                        op.setCurrentKey(key);
+                        return pipelined.prepareBatchForKey(key, values);
+                    },
+                    (group, prepared) -> {
+                        resetIndexedValues(values, buf, groups, group);
+                        Object key = groups.groupKeys[group];
+                        op.setCurrentKey(key);
+                        pipelined.processPreparedBatchForKey(key, values, prepared, collector);
+                    },
+                    group -> {
+                        resetIndexedValues(values, buf, groups, group);
+                        Object key = groups.groupKeys[group];
+                        op.setCurrentKey(key);
+                        pipelined.processBatchForKey(key, values, collector);
+                    });
+            return;
+        }
         runPreparedWindow(
                 pipelined,
                 groups.groupCount,
@@ -552,6 +613,171 @@ public final class LocalPreagg {
                     op.setCurrentKey(key);
                     pipelined.processPreparedBatchForKey(key, values, prepared, collector);
                 });
+    }
+
+    /**
+     * Keeps the expensive prepared-read window sparse without changing keyed processing order.
+     *
+     * <p>Groups below {@code minimumPreparationInputs} cannot contain enough unique DISTINCT keys
+     * to reach the prepared backend threshold. They are classified from the existing group size,
+     * never call the preparer, and later execute through the authoritative synchronous path. The
+     * ring counts only preparation candidates, so light groups between two candidates do not
+     * consume lookahead depth.
+     */
+    @SuppressWarnings("rawtypes")
+    private static void runSparsePreparedWindow(
+            PipelinedBatchableKeyedFunction pipelined,
+            int groupCount,
+            int requestedLookahead,
+            int minimumPreparationInputs,
+            GroupSizer groupSizer,
+            GroupPreparer preparer,
+            GroupConsumer preparedConsumer,
+            GroupSyncConsumer syncConsumer)
+            throws Exception {
+        if (groupCount <= 0) {
+            return;
+        }
+        int lookahead = Math.max(1, Math.min(8, requestedLookahead));
+        int capacity = Math.min(groupCount, lookahead + 1);
+        PreparedWindowWorkspace workspace = PREPARED_WINDOW_WORKSPACE.get();
+        workspace.prepare(capacity);
+        Object[] prepared = workspace.prepared;
+        boolean[] occupied = workspace.occupied;
+        int[] preparedGroupIndexes = workspace.preparedGroupIndexes;
+        long preparationCandidateGroups = 0L;
+        long bypassedGroups = 0L;
+        long preparedGroups = 0L;
+        long preparedAheadGroups = 0L;
+        long consumedGroups = 0L;
+        long cancelledGroups = 0L;
+        long processWithFutureInFlight = 0L;
+        int peakPreparedAhead = 0;
+        long exceptionAborts = 0L;
+        int head = 0;
+        int preparedCount = 0;
+        int nextGroupToClassify = 0;
+        boolean failed = false;
+        try {
+            for (int group = 0; group < groupCount; group++) {
+                // Classify the current group first. Usually it was already classified while a
+                // prior group filled the sparse future window.
+                if (nextGroupToClassify == group) {
+                    if (groupSizer.size(group) < minimumPreparationInputs) {
+                        bypassedGroups++;
+                    } else {
+                        preparationCandidateGroups++;
+                        int tail = (head + preparedCount) % capacity;
+                        prepareSparseWindowGroup(
+                                preparer, prepared, occupied, preparedGroupIndexes, tail, group);
+                        preparedCount++;
+                        preparedGroups++;
+                    }
+                    nextGroupToClassify++;
+                }
+
+                boolean currentPrepared = preparedCount > 0 && preparedGroupIndexes[head] == group;
+                int desiredPrepared = lookahead + (currentPrepared ? 1 : 0);
+                while (nextGroupToClassify < groupCount && preparedCount < desiredPrepared) {
+                    int futureGroup = nextGroupToClassify++;
+                    if (groupSizer.size(futureGroup) < minimumPreparationInputs) {
+                        bypassedGroups++;
+                        continue;
+                    }
+                    preparationCandidateGroups++;
+                    int tail = (head + preparedCount) % capacity;
+                    prepareSparseWindowGroup(
+                            preparer, prepared, occupied, preparedGroupIndexes, tail, futureGroup);
+                    preparedCount++;
+                    preparedGroups++;
+                    preparedAheadGroups++;
+                }
+
+                int futurePrepared = preparedCount - (currentPrepared ? 1 : 0);
+                peakPreparedAhead = Math.max(peakPreparedAhead, futurePrepared);
+                if (futurePrepared > 0) {
+                    processWithFutureInFlight++;
+                }
+                if (currentPrepared) {
+                    preparedConsumer.process(group, prepared[head]);
+                    prepared[head] = null;
+                    occupied[head] = false;
+                    preparedGroupIndexes[head] = -1;
+                    head = (head + 1) % capacity;
+                    preparedCount--;
+                } else {
+                    syncConsumer.process(group);
+                }
+                consumedGroups++;
+            }
+        } catch (Exception | Error failure) {
+            failed = true;
+            exceptionAborts = 1L;
+            throw failure;
+        } finally {
+            Throwable abortFailure = null;
+            try {
+                for (int slot = 0; slot < capacity; slot++) {
+                    if (occupied[slot]) {
+                        try {
+                            pipelined.abortPreparedBatch(prepared[slot]);
+                        } catch (Throwable currentAbortFailure) {
+                            if (!failed) {
+                                if (abortFailure == null) {
+                                    abortFailure = currentAbortFailure;
+                                } else {
+                                    abortFailure.addSuppressed(currentAbortFailure);
+                                }
+                            }
+                        } finally {
+                            prepared[slot] = null;
+                            occupied[slot] = false;
+                            preparedGroupIndexes[slot] = -1;
+                            cancelledGroups++;
+                        }
+                    }
+                }
+            } finally {
+                workspace.clear(capacity);
+                PIPELINE_WINDOWS.incrementAndGet();
+                PIPELINE_GROUPS.addAndGet(groupCount);
+                PIPELINE_PREPARATION_CANDIDATE_GROUPS.addAndGet(preparationCandidateGroups);
+                PIPELINE_BYPASSED_GROUPS.addAndGet(bypassedGroups);
+                PIPELINE_PREPARED_GROUPS.addAndGet(preparedGroups);
+                PIPELINE_PREPARED_AHEAD_GROUPS.addAndGet(preparedAheadGroups);
+                PIPELINE_CONSUMED_GROUPS.addAndGet(consumedGroups);
+                PIPELINE_CANCELLED_GROUPS.addAndGet(cancelledGroups);
+                PIPELINE_PROCESS_WITH_FUTURE_IN_FLIGHT.addAndGet(processWithFutureInFlight);
+                PIPELINE_EXCEPTION_ABORTS.addAndGet(exceptionAborts);
+                PIPELINE_PEAK_PREPARED_AHEAD.accumulateAndGet(peakPreparedAhead, Math::max);
+                PIPELINE_MAX_CONFIGURED_LOOKAHEAD.accumulateAndGet(lookahead, Math::max);
+            }
+            if (abortFailure instanceof Error) {
+                throw (Error) abortFailure;
+            }
+            if (abortFailure instanceof Exception) {
+                throw (Exception) abortFailure;
+            }
+            if (abortFailure != null) {
+                throw new RuntimeException(abortFailure);
+            }
+        }
+    }
+
+    private static void prepareSparseWindowGroup(
+            GroupPreparer preparer,
+            Object[] prepared,
+            boolean[] occupied,
+            int[] preparedGroupIndexes,
+            int slot,
+            int group)
+            throws Exception {
+        if (occupied[slot]) {
+            throw new IllegalStateException("Sparse cross-key pipeline ring slot is occupied");
+        }
+        prepared[slot] = preparer.prepare(group);
+        preparedGroupIndexes[slot] = group;
+        occupied[slot] = true;
     }
 
     @SuppressWarnings("rawtypes")
@@ -682,18 +908,31 @@ public final class LocalPreagg {
     }
 
     @FunctionalInterface
+    private interface GroupSizer {
+        int size(int group);
+    }
+
+    @FunctionalInterface
     private interface GroupConsumer {
         void process(int group, Object prepared) throws Exception;
+    }
+
+    @FunctionalInterface
+    private interface GroupSyncConsumer {
+        void process(int group) throws Exception;
     }
 
     private static final class PreparedWindowWorkspace {
         private Object[] prepared = new Object[2];
         private boolean[] occupied = new boolean[2];
+        private int[] preparedGroupIndexes = new int[] {-1, -1};
 
         private void prepare(int requiredCapacity) {
             if (prepared.length < requiredCapacity) {
                 prepared = new Object[requiredCapacity];
                 occupied = new boolean[requiredCapacity];
+                preparedGroupIndexes = new int[requiredCapacity];
+                Arrays.fill(preparedGroupIndexes, -1);
             }
         }
 
@@ -701,6 +940,7 @@ public final class LocalPreagg {
             for (int index = 0; index < capacity; index++) {
                 prepared[index] = null;
                 occupied[index] = false;
+                preparedGroupIndexes[index] = -1;
             }
         }
     }

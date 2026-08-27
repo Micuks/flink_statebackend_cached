@@ -358,6 +358,68 @@ class LocalPreaggTest {
     }
 
     @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testSparsePipelineCountsLookaheadOnlyAcrossPreparationCandidates() throws Exception {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "a", "b", "b", "b", "c", "d", "d", "d"),
+                        Arrays.asList(1, 2, 3, 4, 5, 6, 7, 8, 9),
+                        null);
+        SparseRecordingPipeline pipeline = new SparseRecordingPipeline(3, null);
+        long candidates = pipelineCounter("PIPELINE_PREPARATION_CANDIDATE_GROUPS");
+        long bypassed = pipelineCounter("PIPELINE_BYPASSED_GROUPS");
+        long prepared = pipelineCounter("PIPELINE_PREPARED_GROUPS");
+        long consumed = pipelineCounter("PIPELINE_CONSUMED_GROUPS");
+        long inFlight = pipelineCounter("PIPELINE_PROCESS_WITH_FUTURE_IN_FLIGHT");
+
+        LocalPreagg.dispatchMaterializedPipeline(
+                mock(AbstractStreamOperator.class),
+                pipeline,
+                groups,
+                mock(TimestampedCollector.class),
+                1);
+
+        assertEquals(
+                Arrays.asList(
+                        "prepare:b", "sync:a", "prepare:d", "process:b", "sync:c", "process:d"),
+                pipeline.events);
+        assertEquals(2L, pipelineCounter("PIPELINE_PREPARATION_CANDIDATE_GROUPS") - candidates);
+        assertEquals(2L, pipelineCounter("PIPELINE_BYPASSED_GROUPS") - bypassed);
+        assertEquals(2L, pipelineCounter("PIPELINE_PREPARED_GROUPS") - prepared);
+        assertEquals(4L, pipelineCounter("PIPELINE_CONSUMED_GROUPS") - consumed);
+        assertEquals(3L, pipelineCounter("PIPELINE_PROCESS_WITH_FUTURE_IN_FLIGHT") - inFlight);
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testSparsePipelineAbortsAllHeavyPreparationsWhenSynchronousGroupFails() throws Exception {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "b", "b", "c", "c", "c"),
+                        Arrays.asList(1, 2, 3, 4, 5, 6, 7),
+                        null);
+        SparseRecordingPipeline pipeline = new SparseRecordingPipeline(3, "a");
+        long cancelled = pipelineCounter("PIPELINE_CANCELLED_GROUPS");
+        long exceptionAborts = pipelineCounter("PIPELINE_EXCEPTION_ABORTS");
+
+        assertThrows(
+                IllegalStateException.class,
+                () ->
+                        LocalPreagg.dispatchMaterializedPipeline(
+                                mock(AbstractStreamOperator.class),
+                                pipeline,
+                                groups,
+                                mock(TimestampedCollector.class),
+                                2));
+
+        assertEquals(
+                Arrays.asList("prepare:b", "prepare:c", "sync:a", "abort:token-b", "abort:token-c"),
+                pipeline.events);
+        assertEquals(2L, pipelineCounter("PIPELINE_CANCELLED_GROUPS") - cancelled);
+        assertEquals(1L, pipelineCounter("PIPELINE_EXCEPTION_ABORTS") - exceptionAborts);
+    }
+
+    @Test
     void testDetectsDirectBatchableOperator() {
         assertTrue(LocalPreagg.hasBatchableTarget(new BatchableInputOperator()));
         assertFalse(LocalPreagg.hasBatchableTarget(mock(Input.class)));
@@ -748,6 +810,49 @@ class LocalPreaggTest {
         public void processBatchForKey(
                 Object currentKey, List<Object> inputs, Collector<Object> out) {
             throw new AssertionError("pipeline must use prepared dispatch");
+        }
+    }
+
+    private static final class SparseRecordingPipeline
+            implements PipelinedBatchableKeyedFunction<Object, Object> {
+        private final int minimumInputs;
+        private final Object failSyncKey;
+        private final List<String> events = new ArrayList<>();
+
+        private SparseRecordingPipeline(int minimumInputs, Object failSyncKey) {
+            this.minimumInputs = minimumInputs;
+            this.failSyncKey = failSyncKey;
+        }
+
+        @Override
+        public int minimumBatchPreparationInputCount() {
+            return minimumInputs;
+        }
+
+        @Override
+        public Object prepareBatchForKey(Object key, List<Object> inputs) {
+            events.add("prepare:" + key);
+            return "token-" + key;
+        }
+
+        @Override
+        public void processPreparedBatchForKey(
+                Object key, List<Object> inputs, Object prepared, Collector<Object> out) {
+            events.add("process:" + key);
+        }
+
+        @Override
+        public void abortPreparedBatch(Object prepared) {
+            events.add("abort:" + prepared);
+        }
+
+        @Override
+        public void processBatchForKey(
+                Object currentKey, List<Object> inputs, Collector<Object> out) {
+            events.add("sync:" + currentKey);
+            if (currentKey.equals(failSyncKey)) {
+                throw new IllegalStateException("expected synchronous failure");
+            }
         }
     }
 
