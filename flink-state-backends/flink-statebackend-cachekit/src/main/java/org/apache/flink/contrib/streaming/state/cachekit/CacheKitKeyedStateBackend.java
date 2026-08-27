@@ -492,7 +492,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                                     })
                             : null;
             initializedNativeCoordinator =
-                    NativeRequestPlaneCoordinator.open(nativeRequestPlaneOptions);
+                    NativeRequestPlaneCoordinator.open(
+                            nativeRequestPlaneOptions,
+                            nativeMapDistinctBatchPrefetchEnabled
+                                            && nativeMapDistinctBatchPrefetchCrossKeyPipelineEnabled
+                                    ? this.nativeMapDistinctBatchPrefetchLookaheadGroups
+                                    : 0);
         } catch (RuntimeException | Error failure) {
             if (initializedNativeCoordinator != null) {
                 initializedNativeCoordinator.close();

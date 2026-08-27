@@ -250,6 +250,38 @@ class NativeRequestPlaneCoordinatorTest {
     }
 
     @Test
+    void testMapDistinctAsyncReadSlotsFollowPipelineDepthAndReleaseDirectMemory() {
+        FakePlane plane = new FakePlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(1), plane, 0);
+
+        assertNull(coordinator.tryAcquireMapDistinctAsyncReadSlot());
+        assertEquals(1, coordinator.mapDistinctAsyncReadLeaseMisses());
+        coordinator.close();
+        assertEquals(1, plane.closeCalls);
+
+        FakePlane pipelinedPlane = new FakePlane();
+        NativeRequestPlaneCoordinator pipelined =
+                NativeRequestPlaneCoordinator.forTesting(
+                        directArenaOptions(1), pipelinedPlane, 4);
+        NativeRequestPlaneCoordinator.BatchSlot[] slots =
+                new NativeRequestPlaneCoordinator.BatchSlot[4];
+        for (int i = 0; i < slots.length; i++) {
+            slots[i] = pipelined.tryAcquireMapDistinctAsyncReadSlot();
+            assertNotNull(slots[i]);
+        }
+        assertNull(pipelined.tryAcquireMapDistinctAsyncReadSlot());
+        for (NativeRequestPlaneCoordinator.BatchSlot slot : slots) {
+            slot.close();
+        }
+        pipelined.close();
+        for (NativeRequestPlaneCoordinator.BatchSlot slot : slots) {
+            assertTrue(slot.directBuffersFreedForTesting());
+        }
+        assertEquals(1, pipelinedPlane.closeCalls);
+    }
+
+    @Test
     void testCompactionScratchSlotIsIndependentBoundedAndLightweight() throws Exception {
         FakePlane plane = new FakePlane();
         plane.compactIndexes = new int[] {0, 2};

@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -32,6 +33,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
+import org.apache.flink.core.memory.MemoryUtils;
 
 /**
  * Keyed-backend owner for one native request plane and a bounded set of direct batch slots.
@@ -57,6 +59,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private final ArrayDeque<BatchSlot> availableMapDistinctAsyncReadSlots;
     private final ArrayDeque<BatchSlot> availableCompactionScratchSlots;
     private final BatchSlot mutationSlot;
+    private final int mapDistinctAsyncReadSlotCount;
     private final ResidentKeyHint residentKeyHint;
     private final ConcurrentMap<Integer, ValueReadActivation> valueReadActivations =
             new ConcurrentHashMap<>();
@@ -66,6 +69,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private volatile boolean active = true;
     private volatile Throwable disableCause;
     private boolean planeClosed;
+    private boolean directBuffersClosed;
     private long leases;
     private long leaseMisses;
     private long mapDistinctReadLeases;
@@ -80,6 +84,11 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private long groupCalls;
 
     public static NativeRequestPlaneCoordinator open(NativeRequestPlaneOptions options) {
+        return open(options, options.batchSlots());
+    }
+
+    public static NativeRequestPlaneCoordinator open(
+            NativeRequestPlaneOptions options, int mapDistinctAsyncReadSlotCount) {
         Objects.requireNonNull(options, "options");
         if (!options.enabled()) {
             return null;
@@ -94,7 +103,8 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                         options.kernelPreference(),
                         options.libraryPath());
         try {
-            return new NativeRequestPlaneCoordinator(options, bridge);
+            return new NativeRequestPlaneCoordinator(
+                    options, bridge, mapDistinctAsyncReadSlotCount);
         } catch (RuntimeException | Error failure) {
             try {
                 bridge.close();
@@ -114,12 +124,20 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     /** Test seam for deterministic probe/fill/failure and lifecycle tests without JNI. */
     public static NativeRequestPlaneCoordinator forTesting(
             NativeRequestPlaneOptions options, NativeRequestPlane plane) {
+        return forTesting(options, plane, options.batchSlots());
+    }
+
+    static NativeRequestPlaneCoordinator forTesting(
+            NativeRequestPlaneOptions options,
+            NativeRequestPlane plane,
+            int mapDistinctAsyncReadSlotCount) {
         if (!options.enabled()) {
             throw new IllegalArgumentException("Testing coordinator options must be enabled.");
         }
         Objects.requireNonNull(plane, "plane");
         try {
-            return new NativeRequestPlaneCoordinator(options, plane);
+            return new NativeRequestPlaneCoordinator(
+                    options, plane, mapDistinctAsyncReadSlotCount);
         } catch (RuntimeException | Error failure) {
             try {
                 plane.close();
@@ -131,47 +149,78 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     }
 
     private NativeRequestPlaneCoordinator(
-            NativeRequestPlaneOptions options, NativeRequestPlane plane) {
+            NativeRequestPlaneOptions options,
+            NativeRequestPlane plane,
+            int requestedMapDistinctAsyncReadSlotCount) {
         this.options = Objects.requireNonNull(options, "options");
         this.plane = Objects.requireNonNull(plane, "plane");
+        if (requestedMapDistinctAsyncReadSlotCount < 0
+                || requestedMapDistinctAsyncReadSlotCount > 8) {
+            throw new IllegalArgumentException(
+                    "MapState DISTINCT async-read slot count must be between 0 and 8.");
+        }
+        this.mapDistinctAsyncReadSlotCount =
+                options.directArenaMultiGetEnabled()
+                        ? requestedMapDistinctAsyncReadSlotCount
+                        : 0;
         this.availableSlots = new ArrayDeque<>(options.batchSlots());
-        for (int i = 0; i < options.batchSlots(); i++) {
-            availableSlots.addLast(new BatchSlot(this, options));
-        }
         this.availableMapDistinctReadSlots = new ArrayDeque<>(1);
-        if (options.directArenaMultiGetEnabled()) {
-            availableMapDistinctReadSlots.addLast(
-                    new BatchSlot(this, options, SlotKind.MAP_DISTINCT_READ));
-        }
-        this.availableMapDistinctAsyncReadSlots = new ArrayDeque<>(options.batchSlots());
-        if (options.directArenaMultiGetEnabled()) {
+        this.availableMapDistinctAsyncReadSlots =
+                new ArrayDeque<>(mapDistinctAsyncReadSlotCount);
+        this.availableCompactionScratchSlots = new ArrayDeque<>(1);
+        BatchSlot initializedMutationSlot = null;
+        try {
             for (int i = 0; i < options.batchSlots(); i++) {
+                availableSlots.addLast(new BatchSlot(this, options));
+            }
+            if (options.directArenaMultiGetEnabled()) {
+                availableMapDistinctReadSlots.addLast(
+                        new BatchSlot(this, options, SlotKind.MAP_DISTINCT_READ));
+            }
+            for (int i = 0; i < mapDistinctAsyncReadSlotCount; i++) {
                 availableMapDistinctAsyncReadSlots.addLast(
                         new BatchSlot(this, options, SlotKind.MAP_DISTINCT_ASYNC_READ));
             }
+            if (options.compactionScratchSlotEnabled()) {
+                availableCompactionScratchSlots.addLast(
+                        new BatchSlot(this, options, SlotKind.COMPACTION_SCRATCH));
+            }
+            initializedMutationSlot = new BatchSlot(this, options, SlotKind.MUTATION);
+            initializedMutationSlot.markLeased();
+            this.mutationSlot = initializedMutationSlot;
+            this.residentKeyHint = new ResidentKeyHint(options.capacityEntries());
+            // Capture audit metadata during construction. If either JNI query fails, open() closes
+            // the bridge before ownership can escape. These getters are thereafter non-JNI and
+            // cannot make CacheKitKeyedStateBackend construction leak an already-open plane.
+            this.selectedKernel =
+                    Objects.requireNonNull(plane.selectedKernel(), "plane.selectedKernel()");
+            this.detectedFeatureBits = plane.detectedFeatureBits();
+            if (options.aarch64Only()
+                    && (detectedFeatureBits & NativeRequestPlaneBridge.FEATURE_AARCH64) == 0) {
+                throw new IllegalStateException(
+                        "Native request plane is AArch64-only by policy, but the loaded JNI library "
+                                + "reported host features "
+                                + detectedFeatureBitsHex()
+                                + ". Set state.backend.cachekit.native.request-plane.aarch64-only=false "
+                                + "only for an explicit portable x86 comparison.");
+            }
+        } catch (RuntimeException | Error failure) {
+            cleanConstructedSlotBuffers(initializedMutationSlot, failure);
+            throw failure;
         }
-        this.availableCompactionScratchSlots = new ArrayDeque<>(1);
-        if (options.compactionScratchSlotEnabled()) {
-            availableCompactionScratchSlots.addLast(
-                    new BatchSlot(this, options, SlotKind.COMPACTION_SCRATCH));
-        }
-        this.mutationSlot = new BatchSlot(this, options, SlotKind.MUTATION);
-        this.mutationSlot.markLeased();
-        this.residentKeyHint = new ResidentKeyHint(options.capacityEntries());
-        // Capture audit metadata during construction. If either JNI query fails, open() closes the
-        // bridge before ownership can escape. These getters are thereafter non-JNI and cannot make
-        // CacheKitKeyedStateBackend construction leak an already-open plane.
-        this.selectedKernel =
-                Objects.requireNonNull(plane.selectedKernel(), "plane.selectedKernel()");
-        this.detectedFeatureBits = plane.detectedFeatureBits();
-        if (options.aarch64Only()
-                && (detectedFeatureBits & NativeRequestPlaneBridge.FEATURE_AARCH64) == 0) {
-            throw new IllegalStateException(
-                    "Native request plane is AArch64-only by policy, but the loaded JNI library "
-                            + "reported host features "
-                            + detectedFeatureBitsHex()
-                            + ". Set state.backend.cachekit.native.request-plane.aarch64-only=false "
-                            + "only for an explicit portable x86 comparison.");
+    }
+
+    private void cleanConstructedSlotBuffers(BatchSlot initializedMutationSlot, Throwable failure) {
+        try {
+            freeAvailableSlotBuffers(availableSlots);
+            freeAvailableSlotBuffers(availableMapDistinctReadSlots);
+            freeAvailableSlotBuffers(availableMapDistinctAsyncReadSlots);
+            freeAvailableSlotBuffers(availableCompactionScratchSlots);
+            if (initializedMutationSlot != null) {
+                initializedMutationSlot.freeDirectBuffers();
+            }
+        } catch (RuntimeException | Error cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
         }
     }
 
@@ -944,7 +993,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         // still be owned by queued or completing state tasks; destroying the plane before those
         // leases are returned leaves teardown correctness dependent on task timing.
         synchronized (planeLock) {
-            if (planeClosed) {
+            if (directBuffersClosed) {
                 return;
             }
             active = false;
@@ -971,11 +1020,9 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 }
             }
         }
-        int expectedMapDistinctAsyncReadSlots =
-                options.directArenaMultiGetEnabled() ? options.batchSlots() : 0;
         synchronized (availableMapDistinctAsyncReadSlots) {
             while (availableMapDistinctAsyncReadSlots.size()
-                    != expectedMapDistinctAsyncReadSlots) {
+                    != mapDistinctAsyncReadSlotCount) {
                 try {
                     availableMapDistinctAsyncReadSlots.wait();
                 } catch (InterruptedException ignored) {
@@ -995,13 +1042,36 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         }
 
         synchronized (planeLock) {
-            if (!planeClosed) {
-                planeClosed = true;
-                plane.close();
+            if (!directBuffersClosed) {
+                RuntimeException cleanupFailure = null;
+                try {
+                    freeAvailableSlotBuffers(availableSlots);
+                    freeAvailableSlotBuffers(availableMapDistinctReadSlots);
+                    freeAvailableSlotBuffers(availableMapDistinctAsyncReadSlots);
+                    freeAvailableSlotBuffers(availableCompactionScratchSlots);
+                    mutationSlot.freeDirectBuffers();
+                } catch (RuntimeException failure) {
+                    cleanupFailure = failure;
+                } finally {
+                    directBuffersClosed = true;
+                    if (!planeClosed) {
+                        planeClosed = true;
+                        plane.close();
+                    }
+                }
+                if (cleanupFailure != null) {
+                    throw cleanupFailure;
+                }
             }
         }
         if (interrupted) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    private static void freeAvailableSlotBuffers(ArrayDeque<BatchSlot> slots) {
+        for (BatchSlot slot : slots) {
+            slot.freeDirectBuffers();
         }
     }
 
@@ -1196,9 +1266,11 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         private final ByteBuffer directMultiGetDescriptors;
         private final ByteBuffer uniqueSourceIndexes;
         private final ByteBuffer sourceGroupIndexes;
+        private final ByteBuffer[] ownedDirectBuffers;
         private final long allocatedDirectBytes;
 
         private boolean leased;
+        private boolean directBuffersFreed;
         private int fillValueBytes;
         private long preparedFillGeneration;
         private int compactedEntryCount;
@@ -1270,32 +1342,48 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             int uniqueIndexBytes =
                     mutationOnly || asyncReadOnly ? 0 : Math.multiplyExact(entries, Integer.BYTES);
             int groupIndexBytes = compactionOnly || asyncReadOnly ? 0 : uniqueIndexBytes;
-
-            ByteBuffer preparedArena = ByteBuffer.allocateDirect(preparedArenaBytes);
-            ByteBuffer preparedMetadata = ByteBuffer.allocateDirect(preparedMetadataBytes);
-            ByteBuffer missArena = ByteBuffer.allocateDirect(missArenaBytes);
-            ByteBuffer missMetadata = ByteBuffer.allocateDirect(missMetadataBytes);
-            this.preparedKeys =
-                    SerializedKeyBatch.forSerializedBytes(preparedArena, preparedMetadata);
-            this.missKeys = SerializedKeyBatch.forSerializedBytes(missArena, missMetadata);
-            this.probeValueOutput = ByteBuffer.allocateDirect(probeValueBytes);
-            this.probeValueInput = new DirectBufferDataInputView(probeValueOutput);
-            this.probeResults =
-                    ByteBuffer.allocateDirect(probeResultBytes).order(ByteOrder.nativeOrder());
-            this.valueArena = ByteBuffer.allocateDirect(valueArenaBytes);
-            this.directMultiGetValueInput = new DirectBufferDataInputView(this.valueArena);
-            this.valueArenaOutput = new DirectBufferDataOutputView(this.valueArena);
-            this.valueMetadata =
-                    ByteBuffer.allocateDirect(valueMetadataBytes).order(ByteOrder.nativeOrder());
-            this.fillResults =
-                    ByteBuffer.allocateDirect(fillResultBytes).order(ByteOrder.nativeOrder());
-            this.directMultiGetDescriptors =
-                    ByteBuffer.allocateDirect(directMultiGetDescriptorBytes)
-                            .order(ByteOrder.nativeOrder());
-            this.uniqueSourceIndexes =
-                    ByteBuffer.allocateDirect(uniqueIndexBytes).order(ByteOrder.nativeOrder());
-            this.sourceGroupIndexes =
-                    ByteBuffer.allocateDirect(groupIndexBytes).order(ByteOrder.nativeOrder());
+            ArrayList<ByteBuffer> allocatedBuffers = new ArrayList<>(11);
+            try {
+                ByteBuffer preparedArena =
+                        allocateOwnedDirectBuffer(allocatedBuffers, preparedArenaBytes);
+                ByteBuffer preparedMetadata =
+                        allocateOwnedDirectBuffer(allocatedBuffers, preparedMetadataBytes);
+                ByteBuffer missArena =
+                        allocateOwnedDirectBuffer(allocatedBuffers, missArenaBytes);
+                ByteBuffer missMetadata =
+                        allocateOwnedDirectBuffer(allocatedBuffers, missMetadataBytes);
+                this.preparedKeys =
+                        SerializedKeyBatch.forSerializedBytes(preparedArena, preparedMetadata);
+                this.missKeys = SerializedKeyBatch.forSerializedBytes(missArena, missMetadata);
+                this.probeValueOutput =
+                        allocateOwnedDirectBuffer(allocatedBuffers, probeValueBytes);
+                this.probeValueInput = new DirectBufferDataInputView(probeValueOutput);
+                this.probeResults =
+                        allocateOwnedDirectBuffer(allocatedBuffers, probeResultBytes)
+                                .order(ByteOrder.nativeOrder());
+                this.valueArena = allocateOwnedDirectBuffer(allocatedBuffers, valueArenaBytes);
+                this.directMultiGetValueInput = new DirectBufferDataInputView(this.valueArena);
+                this.valueArenaOutput = new DirectBufferDataOutputView(this.valueArena);
+                this.valueMetadata =
+                        allocateOwnedDirectBuffer(allocatedBuffers, valueMetadataBytes)
+                                .order(ByteOrder.nativeOrder());
+                this.fillResults =
+                        allocateOwnedDirectBuffer(allocatedBuffers, fillResultBytes)
+                                .order(ByteOrder.nativeOrder());
+                this.directMultiGetDescriptors =
+                        allocateOwnedDirectBuffer(allocatedBuffers, directMultiGetDescriptorBytes)
+                                .order(ByteOrder.nativeOrder());
+                this.uniqueSourceIndexes =
+                        allocateOwnedDirectBuffer(allocatedBuffers, uniqueIndexBytes)
+                                .order(ByteOrder.nativeOrder());
+                this.sourceGroupIndexes =
+                        allocateOwnedDirectBuffer(allocatedBuffers, groupIndexBytes)
+                                .order(ByteOrder.nativeOrder());
+                this.ownedDirectBuffers = allocatedBuffers.toArray(new ByteBuffer[0]);
+            } catch (RuntimeException | Error failure) {
+                cleanDirectBuffers(allocatedBuffers, failure);
+                throw failure;
+            }
             this.allocatedDirectBytes =
                     (long) preparedArenaBytes
                             + preparedMetadataBytes
@@ -1309,6 +1397,43 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                             + directMultiGetDescriptorBytes
                             + uniqueIndexBytes
                             + groupIndexBytes;
+        }
+
+        private static ByteBuffer allocateOwnedDirectBuffer(
+                List<ByteBuffer> allocatedBuffers, int bytes) {
+            ByteBuffer buffer = ByteBuffer.allocateDirect(bytes);
+            allocatedBuffers.add(buffer);
+            return buffer;
+        }
+
+        private static void cleanDirectBuffers(
+                Iterable<ByteBuffer> buffers, Throwable priorFailure) {
+            for (ByteBuffer buffer : buffers) {
+                if (buffer.capacity() == 0) {
+                    continue;
+                }
+                try {
+                    MemoryUtils.UNSAFE.invokeCleaner(buffer);
+                } catch (RuntimeException | Error cleanupFailure) {
+                    if (priorFailure != null) {
+                        priorFailure.addSuppressed(cleanupFailure);
+                    } else {
+                        throw cleanupFailure;
+                    }
+                }
+            }
+        }
+
+        private synchronized void freeDirectBuffers() {
+            if (directBuffersFreed) {
+                return;
+            }
+            cleanDirectBuffers(java.util.Arrays.asList(ownedDirectBuffers), null);
+            directBuffersFreed = true;
+        }
+
+        boolean directBuffersFreedForTesting() {
+            return directBuffersFreed;
         }
 
         /** Whether this lease can only compact and must not escape the mailbox thread. */
