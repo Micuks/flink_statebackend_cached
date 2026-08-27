@@ -66,6 +66,16 @@ class UserFacingMapState<K, V> implements MapState<K, V>, BatchPrefetchableMapSt
 
     @Override
     @SuppressWarnings("unchecked")
+    public BatchPrefetchableMapState.PreparedValues prepareCurrentUniqueKeyValues(
+            List<? extends K> keys) throws Exception {
+        return originalState instanceof BatchPrefetchableMapState
+                ? ((BatchPrefetchableMapState<K>) originalState)
+                        .prepareCurrentUniqueKeyValues(keys)
+                : null;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
     public void endPrefetchCurrentKeys() {
         if (originalState instanceof BatchPrefetchableMapState) {
             ((BatchPrefetchableMapState<K>) originalState).endPrefetchCurrentKeys();

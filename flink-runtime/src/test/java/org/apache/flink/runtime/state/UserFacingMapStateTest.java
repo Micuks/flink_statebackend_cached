@@ -30,6 +30,8 @@ import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 
@@ -59,19 +61,49 @@ public class UserFacingMapStateTest {
     }
 
     @Test
+    public void testDelegatesPreparedPrefetchedValuesCapability() throws Exception {
+        RecordingMapState original = new RecordingMapState();
+        UserFacingMapState<String, Long> state = new UserFacingMapState<>(original);
+
+        BatchPrefetchableMapState.PreparedValues prepared =
+                state.prepareCurrentUniqueKeyValues(java.util.Arrays.asList("a", "b"));
+
+        assertSame(original.preparedValues, prepared);
+        assertEquals(2, original.preparedKeys);
+        assertEquals(java.util.Arrays.asList(1L, null), prepared.awaitValues());
+        prepared.cancel();
+        assertTrue(original.preparedCancelled);
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     public void testUnsupportedDelegateFailsClosed() throws Exception {
         UserFacingMapState<String, Long> state =
                 new UserFacingMapState<>((MapState<String, Long>) mock(MapState.class));
 
         assertFalse(state.beginPrefetchCurrentKeys(Collections.singletonList("a")));
+        assertNull(state.prepareCurrentUniqueKeyValues(Collections.singletonList("a")));
         state.endPrefetchCurrentKeys();
     }
 
     private static final class RecordingMapState
             implements MapState<String, Long>, BatchPrefetchableMapState<String> {
         private int prefetchedKeys;
+        private int preparedKeys;
         private boolean prefetchEnded;
+        private boolean preparedCancelled;
+        private final BatchPrefetchableMapState.PreparedValues preparedValues =
+                new BatchPrefetchableMapState.PreparedValues() {
+                    @Override
+                    public List<?> awaitValues() {
+                        return java.util.Arrays.asList(1L, null);
+                    }
+
+                    @Override
+                    public void cancel() {
+                        preparedCancelled = true;
+                    }
+                };
 
         @Override
         public boolean beginPrefetchCurrentKeys(Iterable<? extends String> keys) {
@@ -89,6 +121,12 @@ public class UserFacingMapStateTest {
         @Override
         public List<?> prefetchCurrentUniqueKeyValues(List<? extends String> keys) {
             return java.util.Arrays.asList(1L, null);
+        }
+
+        @Override
+        public PreparedValues prepareCurrentUniqueKeyValues(List<? extends String> keys) {
+            preparedKeys = keys.size();
+            return preparedValues;
         }
 
         @Override
