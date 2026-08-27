@@ -85,11 +85,7 @@ bool KunpengCrc32Available() {
 #if defined(CACHEKIT_FORCE_FNV_HASH)
     return false;
 #else
-#if defined(__linux__) && defined(__aarch64__) && defined(HWCAP_CRC32)
-    return IsKunpengSnapshotTarget() && (getauxval(AT_HWCAP) & HWCAP_CRC32) != 0;
-#else
-    return false;
-#endif
+    return KunpengSnapshotFeatureAvailable();
 #endif
 }
 
@@ -117,6 +113,17 @@ std::uint64_t HashTableKey(
 
 std::uint64_t HashByteKey(const std::uint8_t* bytes, std::size_t size) {
     return HashByteKeyFnv(bytes, size);
+}
+
+bool KunpengSnapshotFeatureAvailable() {
+#if CACHEKIT_ENABLE_KUNPENG_SNAPSHOT \
+        && defined(__linux__) && defined(__aarch64__) && defined(HWCAP_CRC32)
+    static const bool available =
+            IsKunpengSnapshotTarget() && (getauxval(AT_HWCAP) & HWCAP_CRC32) != 0;
+    return available;
+#else
+    return false;
+#endif
 }
 
 namespace {

@@ -21,6 +21,8 @@ if(CACHEKIT_FORCE_FNV_HASH)
 endif()
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    target_compile_definitions(cachekit_snapshot_core PUBLIC
+        CACHEKIT_ENABLE_KUNPENG_SNAPSHOT=1)
     target_compile_options(cachekit_snapshot_core PRIVATE -march=armv8.2-a -mtune=tsv110)
     target_sources(cachekit_snapshot_core PRIVATE
         src/byte_probe_neon.cc
@@ -39,6 +41,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
         target_sources(cachekit_snapshot_core PRIVATE $<TARGET_OBJECTS:cachekit_snapshot_sve>)
         target_compile_definitions(cachekit_snapshot_core PRIVATE CACHEKIT_HAS_SVE_OBJECT=1)
     endif()
+else()
+    target_compile_definitions(cachekit_snapshot_core PUBLIC
+        CACHEKIT_ENABLE_KUNPENG_SNAPSHOT=0)
 endif()
 
 find_package(JNI REQUIRED)

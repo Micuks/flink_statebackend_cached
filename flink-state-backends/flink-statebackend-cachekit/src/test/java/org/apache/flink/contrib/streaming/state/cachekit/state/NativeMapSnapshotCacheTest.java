@@ -37,6 +37,33 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class NativeMapSnapshotCacheTest {
 
     @Test
+    void testOnlyLinuxArm64IsACandidatePlatform() {
+        assertTrue(NativeMapSnapshotCache.isCandidatePlatform("Linux", "aarch64"));
+        assertTrue(NativeMapSnapshotCache.isCandidatePlatform("linux", "arm64"));
+        assertFalse(NativeMapSnapshotCache.isCandidatePlatform("Linux", "amd64"));
+        assertFalse(NativeMapSnapshotCache.isCandidatePlatform("Linux", "x86_64"));
+        assertFalse(NativeMapSnapshotCache.isCandidatePlatform("Windows", "aarch64"));
+    }
+
+    @Test
+    void testKunpengCrc32CpuInfoGate() {
+        assertTrue(
+                NativeMapSnapshotCache.isKunpengCrc32CpuInfo(
+                        "Features\t: fp asimd crc32 sve\n"
+                                + "CPU implementer\t: 0x48\n"
+                                + "CPU part\t: 0xd02\n"));
+        assertFalse(
+                NativeMapSnapshotCache.isKunpengCrc32CpuInfo(
+                        "Features\t: fp asimd sve\n"
+                                + "CPU implementer\t: 0x48\n"
+                                + "CPU part\t: 0xd02\n"));
+        assertFalse(
+                NativeMapSnapshotCache.isKunpengCrc32CpuInfo(
+                        "flags\t: sse4_2 crc32\n"
+                                + "vendor_id\t: GenuineIntel\n"));
+    }
+
+    @Test
     void testWithdrawnClassifierModeIsRejected() {
         IllegalArgumentException error =
                 assertThrows(
@@ -209,6 +236,7 @@ class NativeMapSnapshotCacheTest {
                 cpuinfo.contains("CPU implementer\t: 0x48")
                         && (cpuinfo.contains("CPU part\t: 0xd01")
                                 || cpuinfo.contains("CPU part\t: 0xd02")));
+        assertTrue(NativeMapSnapshotCache.snapshotFeatureAvailable(nativeLibrary(), true));
         try (NativeMapSnapshotCache<Integer, Integer, String> cache =
                 new NativeMapSnapshotCache<>(
                         2,
@@ -283,6 +311,8 @@ class NativeMapSnapshotCacheTest {
     private static String nativeLibrary() {
         String library = System.getProperty("cachekit.native.snapshot.library", "");
         Assumptions.assumeTrue(library.isEmpty() || Files.isRegularFile(Path.of(library)));
+        Assumptions.assumeTrue(
+                NativeMapSnapshotCache.snapshotFeatureAvailable(library, true));
         return library;
     }
 

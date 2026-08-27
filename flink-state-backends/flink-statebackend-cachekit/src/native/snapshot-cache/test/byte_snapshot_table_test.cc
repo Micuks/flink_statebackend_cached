@@ -194,9 +194,17 @@ void RunSixteenByteHashPath(cachekit::ProbeKernel kernel) {
             "16-byte live entries were lost");
 }
 
+void RunKunpengFeatureGate() {
+#if !CACHEKIT_ENABLE_KUNPENG_SNAPSHOT
+    Require(!cachekit::KunpengSnapshotFeatureAvailable(),
+            "Kunpeng snapshot gate opened in a disabled build");
+#endif
+}
+
 }  // namespace
 
 int main() {
+    RunKunpengFeatureGate();
     std::vector<cachekit::ProbeKernel> kernels = {
             cachekit::ProbeKernel::kAuto, cachekit::ProbeKernel::kScalar};
     if (cachekit::NeonAvailable()) {

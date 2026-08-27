@@ -426,6 +426,9 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
         jobject miss_sentinel,
         jobject empty_sentinel) {
     try {
+        if (!cachekit::KunpengSnapshotFeatureAvailable()) {
+            throw std::invalid_argument("Native snapshot cache is unavailable on this CPU");
+        }
         if (max_entries <= 0 || miss_sentinel == nullptr || empty_sentinel == nullptr) {
             throw std::invalid_argument("invalid Native snapshot creation arguments");
         }
@@ -441,6 +444,12 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
         }
         return 0;
     }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeSnapshotFeatureAvailable(
+        JNIEnv*, jclass) {
+    return cachekit::KunpengSnapshotFeatureAvailable() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL

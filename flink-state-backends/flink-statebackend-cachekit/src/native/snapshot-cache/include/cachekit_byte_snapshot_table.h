@@ -18,6 +18,7 @@ enum class PutResult : std::uint8_t {
 };
 
 std::uint64_t HashByteKey(const std::uint8_t* bytes, std::size_t size);
+bool KunpengSnapshotFeatureAvailable();
 
 struct ByteLookupResult {
     bool found;

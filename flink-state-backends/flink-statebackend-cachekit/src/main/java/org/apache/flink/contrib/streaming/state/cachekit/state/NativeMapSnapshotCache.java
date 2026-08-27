@@ -43,6 +43,45 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
             "/META-INF/native/libcachekit_snapshot_jni.so";
     private static String loadedLibrary;
 
+    static boolean snapshotFeatureAvailable(String libraryPath, boolean nativeRequested) {
+        if (!isCandidatePlatform(
+                System.getProperty("os.name", ""), System.getProperty("os.arch", ""))) {
+            return false;
+        }
+        if (!kunpengCrc32Available()) {
+            return false;
+        }
+        if (!nativeRequested) {
+            return true;
+        }
+        loadLibrary(libraryPath, false);
+        return nativeSnapshotFeatureAvailable();
+    }
+
+    static boolean isCandidatePlatform(String osName, String osArch) {
+        String normalizedOs = osName == null ? "" : osName.trim().toLowerCase(Locale.ROOT);
+        String normalizedArch = osArch == null ? "" : osArch.trim().toLowerCase(Locale.ROOT);
+        return normalizedOs.contains("linux")
+                && (normalizedArch.equals("aarch64") || normalizedArch.equals("arm64"));
+    }
+
+    private static boolean kunpengCrc32Available() {
+        try {
+            return isKunpengCrc32CpuInfo(Files.readString(Path.of("/proc/cpuinfo")));
+        } catch (IOException error) {
+            return false;
+        }
+    }
+
+    static boolean isKunpengCrc32CpuInfo(String cpuInfo) {
+        String normalized = cpuInfo == null ? "" : cpuInfo.toLowerCase(Locale.ROOT);
+        return normalized.contains("cpu implementer")
+                && normalized.contains("0x48")
+                && (normalized.contains("cpu part\t: 0xd01")
+                        || normalized.contains("cpu part\t: 0xd02"))
+                && normalized.matches("(?s).*\\bcrc32\\b.*");
+    }
+
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
     private final TypeSerializer<UK> userKeySerializer;
@@ -403,6 +442,10 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
     }
 
     private static synchronized void loadLibrary(String configuredPath) {
+        loadLibrary(configuredPath, true);
+    }
+
+    private static synchronized void loadLibrary(String configuredPath, boolean logEmbeddedLoad) {
         String requested = configuredPath == null ? "" : configuredPath.trim();
         String identity = requested.isEmpty() ? EMBEDDED_LIBRARY : requested;
         if (loadedLibrary != null) {
@@ -416,12 +459,12 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
         if (!requested.isEmpty()) {
             System.load(requested);
         } else {
-            loadEmbeddedLibrary();
+            loadEmbeddedLibrary(logEmbeddedLoad);
         }
         loadedLibrary = identity;
     }
 
-    private static void loadEmbeddedLibrary() {
+    private static void loadEmbeddedLibrary(boolean logEmbeddedLoad) {
         try (InputStream input = NativeMapSnapshotCache.class.getResourceAsStream(EMBEDDED_LIBRARY)) {
             if (input == null) {
                 System.loadLibrary("cachekit_snapshot_jni");
@@ -431,7 +474,11 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
             Files.copy(input, extracted, StandardCopyOption.REPLACE_EXISTING);
             extracted.toFile().deleteOnExit();
             System.load(extracted.toAbsolutePath().toString());
-            LOG.info("Loaded embedded CacheKit Native snapshot JNI library from {}", EMBEDDED_LIBRARY);
+            if (logEmbeddedLoad) {
+                LOG.info(
+                        "Loaded embedded CacheKit Native snapshot JNI library from {}",
+                        EMBEDDED_LIBRARY);
+            }
         } catch (IOException e) {
             throw new IllegalStateException("Failed to extract embedded Native snapshot library", e);
         }
@@ -522,6 +569,8 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
             int kernel,
             Object missSentinel,
             Object emptySentinel);
+
+    private static native boolean nativeSnapshotFeatureAvailable();
 
     private static native void nativeDestroy(long handle);
 
