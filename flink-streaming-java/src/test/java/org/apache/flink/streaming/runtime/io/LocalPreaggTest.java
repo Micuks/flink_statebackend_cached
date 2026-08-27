@@ -32,6 +32,7 @@ import org.apache.flink.util.Collector;
 
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -40,6 +41,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -281,6 +283,78 @@ class LocalPreaggTest {
                         "abort:token-d",
                         "abort:token-e"),
                 pipeline.events);
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testPipelineCountersPublishExactSuccessfulWindowDeltas() throws Exception {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "c", "d", "e", "f"),
+                        Arrays.asList(1, 2, 3, 4, 5, 6),
+                        null);
+        long windows = pipelineCounter("PIPELINE_WINDOWS");
+        long groupCount = pipelineCounter("PIPELINE_GROUPS");
+        long prepared = pipelineCounter("PIPELINE_PREPARED_GROUPS");
+        long preparedAhead = pipelineCounter("PIPELINE_PREPARED_AHEAD_GROUPS");
+        long consumed = pipelineCounter("PIPELINE_CONSUMED_GROUPS");
+        long cancelled = pipelineCounter("PIPELINE_CANCELLED_GROUPS");
+        long inFlight = pipelineCounter("PIPELINE_PROCESS_WITH_FUTURE_IN_FLIGHT");
+        long exceptionAborts = pipelineCounter("PIPELINE_EXCEPTION_ABORTS");
+
+        LocalPreagg.dispatchMaterializedPipeline(
+                mock(AbstractStreamOperator.class),
+                new RecordingPipeline(null, null),
+                groups,
+                mock(TimestampedCollector.class),
+                4);
+
+        assertEquals(1L, pipelineCounter("PIPELINE_WINDOWS") - windows);
+        assertEquals(6L, pipelineCounter("PIPELINE_GROUPS") - groupCount);
+        assertEquals(6L, pipelineCounter("PIPELINE_PREPARED_GROUPS") - prepared);
+        assertEquals(5L, pipelineCounter("PIPELINE_PREPARED_AHEAD_GROUPS") - preparedAhead);
+        assertEquals(6L, pipelineCounter("PIPELINE_CONSUMED_GROUPS") - consumed);
+        assertEquals(0L, pipelineCounter("PIPELINE_CANCELLED_GROUPS") - cancelled);
+        assertEquals(5L, pipelineCounter("PIPELINE_PROCESS_WITH_FUTURE_IN_FLIGHT") - inFlight);
+        assertEquals(0L, pipelineCounter("PIPELINE_EXCEPTION_ABORTS") - exceptionAborts);
+        assertTrue(pipelineCounter("PIPELINE_PEAK_PREPARED_AHEAD") >= 4L);
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testPipelineCountersPublishExactlyOnceAfterProcessFailure() throws Exception {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "c", "d", "e", "f"),
+                        Arrays.asList(1, 2, 3, 4, 5, 6),
+                        null);
+        long windows = pipelineCounter("PIPELINE_WINDOWS");
+        long groupCount = pipelineCounter("PIPELINE_GROUPS");
+        long prepared = pipelineCounter("PIPELINE_PREPARED_GROUPS");
+        long preparedAhead = pipelineCounter("PIPELINE_PREPARED_AHEAD_GROUPS");
+        long consumed = pipelineCounter("PIPELINE_CONSUMED_GROUPS");
+        long cancelled = pipelineCounter("PIPELINE_CANCELLED_GROUPS");
+        long inFlight = pipelineCounter("PIPELINE_PROCESS_WITH_FUTURE_IN_FLIGHT");
+        long exceptionAborts = pipelineCounter("PIPELINE_EXCEPTION_ABORTS");
+
+        assertThrows(
+                IllegalStateException.class,
+                () ->
+                        LocalPreagg.dispatchMaterializedPipeline(
+                                mock(AbstractStreamOperator.class),
+                                new RecordingPipeline(null, "a"),
+                                groups,
+                                mock(TimestampedCollector.class),
+                                4));
+
+        assertEquals(1L, pipelineCounter("PIPELINE_WINDOWS") - windows);
+        assertEquals(6L, pipelineCounter("PIPELINE_GROUPS") - groupCount);
+        assertEquals(5L, pipelineCounter("PIPELINE_PREPARED_GROUPS") - prepared);
+        assertEquals(4L, pipelineCounter("PIPELINE_PREPARED_AHEAD_GROUPS") - preparedAhead);
+        assertEquals(0L, pipelineCounter("PIPELINE_CONSUMED_GROUPS") - consumed);
+        assertEquals(5L, pipelineCounter("PIPELINE_CANCELLED_GROUPS") - cancelled);
+        assertEquals(1L, pipelineCounter("PIPELINE_PROCESS_WITH_FUTURE_IN_FLIGHT") - inFlight);
+        assertEquals(1L, pipelineCounter("PIPELINE_EXCEPTION_ABORTS") - exceptionAborts);
     }
 
     @Test
@@ -698,5 +772,11 @@ class LocalPreaggTest {
         @Override
         public void processBatchForKey(
                 Object currentKey, List<Object> inputs, Collector<Object> out) {}
+    }
+
+    private static long pipelineCounter(String fieldName) throws Exception {
+        Field field = LocalPreagg.class.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return ((AtomicLong) field.get(null)).get();
     }
 }

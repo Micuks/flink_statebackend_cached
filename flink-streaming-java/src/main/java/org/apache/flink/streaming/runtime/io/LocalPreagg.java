@@ -571,33 +571,48 @@ public final class LocalPreagg {
         workspace.prepare(capacity);
         Object[] prepared = workspace.prepared;
         boolean[] occupied = workspace.occupied;
-        PIPELINE_WINDOWS.incrementAndGet();
-        PIPELINE_GROUPS.addAndGet(groupCount);
-        PIPELINE_MAX_CONFIGURED_LOOKAHEAD.accumulateAndGet(lookahead, Math::max);
+        long preparedGroups = 0L;
+        long preparedAheadGroups = 0L;
+        long consumedGroups = 0L;
+        long cancelledGroups = 0L;
+        long processWithFutureInFlight = 0L;
+        int occupiedCount = 0;
+        int peakPreparedAhead = 0;
+        long exceptionAborts = 0L;
         boolean failed = false;
         try {
             for (int group = 0; group < capacity; group++) {
-                prepareWindowGroup(preparer, prepared, occupied, capacity, group, group > 0);
+                prepareWindowGroup(preparer, prepared, occupied, capacity, group);
+                occupiedCount++;
+                preparedGroups++;
+                if (group > 0) {
+                    preparedAheadGroups++;
+                }
+                peakPreparedAhead = Math.max(peakPreparedAhead, occupiedCount - 1);
             }
             for (int group = 0; group < groupCount; group++) {
                 int slot = group % capacity;
-                int futurePrepared = countOccupied(occupied) - 1;
-                if (futurePrepared > 0) {
-                    PIPELINE_PROCESS_WITH_FUTURE_IN_FLIGHT.incrementAndGet();
+                if (occupiedCount > 1) {
+                    processWithFutureInFlight++;
                 }
                 consumer.process(group, prepared[slot]);
                 prepared[slot] = null;
                 occupied[slot] = false;
-                PIPELINE_CONSUMED_GROUPS.incrementAndGet();
+                occupiedCount--;
+                consumedGroups++;
 
                 int tail = group + capacity;
                 if (tail < groupCount) {
-                    prepareWindowGroup(preparer, prepared, occupied, capacity, tail, true);
+                    prepareWindowGroup(preparer, prepared, occupied, capacity, tail);
+                    occupiedCount++;
+                    preparedGroups++;
+                    preparedAheadGroups++;
+                    peakPreparedAhead = Math.max(peakPreparedAhead, occupiedCount - 1);
                 }
             }
         } catch (Exception | Error failure) {
             failed = true;
-            PIPELINE_EXCEPTION_ABORTS.incrementAndGet();
+            exceptionAborts = 1L;
             throw failure;
         } finally {
             Throwable abortFailure = null;
@@ -617,12 +632,26 @@ public final class LocalPreagg {
                         } finally {
                             prepared[slot] = null;
                             occupied[slot] = false;
-                            PIPELINE_CANCELLED_GROUPS.incrementAndGet();
+                            occupiedCount--;
+                            cancelledGroups++;
                         }
                     }
                 }
             } finally {
                 workspace.clear(capacity);
+                // The pipeline counters are diagnostic-only. Publishing one aggregate per window
+                // avoids contended AtomicLong updates and ring scans for every state key while
+                // preserving exact success, cancellation, and exception closure.
+                PIPELINE_WINDOWS.incrementAndGet();
+                PIPELINE_GROUPS.addAndGet(groupCount);
+                PIPELINE_PREPARED_GROUPS.addAndGet(preparedGroups);
+                PIPELINE_PREPARED_AHEAD_GROUPS.addAndGet(preparedAheadGroups);
+                PIPELINE_CONSUMED_GROUPS.addAndGet(consumedGroups);
+                PIPELINE_CANCELLED_GROUPS.addAndGet(cancelledGroups);
+                PIPELINE_PROCESS_WITH_FUTURE_IN_FLIGHT.addAndGet(processWithFutureInFlight);
+                PIPELINE_EXCEPTION_ABORTS.addAndGet(exceptionAborts);
+                PIPELINE_PEAK_PREPARED_AHEAD.accumulateAndGet(peakPreparedAhead, Math::max);
+                PIPELINE_MAX_CONFIGURED_LOOKAHEAD.accumulateAndGet(lookahead, Math::max);
             }
             if (abortFailure instanceof Error) {
                 throw (Error) abortFailure;
@@ -637,12 +666,7 @@ public final class LocalPreagg {
     }
 
     private static void prepareWindowGroup(
-            GroupPreparer preparer,
-            Object[] prepared,
-            boolean[] occupied,
-            int capacity,
-            int group,
-            boolean ahead)
+            GroupPreparer preparer, Object[] prepared, boolean[] occupied, int capacity, int group)
             throws Exception {
         int slot = group % capacity;
         if (occupied[slot]) {
@@ -650,21 +674,6 @@ public final class LocalPreagg {
         }
         prepared[slot] = preparer.prepare(group);
         occupied[slot] = true;
-        PIPELINE_PREPARED_GROUPS.incrementAndGet();
-        if (ahead) {
-            PIPELINE_PREPARED_AHEAD_GROUPS.incrementAndGet();
-        }
-        PIPELINE_PEAK_PREPARED_AHEAD.accumulateAndGet(capacity - 1, Math::max);
-    }
-
-    private static int countOccupied(boolean[] occupied) {
-        int count = 0;
-        for (boolean present : occupied) {
-            if (present) {
-                count++;
-            }
-        }
-        return count;
     }
 
     @FunctionalInterface
