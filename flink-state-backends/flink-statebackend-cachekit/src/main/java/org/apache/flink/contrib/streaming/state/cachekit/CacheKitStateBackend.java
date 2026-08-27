@@ -83,6 +83,11 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final int mapHitRateWindow;
     private final boolean mapIterationCacheFillEnabled;
     private final int mapSnapshotCacheMaxEntries;
+    private final boolean mapSnapshotCacheNativeEnabled;
+    private final boolean mapSnapshotCacheNativeClassifierEnabled;
+    private final boolean mapSnapshotCacheNativeRemoveHintEnabled;
+    private final String mapSnapshotCacheNativeKernel;
+    private final String mapSnapshotCacheNativeLibraryPath;
     private final boolean listStateCowEnabled;
     private final boolean listStateRywEnabled;
     private final int listStateClearedKeysCapacity;
@@ -114,6 +119,187 @@ public class CacheKitStateBackend extends AbstractStateBackend
             int listStateClearedKeysCapacity,
             boolean priorityQueueOptEnabled,
             boolean diagnosticsEnabled) {
+        this(
+                delegateBackend,
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow,
+                valueBypassEnabled,
+                valueHitRateThreshold,
+                valueHitRateWindow,
+                mapPresenceCacheMaxEntries,
+                mapPresenceCachePolicy,
+                mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                false,
+                false,
+                "AUTO",
+                "",
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled,
+                diagnosticsEnabled);
+    }
+
+    public CacheKitStateBackend(
+            StateBackend delegateBackend,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            boolean mapSnapshotCacheNativeEnabled,
+            String mapSnapshotCacheNativeKernel,
+            String mapSnapshotCacheNativeLibraryPath,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled) {
+        this(
+                delegateBackend,
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow,
+                valueBypassEnabled,
+                valueHitRateThreshold,
+                valueHitRateWindow,
+                mapPresenceCacheMaxEntries,
+                mapPresenceCachePolicy,
+                mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheNativeEnabled,
+                false,
+                mapSnapshotCacheNativeKernel,
+                mapSnapshotCacheNativeLibraryPath,
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled,
+                diagnosticsEnabled);
+    }
+
+    public CacheKitStateBackend(
+            StateBackend delegateBackend,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            boolean mapSnapshotCacheNativeEnabled,
+            boolean mapSnapshotCacheNativeClassifierEnabled,
+            String mapSnapshotCacheNativeKernel,
+            String mapSnapshotCacheNativeLibraryPath,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled) {
+        this(
+                delegateBackend,
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow,
+                valueBypassEnabled,
+                valueHitRateThreshold,
+                valueHitRateWindow,
+                mapPresenceCacheMaxEntries,
+                mapPresenceCachePolicy,
+                mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheNativeEnabled,
+                mapSnapshotCacheNativeClassifierEnabled,
+                false,
+                mapSnapshotCacheNativeKernel,
+                mapSnapshotCacheNativeLibraryPath,
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled,
+                diagnosticsEnabled);
+    }
+
+    public CacheKitStateBackend(
+            StateBackend delegateBackend,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            boolean mapSnapshotCacheNativeEnabled,
+            boolean mapSnapshotCacheNativeClassifierEnabled,
+            boolean mapSnapshotCacheNativeRemoveHintEnabled,
+            String mapSnapshotCacheNativeKernel,
+            String mapSnapshotCacheNativeLibraryPath,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -133,6 +319,11 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.mapHitRateWindow = mapHitRateWindow;
         this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
         this.mapSnapshotCacheMaxEntries = mapSnapshotCacheMaxEntries;
+        this.mapSnapshotCacheNativeEnabled = mapSnapshotCacheNativeEnabled;
+        this.mapSnapshotCacheNativeClassifierEnabled = mapSnapshotCacheNativeClassifierEnabled;
+        this.mapSnapshotCacheNativeRemoveHintEnabled = mapSnapshotCacheNativeRemoveHintEnabled;
+        this.mapSnapshotCacheNativeKernel = mapSnapshotCacheNativeKernel;
+        this.mapSnapshotCacheNativeLibraryPath = mapSnapshotCacheNativeLibraryPath;
         this.listStateCowEnabled = listStateCowEnabled;
         this.listStateRywEnabled = listStateRywEnabled;
         this.listStateClearedKeysCapacity = listStateClearedKeysCapacity;
@@ -219,6 +410,11 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapHitRateWindow,
                 mapIterationCacheFillEnabled,
                 mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheNativeEnabled,
+                mapSnapshotCacheNativeClassifierEnabled,
+                mapSnapshotCacheNativeRemoveHintEnabled,
+                mapSnapshotCacheNativeKernel,
+                mapSnapshotCacheNativeLibraryPath,
                 listStateCowEnabled,
                 listStateRywEnabled,
                 listStateClearedKeysCapacity,
@@ -294,6 +490,16 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 config.get(CacheKitStateBackendFactory.MAP_ITERATION_CACHE_FILL_ENABLED);
         final int mapSnapshotMaxEntries =
                 Math.max(0, config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
+        final boolean mapSnapshotNativeEnabled =
+                config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_ENABLED);
+        final boolean mapSnapshotNativeClassifierEnabled =
+                config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_CLASSIFIER_ENABLED);
+        final String mapSnapshotNativeKernel =
+                config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_KERNEL);
+        final boolean mapSnapshotNativeRemoveHintEnabled =
+                config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_REMOVE_HINT_ENABLED);
+        final String mapSnapshotNativeLibraryPath =
+                config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_LIBRARY_PATH);
         final boolean listStateCowEnabled =
                 config.get(CacheKitStateBackendFactory.LIST_STATE_COW_ENABLED);
         final boolean listStateRywEnabled =
@@ -325,6 +531,11 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapHitRateWindow,
                 mapIterationCacheFillEnabled,
                 mapSnapshotMaxEntries,
+                mapSnapshotNativeEnabled,
+                mapSnapshotNativeClassifierEnabled,
+                mapSnapshotNativeRemoveHintEnabled,
+                mapSnapshotNativeKernel,
+                mapSnapshotNativeLibraryPath,
                 listStateCowEnabled,
                 listStateRywEnabled,
                 clearedKeysCapacity,

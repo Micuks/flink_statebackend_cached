@@ -14,13 +14,20 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
+import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.api.common.typeutils.base.MapSerializer;
+import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.runtime.state.VoidNamespace;
+import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Assumptions;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -38,6 +45,62 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CachedInternalMapStateTest {
+
+    @Test
+    void testNativeSnapshotSingleBackfillAndShortCircuit() throws Exception {
+        String library = System.getProperty("cachekit.native.snapshot.library");
+        Assumptions.assumeTrue(library != null && Files.isRegularFile(Path.of(library)));
+
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate = mock(InternalMapState.class);
+        Map<String, Integer> entries = new LinkedHashMap<>();
+        entries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(entries.entrySet());
+        when(delegate.get("uk1")).thenReturn(1);
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer())
+                .thenReturn(new MapSerializer<>(StringSerializer.INSTANCE, IntSerializer.INSTANCE));
+        MapSnapshotCacheMetrics metrics = MapSnapshotCacheMetrics.forTesting();
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        100,
+                        metrics,
+                        true,
+                        "SCALAR",
+                        library);
+        try {
+            state.setCurrentNamespace(VoidNamespace.INSTANCE);
+            for (Map.Entry<String, Integer> ignored : state.entries()) {
+                // Consume the delegate traversal and populate the Native SINGLE snapshot.
+            }
+
+            clearInvocations(delegate);
+            assertEquals("uk1", state.entries().iterator().next().getKey());
+
+            verify(delegate, times(0)).entries();
+            verify(delegate, times(1)).get("uk1");
+            assertEquals(1, metrics.hits());
+            assertEquals(1, metrics.singleShortCircuits());
+        } finally {
+            state.close();
+        }
+    }
 
     @Test
     void testPresenceCacheSkipsDelegateOnAbsentContains() throws Exception {

@@ -153,6 +153,45 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         + "Caches (Key, Namespace) -> {EMPTY | SINGLE(UserKey)} to short-circuit "
                                                         + "entries()/iterator() calls. Set 0 to disable.");
 
+        public static final ConfigOption<Boolean> MAP_SNAPSHOT_CACHE_NATIVE_ENABLED = ConfigOptions
+                        .key("state.backend.cachekit.map.snapshot.cache.native.enabled")
+                        .booleanType()
+                        .defaultValue(false)
+                        .withDescription(
+                                        "Store MapState EMPTY/SINGLE snapshots in the JNI Native cache. "
+                                                        + "The Java snapshot cache remains the default.");
+
+        public static final ConfigOption<Boolean> MAP_SNAPSHOT_CACHE_NATIVE_CLASSIFIER_ENABLED = ConfigOptions
+                        .key("state.backend.cachekit.map.snapshot.cache.native.classifier.enabled")
+                        .booleanType()
+                        .defaultValue(false)
+                        .withDescription(
+                                        "Reserved compatibility option for the withdrawn Native RocksDB "
+                                                        + "prefix-classifier experiment. Must remain false because CacheKit "
+                                                        + "does not modify the RocksDB state backend.");
+
+        public static final ConfigOption<String> MAP_SNAPSHOT_CACHE_NATIVE_KERNEL = ConfigOptions
+                        .key("state.backend.cachekit.map.snapshot.cache.native.kernel")
+                        .stringType()
+                        .defaultValue("AUTO")
+                        .withDescription("Native snapshot probe kernel: AUTO, SCALAR, NEON, or SVE.");
+
+        public static final ConfigOption<Boolean> MAP_SNAPSHOT_CACHE_NATIVE_REMOVE_HINT_ENABLED =
+                        ConfigOptions
+                                        .key("state.backend.cachekit.map.snapshot.cache.native.remove-hint.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Skip Native snapshot remove JNI calls when an exact Java-side "
+                                                                        + "64-bit hash-count membership hint proves the key absent.");
+
+        public static final ConfigOption<String> MAP_SNAPSHOT_CACHE_NATIVE_LIBRARY_PATH = ConfigOptions
+                        .key("state.backend.cachekit.map.snapshot.cache.native.library-path")
+                        .stringType()
+                        .defaultValue("")
+                        .withDescription(
+                                        "Absolute libcachekit_snapshot_jni.so path. Empty loads the native library embedded in the CacheKit JAR, with java.library.path as a fallback.");
+
         public static final ConfigOption<Boolean> DIAGNOSTICS_ENABLED = ConfigOptions
                         .key("state.backend.cachekit.diagnostics.enabled")
                         .booleanType()
@@ -225,6 +264,13 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                 final int mapHitRateWindow = config.get(MAP_HIT_RATE_WINDOW);
                 final boolean mapIterationCacheFillEnabled = config.get(MAP_ITERATION_CACHE_FILL_ENABLED);
                 final int mapSnapshotMaxEntries = Math.max(0, config.get(MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
+		final boolean mapSnapshotNativeEnabled = config.get(MAP_SNAPSHOT_CACHE_NATIVE_ENABLED);
+		final boolean mapSnapshotNativeClassifierEnabled =
+				config.get(MAP_SNAPSHOT_CACHE_NATIVE_CLASSIFIER_ENABLED);
+		final String mapSnapshotNativeKernel = config.get(MAP_SNAPSHOT_CACHE_NATIVE_KERNEL);
+		final boolean mapSnapshotNativeRemoveHintEnabled =
+				config.get(MAP_SNAPSHOT_CACHE_NATIVE_REMOVE_HINT_ENABLED);
+		final String mapSnapshotNativeLibraryPath = config.get(MAP_SNAPSHOT_CACHE_NATIVE_LIBRARY_PATH);
 		final boolean diagnosticsEnabled = config.get(DIAGNOSTICS_ENABLED);
 		final String delegateClass = config.get(DELEGATE_BACKEND);
 
@@ -234,7 +280,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 			final boolean priorityQueueOptEnabled = config.get(PRIORITY_QUEUE_OPT_ENABLED);
 
 			System.out.printf(
-				"CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, diagnostics=%s, delegate=%s, listStateCow=%s, listStateRyw=%s, clearedKeysCap=%d, priorityQueueOpt=%s%n",
+				"CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, mapSnapshotNative=%s, mapSnapshotClassifier=%s, mapSnapshotKernel=%s, mapSnapshotRemoveHint=%s, diagnostics=%s, delegate=%s, listStateCow=%s, listStateRyw=%s, clearedKeysCap=%d, priorityQueueOpt=%s%n",
                                 maxEntries,
                                 policyType,
                                 lruOverflow,
@@ -253,6 +299,10 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 							mapHitRateWindow,
 							mapIterationCacheFillEnabled,
 							mapSnapshotMaxEntries,
+							mapSnapshotNativeEnabled,
+							mapSnapshotNativeClassifierEnabled,
+							mapSnapshotNativeKernel,
+							mapSnapshotNativeRemoveHintEnabled,
 							diagnosticsEnabled,
 							delegateClass,
 							listStateCowEnabled,
@@ -298,6 +348,11 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 								mapHitRateWindow,
 								mapIterationCacheFillEnabled,
 								mapSnapshotMaxEntries,
+								mapSnapshotNativeEnabled,
+								mapSnapshotNativeClassifierEnabled,
+								mapSnapshotNativeRemoveHintEnabled,
+								mapSnapshotNativeKernel,
+								mapSnapshotNativeLibraryPath,
 								listStateCowEnabled,
 								listStateRywEnabled,
 							clearedKeysCapacity,
