@@ -23,6 +23,7 @@ import org.apache.flink.contrib.streaming.state.RocksDBStateBackendFactory;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneOptions;
+import org.apache.flink.runtime.state.BatchKeyGroupingSupport;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.StateBackendFactory;
 import org.apache.flink.runtime.state.hashmap.HashMapStateBackend;
@@ -727,7 +728,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                     "Maximum number of future LocalPreAgg outer-key groups prepared "
                                             + "while the current group is consumed. One preserves the "
                                             + "original current-plus-next pipeline; values are clamped "
-                                            + "to the bounded range one through eight when the pipeline "
+                                            + "to the bounded range one through thirty-two when the pipeline "
                                             + "is enabled.");
 
     public static final ConfigOption<Boolean>
@@ -933,7 +934,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 					Math.max(
 							1,
 							Math.min(
-									8,
+									BatchKeyGroupingSupport
+											.MAX_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS,
 									config.get(
 											NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS))));
 		}

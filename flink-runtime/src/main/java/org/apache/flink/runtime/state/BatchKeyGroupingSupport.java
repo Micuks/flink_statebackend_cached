@@ -39,6 +39,7 @@ public interface BatchKeyGroupingSupport {
     int PACKED_PLAN_VERSION = 1;
     int PACKED_PLAN_HEADER_INTS = 4;
     int PACKED_PLAN_HEADER_BYTES = PACKED_PLAN_HEADER_INTS * Integer.BYTES;
+    int MAX_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS = 32;
 
     /** Maximum source entries accepted by {@link #groupHashTokens}. */
     int maxGroupingEntries();

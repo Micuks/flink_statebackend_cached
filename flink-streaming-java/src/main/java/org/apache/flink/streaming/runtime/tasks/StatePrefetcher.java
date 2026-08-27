@@ -627,7 +627,11 @@ public final class StatePrefetcher {
             return 0;
         }
         int configured = ((BatchKeyGroupingSupport) backend).crossKeyPipelineLookaheadGroups();
-        return Math.max(0, Math.min(8, configured));
+        return Math.max(
+                0,
+                Math.min(
+                        BatchKeyGroupingSupport.MAX_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS,
+                        configured));
     }
 
     static int groupHashTokensNatively(

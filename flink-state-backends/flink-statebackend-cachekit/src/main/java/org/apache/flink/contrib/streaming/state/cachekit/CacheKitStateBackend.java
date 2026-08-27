@@ -32,6 +32,7 @@ import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.AbstractStateBackend;
+import org.apache.flink.runtime.state.BatchKeyGroupingSupport;
 import org.apache.flink.runtime.state.CheckpointStorage;
 import org.apache.flink.runtime.state.CheckpointStorageAccess;
 import org.apache.flink.runtime.state.CompletedCheckpointStorageLocation;
@@ -709,7 +710,11 @@ public class CacheKitStateBackend extends AbstractStateBackend
     }
 
     static int normalizeNativeMapDistinctBatchPrefetchLookaheadGroups(int configuredValue) {
-        return configuredValue <= 0 ? 1 : Math.min(8, configuredValue);
+        return configuredValue <= 0
+                ? 1
+                : Math.min(
+                        BatchKeyGroupingSupport.MAX_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS,
+                        configuredValue);
     }
 
     static NativeRequestPlaneOptions normalizeNativeRequestPlaneOptions(

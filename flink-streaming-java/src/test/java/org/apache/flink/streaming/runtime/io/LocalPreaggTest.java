@@ -197,6 +197,33 @@ class LocalPreaggTest {
 
     @Test
     @SuppressWarnings({"rawtypes", "unchecked"})
+    void testMaterializedPipelineLookaheadSixteenIsNotSilentlyClampedToEight() throws Exception {
+        List<Object> keys = new ArrayList<>();
+        List<Object> values = new ArrayList<>();
+        for (int index = 0; index < 20; index++) {
+            keys.add("k" + index);
+            values.add(index);
+        }
+        LocalPreagg.GroupedInputs groups = LocalPreagg.groupInputs(keys, values, null);
+        RecordingPipeline pipeline = new RecordingPipeline(null, null);
+
+        LocalPreagg.dispatchMaterializedPipeline(
+                mock(AbstractStreamOperator.class),
+                pipeline,
+                groups,
+                mock(TimestampedCollector.class),
+                16);
+
+        // Current plus sixteen future groups must all be prepared before processing k0. An
+        // accidental legacy clamp to eight would put process:k0 at index nine instead.
+        for (int index = 0; index <= 16; index++) {
+            assertEquals("prepare:k" + index, pipeline.events.get(index));
+        }
+        assertEquals("process:k0:token-k0", pipeline.events.get(17));
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
     void testMaterializedPipelineLookaheadFourHandlesFewerGroupsThanWindow() throws Exception {
         LocalPreagg.GroupedInputs groups =
                 LocalPreagg.groupInputs(Arrays.asList("a", "b"), Arrays.asList(1, 2), null);

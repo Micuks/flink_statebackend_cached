@@ -459,7 +459,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
         this.nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys =
                 Math.max(2, nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys);
         this.nativeMapDistinctBatchPrefetchLookaheadGroups =
-                Math.max(1, Math.min(8, nativeMapDistinctBatchPrefetchLookaheadGroups));
+                Math.max(
+                        1,
+                        Math.min(
+                                BatchKeyGroupingSupport.MAX_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS,
+                                nativeMapDistinctBatchPrefetchLookaheadGroups));
         this.mapSnapshotCacheMetrics =
                 MapSnapshotCacheMetrics.create(metricGroup, diagnosticsEnabled);
         Preconditions.checkNotNull(nativeRequestPlaneOptions, "nativeRequestPlaneOptions");
@@ -508,7 +512,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                             nativeRequestPlaneOptions,
                             nativeMapDistinctBatchPrefetchEnabled
                                             && nativeMapDistinctBatchPrefetchCrossKeyPipelineEnabled
-                                    ? this.nativeMapDistinctBatchPrefetchLookaheadGroups
+                                    // Per-group async direct arenas remain separately bounded.
+                                    // Deferred waves serialize immutable keys on the mailbox and
+                                    // do not consume these slots, so a wider future cohort must not
+                                    // multiply direct-memory reservations per backend.
+                                    ? Math.min(
+                                            8,
+                                            this.nativeMapDistinctBatchPrefetchLookaheadGroups)
                                     : 0);
         } catch (RuntimeException | Error failure) {
             if (initializedNativeCoordinator != null) {

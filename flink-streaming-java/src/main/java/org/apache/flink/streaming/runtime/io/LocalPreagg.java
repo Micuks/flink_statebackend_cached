@@ -639,7 +639,12 @@ public final class LocalPreagg {
         if (groupCount <= 0) {
             return;
         }
-        int lookahead = Math.max(1, Math.min(8, requestedLookahead));
+        int lookahead =
+                Math.max(
+                        1,
+                        Math.min(
+                                BatchKeyGroupingSupport.MAX_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS,
+                                requestedLookahead));
         int capacity = Math.min(groupCount, lookahead + 1);
         PreparedWindowWorkspace workspace = PREPARED_WINDOW_WORKSPACE.get();
         workspace.prepare(capacity);
@@ -823,7 +828,12 @@ public final class LocalPreagg {
         if (groupCount <= 0) {
             return;
         }
-        int lookahead = Math.max(1, Math.min(8, requestedLookahead));
+        int lookahead =
+                Math.max(
+                        1,
+                        Math.min(
+                                BatchKeyGroupingSupport.MAX_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS,
+                                requestedLookahead));
         int capacity = Math.min(groupCount, lookahead + 1);
         PreparedWindowWorkspace workspace = PREPARED_WINDOW_WORKSPACE.get();
         workspace.prepare(capacity);

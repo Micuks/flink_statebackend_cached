@@ -271,7 +271,7 @@ class StatePrefetcherTest {
         org.mockito.Mockito.when(grouping.crossKeyPipelineLookaheadGroups()).thenReturn(4, 99, -1);
 
         assertEquals(4, StatePrefetcher.crossKeyPipelineLookaheadGroups(backend));
-        assertEquals(8, StatePrefetcher.crossKeyPipelineLookaheadGroups(backend));
+        assertEquals(32, StatePrefetcher.crossKeyPipelineLookaheadGroups(backend));
         assertEquals(0, StatePrefetcher.crossKeyPipelineLookaheadGroups(backend));
         verify(grouping, org.mockito.Mockito.times(3)).crossKeyPipelineLookaheadGroups();
     }
