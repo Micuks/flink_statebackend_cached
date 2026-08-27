@@ -23,14 +23,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Shared single-thread executor for backpressure-driven async state prefetch.
+ * Shared bounded executors for backpressure-driven async state prefetch.
  *
- * <p>One daemon thread per TaskManager JVM, shared by all CacheKit backends, so the prefetch
- * side-work stays bounded no matter how many operators enable it (the benchmark's primary metric is
- * throughput <em>per core</em>). Generic submission never blocks the mailbox thread: when the queue
- * is full, the oldest pending prefetch is discarded — a fresher lookahead window is always worth
- * more than a stale one. The explicit work-first path may instead execute one eligible direct-arena
- * task on a mailbox caller while the worker has backlog.
+ * <p>The generic path retains one daemon thread per TaskManager JVM. A separately gated exact-map
+ * deferred-wave path may use two daemon workers because those tasks contain only immutable encoded
+ * RocksDB keys and publish an all-or-none raw value vector. Both paths are shared by all CacheKit
+ * backends and remain bounded. Submission never blocks the mailbox thread: when a queue is full,
+ * the oldest pending prefetch is discarded — a fresher lookahead window is always worth more than
+ * a stale one. The explicit work-first path may instead execute one eligible direct-arena task on a
+ * mailbox caller while the generic worker has backlog.
  */
 public final class PrefetchExecutor {
 
@@ -41,6 +42,9 @@ public final class PrefetchExecutor {
 
     /** Marker for a task whose state and native buffers are safe on a mailbox caller. */
     public interface WorkFirstEligibleTask extends DropAwareTask {}
+
+    /** Marker for an immutable exact-map wave that is safe on the isolated two-worker executor. */
+    public interface DeferredWaveEligibleTask extends DropAwareTask {}
 
     public enum WorkFirstSubmission {
         CALLER_RUN,
@@ -70,9 +74,13 @@ public final class PrefetchExecutor {
             };
 
     private static final ThreadPoolExecutor EXECUTOR;
+    private static final ThreadPoolExecutor DEFERRED_WAVE_EXECUTOR;
     private static final Semaphore CALLER_RUN_PERMIT = new Semaphore(1);
     private static final AtomicInteger ACTIVE_EXECUTIONS = new AtomicInteger();
     private static final AtomicInteger MAX_ACTIVE_EXECUTIONS = new AtomicInteger();
+    private static final AtomicInteger ACTIVE_DEFERRED_WAVE_EXECUTIONS = new AtomicInteger();
+    private static final AtomicInteger MAX_ACTIVE_DEFERRED_WAVE_EXECUTIONS = new AtomicInteger();
+    private static final AtomicInteger DEFERRED_WAVE_THREAD_ID = new AtomicInteger();
 
     static {
         EXECUTOR =
@@ -104,6 +112,40 @@ public final class PrefetchExecutor {
                     }
                 };
         EXECUTOR.allowCoreThreadTimeOut(true);
+        DEFERRED_WAVE_EXECUTOR =
+                new ThreadPoolExecutor(
+                        2,
+                        2,
+                        60L,
+                        TimeUnit.SECONDS,
+                        new ArrayBlockingQueue<>(128),
+                        runnable -> {
+                            Thread t =
+                                    new Thread(
+                                            runnable,
+                                            "cachekit-map-wave-"
+                                                    + DEFERRED_WAVE_THREAD_ID.incrementAndGet());
+                            t.setDaemon(true);
+                            return t;
+                        },
+                        DISCARD_OLDEST_WITH_NOTIFICATION) {
+                    @Override
+                    protected void beforeExecute(Thread thread, Runnable task) {
+                        super.beforeExecute(thread, task);
+                        int active = ACTIVE_DEFERRED_WAVE_EXECUTIONS.incrementAndGet();
+                        MAX_ACTIVE_DEFERRED_WAVE_EXECUTIONS.accumulateAndGet(active, Math::max);
+                    }
+
+                    @Override
+                    protected void afterExecute(Runnable task, Throwable failure) {
+                        try {
+                            ACTIVE_DEFERRED_WAVE_EXECUTIONS.decrementAndGet();
+                        } finally {
+                            super.afterExecute(task, failure);
+                        }
+                    }
+                };
+        DEFERRED_WAVE_EXECUTOR.allowCoreThreadTimeOut(true);
     }
 
     private PrefetchExecutor() {}
@@ -115,6 +157,21 @@ public final class PrefetchExecutor {
         } catch (Throwable ignored) {
             notifyDropped(task);
             // Best-effort: dropping a prefetch is always safe once reservations are released.
+        }
+    }
+
+    /**
+     * Non-blocking submission to the isolated two-worker exact-map wave executor.
+     *
+     * <p>Only callers that have already frozen every key and can fall back authoritatively may use
+     * this path. Keeping it separate prevents unrelated ValueState prefetch from gaining an
+     * unreviewed concurrency change.
+     */
+    public static void trySubmitDeferredWave(DeferredWaveEligibleTask task) {
+        try {
+            DEFERRED_WAVE_EXECUTOR.execute(task);
+        } catch (Throwable ignored) {
+            notifyDropped(task);
         }
     }
 
@@ -165,6 +222,10 @@ public final class PrefetchExecutor {
         return MAX_ACTIVE_EXECUTIONS.get();
     }
 
+    public static int maxActiveDeferredWaveExecutions() {
+        return MAX_ACTIVE_DEFERRED_WAVE_EXECUTIONS.get();
+    }
+
     private static void recordExecutionStarted() {
         int active = ACTIVE_EXECUTIONS.incrementAndGet();
         MAX_ACTIVE_EXECUTIONS.accumulateAndGet(active, Math::max);
@@ -184,7 +245,11 @@ public final class PrefetchExecutor {
      * delays native-plane teardown.
      */
     public static boolean cancelIfQueued(Runnable task) {
-        if (task == null || !EXECUTOR.remove(task)) {
+        if (task == null) {
+            return false;
+        }
+        boolean removed = EXECUTOR.remove(task) || DEFERRED_WAVE_EXECUTOR.remove(task);
+        if (!removed) {
             return false;
         }
         notifyDropped(task);

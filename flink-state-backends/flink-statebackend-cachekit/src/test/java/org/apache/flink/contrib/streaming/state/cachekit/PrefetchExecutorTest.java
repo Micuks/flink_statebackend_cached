@@ -126,6 +126,71 @@ class PrefetchExecutorTest {
         }
     }
 
+    @Test
+    void deferredWaveExecutorRunsTwoImmutableTasksConcurrently() throws Exception {
+        CountDownLatch bothStarted = new CountDownLatch(2);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch bothCompleted = new CountDownLatch(2);
+        PrefetchExecutor.DeferredWaveEligibleTask first =
+                deferredWave(
+                        () -> {
+                            bothStarted.countDown();
+                            await(release);
+                            bothCompleted.countDown();
+                        });
+        PrefetchExecutor.DeferredWaveEligibleTask second =
+                deferredWave(
+                        () -> {
+                            bothStarted.countDown();
+                            await(release);
+                            bothCompleted.countDown();
+                        });
+        try {
+            PrefetchExecutor.trySubmitDeferredWave(first);
+            PrefetchExecutor.trySubmitDeferredWave(second);
+            assertTrue(bothStarted.await(5, TimeUnit.SECONDS));
+            assertEquals(2, PrefetchExecutor.maxActiveDeferredWaveExecutions());
+        } finally {
+            release.countDown();
+        }
+        assertTrue(bothCompleted.await(5, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void cancelIfQueuedCancelsDedicatedDeferredWaveExactlyOnce() throws Exception {
+        CountDownLatch bothStarted = new CountDownLatch(2);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger queuedRuns = new AtomicInteger();
+        AtomicInteger queuedDrops = new AtomicInteger();
+        PrefetchExecutor.DeferredWaveEligibleTask first =
+                deferredWave(
+                        () -> {
+                            bothStarted.countDown();
+                            await(release);
+                        });
+        PrefetchExecutor.DeferredWaveEligibleTask second =
+                deferredWave(
+                        () -> {
+                            bothStarted.countDown();
+                            await(release);
+                        });
+        PrefetchExecutor.DeferredWaveEligibleTask queued =
+                deferredWave(queuedRuns::incrementAndGet, queuedDrops::incrementAndGet);
+        try {
+            PrefetchExecutor.trySubmitDeferredWave(first);
+            PrefetchExecutor.trySubmitDeferredWave(second);
+            assertTrue(bothStarted.await(5, TimeUnit.SECONDS));
+            PrefetchExecutor.trySubmitDeferredWave(queued);
+            assertTrue(PrefetchExecutor.cancelIfQueued(queued));
+            assertEquals(1, queuedDrops.get());
+        } finally {
+            release.countDown();
+        }
+        Thread.sleep(50L);
+        assertEquals(0, queuedRuns.get());
+        assertEquals(1, queuedDrops.get());
+    }
+
     private static PrefetchExecutor.WorkFirstEligibleTask eligible(Runnable action) {
         return eligible(action, () -> {});
     }
@@ -133,6 +198,25 @@ class PrefetchExecutorTest {
     private static PrefetchExecutor.WorkFirstEligibleTask eligible(
             Runnable action, Runnable onDrop) {
         return new PrefetchExecutor.WorkFirstEligibleTask() {
+            @Override
+            public void run() {
+                action.run();
+            }
+
+            @Override
+            public void onDrop() {
+                onDrop.run();
+            }
+        };
+    }
+
+    private static PrefetchExecutor.DeferredWaveEligibleTask deferredWave(Runnable action) {
+        return deferredWave(action, () -> {});
+    }
+
+    private static PrefetchExecutor.DeferredWaveEligibleTask deferredWave(
+            Runnable action, Runnable onDrop) {
+        return new PrefetchExecutor.DeferredWaveEligibleTask() {
             @Override
             public void run() {
                 action.run();

@@ -137,6 +137,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private int nativeDistinctBatchAsyncMinUniqueKeys = 2;
     private boolean nativeDistinctBatchWorkFirstEnabled;
     private boolean nativeDistinctBatchDeferredWaveEnabled;
+    private boolean nativeDistinctBatchDeferredWaveDualWorkerEnabled;
     private boolean batchPrefetchActive;
     private K batchPrefetchOuterKey;
     private N batchPrefetchNamespace;
@@ -706,6 +707,23 @@ public final class CachedInternalMapState<K, N, UK, UV>
             int asyncMinUniqueKeys,
             boolean workFirstEnabled,
             boolean deferredWaveEnabled) {
+        enableNativeDistinctBatchPrefetch(
+                enabled,
+                directArenaEnabled,
+                asyncMinUniqueKeys,
+                workFirstEnabled,
+                deferredWaveEnabled,
+                false);
+    }
+
+    /** Enables the isolated two-worker executor only for immutable deferred map-read waves. */
+    public void enableNativeDistinctBatchPrefetch(
+            boolean enabled,
+            boolean directArenaEnabled,
+            int asyncMinUniqueKeys,
+            boolean workFirstEnabled,
+            boolean deferredWaveEnabled,
+            boolean deferredWaveDualWorkerEnabled) {
         this.nativeDistinctBatchPrefetchEnabled = enabled;
         this.nativeDistinctBatchDirectArenaEnabled = enabled && directArenaEnabled;
         this.nativeDistinctBatchAsyncMinUniqueKeys = Math.max(2, asyncMinUniqueKeys);
@@ -713,6 +731,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 enabled && directArenaEnabled && workFirstEnabled;
         this.nativeDistinctBatchDeferredWaveEnabled =
                 enabled && directArenaEnabled && deferredWaveEnabled;
+        this.nativeDistinctBatchDeferredWaveDualWorkerEnabled =
+                this.nativeDistinctBatchDeferredWaveEnabled && deferredWaveDualWorkerEnabled;
     }
 
     @Override
@@ -1255,7 +1275,11 @@ public final class CachedInternalMapState<K, N, UK, UV>
             deferredWaveSubmitted.incrementAndGet();
                 deferredWaveGroups.addAndGet(waveTokens.size());
                 deferredWaveKeys.addAndGet(totalKeys);
-            PrefetchExecutor.trySubmit(task);
+            if (nativeDistinctBatchDeferredWaveDualWorkerEnabled) {
+                PrefetchExecutor.trySubmitDeferredWave(task);
+            } else {
+                PrefetchExecutor.trySubmit(task);
+            }
                 return true;
         }
 
@@ -1341,7 +1365,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
     }
 
     /** One future-only raw RocksDB read. Worker code never touches key context or serializers. */
-    private final class DeferredWaveTask implements PrefetchExecutor.DropAwareTask {
+    private final class DeferredWaveTask
+            implements PrefetchExecutor.DeferredWaveEligibleTask {
 
         private final List<byte[]> rocksDBKeys;
         private final int expectedValues;
@@ -3091,7 +3116,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
                             ? 0L
                             : nativeRequestPlaneCoordinator.mapDistinctAsyncReadLeaseMisses());
             LOG.info(
-                    "[CACHEKIT NATIVE MAP DISTINCT WAVE] enabled={} attempts={} submitted={} "
+                    "[CACHEKIT NATIVE MAP DISTINCT WAVE] enabled={} dualWorker={} "
+                            + "executorMaxActive={} attempts={} submitted={} "
                             + "windows={} dropped={} groups={} keys={} jniCalls={} found={} "
                             + "missing={} completedGroups={} cancelledGroups={} awaits={} "
                             + "readyBeforeAwait={} waitNanos={} queueNanos={} serviceNanos={} "
@@ -3099,6 +3125,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
                             + "fallbackWindows={} failures={} ownerRejects={} overflows={} "
                             + "protocolFailures={}",
                     nativeDistinctBatchDeferredWaveEnabled,
+                    nativeDistinctBatchDeferredWaveDualWorkerEnabled,
+                    PrefetchExecutor.maxActiveDeferredWaveExecutions(),
                     deferredWaveAttempts.get(),
                     deferredWaveSubmitted.get(),
                     deferredWaveWindows.get(),

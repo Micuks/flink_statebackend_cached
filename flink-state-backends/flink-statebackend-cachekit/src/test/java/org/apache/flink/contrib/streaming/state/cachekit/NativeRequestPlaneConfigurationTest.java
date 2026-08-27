@@ -86,6 +86,9 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(disabledBackend.nativeMapDistinctBatchPrefetchDirectArenaEnabledForTesting());
         assertFalse(disabledBackend.nativeMapDistinctBatchPrefetchWorkFirstEnabledForTesting());
         assertFalse(disabledBackend.nativeMapDistinctBatchPrefetchDeferredWaveEnabledForTesting());
+        assertFalse(
+                disabledBackend
+                        .nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabledForTesting());
         assertEquals(
                 8, disabledBackend.nativeMapDistinctBatchPrefetchAsyncMinUniqueKeysForTesting());
         assertEquals(1, disabledBackend.nativeMapDistinctBatchPrefetchLookaheadGroupsForTesting());
@@ -114,6 +117,16 @@ class NativeRequestPlaneConfigurationTest {
                 new CacheKitStateBackendFactory()
                         .createFromConfig(incomplete, getClass().getClassLoader());
         assertFalse(incompleteBackend.nativeMapDistinctBatchPrefetchWorkFirstEnabledForTesting());
+        incomplete.set(
+                CacheKitStateBackendFactory
+                        .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_DUAL_WORKER_ENABLED,
+                true);
+        CacheKitStateBackend dualWorkerWithoutPrerequisites =
+                new CacheKitStateBackendFactory()
+                        .createFromConfig(incomplete, getClass().getClassLoader());
+        assertFalse(
+                dualWorkerWithoutPrerequisites
+                        .nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabledForTesting());
 
         Configuration enabled = new Configuration(disabled);
         enabled.set(CacheKitStateBackendFactory.NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED, true);
@@ -141,6 +154,10 @@ class NativeRequestPlaneConfigurationTest {
                 CacheKitStateBackendFactory
                         .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_ENABLED,
                 true);
+        enabled.set(
+                CacheKitStateBackendFactory
+                        .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_DUAL_WORKER_ENABLED,
+                true);
         CacheKitStateBackend enabledBackend =
                 new CacheKitStateBackendFactory()
                         .createFromConfig(enabled, getClass().getClassLoader());
@@ -148,6 +165,9 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(enabledBackend.nativeMapDistinctBatchPrefetchDirectArenaEnabledForTesting());
         assertTrue(enabledBackend.nativeMapDistinctBatchPrefetchWorkFirstEnabledForTesting());
         assertTrue(enabledBackend.nativeMapDistinctBatchPrefetchDeferredWaveEnabledForTesting());
+        assertTrue(
+                enabledBackend
+                        .nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabledForTesting());
         assertEquals(
                 16, enabledBackend.nativeMapDistinctBatchPrefetchAsyncMinUniqueKeysForTesting());
         assertEquals(16, enabledBackend.nativeMapDistinctBatchPrefetchLookaheadGroupsForTesting());

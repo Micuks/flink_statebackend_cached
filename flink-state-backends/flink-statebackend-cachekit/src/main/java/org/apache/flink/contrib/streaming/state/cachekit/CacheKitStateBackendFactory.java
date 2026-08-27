@@ -755,6 +755,18 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                             + "direct-arena MultiGet. Any owner, capacity, lifecycle, or protocol "
                                             + "mismatch fails closed to the existing per-group path.");
 
+    public static final ConfigOption<Boolean>
+            NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_DUAL_WORKER_ENABLED =
+                    ConfigOptions.key(
+                                    "state.backend.cachekit.native.map-distinct-batch-prefetch.cross-key-deferred-wave.dual-worker.enabled")
+                            .booleanType()
+                            .defaultValue(false)
+                            .withDescription(
+                                    "Submit immutable exact-map deferred waves to an isolated "
+                                            + "two-worker bounded executor. The default remains the "
+                                            + "single generic prefetch worker; only the frozen-key, "
+                                            + "all-or-none wave path is eligible for this experiment.");
+
     public static final ConfigOption<String> DELEGATE_BACKEND =
             ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
@@ -927,6 +939,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 							&& config.get(DISTINCT_BATCH_OVERLAY_ENABLED)
 							&& config.get(
 									NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_ENABLED),
+					config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED)
+							&& config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED)
+							&& config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ENABLED)
+							&& config.get(DISTINCT_BATCH_OVERLAY_ENABLED)
+							&& config.get(
+									NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_ENABLED)
+							&& config.get(
+									NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_DUAL_WORKER_ENABLED),
 					Math.max(
 							2,
 							config.get(
