@@ -444,7 +444,7 @@ class LocalPreaggTest {
                         "prepare:c",
                         "prepare:d",
                         "prepare:e",
-                        "wave:token-a,token-b,token-c,token-d,token-e",
+                        "wave:token-b,token-c,token-d,token-e",
                         "process:a:token-a",
                         "process:b:token-b",
                         "process:c:token-c",
@@ -452,6 +452,64 @@ class LocalPreaggTest {
                         "process:e:token-e",
                         "prepare:f",
                         "process:f:token-f"),
+                pipeline.events);
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testSparseFutureWaveKeepsFirstPreparedTokenWhenCurrentGroupIsLight() throws Exception {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "b", "b", "b", "c", "c", "c", "d"),
+                        Arrays.asList(1, 2, 3, 4, 5, 6, 7, 8),
+                        null);
+        WaveRecordingPipeline pipeline = new WaveRecordingPipeline(3);
+
+        LocalPreagg.dispatchMaterializedPipeline(
+                mock(AbstractStreamOperator.class),
+                pipeline,
+                groups,
+                mock(TimestampedCollector.class),
+                2);
+
+        assertEquals(
+                Arrays.asList(
+                        "prepare:b",
+                        "prepare:c",
+                        "wave:token-b,token-c",
+                        "sync:a",
+                        "process:b:token-b",
+                        "process:c:token-c",
+                        "sync:d"),
+                pipeline.events);
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void testSparseFutureWaveExcludesPreparedCurrentGroup() throws Exception {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList("a", "a", "a", "b", "b", "b", "c", "c", "c"),
+                        Arrays.asList(1, 2, 3, 4, 5, 6, 7, 8, 9),
+                        null);
+        WaveRecordingPipeline pipeline = new WaveRecordingPipeline(3);
+
+        LocalPreagg.dispatchMaterializedPipeline(
+                mock(AbstractStreamOperator.class),
+                pipeline,
+                groups,
+                mock(TimestampedCollector.class),
+                2);
+
+        assertEquals(
+                Arrays.asList(
+                        "prepare:a",
+                        "prepare:b",
+                        "prepare:c",
+                        "wave:token-b,token-c",
+                        "process:a:token-a",
+                        "process:b:token-b",
+                        "process:c:token-c"),
                 pipeline.events);
     }
 
@@ -961,6 +1019,20 @@ class LocalPreaggTest {
     private static final class WaveRecordingPipeline
             implements PipelinedBatchableKeyedFunction<Object, Object> {
         private final List<String> events = new ArrayList<>();
+        private final int minimumInputs;
+
+        private WaveRecordingPipeline() {
+            this(1);
+        }
+
+        private WaveRecordingPipeline(int minimumInputs) {
+            this.minimumInputs = minimumInputs;
+        }
+
+        @Override
+        public int minimumBatchPreparationInputCount() {
+            return minimumInputs;
+        }
 
         @Override
         public Object prepareBatchForKey(Object key, List<Object> inputs) {
@@ -996,7 +1068,7 @@ class LocalPreaggTest {
         @Override
         public void processBatchForKey(
                 Object currentKey, List<Object> inputs, Collector<Object> out) {
-            throw new AssertionError("pipeline must use prepared dispatch");
+            events.add("sync:" + currentKey);
         }
     }
 

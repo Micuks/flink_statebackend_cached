@@ -51,7 +51,7 @@ public interface BatchPrefetchableMapState<UK> {
         void cancel();
 
         /**
-         * Stable identity for a bounded mailbox-owned read wave, or {@code null} when this token
+         * Stable identity for a bounded speculative read wave, or {@code null} when this token
          * cannot participate.
          *
          * <p>Tokens may share a wave only when this identity is reference-equal. Backends normally
@@ -67,10 +67,11 @@ public interface BatchPrefetchableMapState<UK> {
         }
 
         /**
-         * Executes one all-or-none read wave for tokens with the same {@link #waveOwner()}.
+         * Submits one all-or-none read wave for future tokens with the same {@link #waveOwner()}.
          *
-         * <p>The method is invoked on the mailbox thread before any represented outer-key batch is
-         * consumed. A false result leaves every token usable through its authoritative fallback.
+         * <p>The method is invoked on the mailbox thread before any represented future outer-key
+         * batch is consumed. Implementations must return without performing the backend read on the
+         * caller. A false result leaves every token usable through its authoritative fallback.
          */
         default boolean executeWave(List<? extends PreparedValues> tokens) throws Exception {
             return false;

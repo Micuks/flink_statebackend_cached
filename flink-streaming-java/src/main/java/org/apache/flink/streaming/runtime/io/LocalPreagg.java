@@ -699,12 +699,14 @@ public final class LocalPreagg {
                     preparedAheadGroups++;
                 }
 
+                int waveCount = preparedCount - (currentPrepared ? 1 : 0);
                 if (waveRemaining == 0
                         && waveRetryRemaining == 0
                         && waveSupported
-                        && preparedCount >= 2) {
+                        && waveCount >= 2) {
+                    int waveHead = currentPrepared ? (head + 1) % capacity : head;
                     BatchWindowPreparationResult waveResult =
-                            pipelined.prepareBatchWindow(prepared, head, preparedCount);
+                            pipelined.prepareBatchWindow(prepared, waveHead, waveCount);
                     if (waveResult == BatchWindowPreparationResult.EXECUTED) {
                         // A successful all-or-none wave owns exactly this prepared cohort. Do not
                         // slide new tokens into the ring until every represented group is
@@ -851,12 +853,14 @@ public final class LocalPreagg {
             }
             for (int group = 0; group < groupCount; group++) {
                 int slot = group % capacity;
+                int waveCount = occupiedCount - 1;
                 if (waveRemaining == 0
                         && waveRetryRemaining == 0
                         && waveSupported
-                        && occupiedCount >= 2) {
+                        && waveCount >= 2) {
+                    int waveHead = (slot + 1) % capacity;
                     BatchWindowPreparationResult waveResult =
-                            pipelined.prepareBatchWindow(prepared, slot, occupiedCount);
+                            pipelined.prepareBatchWindow(prepared, waveHead, waveCount);
                     if (waveResult == BatchWindowPreparationResult.EXECUTED) {
                         waveRemaining = occupiedCount;
                     } else if (waveResult == BatchWindowPreparationResult.RETRY_AFTER_COHORT) {

@@ -239,6 +239,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong deferredWaveWindows =
             new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveSubmitted =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveDropped =
+            new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong deferredWaveGroups =
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong deferredWaveKeys =
@@ -255,11 +259,25 @@ public final class CachedInternalMapState<K, N, UK, UV>
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong deferredWaveOwnerRejects =
             new java.util.concurrent.atomic.AtomicLong();
-    private final java.util.concurrent.atomic.AtomicLong deferredWaveSlotLeaseMisses =
-            new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong deferredWaveOverflows =
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong deferredWaveProtocolFailures =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveAwaits =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveReadyBeforeAwait =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveWaitNanos =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveQueueNanos =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveServiceNanos =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveReadySlackNanos =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveFound =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveMissing =
             new java.util.concurrent.atomic.AtomicLong();
 
     // --- MapSnapshot cache (entries() fast path) ---
@@ -1114,14 +1132,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
     }
 
     /**
-     * Keeps small exact-key batches on the mailbox-owned direct-arena path.
+     * Keeps one exact-key batch and optionally attaches it to a future-only asynchronous wave.
      *
-     * <p>The key list was already copied and de-duplicated by the generated DISTINCT view. The
-     * token therefore retains it without another scan and performs no work until LocalPreagg
-     * installs the same outer key for consumption. The normal synchronous routine may fall back
-     * from direct-arena transport to its heap MultiGet before returning {@code null}; either way,
-     * the existing caller falls back to authoritative state reads if no complete vector is
-     * produced.
+     * <p>The generated DISTINCT view already copied and de-duplicated the key list. Wave submission
+     * serializes immutable RocksDB keys on the mailbox, while the worker performs only the raw
+     * batch read. Consumption validates the original outer-key context and deserializes on the
+     * mailbox. Any drop, failure, incomplete vector, or context mismatch returns {@code null} so
+     * the existing caller takes its authoritative state-read fallback.
      */
     private final class DeferredDirectMapValues implements PreparedValues {
 
@@ -1129,9 +1146,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
         private final N preparedNamespace;
         private final List<UK> orderedKeys;
         private final List<byte[]> preparedRocksDBKeys;
-        private List<UV> waveValues;
-        private boolean waveReady;
+        private DeferredWaveTask waveTask;
+        private int waveOffset;
         private boolean consumed;
+        private boolean waveTokenReleased;
 
         private DeferredDirectMapValues(
                 K preparedOuterKey,
@@ -1164,28 +1182,20 @@ public final class CachedInternalMapState<K, N, UK, UV>
         @Override
         public boolean executeWave(List<? extends PreparedValues> tokens) throws Exception {
             deferredWaveAttempts.incrementAndGet();
-            lifecycleLock.readLock().lock();
-            try {
-                return executeWaveUnderLifecycleLock(tokens);
-            } finally {
-                lifecycleLock.readLock().unlock();
-            }
+            return submitDeferredWave(tokens);
         }
 
-        private boolean executeWaveUnderLifecycleLock(List<? extends PreparedValues> tokens) {
+        private boolean submitDeferredWave(List<? extends PreparedValues> tokens) {
             if (!nativeDistinctBatchDeferredWaveEnabled
                     || closed
                     || tokens == null
                     || tokens.size() < 2
-                    || nativeRequestPlaneCoordinator == null
-                    || !nativeRequestPlaneCoordinator.isActive()
-                    || !nativeRequestPlaneCoordinator.options().directArenaMultiGetEnabled()
-                    || !rocksDBBatchMapReader.supportsDirectArenaMultiGet()
-                    || nativeStateId <= 0) {
+                    || rocksDBBatchMapReader == null) {
                 deferredWaveFallbackWindows.incrementAndGet();
                 return false;
             }
             ArrayList<DeferredDirectMapValues> waveTokens = new ArrayList<>(tokens.size());
+            ArrayList<byte[]> rocksDBKeys = new ArrayList<>();
             int totalKeys = 0;
             for (PreparedValues token : tokens) {
                 if (token == null || token.waveOwner() != CachedInternalMapState.this) {
@@ -1196,124 +1206,57 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 @SuppressWarnings("unchecked")
                 DeferredDirectMapValues current = (DeferredDirectMapValues) token;
                 if (current.consumed
-                        || current.waveReady
+                        || current.waveTask != null
                         || current.preparedRocksDBKeys == null
                         || current.preparedRocksDBKeys.size() != current.orderedKeys.size()) {
                     deferredWaveOwnerRejects.incrementAndGet();
                     deferredWaveFallbackWindows.incrementAndGet();
                     return false;
                 }
+                for (DeferredDirectMapValues prior : waveTokens) {
+                    if (Objects.equals(prior.preparedOuterKey, current.preparedOuterKey)
+                            && Objects.equals(prior.preparedNamespace, current.preparedNamespace)) {
+                        deferredWaveOwnerRejects.incrementAndGet();
+                deferredWaveFallbackWindows.incrementAndGet();
+                return false;
+            }
+            }
                 totalKeys += current.preparedRocksDBKeys.size();
                 waveTokens.add(current);
-            }
-            int maxBatch =
-                    Math.min(
-                            RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
-                            rocksDBBatchMapReader.directArenaMultiGetMaxBatch());
-            if (totalKeys <= 0 || totalKeys > maxBatch) {
-                deferredWaveOverflows.incrementAndGet();
-                deferredWaveFallbackWindows.incrementAndGet();
-                return false;
-            }
-
-            NativeRequestPlaneCoordinator.BatchSlot slot =
-                    nativeRequestPlaneCoordinator.tryAcquireMapDistinctReadSlot();
-            if (slot == null) {
-                deferredWaveSlotLeaseMisses.incrementAndGet();
-                deferredWaveFallbackWindows.incrementAndGet();
-                return false;
-            }
-            batchPrefetchDirectArenaAttempts++;
-            try (NativeRequestPlaneCoordinator.BatchSlot ignored = slot) {
-                ArrayList<byte[]> rocksDBKeys = new ArrayList<>(totalKeys);
-                for (DeferredDirectMapValues current : waveTokens) {
                     rocksDBKeys.addAll(current.preparedRocksDBKeys);
                 }
-                slot.prepareLatest(nativeStateId, nativeGeneration, rocksDBKeys);
-                slot.prepareContiguousDirectArenaMultiGet(totalKeys, maxBatch);
-                deferredWaveJniCalls.incrementAndGet();
-                int presentCount =
-                        rocksDBBatchMapReader.getSerializedValuesByRocksDBKeyArena(
-                                slot.directMultiGetKeyArena(),
-                                slot.directMultiGetDescriptors(),
-                                totalKeys,
-                                slot.directMultiGetValueArena(),
-                                slot.directMultiGetValueStride());
-                int observedPresent = 0;
-                int observedMissing = 0;
-                boolean overflow = false;
-                boolean invalidProtocol = presentCount < 0 || presentCount > totalKeys;
-                for (int index = 0; index < totalKeys && !invalidProtocol; index++) {
-                    int result = slot.directMultiGetResult(index);
-                    if (result >= 0 && result <= slot.directMultiGetValueStride()) {
-                        observedPresent++;
-                    } else if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
-                        observedMissing++;
-                    } else if (result == RocksDBBatchValueReader.DIRECT_ARENA_OVERFLOW) {
-                        observedPresent++;
-                        overflow = true;
-                    } else {
-                        invalidProtocol = true;
-                    }
-                }
-                if (observedPresent != presentCount) {
-                    invalidProtocol = true;
-                }
-                if (invalidProtocol) {
-                    deferredWaveProtocolFailures.incrementAndGet();
-                    deferredWaveFallbackWindows.incrementAndGet();
-                    return false;
-                }
-                if (overflow) {
+            if (totalKeys <= 0 || totalKeys > RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
                     deferredWaveOverflows.incrementAndGet();
                     deferredWaveFallbackWindows.incrementAndGet();
                     return false;
                 }
-
-                ArrayList<List<UV>> completed = new ArrayList<>(waveTokens.size());
+            DeferredWaveTask task =
+                    new DeferredWaveTask(
+                            Collections.unmodifiableList(rocksDBKeys),
+                            totalKeys,
+                            waveTokens.size());
                 int offset = 0;
                 for (DeferredDirectMapValues current : waveTokens) {
-                    ArrayList<UV> currentValues = new ArrayList<>(current.orderedKeys.size());
-                    for (int index = 0; index < current.orderedKeys.size(); index++) {
-                        int result = slot.directMultiGetResult(offset++);
-                        if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
-                            currentValues.add(null);
-                        } else {
-                            DataInputView input = slot.directMultiGetValueInput(offset - 1);
-                            boolean isNull = input.readBoolean();
-                            currentValues.add(
-                                    isNull ? null : userValueSerializer.deserialize(input));
+                current.waveTask = task;
+                current.waveOffset = offset;
+                offset += current.orderedKeys.size();
                         }
+            synchronized (asyncBatchPrefetchMonitor) {
+                if (closed) {
+                    for (DeferredDirectMapValues current : waveTokens) {
+                        current.waveTask = null;
+                        current.waveOffset = 0;
                     }
-                    completed.add(currentValues);
-                }
-                if (offset != totalKeys) {
-                    deferredWaveProtocolFailures.incrementAndGet();
                     deferredWaveFallbackWindows.incrementAndGet();
                     return false;
                 }
-                for (int index = 0; index < waveTokens.size(); index++) {
-                    DeferredDirectMapValues current = waveTokens.get(index);
-                    current.waveValues = completed.get(index);
-                    current.waveReady = true;
+                outstandingAsyncBatchPrefetchTasks.add(task);
                 }
-                batchPrefetchFound += observedPresent;
-                batchPrefetchMissing += observedMissing;
-                batchPrefetchDirectArenaBatches++;
-                batchPrefetchDirectArenaKeys += totalKeys;
-                batchPrefetchDirectArenaCompletedBatches++;
-                batchPrefetchDirectArenaCompletedKeys += totalKeys;
-                batchPrefetchDirectArenaFound += observedPresent;
-                batchPrefetchDirectArenaMissing += observedMissing;
-                deferredWaveWindows.incrementAndGet();
+            deferredWaveSubmitted.incrementAndGet();
                 deferredWaveGroups.addAndGet(waveTokens.size());
                 deferredWaveKeys.addAndGet(totalKeys);
+            PrefetchExecutor.trySubmit(task);
                 return true;
-            } catch (Exception | LinkageError failure) {
-                deferredWaveFailures.incrementAndGet();
-                deferredWaveFallbackWindows.incrementAndGet();
-                return false;
-            }
         }
 
         @Override
@@ -1327,19 +1270,46 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     || !Objects.equals(preparedNamespace, currentNamespace)) {
                 deferredSyncBatchPrefetchFallbacks.incrementAndGet();
                 deferredSyncBatchPrefetchContextMismatches.incrementAndGet();
+                if (waveTask != null) {
+                    releaseWaveToken(waveTask);
+                }
                 return null;
             }
-            if (waveReady) {
-                List<UV> values = waveValues;
-                waveValues = null;
-                waveReady = false;
-                if (values == null || values.size() != orderedKeys.size()) {
+            if (waveTask != null) {
+                DeferredWaveTask task = waveTask;
+                try {
+                    List<byte[]> rawValues = task.awaitRawValues();
+                    if (rawValues == null
+                            || waveOffset < 0
+                            || waveOffset + orderedKeys.size() > rawValues.size()) {
                     deferredSyncBatchPrefetchFallbacks.incrementAndGet();
                     return null;
                 }
+                    ArrayList<UV> values = new ArrayList<>(orderedKeys.size());
+                    int waveEnd = waveOffset + orderedKeys.size();
+                    for (int index = waveOffset; index < waveEnd; index++) {
+                        byte[] rawValue = rawValues.get(index);
+                        if (rawValue == null) {
+                            values.add(null);
+                        } else {
+                            batchPrefetchInput.setBuffer(rawValue);
+                            boolean isNull = batchPrefetchInput.readBoolean();
+                            values.add(
+                                    isNull
+                                            ? null
+                                            : userValueSerializer.deserialize(batchPrefetchInput));
+                        }
+                    }
                 deferredSyncBatchPrefetchCompleted.incrementAndGet();
                 deferredWaveCompletedGroups.incrementAndGet();
                 return values;
+                } catch (Exception | LinkageError failure) {
+                    deferredWaveProtocolFailures.incrementAndGet();
+                    deferredSyncBatchPrefetchFallbacks.incrementAndGet();
+                    return null;
+                } finally {
+                    releaseWaveToken(task);
+                }
             }
             List<UV> values = prefetchCurrentUniqueKeyValues(orderedKeys);
             if (values == null || values.size() != orderedKeys.size()) {
@@ -1352,12 +1322,152 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
         @Override
         public void cancel() {
-            if (waveReady) {
+            if (!consumed && waveTask != null) {
                 deferredWaveCancelledGroups.incrementAndGet();
             }
             consumed = true;
-            waveValues = null;
-            waveReady = false;
+            DeferredWaveTask task = waveTask;
+            if (task != null) {
+                releaseWaveToken(task);
+            }
+        }
+
+        private void releaseWaveToken(DeferredWaveTask task) {
+            if (!waveTokenReleased) {
+                waveTokenReleased = true;
+                task.releaseToken();
+            }
+        }
+    }
+
+    /** One future-only raw RocksDB read. Worker code never touches key context or serializers. */
+    private final class DeferredWaveTask implements PrefetchExecutor.DropAwareTask {
+
+        private final List<byte[]> rocksDBKeys;
+        private final int expectedValues;
+        private final java.util.concurrent.CountDownLatch completed =
+                new java.util.concurrent.CountDownLatch(1);
+        private final java.util.concurrent.atomic.AtomicInteger state =
+                new java.util.concurrent.atomic.AtomicInteger();
+        private final java.util.concurrent.atomic.AtomicInteger remainingTokens;
+        private final long submittedNanos = System.nanoTime();
+        private volatile List<byte[]> rawValues;
+        private volatile Throwable failure;
+        private volatile boolean dropped;
+        private volatile long completedNanos;
+
+        private DeferredWaveTask(List<byte[]> rocksDBKeys, int expectedValues, int tokenCount) {
+            this.rocksDBKeys = rocksDBKeys;
+            this.expectedValues = expectedValues;
+            this.remainingTokens = new java.util.concurrent.atomic.AtomicInteger(tokenCount);
+        }
+
+        @Override
+        public void run() {
+            if (!state.compareAndSet(0, 1)) {
+                return;
+            }
+            long startedNanos = System.nanoTime();
+            deferredWaveQueueNanos.addAndGet(Math.max(0L, startedNanos - submittedNanos));
+            try {
+                lifecycleLock.readLock().lock();
+                try {
+                    if (closed) {
+                        throw new IllegalStateException("MapState closed before deferred wave");
+                    }
+                    deferredWaveJniCalls.incrementAndGet();
+                    List<byte[]> completedValues =
+                            rocksDBBatchMapReader.getSerializedValuesByRocksDBKeys(
+                                    rocksDBKeys, 0, expectedValues);
+                    if (completedValues == null || completedValues.size() != expectedValues) {
+                        deferredWaveProtocolFailures.incrementAndGet();
+                        throw new IllegalStateException("Incomplete deferred wave result");
+                    }
+                    rawValues = completedValues;
+                } finally {
+                    lifecycleLock.readLock().unlock();
+                }
+                int present = 0;
+                int missing = 0;
+                for (byte[] rawValue : rawValues) {
+                    if (rawValue == null) {
+                        missing++;
+                    } else {
+                        present++;
+                    }
+                }
+                deferredWaveFound.addAndGet(present);
+                deferredWaveMissing.addAndGet(missing);
+                deferredWaveWindows.incrementAndGet();
+            } catch (Exception | LinkageError currentFailure) {
+                failure = currentFailure;
+                deferredWaveFailures.incrementAndGet();
+                deferredWaveFallbackWindows.incrementAndGet();
+            } finally {
+                deferredWaveServiceNanos.addAndGet(Math.max(0L, System.nanoTime() - startedNanos));
+                finish();
+            }
+        }
+
+        @Override
+        public void onDrop() {
+            if (state.compareAndSet(0, 1)) {
+                dropped = true;
+                deferredWaveDropped.incrementAndGet();
+                deferredWaveFallbackWindows.incrementAndGet();
+                finish();
+            }
+        }
+
+        private void finish() {
+            completedNanos = System.nanoTime();
+            state.set(2);
+            if (remainingTokens.get() == 0) {
+                rawValues = null;
+            }
+            completed.countDown();
+            synchronized (asyncBatchPrefetchMonitor) {
+                outstandingAsyncBatchPrefetchTasks.remove(this);
+                asyncBatchPrefetchMonitor.notifyAll();
+            }
+        }
+
+        private List<byte[]> awaitRawValues() throws InterruptedException {
+            deferredWaveAwaits.incrementAndGet();
+            long awaitStarted = System.nanoTime();
+            long observedCompleted = completedNanos;
+            if (observedCompleted > 0L && observedCompleted <= awaitStarted) {
+                deferredWaveReadyBeforeAwait.incrementAndGet();
+                deferredWaveReadySlackNanos.addAndGet(awaitStarted - observedCompleted);
+            }
+            try {
+                completed.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw interrupted;
+            } finally {
+                deferredWaveWaitNanos.addAndGet(Math.max(0L, System.nanoTime() - awaitStarted));
+            }
+            List<byte[]> completedValues = rawValues;
+            if (dropped
+                    || failure != null
+                    || completedValues == null
+                    || completedValues.size() != expectedValues) {
+                return null;
+            }
+            return completedValues;
+        }
+
+        private void releaseToken() {
+            int remaining = remainingTokens.decrementAndGet();
+            if (remaining < 0) {
+                throw new IllegalStateException("Deferred wave token released more than once");
+            }
+            if (remaining == 0) {
+                if (!PrefetchExecutor.cancelIfQueued(this) && state.get() == 2) {
+                    rawValues = null;
+                }
+            }
         }
     }
 
@@ -2981,22 +3091,34 @@ public final class CachedInternalMapState<K, N, UK, UV>
                             ? 0L
                             : nativeRequestPlaneCoordinator.mapDistinctAsyncReadLeaseMisses());
             LOG.info(
-                    "[CACHEKIT NATIVE MAP DISTINCT WAVE] enabled={} attempts={} windows={} "
-                            + "groups={} keys={} jniCalls={} completedGroups={} cancelledGroups={} "
-                            + "fallbackWindows={} failures={} ownerRejects={} slotLeaseMisses={} "
-                            + "overflows={} protocolFailures={}",
+                    "[CACHEKIT NATIVE MAP DISTINCT WAVE] enabled={} attempts={} submitted={} "
+                            + "windows={} dropped={} groups={} keys={} jniCalls={} found={} "
+                            + "missing={} completedGroups={} cancelledGroups={} awaits={} "
+                            + "readyBeforeAwait={} waitNanos={} queueNanos={} serviceNanos={} "
+                            + "readySlackNanos={} "
+                            + "fallbackWindows={} failures={} ownerRejects={} overflows={} "
+                            + "protocolFailures={}",
                     nativeDistinctBatchDeferredWaveEnabled,
                     deferredWaveAttempts.get(),
+                    deferredWaveSubmitted.get(),
                     deferredWaveWindows.get(),
+                    deferredWaveDropped.get(),
                     deferredWaveGroups.get(),
                     deferredWaveKeys.get(),
                     deferredWaveJniCalls.get(),
+                    deferredWaveFound.get(),
+                    deferredWaveMissing.get(),
                     deferredWaveCompletedGroups.get(),
                     deferredWaveCancelledGroups.get(),
+                    deferredWaveAwaits.get(),
+                    deferredWaveReadyBeforeAwait.get(),
+                    deferredWaveWaitNanos.get(),
+                    deferredWaveQueueNanos.get(),
+                    deferredWaveServiceNanos.get(),
+                    deferredWaveReadySlackNanos.get(),
                     deferredWaveFallbackWindows.get(),
                     deferredWaveFailures.get(),
                     deferredWaveOwnerRejects.get(),
-                    deferredWaveSlotLeaseMisses.get(),
                     deferredWaveOverflows.get(),
                     deferredWaveProtocolFailures.get());
         }
@@ -3122,6 +3244,14 @@ public final class CachedInternalMapState<K, N, UK, UV>
         return deferredWaveWindows.get();
     }
 
+    long getDeferredWaveSubmittedForTesting() {
+        return deferredWaveSubmitted.get();
+    }
+
+    long getDeferredWaveDroppedForTesting() {
+        return deferredWaveDropped.get();
+    }
+
     long getDeferredWaveGroupsForTesting() {
         return deferredWaveGroups.get();
     }
@@ -3152,6 +3282,14 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     long getDeferredWaveProtocolFailuresForTesting() {
         return deferredWaveProtocolFailures.get();
+    }
+
+    long getDeferredWaveAwaitsForTesting() {
+        return deferredWaveAwaits.get();
+    }
+
+    long getDeferredWaveReadyBeforeAwaitForTesting() {
+        return deferredWaveReadyBeforeAwait.get();
     }
 
     private static final class PrefetchedMapValue<V> {
