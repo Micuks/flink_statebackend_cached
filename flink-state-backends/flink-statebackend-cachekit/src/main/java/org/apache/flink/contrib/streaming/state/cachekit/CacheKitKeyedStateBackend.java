@@ -100,6 +100,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final int mapHitRateWindow;
     private final boolean mapIterationCacheFillEnabled;
     private final int mapSnapshotCacheMaxEntries;
+    private final boolean mapSnapshotCacheNativeEnabled;
+    private final boolean mapSnapshotCacheNativeClassifierEnabled;
+    private final boolean mapSnapshotCacheNativeRemoveHintEnabled;
+    private final String mapSnapshotCacheNativeKernel;
+    private final String mapSnapshotCacheNativeLibraryPath;
     private final boolean listStateCowEnabled;
     private final boolean listStateRywEnabled;
     private final int listStateClearedKeysCapacity;
@@ -126,6 +131,77 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     /** Guarded by {@link #lifecycleLock}. */
     private boolean disposed;
+
+    /** Preserves the pre-native-cache constructor contract with the new feature disabled. */
+    public CacheKitKeyedStateBackend(
+            AbstractKeyedStateBackend<K> delegate,
+            TaskKvStateRegistry kvStateRegistry,
+            TypeSerializer<K> keySerializer,
+            ClassLoader userCodeClassLoader,
+            ExecutionConfig executionConfig,
+            TtlTimeProvider ttlTimeProvider,
+            CloseableRegistry cancelStreamRegistry,
+            MetricGroup metricGroup,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled) {
+        this(
+                delegate,
+                kvStateRegistry,
+                keySerializer,
+                userCodeClassLoader,
+                executionConfig,
+                ttlTimeProvider,
+                cancelStreamRegistry,
+                metricGroup,
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow,
+                valueBypassEnabled,
+                valueHitRateThreshold,
+                valueHitRateWindow,
+                mapPresenceCacheMaxEntries,
+                mapPresenceCachePolicy,
+                mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                false,
+                false,
+                "AUTO",
+                "",
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled,
+                diagnosticsEnabled);
+    }
 
     public CacheKitKeyedStateBackend(
             AbstractKeyedStateBackend<K> delegate,
@@ -154,6 +230,159 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int mapHitRateWindow,
             boolean mapIterationCacheFillEnabled,
             int mapSnapshotCacheMaxEntries,
+            boolean mapSnapshotCacheNativeEnabled,
+            String mapSnapshotCacheNativeKernel,
+            String mapSnapshotCacheNativeLibraryPath,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled) {
+        this(
+                delegate,
+                kvStateRegistry,
+                keySerializer,
+                userCodeClassLoader,
+                executionConfig,
+                ttlTimeProvider,
+                cancelStreamRegistry,
+                metricGroup,
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow,
+                valueBypassEnabled,
+                valueHitRateThreshold,
+                valueHitRateWindow,
+                mapPresenceCacheMaxEntries,
+                mapPresenceCachePolicy,
+                mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheNativeEnabled,
+                false,
+                mapSnapshotCacheNativeKernel,
+                mapSnapshotCacheNativeLibraryPath,
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled,
+                diagnosticsEnabled);
+    }
+
+    public CacheKitKeyedStateBackend(
+            AbstractKeyedStateBackend<K> delegate,
+            TaskKvStateRegistry kvStateRegistry,
+            TypeSerializer<K> keySerializer,
+            ClassLoader userCodeClassLoader,
+            ExecutionConfig executionConfig,
+            TtlTimeProvider ttlTimeProvider,
+            CloseableRegistry cancelStreamRegistry,
+            MetricGroup metricGroup,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            boolean mapSnapshotCacheNativeEnabled,
+            boolean mapSnapshotCacheNativeClassifierEnabled,
+            String mapSnapshotCacheNativeKernel,
+            String mapSnapshotCacheNativeLibraryPath,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled) {
+        this(
+                delegate,
+                kvStateRegistry,
+                keySerializer,
+                userCodeClassLoader,
+                executionConfig,
+                ttlTimeProvider,
+                cancelStreamRegistry,
+                metricGroup,
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow,
+                valueBypassEnabled,
+                valueHitRateThreshold,
+                valueHitRateWindow,
+                mapPresenceCacheMaxEntries,
+                mapPresenceCachePolicy,
+                mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheNativeEnabled,
+                mapSnapshotCacheNativeClassifierEnabled,
+                false,
+                mapSnapshotCacheNativeKernel,
+                mapSnapshotCacheNativeLibraryPath,
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled,
+                diagnosticsEnabled);
+    }
+
+    public CacheKitKeyedStateBackend(
+            AbstractKeyedStateBackend<K> delegate,
+            TaskKvStateRegistry kvStateRegistry,
+            TypeSerializer<K> keySerializer,
+            ClassLoader userCodeClassLoader,
+            ExecutionConfig executionConfig,
+            TtlTimeProvider ttlTimeProvider,
+            CloseableRegistry cancelStreamRegistry,
+            MetricGroup metricGroup,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            boolean mapSnapshotCacheNativeEnabled,
+            boolean mapSnapshotCacheNativeClassifierEnabled,
+            boolean mapSnapshotCacheNativeRemoveHintEnabled,
+            String mapSnapshotCacheNativeKernel,
+            String mapSnapshotCacheNativeLibraryPath,
             boolean listStateCowEnabled,
             boolean listStateRywEnabled,
             int listStateClearedKeysCapacity,
@@ -189,6 +418,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapHitRateWindow = mapHitRateWindow;
         this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
         this.mapSnapshotCacheMaxEntries = mapSnapshotCacheMaxEntries;
+        this.mapSnapshotCacheNativeEnabled = mapSnapshotCacheNativeEnabled;
+        this.mapSnapshotCacheNativeClassifierEnabled = mapSnapshotCacheNativeClassifierEnabled;
+        this.mapSnapshotCacheNativeRemoveHintEnabled = mapSnapshotCacheNativeRemoveHintEnabled;
+        this.mapSnapshotCacheNativeKernel = mapSnapshotCacheNativeKernel;
+        this.mapSnapshotCacheNativeLibraryPath = mapSnapshotCacheNativeLibraryPath;
         this.listStateCowEnabled = listStateCowEnabled;
         this.listStateRywEnabled = listStateRywEnabled;
         this.listStateClearedKeysCapacity = listStateClearedKeysCapacity;
@@ -295,7 +529,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapHitRateWindow,
                     mapIterationCacheFillEnabled,
                     mapSnapshotCacheMaxEntries,
-                    mapSnapshotCacheMetrics);
+                    mapSnapshotCacheMetrics,
+                    mapSnapshotCacheNativeEnabled,
+                    mapSnapshotCacheNativeClassifierEnabled,
+                    mapSnapshotCacheNativeRemoveHintEnabled,
+                    mapSnapshotCacheNativeKernel,
+                    mapSnapshotCacheNativeLibraryPath);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -426,7 +665,12 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapHitRateWindow,
                     mapIterationCacheFillEnabled,
                     mapSnapshotCacheMaxEntries,
-                    mapSnapshotCacheMetrics);
+                    mapSnapshotCacheMetrics,
+                    mapSnapshotCacheNativeEnabled,
+                    mapSnapshotCacheNativeClassifierEnabled,
+                    mapSnapshotCacheNativeRemoveHintEnabled,
+                    mapSnapshotCacheNativeKernel,
+                    mapSnapshotCacheNativeLibraryPath);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }
