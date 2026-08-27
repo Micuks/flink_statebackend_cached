@@ -328,8 +328,23 @@ public final class LocalPreagg {
                 double collapse = grps == 0 ? 0 : (double) recs / grps;
                 System.err.println(
                         String.format(
-                                "[LOCAL-PREAGG] FIRING op=%s dispatches=%d records=%d groups=%d collapse=%.2fx",
-                                op.getClass().getSimpleName(), c, recs, grps, collapse));
+                                "[LOCAL-PREAGG MATERIALIZED] [CACHEKIT DISTINCT PIPELINE] mode=materialized jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx pipelineLookahead=%d pipelineWindows=%d pipelineGroups=%d pipelinePreparedGroups=%d pipelinePreparedAheadGroups=%d pipelineConsumedGroups=%d pipelineCancelledGroups=%d pipelineProcessWithFutureInFlight=%d pipelinePeakPreparedAhead=%d pipelineExceptionAborts=%d",
+                                JVM_ID,
+                                op.getClass().getSimpleName(),
+                                c,
+                                recs,
+                                grps,
+                                collapse,
+                                PIPELINE_MAX_CONFIGURED_LOOKAHEAD.get(),
+                                PIPELINE_WINDOWS.get(),
+                                PIPELINE_GROUPS.get(),
+                                PIPELINE_PREPARED_GROUPS.get(),
+                                PIPELINE_PREPARED_AHEAD_GROUPS.get(),
+                                PIPELINE_CONSUMED_GROUPS.get(),
+                                PIPELINE_CANCELLED_GROUPS.get(),
+                                PIPELINE_PROCESS_WITH_FUTURE_IN_FLIGHT.get(),
+                                PIPELINE_PEAK_PREPARED_AHEAD.get(),
+                                PIPELINE_EXCEPTION_ABORTS.get()));
             }
             return true;
         } catch (Throwable t) {
@@ -444,7 +459,7 @@ public final class LocalPreagg {
                 double collapse = groupTotal == 0 ? 0 : (double) records / groupTotal;
                 System.err.println(
                         String.format(
-                                "[LOCAL-PREAGG INDEXED] jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx planFallbacks=%d materializedValueCopiesAvoided=%d allDispatches=%d allRecords=%d allGroups=%d pipelineLookahead=%d pipelineWindows=%d pipelineGroups=%d pipelinePreparedGroups=%d pipelinePreparedAheadGroups=%d pipelineConsumedGroups=%d pipelineCancelledGroups=%d pipelineProcessWithFutureInFlight=%d pipelinePeakPreparedAhead=%d pipelineExceptionAborts=%d",
+                                "[LOCAL-PREAGG INDEXED] [CACHEKIT DISTINCT PIPELINE] mode=indexed jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx planFallbacks=%d materializedValueCopiesAvoided=%d allDispatches=%d allRecords=%d allGroups=%d pipelineLookahead=%d pipelineWindows=%d pipelineGroups=%d pipelinePreparedGroups=%d pipelinePreparedAheadGroups=%d pipelineConsumedGroups=%d pipelineCancelledGroups=%d pipelineProcessWithFutureInFlight=%d pipelinePeakPreparedAhead=%d pipelineExceptionAborts=%d",
                                 JVM_ID,
                                 op.getClass().getSimpleName(),
                                 dispatches,
