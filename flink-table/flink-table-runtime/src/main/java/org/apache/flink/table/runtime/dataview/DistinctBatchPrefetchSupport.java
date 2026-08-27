@@ -42,8 +42,10 @@ public final class DistinctBatchPrefetchSupport {
     private static final AtomicBoolean REPORTED_UNSUPPORTED_VIEW = new AtomicBoolean();
     private static final ThreadLocal<CaptureContext> PREPARED_CAPTURE =
             ThreadLocal.withInitial(CaptureContext::new);
-    private static final ThreadLocal<ArrayList<BatchPrefetchableMapState.PreparedValues>>
-            PREPARED_WAVE_VALUES = ThreadLocal.withInitial(ArrayList::new);
+    private static final ThreadLocal<PreparedWaveWorkspace> PREPARED_WAVE_WORKSPACE =
+            ThreadLocal.withInitial(PreparedWaveWorkspace::new);
+    private static final ThreadLocal<PreparedWaveDiagnostics> PREPARED_WAVE_DIAGNOSTICS =
+            ThreadLocal.withInitial(PreparedWaveDiagnostics::new);
 
     private DistinctBatchPrefetchSupport() {}
 
@@ -182,81 +184,159 @@ public final class DistinctBatchPrefetchSupport {
     /**
      * Executes one bounded, single-owner read wave for a set of prepared outer-key captures.
      *
-     * <p>No capture is consumed or installed here. Any unsupported view, multiple prepared views in
-     * one capture, owner mismatch, or backend rejection leaves every token on its existing
-     * fail-closed per-group path.
+     * <p>No capture is consumed or installed here. Each generated DISTINCT view is treated as an
+     * independent column across the outer-key cohort: tokens for view 0 are waved together, then
+     * tokens for view 1, and so on. This is required for queries such as q15 whose generated
+     * aggregate owns several DISTINCT MapStates per outer key. Unsupported capture shapes are
+     * rejected before any wave executes. A heavy or otherwise ineligible column remains on its
+     * established per-group path without preventing an eligible sibling column from executing.
      */
     public static BatchWindowPreparationResult executePreparedWave(
             Object[] preparedCaptures, int count) throws Exception {
         if (preparedCaptures == null || count < 2 || count > preparedCaptures.length) {
             return BatchWindowPreparationResult.UNSUPPORTED;
         }
-        ArrayList<BatchPrefetchableMapState.PreparedValues> values = PREPARED_WAVE_VALUES.get();
-        values.clear();
-        Object owner = null;
+        PreparedWaveWorkspace workspace = PREPARED_WAVE_WORKSPACE.get();
+        PreparedWaveDiagnostics diagnostics = PREPARED_WAVE_DIAGNOSTICS.get();
+        diagnostics.cohortAttempts++;
+        diagnostics.captures += count;
+        int viewCount = -1;
         try {
             for (int index = 0; index < count; index++) {
                 Object candidate = preparedCaptures[index];
                 if (!(candidate instanceof PreparedCapture)) {
-                    return BatchWindowPreparationResult.UNSUPPORTED;
+                    diagnostics.invalidCaptures++;
+                    return recordWaveResult(diagnostics, BatchWindowPreparationResult.UNSUPPORTED);
                 }
                 PreparedCapture capture = (PreparedCapture) candidate;
                 if (!capture.leased
                         || capture.preparationFailed
                         || capture.prepared.size() != capture.acceptedSessions
-                        || capture.prepared.size() > 1) {
-                    return BatchWindowPreparationResult.RETRY_AFTER_COHORT;
+                        || capture.sessions.size() != capture.prepared.size()) {
+                    diagnostics.rejectedCaptures++;
+                    return recordWaveResult(
+                            diagnostics, BatchWindowPreparationResult.RETRY_AFTER_COHORT);
                 }
-                if (capture.prepared.isEmpty()) {
+                if (viewCount < 0) {
+                    viewCount = capture.prepared.size();
+                    diagnostics.sessionColumns += viewCount;
+                    if (viewCount > 1) {
+                        diagnostics.multiViewCohorts++;
+                    }
+                    workspace.prepare(viewCount);
+                } else if (capture.prepared.size() != viewCount) {
+                    diagnostics.cardinalityMismatches++;
+                    return recordWaveResult(
+                            diagnostics, BatchWindowPreparationResult.RETRY_AFTER_COHORT);
+                }
+                for (int view = 0; view < viewCount; view++) {
+                    BatchPrefetchableMapView<Object> session =
+                            asSession(capture.sessions.get(view));
+                    Object viewPrepared = capture.prepared.get(view);
+                    Object backendPrepared = session.preparedBackendValueForWave(viewPrepared);
+                    if (backendPrepared == null && session.isPreparedWaveNoOp(viewPrepared)) {
+                        diagnostics.noOpTokens++;
+                        continue;
+                    }
+                    if (!(backendPrepared instanceof BatchPrefetchableMapState.PreparedValues)) {
+                        diagnostics.invalidBackendTokens++;
+                        return recordWaveResult(
+                                diagnostics, BatchWindowPreparationResult.UNSUPPORTED);
+                    }
+                    BatchPrefetchableMapState.PreparedValues preparedValue =
+                            (BatchPrefetchableMapState.PreparedValues) backendPrepared;
+                    BatchPrefetchableMapState.PreparedValues.WaveParticipation participation =
+                            preparedValue.waveParticipation();
+                    if (participation
+                            == BatchPrefetchableMapState.PreparedValues.WaveParticipation
+                                    .DISABLED) {
+                        diagnostics.disabledTokens++;
+                        return recordWaveResult(
+                                diagnostics, BatchWindowPreparationResult.UNSUPPORTED);
+                    }
+                    workspace.sawBackendToken[view] = true;
+                    if (participation
+                            == BatchPrefetchableMapState.PreparedValues.WaveParticipation
+                                    .INELIGIBLE) {
+                        diagnostics.ineligibleTokens++;
+                        workspace.eligible[view] = false;
+                        continue;
+                    }
+                    Object currentOwner = preparedValue.waveOwner();
+                    if (currentOwner == null) {
+                        diagnostics.nullOwnerTokens++;
+                        workspace.eligible[view] = false;
+                        continue;
+                    }
+                    if (workspace.owners[view] != null && workspace.owners[view] != currentOwner) {
+                        diagnostics.ownerMismatchTokens++;
+                        workspace.eligible[view] = false;
+                        continue;
+                    }
+                    diagnostics.eligibleTokens++;
+                    workspace.owners[view] = currentOwner;
+                    workspace.values.get(view).add(preparedValue);
+                }
+            }
+            if (viewCount <= 0) {
+                diagnostics.emptyCohorts++;
+                return recordWaveResult(
+                        diagnostics, BatchWindowPreparationResult.RETRY_AFTER_COHORT);
+            }
+            boolean executed = false;
+            for (int view = 0; view < viewCount; view++) {
+                ArrayList<BatchPrefetchableMapState.PreparedValues> values =
+                        workspace.values.get(view);
+                if (!workspace.sawBackendToken[view]
+                        || !workspace.eligible[view]
+                        || values.size() < 2) {
+                    diagnostics.skippedColumns++;
+                    if (workspace.sawBackendToken[view]
+                            && workspace.eligible[view]
+                            && values.size() < 2) {
+                        diagnostics.insufficientColumns++;
+                    }
                     continue;
                 }
-                BatchPrefetchableMapView<Object> session = asSession(capture.sessions.get(0));
-                Object viewPrepared = capture.prepared.get(0);
-                Object backendPrepared = session.preparedBackendValueForWave(viewPrepared);
-                if (backendPrepared == null && session.isPreparedWaveNoOp(viewPrepared)) {
-                    continue;
+                diagnostics.columnWaveAttempts++;
+                diagnostics.columnWaveGroups += values.size();
+                try {
+                    if (values.get(0).executeWave(values)) {
+                        diagnostics.columnWavesExecuted++;
+                        executed = true;
+                    } else {
+                        diagnostics.columnWavesRejected++;
+                    }
+                } catch (Exception | LinkageError ignored) {
+                    diagnostics.columnWaveFailures++;
+                    // A speculative wave is never authoritative. Backend implementations publish
+                    // only after validating the complete view-column, so every capture retains
+                    // its established per-group fallback for any rejected sibling column.
                 }
-                if (!(backendPrepared instanceof BatchPrefetchableMapState.PreparedValues)) {
-                    return BatchWindowPreparationResult.UNSUPPORTED;
-                }
-                BatchPrefetchableMapState.PreparedValues preparedValue =
-                        (BatchPrefetchableMapState.PreparedValues) backendPrepared;
-                BatchPrefetchableMapState.PreparedValues.WaveParticipation participation =
-                        preparedValue.waveParticipation();
-                if (participation
-                        == BatchPrefetchableMapState.PreparedValues.WaveParticipation.DISABLED) {
-                    return BatchWindowPreparationResult.UNSUPPORTED;
-                }
-                if (participation
-                        == BatchPrefetchableMapState.PreparedValues.WaveParticipation.INELIGIBLE) {
-                    return BatchWindowPreparationResult.RETRY_AFTER_COHORT;
-                }
-                Object currentOwner = preparedValue.waveOwner();
-                if (currentOwner == null) {
-                    return BatchWindowPreparationResult.RETRY_AFTER_COHORT;
-                }
-                if (owner != null && owner != currentOwner) {
-                    return BatchWindowPreparationResult.RETRY_AFTER_COHORT;
-                }
-                owner = currentOwner;
-                values.add(preparedValue);
             }
-            if (values.size() < 2) {
-                return BatchWindowPreparationResult.RETRY_AFTER_COHORT;
-            }
-            try {
-                return values.get(0).executeWave(values)
-                        ? BatchWindowPreparationResult.EXECUTED
-                        : BatchWindowPreparationResult.RETRY_AFTER_COHORT;
-            } catch (Exception | LinkageError ignored) {
-                // A speculative wave is never authoritative. Backend implementations publish
-                // only after validating the complete window, so retaining the original tokens
-                // here preserves their established per-group fallback.
-                return BatchWindowPreparationResult.RETRY_AFTER_COHORT;
-            }
+            return recordWaveResult(
+                    diagnostics,
+                    executed
+                            ? BatchWindowPreparationResult.EXECUTED
+                            : BatchWindowPreparationResult.RETRY_AFTER_COHORT);
         } finally {
-            values.clear();
+            workspace.clear();
         }
+    }
+
+    private static BatchWindowPreparationResult recordWaveResult(
+            PreparedWaveDiagnostics diagnostics, BatchWindowPreparationResult result) {
+        if (result == BatchWindowPreparationResult.EXECUTED) {
+            diagnostics.cohortsExecuted++;
+        } else if (result == BatchWindowPreparationResult.RETRY_AFTER_COHORT) {
+            diagnostics.cohortsRetried++;
+        } else {
+            diagnostics.cohortsUnsupported++;
+        }
+        if (diagnostics.cohortAttempts % 5000L == 1L) {
+            diagnostics.report();
+        }
+        return result;
     }
 
     public static void abortSession(Object session) {
@@ -329,6 +409,103 @@ public final class DistinctBatchPrefetchSupport {
     private static final class CaptureContext {
         private final ArrayDeque<PreparedCapture> available = new ArrayDeque<>();
         private PreparedCapture active;
+    }
+
+    private static final class PreparedWaveWorkspace {
+        private final List<ArrayList<BatchPrefetchableMapState.PreparedValues>> values =
+                new ArrayList<>();
+        private Object[] owners = new Object[2];
+        private boolean[] eligible = new boolean[2];
+        private boolean[] sawBackendToken = new boolean[2];
+        private int viewCount;
+
+        private void prepare(int requiredViews) {
+            if (owners.length < requiredViews) {
+                owners = new Object[requiredViews];
+                eligible = new boolean[requiredViews];
+                sawBackendToken = new boolean[requiredViews];
+            }
+            while (values.size() < requiredViews) {
+                values.add(new ArrayList<>());
+            }
+            viewCount = requiredViews;
+            for (int view = 0; view < requiredViews; view++) {
+                values.get(view).clear();
+                owners[view] = null;
+                eligible[view] = true;
+                sawBackendToken[view] = false;
+            }
+        }
+
+        private void clear() {
+            for (int view = 0; view < viewCount; view++) {
+                values.get(view).clear();
+                owners[view] = null;
+                eligible[view] = false;
+                sawBackendToken[view] = false;
+            }
+            viewCount = 0;
+        }
+    }
+
+    /** Thread-confined counters keep the experimental wave hot path allocation and CAS free. */
+    private static final class PreparedWaveDiagnostics {
+        private long cohortAttempts;
+        private long cohortsExecuted;
+        private long cohortsRetried;
+        private long cohortsUnsupported;
+        private long captures;
+        private long multiViewCohorts;
+        private long sessionColumns;
+        private long invalidCaptures;
+        private long rejectedCaptures;
+        private long cardinalityMismatches;
+        private long noOpTokens;
+        private long invalidBackendTokens;
+        private long disabledTokens;
+        private long ineligibleTokens;
+        private long nullOwnerTokens;
+        private long ownerMismatchTokens;
+        private long eligibleTokens;
+        private long skippedColumns;
+        private long insufficientColumns;
+        private long columnWaveAttempts;
+        private long columnWavesExecuted;
+        private long columnWavesRejected;
+        private long columnWaveFailures;
+        private long columnWaveGroups;
+        private long emptyCohorts;
+
+        private void report() {
+            System.err.printf(
+                    "[CACHEKIT DISTINCT WAVE ORCHESTRATOR] thread=%s cohortAttempts=%d cohortsExecuted=%d cohortsRetried=%d cohortsUnsupported=%d captures=%d multiViewCohorts=%d sessionColumns=%d invalidCaptures=%d rejectedCaptures=%d cardinalityMismatches=%d noOpTokens=%d invalidBackendTokens=%d disabledTokens=%d ineligibleTokens=%d nullOwnerTokens=%d ownerMismatchTokens=%d eligibleTokens=%d skippedColumns=%d insufficientColumns=%d columnWaveAttempts=%d columnWavesExecuted=%d columnWavesRejected=%d columnWaveFailures=%d columnWaveGroups=%d emptyCohorts=%d%n",
+                    Thread.currentThread().getName(),
+                    cohortAttempts,
+                    cohortsExecuted,
+                    cohortsRetried,
+                    cohortsUnsupported,
+                    captures,
+                    multiViewCohorts,
+                    sessionColumns,
+                    invalidCaptures,
+                    rejectedCaptures,
+                    cardinalityMismatches,
+                    noOpTokens,
+                    invalidBackendTokens,
+                    disabledTokens,
+                    ineligibleTokens,
+                    nullOwnerTokens,
+                    ownerMismatchTokens,
+                    eligibleTokens,
+                    skippedColumns,
+                    insufficientColumns,
+                    columnWaveAttempts,
+                    columnWavesExecuted,
+                    columnWavesRejected,
+                    columnWaveFailures,
+                    columnWaveGroups,
+                    emptyCohorts);
+        }
     }
 
     private static final class PreparedCapture {
