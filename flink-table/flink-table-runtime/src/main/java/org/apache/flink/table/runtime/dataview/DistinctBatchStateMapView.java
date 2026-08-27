@@ -239,15 +239,22 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         try {
             int size = pendingPrefetchKeys.size();
             recordPrefetchSize(size);
-            if (size < minPrefetchUniqueKeys || !delegate.supportsDirectPrefetchedValues()) {
-                prefetchRejectedBelowMinimum += size < minPrefetchUniqueKeys ? 1 : 0;
+            if (size < minPrefetchUniqueKeys) {
+                prefetchRejectedBelowMinimum++;
+                // The generated session was admitted from the outer group size, but de-duplication
+                // can leave fewer useful keys than the backend threshold. This is a successful
+                // per-view no-op, not a preparation failure: invalidating the composite capture
+                // here would cancel useful tokens already prepared by sibling DISTINCT views.
+                return new PreparedPrefetch<>(this, java.util.Collections.emptyList(), null, true);
+            }
+            if (!delegate.supportsDirectPrefetchedValues()) {
                 return null;
             }
             ArrayList<EK> stableKeys = new ArrayList<>(pendingPrefetchKeys);
             Object backendPrepared = delegate.prepareUniqueKeyValues(stableKeys);
             return backendPrepared == null
                     ? null
-                    : new PreparedPrefetch<>(this, stableKeys, backendPrepared);
+                    : new PreparedPrefetch<>(this, stableKeys, backendPrepared, false);
         } finally {
             pendingPrefetchKeys.clear();
             pendingPrefetchKeySet.clear();
@@ -264,6 +271,9 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             return false;
         }
         token.consumed = true;
+        if (token.noOp) {
+            return true;
+        }
         @SuppressWarnings("unchecked")
         List<EK> keys = (List<EK>) token.keys;
         List<EV> values = delegate.awaitPreparedUniqueKeyValues(token.backendPrepared);
@@ -291,7 +301,9 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         if (token.owner == this) {
             if (!token.consumed) {
                 token.consumed = true;
-                delegate.abortPreparedUniqueKeyValues(token.backendPrepared);
+                if (!token.noOp) {
+                    delegate.abortPreparedUniqueKeyValues(token.backendPrepared);
+                }
             }
             if (!active && directValuesPrimed) {
                 overlay.clear();
@@ -316,13 +328,18 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         private final DistinctBatchStateMapView<?, EK, EV> owner;
         private final List<EK> keys;
         private final Object backendPrepared;
+        private final boolean noOp;
         private boolean consumed;
 
         private PreparedPrefetch(
-                DistinctBatchStateMapView<?, EK, EV> owner, List<EK> keys, Object backendPrepared) {
+                DistinctBatchStateMapView<?, EK, EV> owner,
+                List<EK> keys,
+                Object backendPrepared,
+                boolean noOp) {
             this.owner = owner;
             this.keys = keys;
             this.backendPrepared = backendPrepared;
+            this.noOp = noOp;
         }
     }
 

@@ -75,6 +75,71 @@ class DistinctBatchStateMapViewTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void compositeCaptureKeepsDetachedSiblingWhenOneViewDeduplicatesBelowMinimum()
+            throws Exception {
+        StateMapView<Void, String, Long> asyncDelegate = mock(StateMapView.class);
+        Object backendPrepared = new Object();
+        when(asyncDelegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        when(asyncDelegate.prepareUniqueKeyValues(any())).thenReturn(backendPrepared);
+        when(asyncDelegate.awaitPreparedUniqueKeyValues(backendPrepared))
+                .thenReturn(java.util.Arrays.asList(7L, null));
+        DistinctBatchStateMapView<Void, String, Long> asyncView = createView(asyncDelegate);
+
+        StateMapView<Void, String, Long> noOpDelegate = mock(StateMapView.class);
+        when(noOpDelegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        DistinctBatchStateMapView<Void, String, Long> noOpView = createView(noOpDelegate);
+
+        Object asyncSession = DistinctBatchPrefetchSupport.beginSession(asyncView, 2);
+        Object noOpSession = DistinctBatchPrefetchSupport.beginSession(noOpView, 2);
+        DistinctBatchPrefetchSupport.beginPreparedCapture();
+        for (String key : java.util.Arrays.asList("bidder-1", "bidder-2")) {
+            DistinctBatchPrefetchSupport.addSession(asyncSession, key);
+            DistinctBatchPrefetchSupport.addSession(noOpSession, "duplicate-key");
+        }
+        assertTrue(DistinctBatchPrefetchSupport.finishSession(asyncSession));
+        assertTrue(DistinctBatchPrefetchSupport.finishSession(noOpSession));
+        Object capture = DistinctBatchPrefetchSupport.endPreparedCapture();
+
+        assertTrue(DistinctBatchPrefetchSupport.installPreparedCapture(capture));
+        verify(asyncDelegate, times(1)).awaitPreparedUniqueKeyValues(backendPrepared);
+        verify(asyncDelegate, never()).prefetchUniqueKeyValues(any());
+        verify(noOpDelegate, never()).prepareUniqueKeyValues(any());
+        verify(noOpDelegate, never()).prefetchUniqueKeyValues(any());
+        verify(noOpDelegate, never()).awaitPreparedUniqueKeyValues(any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void compositeCaptureStillFailsClosedWhenSiblingBackendPreparationFails() throws Exception {
+        StateMapView<Void, String, Long> asyncDelegate = mock(StateMapView.class);
+        Object backendPrepared = new Object();
+        when(asyncDelegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        when(asyncDelegate.prepareUniqueKeyValues(any())).thenReturn(backendPrepared);
+        DistinctBatchStateMapView<Void, String, Long> asyncView = createView(asyncDelegate);
+
+        StateMapView<Void, String, Long> failedDelegate = mock(StateMapView.class);
+        when(failedDelegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        when(failedDelegate.prepareUniqueKeyValues(any())).thenReturn(null);
+        DistinctBatchStateMapView<Void, String, Long> failedView = createView(failedDelegate);
+
+        Object asyncSession = DistinctBatchPrefetchSupport.beginSession(asyncView, 2);
+        Object failedSession = DistinctBatchPrefetchSupport.beginSession(failedView, 2);
+        DistinctBatchPrefetchSupport.beginPreparedCapture();
+        for (String key : java.util.Arrays.asList("bidder-1", "bidder-2")) {
+            DistinctBatchPrefetchSupport.addSession(asyncSession, key);
+            DistinctBatchPrefetchSupport.addSession(failedSession, key);
+        }
+        assertTrue(DistinctBatchPrefetchSupport.finishSession(asyncSession));
+        assertFalse(DistinctBatchPrefetchSupport.finishSession(failedSession));
+        Object capture = DistinctBatchPrefetchSupport.endPreparedCapture();
+
+        assertFalse(DistinctBatchPrefetchSupport.installPreparedCapture(capture));
+        verify(asyncDelegate, times(1)).abortPreparedUniqueKeyValues(backendPrepared);
+        verify(asyncDelegate, never()).awaitPreparedUniqueKeyValues(any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void compositePreparedCaptureIsAllOrNothingAcrossDistinctViews() throws Exception {
         BatchPrefetchableMapView<Object> first = mock(BatchPrefetchableMapView.class);
         BatchPrefetchableMapView<Object> second = mock(BatchPrefetchableMapView.class);
