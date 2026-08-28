@@ -722,6 +722,27 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                     + "feature is disabled by default and any pre-write validation "
                                     + "mismatch falls back to the established MapState path.");
 
+    public static final ConfigOption<Boolean> EXACT_DISTINCT_RESIDENT_WRITE_BACK_ENABLED =
+            ConfigOptions.key(
+                            "state.backend.cachekit.native.map-distinct-resident-write-back.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Keep exact DISTINCT accumulator mutations resident across outer-key "
+                                    + "batches and flush them through the established MapState "
+                                    + "write-back path. Only state names beginning with distinctAcc_ "
+                                    + "whose MapState value serializer is LongSerializer and whose "
+                                    + "state TTL is disabled are eligible.");
+
+    public static final ConfigOption<Integer> EXACT_DISTINCT_RESIDENT_WRITE_BACK_MAX_ENTRIES =
+            ConfigOptions.key(
+                            "state.backend.cachekit.native.map-distinct-resident-write-back.max-entries")
+                    .intType()
+                    .defaultValue(4096)
+                    .withDescription(
+                            "Maximum exact (outer key, namespace, DISTINCT user key) entries "
+                                    + "retained by each eligible write-back MapState.");
+
     public static final ConfigOption<Boolean>
             NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ENABLED =
                     ConfigOptions.key(
@@ -1030,7 +1051,10 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 									BatchKeyGroupingSupport
 											.MAX_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS,
 									config.get(
-											NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS))));
+											NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS))))
+						.configureExactDistinctResidentWriteBack(
+							config.get(EXACT_DISTINCT_RESIDENT_WRITE_BACK_ENABLED),
+							Math.max(1, config.get(EXACT_DISTINCT_RESIDENT_WRITE_BACK_MAX_ENTRIES)));
 		}
 
         static NativeRequestPlaneOptions nativeRequestPlaneOptions(ReadableConfig config) {

@@ -31,6 +31,30 @@ import org.junit.jupiter.api.Test;
 class NativeRequestPlaneConfigurationTest {
 
     @Test
+    void testExactDistinctResidentWriteBackIsExplicitAndCarriesCapacity() throws Exception {
+        Configuration disabled = new Configuration();
+        disabled.set(
+                CacheKitStateBackendFactory.DELEGATE_BACKEND,
+                "org.apache.flink.runtime.state.hashmap.HashMapStateBackend");
+        CacheKitStateBackend disabledBackend =
+                new CacheKitStateBackendFactory()
+                        .createFromConfig(disabled, getClass().getClassLoader());
+        assertFalse(disabledBackend.exactDistinctResidentWriteBackEnabledForTesting());
+        assertEquals(4096, disabledBackend.exactDistinctResidentWriteBackMaxEntriesForTesting());
+
+        Configuration enabled = new Configuration(disabled);
+        enabled.set(
+                CacheKitStateBackendFactory.EXACT_DISTINCT_RESIDENT_WRITE_BACK_ENABLED, true);
+        enabled.set(
+                CacheKitStateBackendFactory.EXACT_DISTINCT_RESIDENT_WRITE_BACK_MAX_ENTRIES, 777);
+        CacheKitStateBackend enabledBackend =
+                new CacheKitStateBackendFactory()
+                        .createFromConfig(enabled, getClass().getClassLoader());
+        assertTrue(enabledBackend.exactDistinctResidentWriteBackEnabledForTesting());
+        assertEquals(777, enabledBackend.exactDistinctResidentWriteBackMaxEntriesForTesting());
+    }
+
+    @Test
     void testKeyScopedInvalidationIsCarriedByConfiguredBackendInstance() throws Exception {
         Configuration disabled = new Configuration();
         disabled.set(

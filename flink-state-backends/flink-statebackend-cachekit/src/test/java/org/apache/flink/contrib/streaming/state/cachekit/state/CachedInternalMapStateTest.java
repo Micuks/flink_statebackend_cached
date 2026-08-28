@@ -2584,6 +2584,226 @@ class CachedInternalMapStateTest {
     }
 
     @Test
+    void testExactDistinctResidentWriteBackIsolatesOuterKeyAndNamespaceAcrossBatches()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, String, String, Integer> delegate = mock(InternalMapState.class);
+        CachedInternalMapState<String, String, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.OBJECT,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0);
+        state.enableExactDistinctResidentWriteBack(true);
+
+        state.setCurrentNamespace("ns1");
+        state.put("u", 11);
+        state.setCurrentNamespace("ns2");
+        state.put("u", 12);
+        currentKey.set("k2");
+        state.setCurrentNamespace("ns1");
+        state.put("u", 21);
+
+        clearInvocations(delegate);
+        currentKey.set("k1");
+        state.setCurrentNamespace("ns1");
+        assertEquals(11, state.get("u"));
+        state.setCurrentNamespace("ns2");
+        assertEquals(12, state.get("u"));
+        currentKey.set("k2");
+        state.setCurrentNamespace("ns1");
+        assertEquals(21, state.get("u"));
+        verify(delegate, times(0)).get(any());
+        assertEquals(3, state.getExactDistinctResidentMutationCountForTesting());
+        assertEquals(3, state.getExactDistinctResidentReadHitsForTesting());
+
+        state.flush();
+        verify(delegate, times(3)).put(org.mockito.ArgumentMatchers.eq("u"), any());
+        assertEquals(3, state.getExactDistinctResidentExplicitFlushesForTesting());
+    }
+
+    @Test
+    void testExactDistinctResidentWriteBackRetriesFlushFailureWithoutLosingDirtyEntry()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.OBJECT,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0);
+        state.enableExactDistinctResidentWriteBack(true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        state.put("u", 1);
+        org.mockito.Mockito.doThrow(new Exception("injected flush failure"))
+                .doNothing()
+                .when(delegate)
+                .put("u", 1);
+
+        org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class, state::flush);
+        assertEquals(1, state.getExactDistinctResidentFlushFailuresForTesting());
+        state.flush();
+        verify(delegate, times(2)).put("u", 1);
+        assertEquals(1, state.getExactDistinctResidentExplicitFlushesForTesting());
+    }
+
+    @Test
+    void testExactDistinctResidentWriteBackCountsDirtyEvictionFlush() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.OBJECT,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0);
+        state.enableExactDistinctResidentWriteBack(true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        for (int index = 0; index < 129; index++) {
+            state.put("u" + index, index);
+        }
+
+        assertEquals(1, state.getExactDistinctResidentEvictionFlushesForTesting());
+        assertEquals(129, state.getExactDistinctResidentMutationCountForTesting());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testExactDistinctResidentPrefetchKeepsDirtyValueAndReadsOnlyMisses() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                                IntSerializer.INSTANCE));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        when(reader.getSerializedValuesByUserKeys(Arrays.asList("miss")))
+                .thenReturn(Arrays.asList(serializedMapValue(3)));
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.OBJECT,
+                        500,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0);
+        state.enableNativeDistinctBatchPrefetch(true);
+        state.enableExactDistinctResidentWriteBack(true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        state.put("resident", 9);
+        assertTrue(state.beginPrefetchCurrentKeys(Arrays.asList("resident", "miss")));
+
+        assertEquals(9, state.get("resident"));
+        assertEquals(3, state.get("miss"));
+        verify(reader, times(1)).getSerializedValuesByUserKeys(Arrays.asList("miss"));
+        verify(delegate, times(0)).put("resident", 9);
+        assertEquals(1, state.getExactDistinctResidentPrefetchHitsForTesting());
+        assertEquals(1, state.getExactDistinctResidentRocksDbPrefetchMissesForTesting());
+        assertEquals(1, state.getExactDistinctResidentDirtyAvoidedFlushesForTesting());
+    }
+
+    @Test
+    void testExactDistinctResidentCheckpointFlushAndFreshWrapperStartsEmpty() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> beforeCheckpoint =
+                mock(InternalMapState.class);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> first =
+                createResidentState(beforeCheckpoint, currentKey, 500);
+        first.put("u", 17);
+
+        // CacheKitKeyedStateBackend invokes this same flush seam before delegate snapshot.
+        first.flush();
+        verify(beforeCheckpoint).put("u", 17);
+
+        InternalMapState<String, VoidNamespace, String, Integer> restoredDelegate =
+                mock(InternalMapState.class);
+        when(restoredDelegate.get("u")).thenReturn(17);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> restored =
+                createResidentState(restoredDelegate, currentKey, 500);
+        assertEquals(17, restored.get("u"));
+        verify(restoredDelegate).get("u");
+        assertEquals(0, restored.getExactDistinctResidentReadHitsForTesting());
+    }
+
+    private static CachedInternalMapState<String, VoidNamespace, String, Integer>
+            createResidentState(
+                    InternalMapState<String, VoidNamespace, String, Integer> delegate,
+                    AtomicReference<String> currentKey,
+                    int mapCacheBackingEntries) {
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.OBJECT,
+                        mapCacheBackingEntries,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        0);
+        state.enableExactDistinctResidentWriteBack(true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        return state;
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void testPreparedCommitIsDisabledByDefault() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");

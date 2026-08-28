@@ -30,9 +30,11 @@ import java.util.stream.Stream;
 import javax.annotation.Nonnull;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
@@ -120,6 +122,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
     private final boolean nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled;
     private final int nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys;
     private final int nativeMapDistinctBatchPrefetchLookaheadGroups;
+    private boolean exactDistinctResidentWriteBackEnabled;
+    private int exactDistinctResidentWriteBackMaxEntries = 4096;
     private int nextNativeStateId = 1;
     private long nativePreaggGroupBatches;
     private long nativePreaggInputKeys;
@@ -593,6 +597,32 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
         delegate.setCurrentKey(newKey);
     }
 
+    void configureExactDistinctResidentWriteBack(boolean enabled, int maxEntries) {
+        this.exactDistinctResidentWriteBackEnabled = enabled;
+        this.exactDistinctResidentWriteBackMaxEntries = normalizeExactDistinctResidentMaxEntries(maxEntries);
+    }
+
+    static boolean isExactDistinctResidentWriteBackEligible(
+            StateDescriptor<?, ?> descriptor, boolean enabled, int maxEntries) {
+        return enabled
+                && maxEntries > 0
+                && descriptor != null
+                && descriptor.getType() == StateDescriptor.Type.MAP
+                && descriptor instanceof MapStateDescriptor
+                && descriptor.getName().startsWith("distinctAcc_")
+                && ((MapStateDescriptor<?, ?>) descriptor).getValueSerializer()
+                        == LongSerializer.INSTANCE
+                && !descriptor.getTtlConfig().isEnabled();
+    }
+
+    private static int normalizeExactDistinctResidentMaxEntries(int maxEntries) {
+        return Math.max(128, Math.min(Integer.MAX_VALUE / 5, maxEntries));
+    }
+
+    static int exactDistinctResidentBackingEntries(int maxEntries) {
+        return normalizeExactDistinctResidentMaxEntries(maxEntries) * 5;
+    }
+
     @Nonnull
     @Override
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -645,12 +675,18 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
             return (S) wrapped;
         }
 
+        boolean exactDistinctResidentWriteBack =
+                isExactDistinctResidentWriteBackEligible(
+                        stateDescriptor,
+                        exactDistinctResidentWriteBackEnabled,
+                        exactDistinctResidentWriteBackMaxEntries);
         if (stateDescriptor.getType() == StateDescriptor.Type.MAP
                 && internal instanceof InternalMapState
                 && (mapPresenceCacheMaxEntries > 0
                         || mapCacheMaxEntries > 0
                         || mapSnapshotCacheMaxEntries > 0
                         || nativeMapDistinctBatchPrefetchEnabled
+                        || exactDistinctResidentWriteBack
                         || (nativeRequestPlaneCoordinator != null
                                 && (nativeRequestPlaneCoordinator.options().mapCacheEnabled()
                                         || nativeRequestPlaneCoordinator
@@ -671,10 +707,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                             mapPresenceCachePolicy,
                             mapPresenceCacheLruOverflow,
                             mapPresenceCacheImplementation,
-                            mapCacheMaxEntries,
+                            exactDistinctResidentWriteBack
+                                    ? exactDistinctResidentBackingEntries(
+                                            exactDistinctResidentWriteBackMaxEntries)
+                                    : mapCacheMaxEntries,
                             mapCachePolicy,
                             mapCacheLruOverflow,
-                            mapBypassEnabled,
+                            exactDistinctResidentWriteBack ? false : mapBypassEnabled,
                             mapHitRateThreshold,
                             mapHitRateWindow,
                             mapIterationCacheFillEnabled,
@@ -728,6 +767,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                     nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabled,
                     nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled);
             wrapped.enableNativeDistinctPreparedCommit(nativeMapDistinctPreparedCommitEnabled);
+            wrapped.enableExactDistinctResidentWriteBack(exactDistinctResidentWriteBack);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -855,12 +895,18 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
             return (IS) wrapped;
         }
 
+        boolean exactDistinctResidentWriteBack =
+                isExactDistinctResidentWriteBackEligible(
+                        stateDesc,
+                        exactDistinctResidentWriteBackEnabled,
+                        exactDistinctResidentWriteBackMaxEntries);
         if (stateDesc.getType() == StateDescriptor.Type.MAP
                 && internal instanceof InternalMapState
                 && (mapPresenceCacheMaxEntries > 0
                         || mapCacheMaxEntries > 0
                         || mapSnapshotCacheMaxEntries > 0
                         || nativeMapDistinctBatchPrefetchEnabled
+                        || exactDistinctResidentWriteBack
                         || (nativeRequestPlaneCoordinator != null
                                 && (nativeRequestPlaneCoordinator.options().mapCacheEnabled()
                                         || nativeRequestPlaneCoordinator
@@ -881,10 +927,13 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                             mapPresenceCachePolicy,
                             mapPresenceCacheLruOverflow,
                             mapPresenceCacheImplementation,
-                            mapCacheMaxEntries,
+                            exactDistinctResidentWriteBack
+                                    ? exactDistinctResidentBackingEntries(
+                                            exactDistinctResidentWriteBackMaxEntries)
+                                    : mapCacheMaxEntries,
                             mapCachePolicy,
                             mapCacheLruOverflow,
-                            mapBypassEnabled,
+                            exactDistinctResidentWriteBack ? false : mapBypassEnabled,
                             mapHitRateThreshold,
                             mapHitRateWindow,
                             mapIterationCacheFillEnabled,
@@ -938,6 +987,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                     nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabled,
                     nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled);
             wrapped.enableNativeDistinctPreparedCommit(nativeMapDistinctPreparedCommitEnabled);
+            wrapped.enableExactDistinctResidentWriteBack(exactDistinctResidentWriteBack);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }

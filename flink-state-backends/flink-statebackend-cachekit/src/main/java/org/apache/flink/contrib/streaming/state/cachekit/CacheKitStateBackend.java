@@ -100,6 +100,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final boolean nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled;
     private final int nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys;
     private final int nativeMapDistinctBatchPrefetchLookaheadGroups;
+    private boolean exactDistinctResidentWriteBackEnabled;
+    private int exactDistinctResidentWriteBackMaxEntries = 4096;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -428,6 +430,22 @@ public class CacheKitStateBackend extends AbstractStateBackend
         return effectiveNativeMapDistinctBatchPrefetchLookaheadGroups();
     }
 
+    boolean exactDistinctResidentWriteBackEnabledForTesting() {
+        return exactDistinctResidentWriteBackEnabled;
+    }
+
+    int exactDistinctResidentWriteBackMaxEntriesForTesting() {
+        return effectiveExactDistinctResidentWriteBackMaxEntries();
+    }
+
+    CacheKitStateBackend configureExactDistinctResidentWriteBack(
+            boolean enabled, int maxEntries) {
+        this.exactDistinctResidentWriteBackEnabled = enabled;
+        this.exactDistinctResidentWriteBackMaxEntries =
+                Math.max(128, Math.min(Integer.MAX_VALUE / 5, maxEntries));
+        return this;
+    }
+
     @Override
     public StateBackend getDelegatedStateBackend() {
         return delegateBackend;
@@ -483,7 +501,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
         ClassLoader userCodeClassLoader = env.getUserCodeClassLoader().asClassLoader();
 
         try {
-            return new CacheKitKeyedStateBackend<>(
+            CacheKitKeyedStateBackend<K> cacheKitBackend =
+                    new CacheKitKeyedStateBackend<>(
                     delegated,
                     kvStateRegistry,
                     keySerializer,
@@ -528,8 +547,12 @@ public class CacheKitStateBackend extends AbstractStateBackend
                     nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabled,
                     nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled,
                     nativeMapDistinctPreparedCommitEnabled,
-                    effectiveNativeMapDistinctBatchPrefetchAsyncMinUniqueKeys(),
-                    effectiveNativeMapDistinctBatchPrefetchLookaheadGroups());
+                            effectiveNativeMapDistinctBatchPrefetchAsyncMinUniqueKeys(),
+                            effectiveNativeMapDistinctBatchPrefetchLookaheadGroups());
+            cacheKitBackend.configureExactDistinctResidentWriteBack(
+                    exactDistinctResidentWriteBackEnabled,
+                    effectiveExactDistinctResidentWriteBackMaxEntries());
+            return cacheKitBackend;
         } catch (RuntimeException | LinkageError failure) {
             disposeAfterInitializationFailure(delegated, failure);
             throw new IOException(
@@ -745,7 +768,14 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled,
                 nativeMapDistinctPreparedCommitEnabled,
                 nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys,
-                nativeMapDistinctBatchPrefetchLookaheadGroups);
+                nativeMapDistinctBatchPrefetchLookaheadGroups)
+                .configureExactDistinctResidentWriteBack(
+                        config.get(
+                                CacheKitStateBackendFactory
+                                        .EXACT_DISTINCT_RESIDENT_WRITE_BACK_ENABLED),
+                        config.get(
+                                CacheKitStateBackendFactory
+                                        .EXACT_DISTINCT_RESIDENT_WRITE_BACK_MAX_ENTRIES));
     }
 
     private NativeRequestPlaneOptions effectiveNativeRequestPlaneOptions() {
@@ -766,6 +796,16 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private int effectiveNativeMapDistinctBatchPrefetchLookaheadGroups() {
         return normalizeNativeMapDistinctBatchPrefetchLookaheadGroups(
                 nativeMapDistinctBatchPrefetchLookaheadGroups);
+    }
+
+    private int effectiveExactDistinctResidentWriteBackMaxEntries() {
+        return Math.max(
+                128,
+                Math.min(
+                        Integer.MAX_VALUE / 5,
+                        exactDistinctResidentWriteBackMaxEntries <= 0
+                                ? 4096
+                                : exactDistinctResidentWriteBackMaxEntries));
     }
 
     static int normalizeNativeMapDistinctBatchPrefetchAsyncMinUniqueKeys(int configuredValue) {

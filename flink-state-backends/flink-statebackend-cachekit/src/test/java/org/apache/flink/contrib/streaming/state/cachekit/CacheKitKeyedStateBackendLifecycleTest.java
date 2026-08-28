@@ -17,7 +17,10 @@ package org.apache.flink.contrib.streaming.state.cachekit;
 
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
@@ -54,6 +57,44 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CacheKitKeyedStateBackendLifecycleTest {
+
+    @Test
+    void testExactDistinctResidentWriteBackEligibilityRequiresNameAndNoTtl() {
+        MapStateDescriptor<String, Long> distinct =
+                new MapStateDescriptor<>(
+                        "distinctAcc_count", StringSerializer.INSTANCE, LongSerializer.INSTANCE);
+        assertTrue(
+                CacheKitKeyedStateBackend.isExactDistinctResidentWriteBackEligible(
+                        distinct, true, 128));
+        assertEquals(3885, CacheKitKeyedStateBackend.exactDistinctResidentBackingEntries(777));
+
+        MapStateDescriptor<String, Integer> ordinary =
+                new MapStateDescriptor<>(
+                        "ordinary", StringSerializer.INSTANCE, IntSerializer.INSTANCE);
+        assertFalse(
+                CacheKitKeyedStateBackend.isExactDistinctResidentWriteBackEligible(
+                        ordinary, true, 128));
+
+        MapStateDescriptor<String, Integer> mutableDistinctAccumulator =
+                new MapStateDescriptor<>(
+                        "distinctAcc_filter", StringSerializer.INSTANCE, IntSerializer.INSTANCE);
+        assertFalse(
+                CacheKitKeyedStateBackend.isExactDistinctResidentWriteBackEligible(
+                        mutableDistinctAccumulator, true, 128));
+
+        distinct.enableTimeToLive(
+                StateTtlConfig.newBuilder(org.apache.flink.api.common.time.Time.seconds(60))
+                        .build());
+        assertFalse(
+                CacheKitKeyedStateBackend.isExactDistinctResidentWriteBackEligible(
+                        distinct, true, 128));
+        assertFalse(
+                CacheKitKeyedStateBackend.isExactDistinctResidentWriteBackEligible(
+                        ordinary, false, 128));
+        assertFalse(
+                CacheKitKeyedStateBackend.isExactDistinctResidentWriteBackEligible(
+                        ordinary, true, 0));
+    }
 
     @Test
     void testNativePreaggHashTokenUsesJavaEqualityContract() {

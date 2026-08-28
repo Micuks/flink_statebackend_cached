@@ -141,6 +141,15 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private boolean nativeDistinctBatchDeferredWaveDirectArenaResultsEnabled;
     private boolean nativeDistinctBatchCrossColumnWaveEnabled;
     private boolean nativeDistinctPreparedCommitEnabled;
+    private boolean exactDistinctResidentWriteBackEnabled;
+    private long exactDistinctResidentMutations;
+    private long exactDistinctResidentReadHits;
+    private long exactDistinctResidentEvictionFlushes;
+    private long exactDistinctResidentExplicitFlushes;
+    private long exactDistinctResidentFlushFailures;
+    private long exactDistinctResidentPrefetchHits;
+    private long exactDistinctResidentRocksDbPrefetchMisses;
+    private long exactDistinctResidentDirtyAvoidedFlushes;
     private boolean batchPrefetchActive;
     private K batchPrefetchOuterKey;
     private N batchPrefetchNamespace;
@@ -799,6 +808,15 @@ public final class CachedInternalMapState<K, N, UK, UV>
         this.nativeDistinctPreparedCommitEnabled = enabled;
     }
 
+    /** Enables exact-DISTINCT cross-batch write-back after descriptor-level eligibility checks. */
+    public void enableExactDistinctResidentWriteBack(boolean enabled) {
+        if (enabled && !mapCacheEnabled) {
+            throw new IllegalStateException(
+                    "Exact DISTINCT resident write-back requires a positive MapState cache capacity.");
+        }
+        this.exactDistinctResidentWriteBackEnabled = enabled;
+    }
+
     /** Compatibility overload retaining the pre-Fix27 cross-column treatment signature. */
     public void enableNativeDistinctBatchPrefetch(
             boolean enabled,
@@ -848,6 +866,12 @@ public final class CachedInternalMapState<K, N, UK, UV>
         batchPrefetchInputKeys += orderedKeys.size();
         batchPrefetchUniqueKeys += orderedKeys.size();
         try {
+            if (exactDistinctResidentWriteBackEnabled) {
+                List<UV> values = readResidentFirstValues(currentKey, orderedKeys);
+                batchPrefetchBatches++;
+                batchPrefetchDirectOverlayValues += values.size();
+                return values;
+            }
             flushCurrentKey(currentKey);
             ensureDelegateNamespace(currentKey);
             if (nativeDistinctBatchDirectArenaEnabled) {
@@ -911,6 +935,24 @@ public final class CachedInternalMapState<K, N, UK, UV>
         List<UK> orderedKeys = (List<UK>) (List<?>) uniqueUserKeys;
         KeyNamespace<K, N> stableContext = newStoredKeyNamespace(currentKey, namespace);
         List<UK> stableOrderedKeys = new ArrayList<>(orderedKeys);
+        if (exactDistinctResidentWriteBackEnabled) {
+            ensureDelegateNamespace(currentKey);
+            List<byte[]> rocksDBKeys = null;
+            if (nativeDistinctPreparedCommitEnabled) {
+                rocksDBKeys = rocksDBBatchMapReader.serializeRocksDBKeysByUserKeys(orderedKeys);
+                if (rocksDBKeys.size() != orderedKeys.size()) {
+                    return null;
+                }
+            }
+            List<UV> values = readResidentFirstValues(currentKey, orderedKeys);
+            return new ResidentPreparedMapValues(
+                    stableContext.key,
+                    stableContext.namespace,
+                    stableOrderedKeys,
+                    rocksDBKeys,
+                    values,
+                    nativeGeneration);
+        }
         if (nativeDistinctBatchDeferredWaveEnabled
                 && orderedKeys.size() < nativeDistinctBatchAsyncMinUniqueKeys
                 && orderedKeys.size() <= RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
@@ -1036,6 +1078,59 @@ public final class CachedInternalMapState<K, N, UK, UV>
             asyncBatchPrefetchQueuedSubmissions.incrementAndGet();
         }
         return prepared;
+    }
+
+    private List<UV> readResidentFirstValues(K currentKey, List<UK> orderedKeys)
+            throws Exception {
+        ArrayList<UV> values = new ArrayList<>(Collections.nCopies(orderedKeys.size(), null));
+        ArrayList<UK> rocksDbKeys = new ArrayList<>();
+        ArrayList<Integer> rocksDbIndexes = new ArrayList<>();
+        for (int index = 0; index < orderedKeys.size(); index++) {
+            UK userKey = orderedKeys.get(index);
+            setLookupKey(currentKey, currentNamespace, userKey);
+            CachedMapValue<UV> resident = getCachedValue(currentKey);
+            if (resident == null) {
+                rocksDbKeys.add(userKey);
+                rocksDbIndexes.add(index);
+                continue;
+            }
+            values.set(index, resident.valueOrNull());
+            exactDistinctResidentPrefetchHits++;
+            if (resident.dirty) {
+                exactDistinctResidentDirtyAvoidedFlushes++;
+            }
+        }
+        if (rocksDbKeys.isEmpty()) {
+            return values;
+        }
+
+        ensureDelegateNamespace(currentKey);
+        exactDistinctResidentRocksDbPrefetchMisses += rocksDbKeys.size();
+        List<byte[]> rawValues = rocksDBBatchMapReader.getSerializedValuesByUserKeys(rocksDbKeys);
+        if (rawValues.size() != rocksDbKeys.size()) {
+            throw new IllegalStateException(
+                    "MapState resident-first MultiGet returned "
+                            + rawValues.size()
+                            + " values for "
+                            + rocksDbKeys.size()
+                            + " misses.");
+        }
+        for (int index = 0; index < rawValues.size(); index++) {
+            byte[] rawValue = rawValues.get(index);
+            UV value = null;
+            if (rawValue == null) {
+                batchPrefetchMissing++;
+            } else {
+                batchPrefetchInput.setBuffer(rawValue);
+                boolean isNull = batchPrefetchInput.readBoolean();
+                value = isNull ? null : userValueSerializer.deserialize(batchPrefetchInput);
+                batchPrefetchFound++;
+            }
+            int orderedIndex = rocksDbIndexes.get(index);
+            values.set(orderedIndex, value);
+            updateValueCache(currentKey, orderedKeys.get(orderedIndex), value, false);
+        }
+        return values;
     }
 
     private interface PreparedCommitHandle {
@@ -1208,6 +1303,133 @@ public final class CachedInternalMapState<K, N, UK, UV>
         if (changed) {
             advanceNativeGeneration();
             invalidateSnapshot(currentKey);
+        }
+    }
+
+    private final class ResidentPreparedMapValues implements PreparedValues, PreparedCommitHandle {
+
+        private final K preparedOuterKey;
+        private final N preparedNamespace;
+        private final List<UK> orderedKeys;
+        private final List<byte[]> rocksDBKeys;
+        private final List<UV> values;
+        private final long preparedGeneration;
+        private boolean readConsumed;
+        private boolean preparedCommitConsumed;
+
+        private ResidentPreparedMapValues(
+                K preparedOuterKey,
+                N preparedNamespace,
+                List<UK> orderedKeys,
+                List<byte[]> rocksDBKeys,
+                List<UV> values,
+                long preparedGeneration) {
+            this.preparedOuterKey = preparedOuterKey;
+            this.preparedNamespace = preparedNamespace;
+            this.orderedKeys = orderedKeys;
+            this.rocksDBKeys = rocksDBKeys;
+            this.values = values;
+            this.preparedGeneration = preparedGeneration;
+        }
+
+        @Override
+        public List<?> awaitValues() {
+            if (readConsumed
+                    || closed
+                    || preparedGeneration != nativeGeneration
+                    || !Objects.equals(preparedOuterKey, currentKeyProvider.getCurrentKey())
+                    || !Objects.equals(preparedNamespace, currentNamespace)) {
+                return null;
+            }
+            readConsumed = true;
+            return new ArrayList<>(values);
+        }
+
+        @Override
+        public void cancel() {
+            readConsumed = true;
+            preparedCommitConsumed = true;
+        }
+
+        @Override
+        public WaveParticipation waveParticipation() {
+            return WaveParticipation.INELIGIBLE;
+        }
+
+        @Override
+        public boolean supportsPreparedCommit() {
+            return preparedCommitAvailable();
+        }
+
+        @Override
+        public boolean commitPreparedValues(Object[] values, boolean[] dirty, boolean[] removed)
+                throws Exception {
+            return commitPreparedCohortInternal(
+                    Collections.<PreparedValues>singletonList(this),
+                    Collections.singletonList(values),
+                    Collections.singletonList(dirty),
+                    Collections.singletonList(removed));
+        }
+
+        @Override
+        public boolean commitPreparedCohort(
+                List<? extends PreparedValues> tokens,
+                List<Object[]> values,
+                List<boolean[]> dirty,
+                List<boolean[]> removed)
+                throws Exception {
+            return commitPreparedCohortInternal(tokens, values, dirty, removed);
+        }
+
+        @Override
+        public boolean preparedCommitAvailable() {
+            return CachedInternalMapState.this.preparedCommitAvailable(
+                    preparedCommitConsumed, orderedKeys, rocksDBKeys);
+        }
+
+        @Override
+        public boolean validatePreparedCommit(
+                Object[] values, boolean[] dirty, boolean[] removed) {
+            return CachedInternalMapState.this.validatePreparedCommit(
+                    preparedCommitConsumed,
+                    preparedOuterKey,
+                    preparedNamespace,
+                    orderedKeys,
+                    rocksDBKeys,
+                    preparedGeneration,
+                    values,
+                    dirty,
+                    removed);
+        }
+
+        @Override
+        public Object preparedWriteOwner() {
+            return rocksDBBatchMapReader.preparedWriteOwner();
+        }
+
+        @Override
+        public RocksDBBatchMapReader.PreparedMutation prepareMutation(
+                Object[] values, boolean[] dirty, boolean[] removed) throws Exception {
+            return rocksDBBatchMapReader.prepareSerializedMutations(
+                    rocksDBKeys, values, dirty, removed);
+        }
+
+        @Override
+        public void commitMutations(
+                List<? extends RocksDBBatchMapReader.PreparedMutation> mutations)
+                throws Exception {
+            rocksDBBatchMapReader.commitPreparedMutations(mutations);
+        }
+
+        @Override
+        public void markPreparedCommitConsumed() {
+            preparedCommitConsumed = true;
+        }
+
+        @Override
+        public void completePreparedCommit(Object[] values, boolean[] dirty, boolean[] removed) {
+            CachedInternalMapState.this.completePreparedCommit(
+                    orderedKeys, values, dirty, removed);
         }
     }
 
@@ -2622,6 +2844,22 @@ public final class CachedInternalMapState<K, N, UK, UV>
         List<UK> orderedKeys = new ArrayList<>(unique);
         batchPrefetchUniqueKeys += orderedKeys.size();
         try {
+            if (exactDistinctResidentWriteBackEnabled) {
+                List<UV> values = readResidentFirstValues(currentKey, orderedKeys);
+                for (int index = 0; index < orderedKeys.size(); index++) {
+                    UV value = values.get(index);
+                    batchPrefetchStaging.put(
+                            orderedKeys.get(index),
+                            value == null
+                                    ? PrefetchedMapValue.missing()
+                                    : PrefetchedMapValue.present(value));
+                }
+                batchPrefetchOuterKey = currentKey;
+                batchPrefetchNamespace = namespace;
+                batchPrefetchActive = true;
+                batchPrefetchBatches++;
+                return true;
+            }
             // A write-back MapState cache can otherwise make RocksDB older than the logical state.
             flushCurrentKey(currentKey);
             ensureDelegateNamespace(currentKey);
@@ -2721,6 +2959,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
             CachedMapValue<UV> cached =
                     getCachedValue(currentKey); // Optimize getCachedValue to use lookupKey
             if (cached != null) {
+                if (exactDistinctResidentWriteBackEnabled) {
+                    exactDistinctResidentReadHits++;
+                }
                 recordAccess(true);
                 return cached.valueOrNull();
             }
@@ -2759,6 +3000,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
         advanceNativeGeneration();
         updateBatchPrefetchStaging(currentKey, userKey, true, userValue);
         boolean writeThrough = !mapCacheEnabled || (bypassEnabled && isBypassing);
+        if (exactDistinctResidentWriteBackEnabled && !writeThrough) {
+            exactDistinctResidentMutations++;
+        }
         if (writeThrough) {
             delegate.put(userKey, userValue);
         }
@@ -2790,6 +3034,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
             if (uKey == null) {
                 continue;
             }
+            if (exactDistinctResidentWriteBackEnabled && !writeThrough) {
+                exactDistinctResidentMutations++;
+            }
             updateBatchPrefetchStaging(currentKey, uKey, true, entry.getValue());
             if (mapCacheEnabled) {
                 updateValueCache(currentKey, uKey, entry.getValue(), !writeThrough);
@@ -2812,6 +3059,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
         updateBatchPrefetchStaging(currentKey, userKey, false, null);
 
         boolean writeThrough = !mapCacheEnabled || (bypassEnabled && isBypassing);
+        if (exactDistinctResidentWriteBackEnabled && !writeThrough) {
+            exactDistinctResidentMutations++;
+        }
         if (writeThrough) {
             delegate.remove(userKey);
         }
@@ -2856,6 +3106,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
         if (mapCacheEnabled) {
             CachedMapValue<UV> cached = getCachedValue(currentKey);
             if (cached != null) {
+                if (exactDistinctResidentWriteBackEnabled) {
+                    exactDistinctResidentReadHits++;
+                }
                 recordAccess(true);
                 return !cached.isNull();
             }
@@ -3704,6 +3957,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return;
         }
         if (value.dirty) {
+            if (exactDistinctResidentWriteBackEnabled) {
+                exactDistinctResidentEvictionFlushes++;
+            }
             flushEntryToDelegate(key, value);
             untrackDirtyEntry(key);
             l2ValueCache.put(key, CachedMapValue.of(value.valueOrNull(), false));
@@ -3716,6 +3972,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private void onValueL2Eviction(KeyNamespaceUserKey<K, N, UK> key, CachedMapValue<UV> value) {
         if (key == null || value == null || !value.dirty) {
             return;
+        }
+        if (exactDistinctResidentWriteBackEnabled) {
+            exactDistinctResidentEvictionFlushes++;
         }
         flushEntryToDelegate(key, value);
     }
@@ -3829,6 +4088,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
 
         flushEntryToDelegate(key, value);
+        if (exactDistinctResidentWriteBackEnabled) {
+            exactDistinctResidentExplicitFlushes++;
+        }
         CachedMapValue<UV> clean = CachedMapValue.of(value.valueOrNull(), false);
         l2ValueCache.put(key, clean);
         l1ValueCache.put(key, clean);
@@ -3895,6 +4157,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     delegate.put(key.userKey, value.value);
                 }
             } catch (Exception e) {
+                if (exactDistinctResidentWriteBackEnabled) {
+                    exactDistinctResidentFlushFailures++;
+                }
                 throw new RuntimeException("Failed to flush MapState entry to delegate", e);
             } finally {
                 keyContextSetter.accept(previousKey);
@@ -4148,6 +4413,52 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     deferredWaveDirectArenaProtocolFailures.get(),
                     deferredWaveDirectArenaFallbacks.get());
         }
+        if (exactDistinctResidentWriteBackEnabled) {
+            LOG.info(
+                    "[CACHEKIT EXACT DISTINCT RESIDENT] mutations={} readHits={} "
+                            + "prefetchHits={} rocksDbPrefetchMisses={} dirtyAvoidedFlushes={} "
+                            + "evictionFlushes={} explicitFlushes={} flushFailures={}",
+                    exactDistinctResidentMutations,
+                    exactDistinctResidentReadHits,
+                    exactDistinctResidentPrefetchHits,
+                    exactDistinctResidentRocksDbPrefetchMisses,
+                    exactDistinctResidentDirtyAvoidedFlushes,
+                    exactDistinctResidentEvictionFlushes,
+                    exactDistinctResidentExplicitFlushes,
+                    exactDistinctResidentFlushFailures);
+        }
+    }
+
+    long getExactDistinctResidentMutationCountForTesting() {
+        return exactDistinctResidentMutations;
+    }
+
+    long getExactDistinctResidentReadHitsForTesting() {
+        return exactDistinctResidentReadHits;
+    }
+
+    long getExactDistinctResidentEvictionFlushesForTesting() {
+        return exactDistinctResidentEvictionFlushes;
+    }
+
+    long getExactDistinctResidentExplicitFlushesForTesting() {
+        return exactDistinctResidentExplicitFlushes;
+    }
+
+    long getExactDistinctResidentFlushFailuresForTesting() {
+        return exactDistinctResidentFlushFailures;
+    }
+
+    long getExactDistinctResidentPrefetchHitsForTesting() {
+        return exactDistinctResidentPrefetchHits;
+    }
+
+    long getExactDistinctResidentRocksDbPrefetchMissesForTesting() {
+        return exactDistinctResidentRocksDbPrefetchMisses;
+    }
+
+    long getExactDistinctResidentDirtyAvoidedFlushesForTesting() {
+        return exactDistinctResidentDirtyAvoidedFlushes;
     }
 
     long getNativeProbeAttemptsForTesting() {
