@@ -87,10 +87,13 @@ public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
         java.util.Iterator<Map.Entry<K, V>> iterator = map.entrySet().iterator();
         while (map.size() > maxEntries && iterator.hasNext()) {
             Map.Entry<K, V> entry = iterator.next();
-            iterator.remove();
             if (evictionListener != null) {
                 evictionListener.accept(entry.getKey(), entry.getValue());
             }
+            // Listener completion is the eviction commit point. A write-back listener may throw;
+            // retaining the entry makes the payload available for retry instead of silently
+            // discarding dirty state.
+            iterator.remove();
         }
     }
 }

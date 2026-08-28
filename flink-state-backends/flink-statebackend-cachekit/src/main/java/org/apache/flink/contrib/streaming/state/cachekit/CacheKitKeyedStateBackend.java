@@ -623,6 +623,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
         return normalizeExactDistinctResidentMaxEntries(maxEntries) * 5;
     }
 
+    static CachePolicyType exactDistinctResidentCachePolicy(
+            boolean exactDistinctResidentWriteBack, CachePolicyType configuredPolicy) {
+        return exactDistinctResidentWriteBack ? CachePolicyType.LRU : configuredPolicy;
+    }
+
     @Nonnull
     @Override
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -711,7 +716,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                                     ? exactDistinctResidentBackingEntries(
                                             exactDistinctResidentWriteBackMaxEntries)
                                     : mapCacheMaxEntries,
-                            mapCachePolicy,
+                            exactDistinctResidentCachePolicy(
+                                    exactDistinctResidentWriteBack, mapCachePolicy),
                             mapCacheLruOverflow,
                             exactDistinctResidentWriteBack ? false : mapBypassEnabled,
                             mapHitRateThreshold,
@@ -931,7 +937,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                                     ? exactDistinctResidentBackingEntries(
                                             exactDistinctResidentWriteBackMaxEntries)
                                     : mapCacheMaxEntries,
-                            mapCachePolicy,
+                            exactDistinctResidentCachePolicy(
+                                    exactDistinctResidentWriteBack, mapCachePolicy),
                             mapCacheLruOverflow,
                             exactDistinctResidentWriteBack ? false : mapBypassEnabled,
                             mapHitRateThreshold,

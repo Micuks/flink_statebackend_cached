@@ -67,6 +67,14 @@ class CacheKitKeyedStateBackendLifecycleTest {
                 CacheKitKeyedStateBackend.isExactDistinctResidentWriteBackEligible(
                         distinct, true, 128));
         assertEquals(3885, CacheKitKeyedStateBackend.exactDistinctResidentBackingEntries(777));
+        assertEquals(
+                CachePolicyType.LRU,
+                CacheKitKeyedStateBackend.exactDistinctResidentCachePolicy(
+                        true, CachePolicyType.CAFFEINE));
+        assertEquals(
+                CachePolicyType.CAFFEINE,
+                CacheKitKeyedStateBackend.exactDistinctResidentCachePolicy(
+                        false, CachePolicyType.CAFFEINE));
 
         MapStateDescriptor<String, Integer> ordinary =
                 new MapStateDescriptor<>(

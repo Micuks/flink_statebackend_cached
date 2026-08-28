@@ -3570,7 +3570,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private void advanceNativeGeneration() {
         if (nativeMapCacheEnabled
                 || nativeMapSnapshotEnabled
-                || nativeDistinctPreparedCommitEnabled) {
+                || nativeDistinctPreparedCommitEnabled
+                || exactDistinctResidentWriteBackEnabled) {
             nativeGeneration++;
         }
     }
@@ -3957,10 +3958,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return;
         }
         if (value.dirty) {
+            flushEntryToDelegate(key, value);
             if (exactDistinctResidentWriteBackEnabled) {
                 exactDistinctResidentEvictionFlushes++;
             }
-            flushEntryToDelegate(key, value);
             untrackDirtyEntry(key);
             l2ValueCache.put(key, CachedMapValue.of(value.valueOrNull(), false));
             return;
@@ -3973,10 +3974,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
         if (key == null || value == null || !value.dirty) {
             return;
         }
+        flushEntryToDelegate(key, value);
         if (exactDistinctResidentWriteBackEnabled) {
             exactDistinctResidentEvictionFlushes++;
         }
-        flushEntryToDelegate(key, value);
     }
 
     private boolean shouldBypassRead() {

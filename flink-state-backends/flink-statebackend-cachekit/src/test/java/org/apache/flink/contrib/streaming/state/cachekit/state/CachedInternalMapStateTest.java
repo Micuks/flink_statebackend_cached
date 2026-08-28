@@ -2805,6 +2805,67 @@ class CachedInternalMapStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testExactDistinctResidentPreparedReadRejectsPutRemoveAndClearGenerationChanges()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createResidentState(delegate, currentKey, 500);
+        state.enableNativeDistinctBatchPrefetch(true);
+        state.put("u1", 1);
+        state.put("u2", 2);
+
+        BatchPrefetchableMapState.PreparedValues beforePut =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+        state.put("u1", 11);
+        assertNull(beforePut.awaitValues());
+
+        BatchPrefetchableMapState.PreparedValues beforeRemove =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+        state.remove("u2");
+        assertNull(beforeRemove.awaitValues());
+
+        state.put("u2", 22);
+        BatchPrefetchableMapState.PreparedValues beforeClear =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+        state.clear();
+        assertNull(beforeClear.awaitValues());
+    }
+
+    @Test
+    void testExactDistinctResidentEvictionFailureRetainsDirtyPayloadForRetry() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createResidentState(delegate, currentKey, 100);
+        org.mockito.Mockito.doThrow(new Exception("injected eviction flush failure"))
+                .doNothing()
+                .when(delegate)
+                .put("u0", 0);
+
+        for (int index = 0; index < 128; index++) {
+            state.put("u" + index, index);
+        }
+        org.junit.jupiter.api.Assertions.assertThrows(
+                RuntimeException.class, () -> state.put("u128", 128));
+
+        assertEquals(0, state.get("u0"));
+        verify(delegate, times(0)).get("u0");
+        assertEquals(1, state.getExactDistinctResidentFlushFailuresForTesting());
+        assertEquals(0, state.getExactDistinctResidentEvictionFlushesForTesting());
+
+        state.flush();
+        verify(delegate, times(2)).put("u0", 0);
+        assertEquals(1, state.getExactDistinctResidentEvictionFlushesForTesting());
+        assertEquals(1, state.getExactDistinctResidentFlushFailuresForTesting());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testPreparedCommitIsDisabledByDefault() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
         InternalMapState<String, VoidNamespace, String, Integer> delegate =
