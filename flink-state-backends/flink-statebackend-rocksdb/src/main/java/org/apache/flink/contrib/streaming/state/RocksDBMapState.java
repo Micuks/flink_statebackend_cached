@@ -175,6 +175,45 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
     }
 
     @Override
+    public Object multiColumnReadOwner() {
+        return backend.db;
+    }
+
+    @Override
+    public List<byte[]> getSerializedValuesAcrossColumns(
+            List<? extends RocksDBBatchMapReader<?>> readers,
+            List<? extends List<byte[]>> keysByReader)
+            throws Exception {
+        if (readers == null || keysByReader == null || readers.size() != keysByReader.size()) {
+            throw new IllegalArgumentException("Reader/key column cardinality mismatch");
+        }
+        int totalKeys = 0;
+        for (List<byte[]> keys : keysByReader) {
+            totalKeys = Math.addExact(totalKeys, keys.size());
+        }
+        if (totalKeys == 0) {
+            return Collections.emptyList();
+        }
+        List<ColumnFamilyHandle> columnFamilies = new ArrayList<>(totalKeys);
+        List<byte[]> keys = new ArrayList<>(totalKeys);
+        for (int column = 0; column < readers.size(); column++) {
+            RocksDBBatchMapReader<?> reader = readers.get(column);
+            if (!(reader instanceof RocksDBMapState)) {
+                throw new IllegalArgumentException("Cross-column reader is not RocksDBMapState");
+            }
+            RocksDBMapState<?, ?, ?, ?> state = (RocksDBMapState<?, ?, ?, ?>) reader;
+            if (state.backend.db != backend.db) {
+                throw new IllegalArgumentException(
+                        "Cross-column readers use different RocksDB instances");
+            }
+            List<byte[]> columnKeys = keysByReader.get(column);
+            columnFamilies.addAll(Collections.nCopies(columnKeys.size(), state.columnFamily));
+            keys.addAll(columnKeys);
+        }
+        return backend.db.multiGetAsList(columnFamilies, keys);
+    }
+
+    @Override
     public boolean supportsDirectArenaMultiGet() {
         return true;
     }

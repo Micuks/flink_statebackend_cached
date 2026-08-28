@@ -185,6 +185,53 @@ class DistinctBatchStateMapViewTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void prefersOneCrossColumnCohortWaveOverIndependentColumnWaves() throws Exception {
+        StateMapView<Void, String, Long> firstDelegate = mock(StateMapView.class);
+        StateMapView<Void, String, Long> secondDelegate = mock(StateMapView.class);
+        BatchPrefetchableMapState.PreparedValues firstA = preparedValue(new Object());
+        BatchPrefetchableMapState.PreparedValues firstB = preparedValue(firstA.waveOwner());
+        BatchPrefetchableMapState.PreparedValues secondA = preparedValue(new Object());
+        BatchPrefetchableMapState.PreparedValues secondB = preparedValue(secondA.waveOwner());
+        when(firstDelegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        when(secondDelegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        when(firstDelegate.prepareUniqueKeyValues(List.of("a", "b"))).thenReturn(firstA);
+        when(firstDelegate.prepareUniqueKeyValues(List.of("c", "d"))).thenReturn(firstB);
+        when(secondDelegate.prepareUniqueKeyValues(List.of("a", "b"))).thenReturn(secondA);
+        when(secondDelegate.prepareUniqueKeyValues(List.of("c", "d"))).thenReturn(secondB);
+        List<List<BatchPrefetchableMapState.PreparedValues>> invokedColumns = new ArrayList<>();
+        doAnswer(
+                        invocation -> {
+                            List<? extends List<? extends BatchPrefetchableMapState.PreparedValues>>
+                                    columns = invocation.getArgument(0);
+                            for (List<? extends BatchPrefetchableMapState.PreparedValues> column :
+                                    columns) {
+                                invokedColumns.add(new ArrayList<>(column));
+                            }
+                            return true;
+                        })
+                .when(firstA)
+                .executeCohortWave(any());
+        List<DistinctBatchStateMapView<Void, String, Long>> views =
+                List.of(createView(firstDelegate), createView(secondDelegate));
+
+        Object firstCapture = capturePrepared(views, List.of("a", "b"));
+        Object secondCapture = capturePrepared(views, List.of("c", "d"));
+
+        assertEquals(
+                BatchWindowPreparationResult.EXECUTED,
+                DistinctBatchPrefetchSupport.executePreparedWave(
+                        new Object[] {firstCapture, secondCapture}, 2));
+        assertEquals(List.of(List.of(firstA, firstB), List.of(secondA, secondB)), invokedColumns);
+        verify(firstA, times(1)).executeCohortWave(any());
+        verify(firstA, never()).executeWave(any());
+        verify(secondA, never()).executeWave(any());
+
+        DistinctBatchPrefetchSupport.abortPreparedCapture(firstCapture);
+        DistinctBatchPrefetchSupport.abortPreparedCapture(secondCapture);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void eligibleViewWaveIsNotBlockedByIneligibleSiblingView() throws Exception {
         StateMapView<Void, String, Long> eligibleDelegate = mock(StateMapView.class);
         StateMapView<Void, String, Long> heavyDelegate = mock(StateMapView.class);

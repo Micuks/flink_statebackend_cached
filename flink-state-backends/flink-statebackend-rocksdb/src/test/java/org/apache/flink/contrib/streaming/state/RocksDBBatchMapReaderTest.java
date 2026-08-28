@@ -24,6 +24,7 @@ import java.util.List;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 /** Tests for prepared exact-key reads exposed by {@link RocksDBBatchMapReader}. */
@@ -70,6 +71,56 @@ public class RocksDBBatchMapReaderTest {
                     reader.getSerializedValuesByRocksDBKeys(rocksDBKeys, 2, 2).isEmpty());
             assertTrue(reader.supportsDirectArenaMultiGet());
             assertTrue(reader.directArenaMultiGetMaxBatch() >= 1);
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testPreparedKeysCanReadMultipleColumnFamiliesInOneOrderedBatch() throws Exception {
+        try (RocksDBKeyedStateBackendTestFactory factory =
+                new RocksDBKeyedStateBackendTestFactory()) {
+            RocksDBKeyedStateBackend<Integer> backend =
+                    factory.create(tmp, IntSerializer.INSTANCE, 128);
+            InternalMapState<Integer, VoidNamespace, String, Integer> firstState =
+                    (InternalMapState<Integer, VoidNamespace, String, Integer>)
+                            backend.getPartitionedState(
+                                    VoidNamespace.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE,
+                                    new MapStateDescriptor<>(
+                                            "batch-map-first",
+                                            StringSerializer.INSTANCE,
+                                            IntSerializer.INSTANCE));
+            InternalMapState<Integer, VoidNamespace, String, Integer> secondState =
+                    (InternalMapState<Integer, VoidNamespace, String, Integer>)
+                            backend.getPartitionedState(
+                                    VoidNamespace.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE,
+                                    new MapStateDescriptor<>(
+                                            "batch-map-second",
+                                            StringSerializer.INSTANCE,
+                                            IntSerializer.INSTANCE));
+
+            backend.setCurrentKey(9);
+            firstState.put("a", 11);
+            secondState.put("b", 22);
+
+            RocksDBBatchMapReader<String> first = (RocksDBBatchMapReader<String>) firstState;
+            RocksDBBatchMapReader<String> second = (RocksDBBatchMapReader<String>) secondState;
+            assertSame(first.multiColumnReadOwner(), second.multiColumnReadOwner());
+            List<byte[]> firstKeys =
+                    first.serializeRocksDBKeysByUserKeys(Arrays.asList("a", "missing"));
+            List<byte[]> secondKeys =
+                    second.serializeRocksDBKeysByUserKeys(Arrays.asList("missing", "b"));
+
+            List<byte[]> values =
+                    first.getSerializedValuesAcrossColumns(
+                            Arrays.asList(first, second), Arrays.asList(firstKeys, secondKeys));
+
+            assertEquals(4, values.size());
+            assertEquals(Integer.valueOf(11), deserializeMapValue(values.get(0)));
+            assertNull(values.get(1));
+            assertNull(values.get(2));
+            assertEquals(Integer.valueOf(22), deserializeMapValue(values.get(3)));
         }
     }
 

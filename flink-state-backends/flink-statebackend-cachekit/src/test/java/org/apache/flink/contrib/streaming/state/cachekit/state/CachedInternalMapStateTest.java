@@ -1215,6 +1215,116 @@ class CachedInternalMapStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testDeferredCohortWaveFusesTwoStateColumnsIntoOneCrossColumnMultiGet()
+            throws Exception {
+        AtomicReference<String> firstKey = new AtomicReference<>("k1");
+        AtomicReference<String> secondKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> firstDelegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        InternalMapState<String, VoidNamespace, String, Integer> secondDelegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        for (InternalMapState<String, VoidNamespace, String, Integer> delegate :
+                Arrays.asList(firstDelegate, secondDelegate)) {
+            when(delegate.getValueSerializer())
+                    .thenReturn(
+                            new MapSerializer<>(
+                                    org.apache.flink.api.common.typeutils.base.StringSerializer
+                                            .INSTANCE,
+                                    IntSerializer.INSTANCE));
+        }
+        RocksDBBatchMapReader<String> firstReader =
+                (RocksDBBatchMapReader<String>) firstDelegate;
+        RocksDBBatchMapReader<String> secondReader =
+                (RocksDBBatchMapReader<String>) secondDelegate;
+        Object databaseOwner = new Object();
+        when(firstReader.multiColumnReadOwner()).thenReturn(databaseOwner);
+        when(secondReader.multiColumnReadOwner()).thenReturn(databaseOwner);
+        when(firstReader.serializeRocksDBKeysByUserKeys(Arrays.asList("u1", "u2")))
+                .thenReturn(Arrays.asList(new byte[] {1}, new byte[] {2}));
+        when(firstReader.serializeRocksDBKeysByUserKeys(Arrays.asList("u3", "u4")))
+                .thenReturn(Arrays.asList(new byte[] {3}, new byte[] {4}));
+        when(secondReader.serializeRocksDBKeysByUserKeys(Arrays.asList("v1", "v2")))
+                .thenReturn(Arrays.asList(new byte[] {5}, new byte[] {6}));
+        when(secondReader.serializeRocksDBKeysByUserKeys(Arrays.asList("v3", "v4")))
+                .thenReturn(Arrays.asList(new byte[] {7}, new byte[] {8}));
+        when(firstReader.getSerializedValuesAcrossColumns(any(), any()))
+                .thenReturn(
+                        Arrays.asList(
+                                serializedMapValue(11),
+                                null,
+                                serializedMapValue(22),
+                                null,
+                                serializedMapValue(33),
+                                null,
+                                serializedMapValue(44),
+                                null));
+
+        NativeRequestPlane plane = mock(NativeRequestPlane.class);
+        when(plane.selectedKernel()).thenReturn("test");
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> firstState =
+                createDeferredWaveState(firstDelegate, firstKey, coordinator);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> secondState =
+                createDeferredWaveState(secondDelegate, secondKey, coordinator);
+        firstState.enableNativeDistinctBatchPrefetch(true, true, 8, false, true, true, true);
+        secondState.enableNativeDistinctBatchPrefetch(true, true, 8, false, true, true, true);
+
+        BatchPrefetchableMapState.PreparedValues firstA =
+                firstState.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+        firstKey.set("k2");
+        BatchPrefetchableMapState.PreparedValues firstB =
+                firstState.prepareCurrentUniqueKeyValues(Arrays.asList("u3", "u4"));
+        BatchPrefetchableMapState.PreparedValues secondA =
+                secondState.prepareCurrentUniqueKeyValues(Arrays.asList("v1", "v2"));
+        secondKey.set("k2");
+        BatchPrefetchableMapState.PreparedValues secondB =
+                secondState.prepareCurrentUniqueKeyValues(Arrays.asList("v3", "v4"));
+
+        assertTrue(
+                firstA.executeCohortWave(
+                        Arrays.asList(
+                                Arrays.asList(firstA, firstB),
+                                Arrays.asList(secondA, secondB))));
+        firstKey.set("k1");
+        assertEquals(Arrays.asList(11, null), firstA.awaitValues());
+        firstKey.set("k2");
+        assertEquals(Arrays.asList(22, null), firstB.awaitValues());
+        secondKey.set("k1");
+        assertEquals(Arrays.asList(33, null), secondA.awaitValues());
+        secondKey.set("k2");
+        assertEquals(Arrays.asList(44, null), secondB.awaitValues());
+
+        assertEquals(1, firstState.getDeferredCohortWaveAttemptsForTesting());
+        assertEquals(1, firstState.getDeferredCohortWaveSubmittedForTesting());
+        assertEquals(2, firstState.getDeferredCohortWaveColumnsForTesting());
+        assertEquals(4, firstState.getDeferredCohortWaveGroupsForTesting());
+        assertEquals(8, firstState.getDeferredCohortWaveKeysForTesting());
+        assertEquals(1, firstState.getDeferredCohortWaveJniCallsForTesting());
+        assertEquals(0, firstState.getDeferredCohortWaveRejectsForTesting());
+        verify(firstReader, times(1)).getSerializedValuesAcrossColumns(any(), any());
+        verify(firstReader, times(0))
+                .getSerializedValuesByRocksDBKeys(
+                        any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.anyInt());
+        verify(secondReader, times(0))
+                .getSerializedValuesByRocksDBKeys(
+                        any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.anyInt());
+
+        firstState.close();
+        secondState.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testExactDistinctBatchPrefetchInvalidatesOnOuterKeyChangeAndTracksWrites()
             throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");

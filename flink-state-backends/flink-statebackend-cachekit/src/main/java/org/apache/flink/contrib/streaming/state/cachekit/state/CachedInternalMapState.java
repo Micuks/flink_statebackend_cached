@@ -138,6 +138,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private boolean nativeDistinctBatchWorkFirstEnabled;
     private boolean nativeDistinctBatchDeferredWaveEnabled;
     private boolean nativeDistinctBatchDeferredWaveDualWorkerEnabled;
+    private boolean nativeDistinctBatchCrossColumnWaveEnabled;
     private boolean batchPrefetchActive;
     private K batchPrefetchOuterKey;
     private N batchPrefetchNamespace;
@@ -279,6 +280,20 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private final java.util.concurrent.atomic.AtomicLong deferredWaveFound =
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong deferredWaveMissing =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredCohortWaveAttempts =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredCohortWaveSubmitted =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredCohortWaveColumns =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredCohortWaveGroups =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredCohortWaveKeys =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredCohortWaveJniCalls =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredCohortWaveRejects =
             new java.util.concurrent.atomic.AtomicLong();
 
     // --- MapSnapshot cache (entries() fast path) ---
@@ -724,6 +739,25 @@ public final class CachedInternalMapState<K, N, UK, UV>
             boolean workFirstEnabled,
             boolean deferredWaveEnabled,
             boolean deferredWaveDualWorkerEnabled) {
+        enableNativeDistinctBatchPrefetch(
+                enabled,
+                directArenaEnabled,
+                asyncMinUniqueKeys,
+                workFirstEnabled,
+                deferredWaveEnabled,
+                deferredWaveDualWorkerEnabled,
+                false);
+    }
+
+    /** Enables one cross-column-family MultiGet task for eligible DISTINCT state columns. */
+    public void enableNativeDistinctBatchPrefetch(
+            boolean enabled,
+            boolean directArenaEnabled,
+            int asyncMinUniqueKeys,
+            boolean workFirstEnabled,
+            boolean deferredWaveEnabled,
+            boolean deferredWaveDualWorkerEnabled,
+            boolean crossColumnWaveEnabled) {
         this.nativeDistinctBatchPrefetchEnabled = enabled;
         this.nativeDistinctBatchDirectArenaEnabled = enabled && directArenaEnabled;
         this.nativeDistinctBatchAsyncMinUniqueKeys = Math.max(2, asyncMinUniqueKeys);
@@ -733,6 +767,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 enabled && directArenaEnabled && deferredWaveEnabled;
         this.nativeDistinctBatchDeferredWaveDualWorkerEnabled =
                 this.nativeDistinctBatchDeferredWaveEnabled && deferredWaveDualWorkerEnabled;
+        this.nativeDistinctBatchCrossColumnWaveEnabled =
+                this.nativeDistinctBatchDeferredWaveEnabled && crossColumnWaveEnabled;
     }
 
     @Override
@@ -1166,7 +1202,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         private final N preparedNamespace;
         private final List<UK> orderedKeys;
         private final List<byte[]> preparedRocksDBKeys;
-        private DeferredWaveTask waveTask;
+        private DeferredWaveResult waveTask;
         private int waveOffset;
         private boolean consumed;
         private boolean waveTokenReleased;
@@ -1203,6 +1239,163 @@ public final class CachedInternalMapState<K, N, UK, UV>
         public boolean executeWave(List<? extends PreparedValues> tokens) throws Exception {
             deferredWaveAttempts.incrementAndGet();
             return submitDeferredWave(tokens);
+        }
+
+        @Override
+        public boolean executeCohortWave(
+                List<? extends List<? extends PreparedValues>> columns) throws Exception {
+            deferredCohortWaveAttempts.incrementAndGet();
+            return submitDeferredCohortWave(columns);
+        }
+
+        private boolean submitDeferredCohortWave(
+                List<? extends List<? extends PreparedValues>> columns) {
+            if (!nativeDistinctBatchCrossColumnWaveEnabled
+                    || closed
+                    || columns == null
+                    || columns.size() < 2) {
+                deferredCohortWaveRejects.incrementAndGet();
+                return false;
+            }
+            ArrayList<DeferredCohortColumn> cohortColumns = new ArrayList<>(columns.size());
+            ArrayList<CachedInternalMapState<?, ?, ?, ?>> owners =
+                    new ArrayList<>(columns.size());
+            Object databaseOwner = null;
+            int totalGroups = 0;
+            int totalKeys = 0;
+            for (List<? extends PreparedValues> column : columns) {
+                if (column == null || column.size() < 2) {
+                    deferredCohortWaveRejects.incrementAndGet();
+                    return false;
+                }
+                DeferredDirectMapValues first = asDeferredToken(column.get(0));
+                if (first == null) {
+                    deferredCohortWaveRejects.incrementAndGet();
+                    return false;
+                }
+                CachedInternalMapState<?, ?, ?, ?> owner = first.ownerState();
+                RocksDBBatchMapReader<?> reader = owner.rocksDBBatchMapReader;
+                Object currentDatabaseOwner =
+                        reader == null ? null : reader.multiColumnReadOwner();
+                if (owner.closed
+                        || !owner.nativeDistinctBatchCrossColumnWaveEnabled
+                        || currentDatabaseOwner == null
+                        || databaseOwner != null && databaseOwner != currentDatabaseOwner
+                        || containsOwnerIdentity(owners, owner)) {
+                    deferredCohortWaveRejects.incrementAndGet();
+                    return false;
+                }
+                if (databaseOwner == null) {
+                    databaseOwner = currentDatabaseOwner;
+                }
+                ArrayList<DeferredDirectMapValues> tokens = new ArrayList<>(column.size());
+                ArrayList<byte[]> columnKeys = new ArrayList<>();
+                for (PreparedValues prepared : column) {
+                    DeferredDirectMapValues current = asDeferredToken(prepared);
+                    if (current == null
+                            || current.ownerState() != owner
+                            || current.consumed
+                            || current.waveTask != null
+                            || current.preparedRocksDBKeys == null
+                            || current.preparedRocksDBKeys.size() != current.orderedKeys.size()) {
+                        deferredCohortWaveRejects.incrementAndGet();
+                        return false;
+                    }
+                    for (DeferredDirectMapValues prior : tokens) {
+                        if (Objects.equals(prior.preparedOuterKey, current.preparedOuterKey)
+                                && Objects.equals(
+                                        prior.preparedNamespace, current.preparedNamespace)) {
+                            deferredCohortWaveRejects.incrementAndGet();
+                            return false;
+                        }
+                    }
+                    tokens.add(current);
+                    columnKeys.addAll(current.preparedRocksDBKeys);
+                }
+                totalGroups = Math.addExact(totalGroups, tokens.size());
+                totalKeys = Math.addExact(totalKeys, columnKeys.size());
+                owners.add(owner);
+                cohortColumns.add(new DeferredCohortColumn(reader, tokens, columnKeys));
+            }
+            if (totalKeys <= 0 || totalKeys > RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
+                deferredCohortWaveRejects.incrementAndGet();
+                deferredWaveOverflows.incrementAndGet();
+                return false;
+            }
+            DeferredCohortWaveTask task =
+                    new DeferredCohortWaveTask(cohortColumns, owners, totalKeys, totalGroups);
+            ArrayList<CachedInternalMapState<?, ?, ?, ?>> registered =
+                    new ArrayList<>(owners.size());
+            boolean registrationFailed = false;
+            for (CachedInternalMapState<?, ?, ?, ?> owner : owners) {
+                synchronized (owner.asyncBatchPrefetchMonitor) {
+                    if (owner.closed) {
+                        registrationFailed = true;
+                    } else {
+                        owner.outstandingAsyncBatchPrefetchTasks.add(task);
+                        registered.add(owner);
+                    }
+                }
+                if (registrationFailed) {
+                    break;
+                }
+            }
+            if (registrationFailed) {
+                // Roll back without nesting owner monitors. This keeps concurrent close() calls
+                // from observing a half-registered cohort and avoids cross-owner monitor cycles.
+                for (CachedInternalMapState<?, ?, ?, ?> prior : registered) {
+                    synchronized (prior.asyncBatchPrefetchMonitor) {
+                        prior.outstandingAsyncBatchPrefetchTasks.remove(task);
+                        prior.asyncBatchPrefetchMonitor.notifyAll();
+                    }
+                }
+                deferredCohortWaveRejects.incrementAndGet();
+                return false;
+            }
+            int offset = 0;
+            for (DeferredCohortColumn column : cohortColumns) {
+                for (DeferredDirectMapValues current : column.tokens) {
+                    current.waveTask = task;
+                    current.waveOffset = offset;
+                    offset += current.orderedKeys.size();
+                }
+            }
+            deferredCohortWaveSubmitted.incrementAndGet();
+            deferredCohortWaveColumns.addAndGet(cohortColumns.size());
+            deferredCohortWaveGroups.addAndGet(totalGroups);
+            deferredCohortWaveKeys.addAndGet(totalKeys);
+            deferredWaveSubmitted.incrementAndGet();
+            deferredWaveGroups.addAndGet(totalGroups);
+            deferredWaveKeys.addAndGet(totalKeys);
+            if (nativeDistinctBatchDeferredWaveDualWorkerEnabled) {
+                PrefetchExecutor.trySubmitDeferredWave(task);
+            } else {
+                PrefetchExecutor.trySubmit(task);
+            }
+            return true;
+        }
+
+        @SuppressWarnings("unchecked")
+        private DeferredDirectMapValues asDeferredToken(PreparedValues token) {
+            if (!(token instanceof CachedInternalMapState.DeferredDirectMapValues)) {
+                return null;
+            }
+            return (DeferredDirectMapValues) token;
+        }
+
+        private CachedInternalMapState<?, ?, ?, ?> ownerState() {
+            return CachedInternalMapState.this;
+        }
+
+        private boolean containsOwnerIdentity(
+                List<CachedInternalMapState<?, ?, ?, ?>> owners,
+                CachedInternalMapState<?, ?, ?, ?> candidate) {
+            for (CachedInternalMapState<?, ?, ?, ?> owner : owners) {
+                if (owner == candidate) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private boolean submitDeferredWave(List<? extends PreparedValues> tokens) {
@@ -1300,7 +1493,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 return null;
             }
             if (waveTask != null) {
-                DeferredWaveTask task = waveTask;
+                DeferredWaveResult task = waveTask;
                 try {
                     List<byte[]> rawValues = task.awaitRawValues();
                     if (rawValues == null
@@ -1350,13 +1543,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 deferredWaveCancelledGroups.incrementAndGet();
             }
             consumed = true;
-            DeferredWaveTask task = waveTask;
+            DeferredWaveResult task = waveTask;
             if (task != null) {
                 releaseWaveToken(task);
             }
         }
 
-        private void releaseWaveToken(DeferredWaveTask task) {
+        private void releaseWaveToken(DeferredWaveResult task) {
             if (!waveTokenReleased) {
                 waveTokenReleased = true;
                 task.releaseToken();
@@ -1364,9 +1557,185 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
     }
 
+    /** One immutable state column participating in a fused cross-column read. */
+    private final class DeferredCohortColumn {
+        private final RocksDBBatchMapReader<?> reader;
+        private final List<DeferredDirectMapValues> tokens;
+        private final List<byte[]> rocksDBKeys;
+
+        private DeferredCohortColumn(
+                RocksDBBatchMapReader<?> reader,
+                List<DeferredDirectMapValues> tokens,
+                List<byte[]> rocksDBKeys) {
+            this.reader = reader;
+            this.tokens = tokens;
+            this.rocksDBKeys = Collections.unmodifiableList(rocksDBKeys);
+        }
+    }
+
+    /** One worker task and one RocksDB MultiGet spanning all eligible DISTINCT state columns. */
+    private final class DeferredCohortWaveTask
+            implements PrefetchExecutor.DeferredWaveEligibleTask, DeferredWaveResult {
+
+        private final List<CachedInternalMapState<?, ?, ?, ?>> owners;
+        private final List<RocksDBBatchMapReader<?>> readers;
+        private final List<List<byte[]>> keysByReader;
+        private final int expectedValues;
+        private final java.util.concurrent.CountDownLatch completed =
+                new java.util.concurrent.CountDownLatch(1);
+        private final java.util.concurrent.atomic.AtomicInteger state =
+                new java.util.concurrent.atomic.AtomicInteger();
+        private final java.util.concurrent.atomic.AtomicInteger remainingTokens;
+        private final long submittedNanos = System.nanoTime();
+        private volatile List<byte[]> rawValues;
+        private volatile Throwable failure;
+        private volatile boolean dropped;
+        private volatile long completedNanos;
+
+        private DeferredCohortWaveTask(
+                List<DeferredCohortColumn> columns,
+                List<CachedInternalMapState<?, ?, ?, ?>> owners,
+                int expectedValues,
+                int tokenCount) {
+            this.owners = Collections.unmodifiableList(new ArrayList<>(owners));
+            this.expectedValues = expectedValues;
+            this.remainingTokens = new java.util.concurrent.atomic.AtomicInteger(tokenCount);
+            this.readers = new ArrayList<>(columns.size());
+            this.keysByReader = new ArrayList<>(columns.size());
+            for (DeferredCohortColumn column : columns) {
+                readers.add(column.reader);
+                keysByReader.add(column.rocksDBKeys);
+            }
+        }
+
+        @Override
+        public void run() {
+            if (!state.compareAndSet(0, 1)) {
+                return;
+            }
+            long startedNanos = System.nanoTime();
+            deferredWaveQueueNanos.addAndGet(Math.max(0L, startedNanos - submittedNanos));
+            int lockedOwners = 0;
+            try {
+                for (CachedInternalMapState<?, ?, ?, ?> owner : owners) {
+                    owner.lifecycleLock.readLock().lock();
+                    lockedOwners++;
+                    if (owner.closed) {
+                        throw new IllegalStateException(
+                                "MapState closed before cross-column deferred wave");
+                    }
+                }
+                deferredWaveJniCalls.incrementAndGet();
+                deferredCohortWaveJniCalls.incrementAndGet();
+                List<byte[]> completedValues =
+                        readers.get(0).getSerializedValuesAcrossColumns(readers, keysByReader);
+                if (completedValues == null || completedValues.size() != expectedValues) {
+                    deferredWaveProtocolFailures.incrementAndGet();
+                    throw new IllegalStateException("Incomplete cross-column deferred wave result");
+                }
+                rawValues = completedValues;
+                int present = 0;
+                int missing = 0;
+                for (byte[] rawValue : completedValues) {
+                    if (rawValue == null) {
+                        missing++;
+                    } else {
+                        present++;
+                    }
+                }
+                deferredWaveFound.addAndGet(present);
+                deferredWaveMissing.addAndGet(missing);
+                deferredWaveWindows.incrementAndGet();
+            } catch (Exception | LinkageError currentFailure) {
+                failure = currentFailure;
+                deferredWaveFailures.incrementAndGet();
+                deferredWaveFallbackWindows.incrementAndGet();
+            } finally {
+                for (int index = lockedOwners - 1; index >= 0; index--) {
+                    owners.get(index).lifecycleLock.readLock().unlock();
+                }
+                deferredWaveServiceNanos.addAndGet(Math.max(0L, System.nanoTime() - startedNanos));
+                finish();
+            }
+        }
+
+        @Override
+        public void onDrop() {
+            if (state.compareAndSet(0, 1)) {
+                dropped = true;
+                deferredWaveDropped.incrementAndGet();
+                deferredWaveFallbackWindows.incrementAndGet();
+                finish();
+            }
+        }
+
+        private void finish() {
+            completedNanos = System.nanoTime();
+            state.set(2);
+            if (remainingTokens.get() == 0) {
+                rawValues = null;
+            }
+            completed.countDown();
+            for (CachedInternalMapState<?, ?, ?, ?> owner : owners) {
+                synchronized (owner.asyncBatchPrefetchMonitor) {
+                    owner.outstandingAsyncBatchPrefetchTasks.remove(this);
+                    owner.asyncBatchPrefetchMonitor.notifyAll();
+                }
+            }
+        }
+
+        @Override
+        public List<byte[]> awaitRawValues() throws InterruptedException {
+            deferredWaveAwaits.incrementAndGet();
+            long awaitStarted = System.nanoTime();
+            long observedCompleted = completedNanos;
+            if (observedCompleted > 0L && observedCompleted <= awaitStarted) {
+                deferredWaveReadyBeforeAwait.incrementAndGet();
+                deferredWaveReadySlackNanos.addAndGet(awaitStarted - observedCompleted);
+            }
+            try {
+                completed.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw interrupted;
+            } finally {
+                deferredWaveWaitNanos.addAndGet(Math.max(0L, System.nanoTime() - awaitStarted));
+            }
+            List<byte[]> completedValues = rawValues;
+            if (dropped
+                    || failure != null
+                    || completedValues == null
+                    || completedValues.size() != expectedValues) {
+                return null;
+            }
+            return completedValues;
+        }
+
+        @Override
+        public void releaseToken() {
+            int remaining = remainingTokens.decrementAndGet();
+            if (remaining < 0) {
+                throw new IllegalStateException(
+                        "Cross-column deferred wave token released more than once");
+            }
+            if (remaining == 0) {
+                if (!PrefetchExecutor.cancelIfQueued(this) && state.get() == 2) {
+                    rawValues = null;
+                }
+            }
+        }
+    }
+
+    /** Common result lifetime for one state-column wave or one cross-column cohort wave. */
+    private interface DeferredWaveResult extends PrefetchExecutor.DropAwareTask {
+        List<byte[]> awaitRawValues() throws InterruptedException;
+
+        void releaseToken();
+    }
+
     /** One future-only raw RocksDB read. Worker code never touches key context or serializers. */
     private final class DeferredWaveTask
-            implements PrefetchExecutor.DeferredWaveEligibleTask {
+            implements PrefetchExecutor.DeferredWaveEligibleTask, DeferredWaveResult {
 
         private final List<byte[]> rocksDBKeys;
         private final int expectedValues;
@@ -1457,7 +1826,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
             }
         }
 
-        private List<byte[]> awaitRawValues() throws InterruptedException {
+        @Override
+        public List<byte[]> awaitRawValues() throws InterruptedException {
             deferredWaveAwaits.incrementAndGet();
             long awaitStarted = System.nanoTime();
             long observedCompleted = completedNanos;
@@ -1483,7 +1853,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return completedValues;
         }
 
-        private void releaseToken() {
+        @Override
+        public void releaseToken() {
             int remaining = remainingTokens.decrementAndGet();
             if (remaining < 0) {
                 throw new IllegalStateException("Deferred wave token released more than once");
@@ -3116,16 +3487,19 @@ public final class CachedInternalMapState<K, N, UK, UV>
                             ? 0L
                             : nativeRequestPlaneCoordinator.mapDistinctAsyncReadLeaseMisses());
             LOG.info(
-                    "[CACHEKIT NATIVE MAP DISTINCT WAVE] enabled={} dualWorker={} "
+                    "[CACHEKIT NATIVE MAP DISTINCT WAVE] enabled={} dualWorker={} crossColumn={} "
                             + "executorMaxActive={} attempts={} submitted={} "
                             + "windows={} dropped={} groups={} keys={} jniCalls={} found={} "
                             + "missing={} completedGroups={} cancelledGroups={} awaits={} "
                             + "readyBeforeAwait={} waitNanos={} queueNanos={} serviceNanos={} "
                             + "readySlackNanos={} "
                             + "fallbackWindows={} failures={} ownerRejects={} overflows={} "
-                            + "protocolFailures={}",
+                            + "protocolFailures={} cohortAttempts={} cohortSubmitted={} "
+                            + "cohortColumns={} cohortGroups={} cohortKeys={} cohortJniCalls={} "
+                            + "cohortRejects={}",
                     nativeDistinctBatchDeferredWaveEnabled,
                     nativeDistinctBatchDeferredWaveDualWorkerEnabled,
+                    nativeDistinctBatchCrossColumnWaveEnabled,
                     PrefetchExecutor.maxActiveDeferredWaveExecutions(),
                     deferredWaveAttempts.get(),
                     deferredWaveSubmitted.get(),
@@ -3148,7 +3522,14 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     deferredWaveFailures.get(),
                     deferredWaveOwnerRejects.get(),
                     deferredWaveOverflows.get(),
-                    deferredWaveProtocolFailures.get());
+                    deferredWaveProtocolFailures.get(),
+                    deferredCohortWaveAttempts.get(),
+                    deferredCohortWaveSubmitted.get(),
+                    deferredCohortWaveColumns.get(),
+                    deferredCohortWaveGroups.get(),
+                    deferredCohortWaveKeys.get(),
+                    deferredCohortWaveJniCalls.get(),
+                    deferredCohortWaveRejects.get());
         }
     }
 
@@ -3318,6 +3699,34 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     long getDeferredWaveReadyBeforeAwaitForTesting() {
         return deferredWaveReadyBeforeAwait.get();
+    }
+
+    long getDeferredCohortWaveAttemptsForTesting() {
+        return deferredCohortWaveAttempts.get();
+    }
+
+    long getDeferredCohortWaveSubmittedForTesting() {
+        return deferredCohortWaveSubmitted.get();
+    }
+
+    long getDeferredCohortWaveColumnsForTesting() {
+        return deferredCohortWaveColumns.get();
+    }
+
+    long getDeferredCohortWaveGroupsForTesting() {
+        return deferredCohortWaveGroups.get();
+    }
+
+    long getDeferredCohortWaveKeysForTesting() {
+        return deferredCohortWaveKeys.get();
+    }
+
+    long getDeferredCohortWaveJniCallsForTesting() {
+        return deferredCohortWaveJniCalls.get();
+    }
+
+    long getDeferredCohortWaveRejectsForTesting() {
+        return deferredCohortWaveRejects.get();
     }
 
     private static final class PrefetchedMapValue<V> {

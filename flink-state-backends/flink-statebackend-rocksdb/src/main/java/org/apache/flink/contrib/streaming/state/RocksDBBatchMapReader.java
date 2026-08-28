@@ -37,6 +37,25 @@ public interface RocksDBBatchMapReader<UK> {
     List<byte[]> getSerializedValuesByRocksDBKeys(
             List<byte[]> rocksDBKeys, int fromIndex, int toIndex) throws Exception;
 
+    /** Stable identity of the RocksDB instance used for an optional multi-column read. */
+    default Object multiColumnReadOwner() {
+        return null;
+    }
+
+    /**
+     * Reads already-serialized keys from several column families through one ordered MultiGet.
+     *
+     * <p>The outer list is ordered by state column and the returned flat list follows the same
+     * order. Implementations must reject readers backed by another database. The default keeps the
+     * capability unavailable so ordinary RocksDB state semantics are unchanged.
+     */
+    default List<byte[]> getSerializedValuesAcrossColumns(
+            List<? extends RocksDBBatchMapReader<?>> readers,
+            List<? extends List<byte[]>> keysByReader)
+            throws Exception {
+        throw new UnsupportedOperationException("Cross-column MapState MultiGet is unavailable.");
+    }
+
     /** Whether this reader can execute the shared direct-arena MultiGet ABI. */
     default boolean supportsDirectArenaMultiGet() {
         return false;

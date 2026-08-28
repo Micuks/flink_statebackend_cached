@@ -767,6 +767,19 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                             + "single generic prefetch worker; only the frozen-key, "
                                             + "all-or-none wave path is eligible for this experiment.");
 
+    public static final ConfigOption<Boolean>
+            NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_COLUMN_WAVE_ENABLED =
+                    ConfigOptions.key(
+                                    "state.backend.cachekit.native.map-distinct-batch-prefetch.cross-column-wave.enabled")
+                            .booleanType()
+                            .defaultValue(false)
+                            .withDescription(
+                                    "Fuse eligible exact-DISTINCT MapState columns backed by one "
+                                            + "RocksDB instance into one executor task and one ordered "
+                                            + "cross-column-family MultiGet. Disabled by default; any "
+                                            + "owner, lifecycle, capacity, or protocol mismatch preserves "
+                                            + "the existing per-column wave and authoritative fallback.");
+
     public static final ConfigOption<String> DELEGATE_BACKEND =
             ConfigOptions.key("state.backend.cachekit.delegate")
 			.stringType()
@@ -945,8 +958,16 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 							&& config.get(DISTINCT_BATCH_OVERLAY_ENABLED)
 							&& config.get(
 									NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_ENABLED)
+								&& config.get(
+										NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_DUAL_WORKER_ENABLED),
+					config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED)
+							&& config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED)
+							&& config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ENABLED)
+							&& config.get(DISTINCT_BATCH_OVERLAY_ENABLED)
 							&& config.get(
-									NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_DUAL_WORKER_ENABLED),
+									NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_ENABLED)
+							&& config.get(
+									NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_COLUMN_WAVE_ENABLED),
 					Math.max(
 							2,
 							config.get(

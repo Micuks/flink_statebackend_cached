@@ -283,6 +283,40 @@ public final class DistinctBatchPrefetchSupport {
                 return recordWaveResult(
                         diagnostics, BatchWindowPreparationResult.RETRY_AFTER_COHORT);
             }
+            for (int view = 0; view < viewCount; view++) {
+                ArrayList<BatchPrefetchableMapState.PreparedValues> values =
+                        workspace.values.get(view);
+                if (workspace.sawBackendToken[view]
+                        && workspace.eligible[view]
+                        && values.size() >= 2) {
+                    workspace.cohortColumns.add(values);
+                }
+            }
+            if (workspace.cohortColumns.size() >= 2) {
+                diagnostics.cohortFusionAttempts++;
+                int fusedGroups = 0;
+                for (List<? extends BatchPrefetchableMapState.PreparedValues> column :
+                        workspace.cohortColumns) {
+                    fusedGroups += column.size();
+                }
+                try {
+                    if (workspace
+                            .cohortColumns
+                            .get(0)
+                            .get(0)
+                            .executeCohortWave(workspace.cohortColumns)) {
+                        diagnostics.cohortFusionsExecuted++;
+                        diagnostics.fusedColumns += workspace.cohortColumns.size();
+                        diagnostics.fusedColumnGroups += fusedGroups;
+                        return recordWaveResult(diagnostics, BatchWindowPreparationResult.EXECUTED);
+                    }
+                    diagnostics.cohortFusionsRejected++;
+                } catch (Exception | LinkageError ignored) {
+                    diagnostics.cohortFusionFailures++;
+                    // No token may be published by a failed all-or-none cohort attempt. Backends
+                    // are required to return false or throw before ownership is installed.
+                }
+            }
             boolean executed = false;
             for (int view = 0; view < viewCount; view++) {
                 ArrayList<BatchPrefetchableMapState.PreparedValues> values =
@@ -414,6 +448,8 @@ public final class DistinctBatchPrefetchSupport {
     private static final class PreparedWaveWorkspace {
         private final List<ArrayList<BatchPrefetchableMapState.PreparedValues>> values =
                 new ArrayList<>();
+        private final List<List<? extends BatchPrefetchableMapState.PreparedValues>> cohortColumns =
+                new ArrayList<>();
         private Object[] owners = new Object[2];
         private boolean[] eligible = new boolean[2];
         private boolean[] sawBackendToken = new boolean[2];
@@ -429,6 +465,7 @@ public final class DistinctBatchPrefetchSupport {
                 values.add(new ArrayList<>());
             }
             viewCount = requiredViews;
+            cohortColumns.clear();
             for (int view = 0; view < requiredViews; view++) {
                 values.get(view).clear();
                 owners[view] = null;
@@ -445,6 +482,7 @@ public final class DistinctBatchPrefetchSupport {
                 sawBackendToken[view] = false;
             }
             viewCount = 0;
+            cohortColumns.clear();
         }
     }
 
@@ -474,11 +512,17 @@ public final class DistinctBatchPrefetchSupport {
         private long columnWavesRejected;
         private long columnWaveFailures;
         private long columnWaveGroups;
+        private long cohortFusionAttempts;
+        private long cohortFusionsExecuted;
+        private long cohortFusionsRejected;
+        private long cohortFusionFailures;
+        private long fusedColumns;
+        private long fusedColumnGroups;
         private long emptyCohorts;
 
         private void report() {
             System.err.printf(
-                    "[CACHEKIT DISTINCT WAVE ORCHESTRATOR] thread=%s cohortAttempts=%d cohortsExecuted=%d cohortsRetried=%d cohortsUnsupported=%d captures=%d multiViewCohorts=%d sessionColumns=%d invalidCaptures=%d rejectedCaptures=%d cardinalityMismatches=%d noOpTokens=%d invalidBackendTokens=%d disabledTokens=%d ineligibleTokens=%d nullOwnerTokens=%d ownerMismatchTokens=%d eligibleTokens=%d skippedColumns=%d insufficientColumns=%d columnWaveAttempts=%d columnWavesExecuted=%d columnWavesRejected=%d columnWaveFailures=%d columnWaveGroups=%d emptyCohorts=%d%n",
+                    "[CACHEKIT DISTINCT WAVE ORCHESTRATOR] thread=%s cohortAttempts=%d cohortsExecuted=%d cohortsRetried=%d cohortsUnsupported=%d captures=%d multiViewCohorts=%d sessionColumns=%d invalidCaptures=%d rejectedCaptures=%d cardinalityMismatches=%d noOpTokens=%d invalidBackendTokens=%d disabledTokens=%d ineligibleTokens=%d nullOwnerTokens=%d ownerMismatchTokens=%d eligibleTokens=%d skippedColumns=%d insufficientColumns=%d columnWaveAttempts=%d columnWavesExecuted=%d columnWavesRejected=%d columnWaveFailures=%d columnWaveGroups=%d cohortFusionAttempts=%d cohortFusionsExecuted=%d cohortFusionsRejected=%d cohortFusionFailures=%d fusedColumns=%d fusedColumnGroups=%d emptyCohorts=%d%n",
                     Thread.currentThread().getName(),
                     cohortAttempts,
                     cohortsExecuted,
@@ -504,6 +548,12 @@ public final class DistinctBatchPrefetchSupport {
                     columnWavesRejected,
                     columnWaveFailures,
                     columnWaveGroups,
+                    cohortFusionAttempts,
+                    cohortFusionsExecuted,
+                    cohortFusionsRejected,
+                    cohortFusionFailures,
+                    fusedColumns,
+                    fusedColumnGroups,
                     emptyCohorts);
         }
     }

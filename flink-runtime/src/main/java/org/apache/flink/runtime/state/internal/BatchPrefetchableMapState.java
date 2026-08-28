@@ -76,6 +76,20 @@ public interface BatchPrefetchableMapState<UK> {
         default boolean executeWave(List<? extends PreparedValues> tokens) throws Exception {
             return false;
         }
+
+        /**
+         * Submits one all-or-none read across multiple state columns of the same prepared cohort.
+         *
+         * <p>Every nested list contains tokens for one {@link #waveOwner()}, while different lists
+         * may belong to different MapState column families backed by the same database. A backend
+         * that can fuse those columns into one worker task or one native MultiGet may override this
+         * method. Returning {@code false} leaves every token untouched so the caller can use the
+         * established per-column wave or authoritative fallback.
+         */
+        default boolean executeCohortWave(List<? extends List<? extends PreparedValues>> columns)
+                throws Exception {
+            return false;
+        }
     }
 
     /**
