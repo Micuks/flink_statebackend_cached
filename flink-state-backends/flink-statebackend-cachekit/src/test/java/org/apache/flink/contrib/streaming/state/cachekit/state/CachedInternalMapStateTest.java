@@ -29,6 +29,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
 
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
@@ -989,6 +990,90 @@ class CachedInternalMapStateTest {
         returned.close();
 
         state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testDeferredWaveDirectArenaReleasesSlotWhenStateClosesBeforeSubmission()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer
+                                        .INSTANCE,
+                                IntSerializer.INSTANCE));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        when(reader.directArenaMultiGetMaxBatch())
+                .thenReturn(RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
+        when(reader.serializeRocksDBKeysByUserKeys(Arrays.asList("u1", "u2")))
+                .thenReturn(Arrays.asList(new byte[] {1}, new byte[] {2}));
+        when(reader.serializeRocksDBKeysByUserKeys(Arrays.asList("u3", "u4")))
+                .thenReturn(Arrays.asList(new byte[] {3}, new byte[] {4}));
+
+        NativeRequestPlane plane = mock(NativeRequestPlane.class);
+        when(plane.selectedKernel()).thenReturn("test");
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createDeferredWaveState(delegate, currentKey, coordinator);
+        state.enableNativeDistinctBatchPrefetch(true, true, 8, false, true, true, true, false);
+
+        BatchPrefetchableMapState.PreparedValues first =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+        currentKey.set("k2");
+        BatchPrefetchableMapState.PreparedValues second =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u3", "u4"));
+
+        Field monitorField =
+                CachedInternalMapState.class.getDeclaredField("asyncBatchPrefetchMonitor");
+        monitorField.setAccessible(true);
+        Object monitor = monitorField.get(state);
+        Field closedField = CachedInternalMapState.class.getDeclaredField("closed");
+        closedField.setAccessible(true);
+        AtomicReference<Boolean> submitted = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread submitter =
+                new Thread(
+                        () -> {
+                            try {
+                                submitted.set(first.executeWave(Arrays.asList(first, second)));
+                            } catch (Throwable currentFailure) {
+                                failure.set(currentFailure);
+                            }
+                        },
+                        "deferred-wave-close-race-test");
+
+        synchronized (monitor) {
+            submitter.start();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (coordinator.mapDistinctAsyncReadLeases() < 1
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(10);
+            }
+            assertEquals(1, coordinator.mapDistinctAsyncReadLeases());
+            closedField.setBoolean(state, true);
+        }
+        submitter.join(TimeUnit.SECONDS.toMillis(5));
+        assertFalse(submitter.isAlive());
+        assertNull(failure.get());
+        assertEquals(Boolean.FALSE, submitted.get());
+
+        NativeRequestPlaneCoordinator.BatchSlot firstReturned =
+                coordinator.tryAcquireMapDistinctAsyncReadSlot();
+        NativeRequestPlaneCoordinator.BatchSlot secondReturned =
+                coordinator.tryAcquireMapDistinctAsyncReadSlot();
+        assertNotNull(firstReturned);
+        assertNotNull(secondReturned);
+        assertNull(coordinator.tryAcquireMapDistinctAsyncReadSlot());
+        firstReturned.close();
+        secondReturned.close();
         coordinator.close();
     }
 

@@ -1472,19 +1472,19 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     if (Objects.equals(prior.preparedOuterKey, current.preparedOuterKey)
                             && Objects.equals(prior.preparedNamespace, current.preparedNamespace)) {
                         deferredWaveOwnerRejects.incrementAndGet();
+                        deferredWaveFallbackWindows.incrementAndGet();
+                        return false;
+                    }
+                }
+                totalKeys += current.preparedRocksDBKeys.size();
+                waveTokens.add(current);
+                rocksDBKeys.addAll(current.preparedRocksDBKeys);
+            }
+            if (totalKeys <= 0 || totalKeys > RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
+                deferredWaveOverflows.incrementAndGet();
                 deferredWaveFallbackWindows.incrementAndGet();
                 return false;
             }
-            }
-                totalKeys += current.preparedRocksDBKeys.size();
-                waveTokens.add(current);
-                    rocksDBKeys.addAll(current.preparedRocksDBKeys);
-                }
-            if (totalKeys <= 0 || totalKeys > RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
-                    deferredWaveOverflows.incrementAndGet();
-                    deferredWaveFallbackWindows.incrementAndGet();
-                    return false;
-                }
             NativeRequestPlaneCoordinator.BatchSlot directSlot =
                     tryPrepareDeferredWaveDirectSlot(rocksDBKeys, totalKeys);
             DeferredWaveTask task =
@@ -1493,32 +1493,36 @@ public final class CachedInternalMapState<K, N, UK, UV>
                             directSlot,
                             totalKeys,
                             waveTokens.size());
-                int offset = 0;
-                for (DeferredDirectMapValues current : waveTokens) {
+            int offset = 0;
+            for (DeferredDirectMapValues current : waveTokens) {
                 current.waveTask = task;
                 current.waveOffset = offset;
                 offset += current.orderedKeys.size();
-                        }
+            }
             synchronized (asyncBatchPrefetchMonitor) {
                 if (closed) {
                     for (DeferredDirectMapValues current : waveTokens) {
                         current.waveTask = null;
                         current.waveOffset = 0;
                     }
+                    if (directSlot != null) {
+                        directSlot.close();
+                        deferredWaveDirectArenaFallbacks.incrementAndGet();
+                    }
                     deferredWaveFallbackWindows.incrementAndGet();
                     return false;
                 }
                 outstandingAsyncBatchPrefetchTasks.add(task);
-                }
+            }
             deferredWaveSubmitted.incrementAndGet();
-                deferredWaveGroups.addAndGet(waveTokens.size());
-                deferredWaveKeys.addAndGet(totalKeys);
+            deferredWaveGroups.addAndGet(waveTokens.size());
+            deferredWaveKeys.addAndGet(totalKeys);
             if (nativeDistinctBatchDeferredWaveDualWorkerEnabled) {
                 PrefetchExecutor.trySubmitDeferredWave(task);
             } else {
                 PrefetchExecutor.trySubmit(task);
             }
-                return true;
+            return true;
         }
 
         private NativeRequestPlaneCoordinator.BatchSlot tryPrepareDeferredWaveDirectSlot(
