@@ -936,22 +936,69 @@ public final class CachedInternalMapState<K, N, UK, UV>
         KeyNamespace<K, N> stableContext = newStoredKeyNamespace(currentKey, namespace);
         List<UK> stableOrderedKeys = new ArrayList<>(orderedKeys);
         if (exactDistinctResidentWriteBackEnabled) {
-            ensureDelegateNamespace(currentKey);
-            List<byte[]> rocksDBKeys = null;
             if (nativeDistinctPreparedCommitEnabled) {
-                rocksDBKeys = rocksDBBatchMapReader.serializeRocksDBKeysByUserKeys(orderedKeys);
+                ensureDelegateNamespace(currentKey);
+                List<byte[]> rocksDBKeys =
+                        rocksDBBatchMapReader.serializeRocksDBKeysByUserKeys(orderedKeys);
                 if (rocksDBKeys.size() != orderedKeys.size()) {
                     return null;
                 }
+                List<UV> values = readResidentFirstValues(currentKey, orderedKeys);
+                return new ResidentPreparedMapValues(
+                        stableContext.key,
+                        stableContext.namespace,
+                        stableOrderedKeys,
+                        rocksDBKeys,
+                        values,
+                        nativeGeneration);
             }
-            List<UV> values = readResidentFirstValues(currentKey, orderedKeys);
-            return new ResidentPreparedMapValues(
-                    stableContext.key,
-                    stableContext.namespace,
+            ResidentReadPlan plan = planResidentReads(currentKey, orderedKeys);
+            if (plan.missUserKeys.isEmpty()) {
+                if (nativeDistinctBatchDeferredWaveEnabled) {
+                    return new DeferredDirectMapValues(
+                            stableContext.key,
+                            stableContext.namespace,
+                            stableOrderedKeys,
+                            Collections.emptyList(),
+                            plan.values,
+                            new int[0],
+                            nativeGeneration);
+                }
+                return new ResidentPreparedMapValues(
+                        stableContext.key,
+                        stableContext.namespace,
+                        stableOrderedKeys,
+                        null,
+                        plan.values,
+                        nativeGeneration);
+            }
+            ensureDelegateNamespace(currentKey);
+            List<byte[]> missRocksDBKeys =
+                    rocksDBBatchMapReader.serializeRocksDBKeysByUserKeys(plan.missUserKeys);
+            if (missRocksDBKeys.size() != plan.missUserKeys.size()) {
+                return null;
+            }
+            if ((nativeDistinctBatchDeferredWaveEnabled
+                            || nativeDistinctBatchDirectArenaEnabled)
+                    && orderedKeys.size() < nativeDistinctBatchAsyncMinUniqueKeys
+                    && missRocksDBKeys.size() <= RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
+                deferredSyncBatchPrefetchBatches.incrementAndGet();
+                deferredSyncBatchPrefetchKeys.addAndGet(missRocksDBKeys.size());
+                return new DeferredDirectMapValues(
+                        stableContext.key,
+                        stableContext.namespace,
+                        stableOrderedKeys,
+                        missRocksDBKeys,
+                        plan.values,
+                        plan.missIndexes,
+                        nativeGeneration);
+            }
+            return submitPreparedMapValues(
+                    stableContext,
                     stableOrderedKeys,
-                    rocksDBKeys,
-                    values,
-                    nativeGeneration);
+                    missRocksDBKeys,
+                    plan.values,
+                    plan.missIndexes);
         }
         if (nativeDistinctBatchDeferredWaveEnabled
                 && orderedKeys.size() < nativeDistinctBatchAsyncMinUniqueKeys
@@ -999,11 +1046,23 @@ public final class CachedInternalMapState<K, N, UK, UV>
         if (rocksDBKeys.size() != orderedKeys.size()) {
             return null;
         }
+        return submitPreparedMapValues(
+                stableContext, stableOrderedKeys, rocksDBKeys, null, null);
+    }
+
+    private PreparedValues submitPreparedMapValues(
+            KeyNamespace<K, N> stableContext,
+            List<UK> stableOrderedKeys,
+            List<byte[]> rocksDBKeys,
+            ArrayList<UV> residentValues,
+            int[] readIndexes)
+            throws Exception {
+        int readCount = rocksDBKeys.size();
         NativeRequestPlaneCoordinator.BatchSlot directSlot = null;
         if (nativeDistinctBatchDirectArenaEnabled
                 && nativeRequestPlaneCoordinator != null
                 && nativeRequestPlaneCoordinator.isActive()
-                && orderedKeys.size() <= RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
+                && readCount <= RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
             directSlot = nativeRequestPlaneCoordinator.tryAcquireMapDistinctAsyncReadSlot();
             if (directSlot == null) {
                 asyncDirectArenaLeaseMisses.incrementAndGet();
@@ -1011,9 +1070,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 try {
                     directSlot.prepareLatest(nativeStateId, nativeGeneration, rocksDBKeys);
                     directSlot.prepareContiguousDirectArenaMultiGet(
-                            orderedKeys.size(), RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
+                            readCount, RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
                     asyncDirectArenaBatches.incrementAndGet();
-                    asyncDirectArenaKeys.addAndGet(orderedKeys.size());
+                    asyncDirectArenaKeys.addAndGet(readCount);
                 } catch (Exception | LinkageError directPreparationFailure) {
                     directSlot.close();
                     directSlot = null;
@@ -1029,6 +1088,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
                                 stableOrderedKeys,
                                 rocksDBKeys,
                                 null,
+                                residentValues,
+                                readIndexes,
                                 nativeGeneration)
                         : new PreparedMapValues(
                                 stableContext.key,
@@ -1036,6 +1097,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
                                 stableOrderedKeys,
                                 rocksDBKeys,
                                 directSlot,
+                                residentValues,
+                                readIndexes,
                                 nativeGeneration);
         synchronized (asyncBatchPrefetchMonitor) {
             if (closed) {
@@ -1045,7 +1108,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             outstandingAsyncBatchPrefetchTasks.add(prepared);
         }
         asyncBatchPrefetchSubmitted.incrementAndGet();
-        asyncBatchPrefetchKeys.addAndGet(orderedKeys.size());
+        asyncBatchPrefetchKeys.addAndGet(readCount);
         if (nativeDistinctBatchWorkFirstEnabled && directSlot != null) {
             asyncBatchPrefetchWorkFirstEligible.incrementAndGet();
             long submitStartedNanos = System.nanoTime();
@@ -1054,7 +1117,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             switch (submission) {
                 case CALLER_RUN:
                     asyncBatchPrefetchCallerRuns.incrementAndGet();
-                    asyncBatchPrefetchCallerRunKeys.addAndGet(orderedKeys.size());
+                    asyncBatchPrefetchCallerRunKeys.addAndGet(readCount);
                     asyncBatchPrefetchCallerRunNanos.addAndGet(
                             Math.max(0L, System.nanoTime() - submitStartedNanos));
                     break;
@@ -1082,6 +1145,19 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     private List<UV> readResidentFirstValues(K currentKey, List<UK> orderedKeys)
             throws Exception {
+        ResidentReadPlan plan = planResidentReads(currentKey, orderedKeys);
+        if (plan.missUserKeys.isEmpty()) {
+            return plan.values;
+        }
+
+        ensureDelegateNamespace(currentKey);
+        List<byte[]> rawValues =
+                rocksDBBatchMapReader.getSerializedValuesByUserKeys(plan.missUserKeys);
+        scatterResidentMissValues(currentKey, orderedKeys, plan, rawValues);
+        return plan.values;
+    }
+
+    private ResidentReadPlan planResidentReads(K currentKey, List<UK> orderedKeys) {
         ArrayList<UV> values = new ArrayList<>(Collections.nCopies(orderedKeys.size(), null));
         ArrayList<UK> rocksDbKeys = new ArrayList<>();
         ArrayList<Integer> rocksDbIndexes = new ArrayList<>();
@@ -1100,19 +1176,26 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 exactDistinctResidentDirtyAvoidedFlushes++;
             }
         }
-        if (rocksDbKeys.isEmpty()) {
-            return values;
-        }
-
-        ensureDelegateNamespace(currentKey);
         exactDistinctResidentRocksDbPrefetchMisses += rocksDbKeys.size();
-        List<byte[]> rawValues = rocksDBBatchMapReader.getSerializedValuesByUserKeys(rocksDbKeys);
-        if (rawValues.size() != rocksDbKeys.size()) {
+        int[] missIndexes = new int[rocksDbIndexes.size()];
+        for (int index = 0; index < missIndexes.length; index++) {
+            missIndexes[index] = rocksDbIndexes.get(index);
+        }
+        return new ResidentReadPlan(values, rocksDbKeys, missIndexes);
+    }
+
+    private void scatterResidentMissValues(
+            K currentKey,
+            List<UK> orderedKeys,
+            ResidentReadPlan plan,
+            List<byte[]> rawValues)
+            throws Exception {
+        if (rawValues.size() != plan.missUserKeys.size()) {
             throw new IllegalStateException(
                     "MapState resident-first MultiGet returned "
                             + rawValues.size()
                             + " values for "
-                            + rocksDbKeys.size()
+                            + plan.missUserKeys.size()
                             + " misses.");
         }
         for (int index = 0; index < rawValues.size(); index++) {
@@ -1126,11 +1209,23 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 value = isNull ? null : userValueSerializer.deserialize(batchPrefetchInput);
                 batchPrefetchFound++;
             }
-            int orderedIndex = rocksDbIndexes.get(index);
-            values.set(orderedIndex, value);
+            int orderedIndex = plan.missIndexes[index];
+            plan.values.set(orderedIndex, value);
             updateValueCache(currentKey, orderedKeys.get(orderedIndex), value, false);
         }
-        return values;
+    }
+
+    private final class ResidentReadPlan {
+        private final ArrayList<UV> values;
+        private final List<UK> missUserKeys;
+        private final int[] missIndexes;
+
+        private ResidentReadPlan(
+                ArrayList<UV> values, List<UK> missUserKeys, int[] missIndexes) {
+            this.values = values;
+            this.missUserKeys = missUserKeys;
+            this.missIndexes = missIndexes;
+        }
     }
 
     private interface PreparedCommitHandle {
@@ -1441,6 +1536,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
         private final K preparedOuterKey;
         private final N preparedNamespace;
         private final List<UK> orderedKeys;
+        private final ArrayList<UV> residentValues;
+        private final int[] readIndexes;
         private final long preparedGeneration;
         private final int expectedValues;
         private final java.util.concurrent.CountDownLatch completed =
@@ -1464,14 +1561,23 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 List<UK> orderedKeys,
                 List<byte[]> rocksDBKeys,
                 NativeRequestPlaneCoordinator.BatchSlot directSlot,
+                ArrayList<UV> residentValues,
+                int[] readIndexes,
                 long preparedGeneration) {
             this.preparedOuterKey = preparedOuterKey;
             this.preparedNamespace = preparedNamespace;
             this.orderedKeys = orderedKeys;
             this.rocksDBKeys = rocksDBKeys;
             this.directSlot = directSlot;
+            this.residentValues = residentValues;
+            this.readIndexes = readIndexes;
             this.preparedGeneration = preparedGeneration;
-            this.expectedValues = orderedKeys.size();
+            this.expectedValues = rocksDBKeys.size();
+            if ((residentValues == null) != (readIndexes == null)
+                    || residentValues != null && residentValues.size() != orderedKeys.size()
+                    || readIndexes != null && readIndexes.length != expectedValues) {
+                throw new IllegalArgumentException("Invalid resident async read scatter plan");
+            }
         }
 
         @Override
@@ -1691,38 +1797,70 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 if (dropped
                         || failure != null
                         || directSlot == null && rawValues == null
-                        || directSlot != null && !directValuesReady) {
+                        || directSlot != null && !directValuesReady
+                        || residentValues != null
+                                && (preparedGeneration != nativeGeneration
+                                        || !Objects.equals(
+                                                preparedOuterKey,
+                                                currentKeyProvider.getCurrentKey())
+                                        || !Objects.equals(
+                                                preparedNamespace, currentNamespace))) {
                     return null;
                 }
-                ArrayList<UV> values = new ArrayList<>(expectedValues);
+                ArrayList<UV> values =
+                        residentValues == null
+                                ? new ArrayList<>(
+                                        Collections.nCopies(orderedKeys.size(), (UV) null))
+                                : new ArrayList<>(residentValues);
                 if (directSlot != null) {
                     for (int index = 0; index < expectedValues; index++) {
+                        int target = readIndexes == null ? index : readIndexes[index];
+                        UV value;
                         int result = directSlot.directMultiGetResult(index);
                         if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
-                            values.add(null);
+                            value = null;
                         } else {
                             DataInputView input = directSlot.directMultiGetValueInput(index);
                             boolean isNull = input.readBoolean();
-                            values.add(isNull ? null : userValueSerializer.deserialize(input));
+                            value = isNull ? null : userValueSerializer.deserialize(input);
                         }
+                        values.set(target, value);
+                        cacheResidentAsyncValue(target, value);
                     }
                 } else {
-                    for (byte[] rawValue : rawValues) {
+                    for (int index = 0; index < rawValues.size(); index++) {
+                        int target = readIndexes == null ? index : readIndexes[index];
+                        byte[] rawValue = rawValues.get(index);
+                        UV value;
                         if (rawValue == null) {
-                            values.add(null);
+                            value = null;
                         } else {
                             batchPrefetchInput.setBuffer(rawValue);
                             boolean isNull = batchPrefetchInput.readBoolean();
-                            values.add(
+                            value =
                                     isNull
                                             ? null
-                                            : userValueSerializer.deserialize(batchPrefetchInput));
+                                            : userValueSerializer.deserialize(batchPrefetchInput);
                         }
+                        values.set(target, value);
+                        cacheResidentAsyncValue(target, value);
                     }
                 }
                 return values;
             } finally {
                 releaseDirectSlotOnce();
+            }
+        }
+
+        private void cacheResidentAsyncValue(int orderedIndex, UV value) {
+            if (residentValues != null) {
+                updateValueCache(
+                        preparedOuterKey, orderedKeys.get(orderedIndex), value, false);
+                if (value == null) {
+                    batchPrefetchMissing++;
+                } else {
+                    batchPrefetchFound++;
+                }
             }
         }
 
@@ -1757,6 +1895,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
         private final N preparedNamespace;
         private final List<UK> orderedKeys;
         private final List<byte[]> preparedRocksDBKeys;
+        private final ArrayList<UV> residentValues;
+        private final int[] readIndexes;
         private final long preparedGeneration;
         private DeferredWaveResult waveTask;
         private int waveOffset;
@@ -1770,11 +1910,42 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 List<UK> orderedKeys,
                 List<byte[]> preparedRocksDBKeys,
                 long preparedGeneration) {
+            this(
+                    preparedOuterKey,
+                    preparedNamespace,
+                    orderedKeys,
+                    preparedRocksDBKeys,
+                    null,
+                    null,
+                    preparedGeneration);
+        }
+
+        private DeferredDirectMapValues(
+                K preparedOuterKey,
+                N preparedNamespace,
+                List<UK> orderedKeys,
+                List<byte[]> preparedRocksDBKeys,
+                ArrayList<UV> residentValues,
+                int[] readIndexes,
+                long preparedGeneration) {
             this.preparedOuterKey = preparedOuterKey;
             this.preparedNamespace = preparedNamespace;
             this.orderedKeys = orderedKeys;
             this.preparedRocksDBKeys = preparedRocksDBKeys;
+            this.residentValues = residentValues;
+            this.readIndexes = readIndexes;
             this.preparedGeneration = preparedGeneration;
+            if ((residentValues == null) != (readIndexes == null)
+                    || residentValues != null && residentValues.size() != orderedKeys.size()
+                    || readIndexes != null
+                            && (preparedRocksDBKeys == null
+                                    || readIndexes.length != preparedRocksDBKeys.size())) {
+                throw new IllegalArgumentException("Invalid resident deferred read scatter plan");
+            }
+        }
+
+        private int readCount() {
+            return readIndexes == null ? orderedKeys.size() : readIndexes.length;
         }
 
         @Override
@@ -1933,7 +2104,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
                             || current.consumed
                             || current.waveTask != null
                             || current.preparedRocksDBKeys == null
-                            || current.preparedRocksDBKeys.size() != current.orderedKeys.size()) {
+                            || current.preparedRocksDBKeys.size() != current.readCount()) {
                         deferredCohortWaveRejects.incrementAndGet();
                         return false;
                     }
@@ -1993,7 +2164,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 for (DeferredDirectMapValues current : column.tokens) {
                     current.waveTask = task;
                     current.waveOffset = offset;
-                    offset += current.orderedKeys.size();
+                    offset += current.readCount();
                 }
             }
             deferredCohortWaveSubmitted.incrementAndGet();
@@ -2057,7 +2228,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 if (current.consumed
                         || current.waveTask != null
                         || current.preparedRocksDBKeys == null
-                        || current.preparedRocksDBKeys.size() != current.orderedKeys.size()) {
+                        || current.preparedRocksDBKeys.size() != current.readCount()) {
                     deferredWaveOwnerRejects.incrementAndGet();
                     deferredWaveFallbackWindows.incrementAndGet();
                     return false;
@@ -2091,7 +2262,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             for (DeferredDirectMapValues current : waveTokens) {
                 current.waveTask = task;
                 current.waveOffset = offset;
-                offset += current.orderedKeys.size();
+                offset += current.readCount();
             }
             synchronized (asyncBatchPrefetchMonitor) {
                 if (closed) {
@@ -2164,6 +2335,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             }
             consumed = true;
             if (closed
+                    || (residentValues != null && preparedGeneration != nativeGeneration)
                     || !Objects.equals(preparedOuterKey, currentKeyProvider.getCurrentKey())
                     || !Objects.equals(preparedNamespace, currentNamespace)) {
                 deferredSyncBatchPrefetchFallbacks.incrementAndGet();
@@ -2173,48 +2345,73 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 }
                 return null;
             }
+            if (residentValues != null && readCount() == 0) {
+                DeferredWaveResult task = waveTask;
+                if (task != null) {
+                    releaseWaveToken(task);
+                }
+                deferredSyncBatchPrefetchCompleted.incrementAndGet();
+                return new ArrayList<>(residentValues);
+            }
             if (waveTask != null) {
                 DeferredWaveResult task = waveTask;
                 try {
                     if (!task.awaitReady()
                             || waveOffset < 0
-                            || waveOffset + orderedKeys.size() > task.valueCount()) {
-                    deferredSyncBatchPrefetchFallbacks.incrementAndGet();
-                    return null;
-                }
-                    ArrayList<UV> values = new ArrayList<>(orderedKeys.size());
-                    int waveEnd = waveOffset + orderedKeys.size();
+                            || waveOffset + readCount() > task.valueCount()) {
+                        deferredSyncBatchPrefetchFallbacks.incrementAndGet();
+                        return null;
+                    }
+                    ArrayList<UV> values =
+                            residentValues == null
+                                    ? new ArrayList<>(
+                                            Collections.nCopies(orderedKeys.size(), (UV) null))
+                                    : new ArrayList<>(residentValues);
+                    int waveEnd = waveOffset + readCount();
                     for (int index = waveOffset; index < waveEnd; index++) {
+                        int readIndex = index - waveOffset;
+                        int target = readIndexes == null ? readIndex : readIndexes[readIndex];
+                        UV value;
                         if (task.usesDirectArena()) {
                             int result = task.directResult(index);
                             if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
-                                values.add(null);
+                                value = null;
                             } else {
                                 DataInputView input = task.directValueInput(index);
                                 boolean isNull = input.readBoolean();
-                                values.add(
+                                value =
                                         isNull
                                                 ? null
-                                                : userValueSerializer.deserialize(input));
+                                                : userValueSerializer.deserialize(input);
                             }
                         } else {
                             byte[] rawValue = task.rawValue(index);
                             if (rawValue == null) {
-                                values.add(null);
+                                value = null;
                             } else {
                                 batchPrefetchInput.setBuffer(rawValue);
                                 boolean isNull = batchPrefetchInput.readBoolean();
-                                values.add(
+                                value =
                                         isNull
                                                 ? null
                                                 : userValueSerializer.deserialize(
-                                                        batchPrefetchInput));
+                                                        batchPrefetchInput);
+                            }
+                        }
+                        values.set(target, value);
+                        if (residentValues != null) {
+                            updateValueCache(
+                                    preparedOuterKey, orderedKeys.get(target), value, false);
+                            if (value == null) {
+                                batchPrefetchMissing++;
+                            } else {
+                                batchPrefetchFound++;
                             }
                         }
                     }
-                deferredSyncBatchPrefetchCompleted.incrementAndGet();
-                deferredWaveCompletedGroups.incrementAndGet();
-                return values;
+                    deferredSyncBatchPrefetchCompleted.incrementAndGet();
+                    deferredWaveCompletedGroups.incrementAndGet();
+                    return values;
                 } catch (Exception | LinkageError failure) {
                     deferredWaveProtocolFailures.incrementAndGet();
                     deferredSyncBatchPrefetchFallbacks.incrementAndGet();

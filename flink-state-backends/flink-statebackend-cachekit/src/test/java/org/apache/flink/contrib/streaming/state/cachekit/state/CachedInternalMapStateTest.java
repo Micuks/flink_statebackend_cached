@@ -2836,6 +2836,186 @@ class CachedInternalMapStateTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void testExactDistinctResidentPreparedAllHitCompletesWithoutRocksDbRead() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createResidentAsyncState(delegate, currentKey);
+        state.put("u1", 11);
+        state.put("u2", 22);
+
+        BatchPrefetchableMapState.PreparedValues prepared =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+
+        assertEquals(Arrays.asList(11, 22), prepared.awaitValues());
+        verify(reader, times(0)).serializeRocksDBKeysByUserKeys(any());
+        verify(reader, times(0))
+                .getSerializedValuesByRocksDBKeys(
+                        any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.anyInt());
+        state.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testExactDistinctResidentPreparedAllMissUsesAsyncSubset() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        List<String> userKeys = Arrays.asList("u1", "u2");
+        List<byte[]> rocksDBKeys = Arrays.asList(new byte[] {1}, new byte[] {2});
+        when(reader.serializeRocksDBKeysByUserKeys(userKeys)).thenReturn(rocksDBKeys);
+        when(reader.getSerializedValuesByRocksDBKeys(rocksDBKeys, 0, 2))
+                .thenReturn(Arrays.asList(serializedMapValue(5), null));
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createResidentAsyncState(delegate, currentKey);
+
+        BatchPrefetchableMapState.PreparedValues prepared =
+                state.prepareCurrentUniqueKeyValues(userKeys);
+
+        assertEquals(Arrays.asList(5, null), prepared.awaitValues());
+        verify(reader).serializeRocksDBKeysByUserKeys(userKeys);
+        verify(reader).getSerializedValuesByRocksDBKeys(rocksDBKeys, 0, 2);
+        state.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testExactDistinctResidentPreparedMixedMissesScatterNegativeInOriginalOrder()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        List<String> missUserKeys = Arrays.asList("u1", "u3");
+        List<byte[]> missRocksDBKeys = Arrays.asList(new byte[] {1}, new byte[] {3});
+        when(reader.serializeRocksDBKeysByUserKeys(missUserKeys)).thenReturn(missRocksDBKeys);
+        when(reader.getSerializedValuesByRocksDBKeys(missRocksDBKeys, 0, 2))
+                .thenReturn(Arrays.asList(null, serializedMapValue(33)));
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createResidentAsyncState(delegate, currentKey);
+        state.put("u2", 22);
+        state.put("u4", 44);
+
+        BatchPrefetchableMapState.PreparedValues prepared =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2", "u3", "u4"));
+
+        assertEquals(Arrays.asList(null, 22, 33, 44), prepared.awaitValues());
+        verify(reader).serializeRocksDBKeysByUserKeys(missUserKeys);
+        verify(reader).getSerializedValuesByRocksDBKeys(missRocksDBKeys, 0, 2);
+        assertEquals(2, state.getExactDistinctResidentPrefetchHitsForTesting());
+        assertEquals(2, state.getExactDistinctResidentRocksDbPrefetchMissesForTesting());
+        state.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testExactDistinctResidentPreparedMissSubsetParticipatesInDeferredWave()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                                IntSerializer.INSTANCE));
+        List<byte[]> firstMiss = Arrays.asList(new byte[] {1});
+        List<byte[]> secondMiss = Arrays.asList(new byte[] {2});
+        List<byte[]> combined = Arrays.asList(firstMiss.get(0), secondMiss.get(0));
+        when(reader.serializeRocksDBKeysByUserKeys(Arrays.asList("m1")))
+                .thenReturn(firstMiss);
+        when(reader.serializeRocksDBKeysByUserKeys(Arrays.asList("m2")))
+                .thenReturn(secondMiss);
+        when(reader.getSerializedValuesByRocksDBKeys(combined, 0, 2))
+                .thenReturn(Arrays.asList(serializedMapValue(101), null));
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createResidentState(delegate, currentKey, 500);
+        state.enableNativeDistinctBatchPrefetch(true, true, 8, false, true);
+
+        state.put("resident", 11);
+        currentKey.set("k2");
+        state.put("resident", 22);
+        currentKey.set("k1");
+        BatchPrefetchableMapState.PreparedValues first =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("resident", "m1"));
+        currentKey.set("k2");
+        BatchPrefetchableMapState.PreparedValues second =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("resident", "m2"));
+
+        assertEquals(
+                BatchPrefetchableMapState.PreparedValues.WaveParticipation.ELIGIBLE,
+                first.waveParticipation());
+        assertTrue(first.executeWave(Arrays.asList(first, second)));
+        currentKey.set("k1");
+        assertEquals(Arrays.asList(11, 101), first.awaitValues());
+        currentKey.set("k2");
+        assertEquals(Arrays.asList(22, null), second.awaitValues());
+        verify(reader).getSerializedValuesByRocksDBKeys(combined, 0, 2);
+        state.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testExactDistinctResidentPreparedAllHitDoesNotPoisonSiblingDeferredWave()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                                IntSerializer.INSTANCE));
+        List<byte[]> missKey = Arrays.asList(new byte[] {2});
+        when(reader.serializeRocksDBKeysByUserKeys(Arrays.asList("miss"))).thenReturn(missKey);
+        when(reader.getSerializedValuesByRocksDBKeys(missKey, 0, 1))
+                .thenReturn(Arrays.asList(serializedMapValue(202)));
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createResidentState(delegate, currentKey, 500);
+        state.enableNativeDistinctBatchPrefetch(true, true, 8, false, true);
+
+        state.put("r1", 11);
+        state.put("r2", 12);
+        currentKey.set("k2");
+        state.put("resident", 22);
+        currentKey.set("k1");
+        BatchPrefetchableMapState.PreparedValues allHit =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("r1", "r2"));
+        currentKey.set("k2");
+        BatchPrefetchableMapState.PreparedValues mixed =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("resident", "miss"));
+
+        assertEquals(
+                BatchPrefetchableMapState.PreparedValues.WaveParticipation.ELIGIBLE,
+                allHit.waveParticipation());
+        assertTrue(allHit.executeWave(Arrays.asList(allHit, mixed)));
+        currentKey.set("k1");
+        assertEquals(Arrays.asList(11, 12), allHit.awaitValues());
+        currentKey.set("k2");
+        assertEquals(Arrays.asList(22, 202), mixed.awaitValues());
+        verify(reader).getSerializedValuesByRocksDBKeys(missKey, 0, 1);
+        state.close();
+    }
+
+    @Test
     void testExactDistinctResidentEvictionFailureRetainsDirtyPayloadForRetry() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
         InternalMapState<String, VoidNamespace, String, Integer> delegate =
@@ -3125,6 +3305,21 @@ class CachedInternalMapStateTest {
                         false);
         state.enableNativeDistinctBatchPrefetch(true, true, 8);
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
+        return state;
+    }
+
+    private static CachedInternalMapState<String, VoidNamespace, String, Integer>
+            createResidentAsyncState(
+                    InternalMapState<String, VoidNamespace, String, Integer> delegate,
+                    AtomicReference<String> currentKey) {
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                                IntSerializer.INSTANCE));
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createResidentState(delegate, currentKey, 500);
+        state.enableNativeDistinctBatchPrefetch(true, false, 2);
         return state;
     }
 
