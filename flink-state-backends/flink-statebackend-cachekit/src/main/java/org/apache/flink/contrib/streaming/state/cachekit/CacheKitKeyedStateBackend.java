@@ -611,7 +611,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 && descriptor instanceof MapStateDescriptor
                 && descriptor.getName().startsWith("distinctAcc_")
                 && ((MapStateDescriptor<?, ?>) descriptor).getValueSerializer()
-                        == LongSerializer.INSTANCE
+                        instanceof LongSerializer
                 && !descriptor.getTtlConfig().isEnabled();
     }
 

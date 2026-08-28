@@ -66,6 +66,14 @@ class CacheKitKeyedStateBackendLifecycleTest {
         assertTrue(
                 CacheKitKeyedStateBackend.isExactDistinctResidentWriteBackEligible(
                         distinct, true, 128));
+        MapStateDescriptor<String, Long> equivalentNonSingletonSerializer =
+                new MapStateDescriptor<>(
+                        "distinctAcc_runtime",
+                        StringSerializer.INSTANCE,
+                        new LongSerializer());
+        assertTrue(
+                CacheKitKeyedStateBackend.isExactDistinctResidentWriteBackEligible(
+                        equivalentNonSingletonSerializer, true, 128));
         assertEquals(3885, CacheKitKeyedStateBackend.exactDistinctResidentBackingEntries(777));
         assertEquals(
                 CachePolicyType.LRU,
