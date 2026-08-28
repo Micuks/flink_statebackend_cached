@@ -16,9 +16,10 @@
  * limitations under the License.
  */
 
-package org.apache.flink.api.java.functions;
+package org.apache.flink.streaming.runtime.io;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.api.java.functions.KeySelector;
 
 /**
  * Internal key-selector capability for a key view that is valid only until the next invocation.

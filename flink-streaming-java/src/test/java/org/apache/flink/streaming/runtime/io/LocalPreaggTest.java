@@ -18,7 +18,6 @@
 
 package org.apache.flink.streaming.runtime.io;
 
-import org.apache.flink.api.java.functions.TransientKeySelector;
 import org.apache.flink.runtime.state.BatchKeyGroupingSupport;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.BatchableKeyedFunction;

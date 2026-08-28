@@ -20,7 +20,7 @@ package org.apache.flink.table.runtime.keyselector;
 
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.binary.BinaryRowData;
-import org.apache.flink.api.java.functions.TransientKeySelector;
+import org.apache.flink.streaming.runtime.io.TransientKeySelector;
 import org.apache.flink.table.runtime.generated.GeneratedProjection;
 import org.apache.flink.table.runtime.generated.Projection;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
