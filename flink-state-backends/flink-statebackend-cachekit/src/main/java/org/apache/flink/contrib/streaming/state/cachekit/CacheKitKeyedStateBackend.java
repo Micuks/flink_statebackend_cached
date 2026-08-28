@@ -34,7 +34,6 @@ import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
@@ -604,15 +603,43 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
 
     static boolean isExactDistinctResidentWriteBackEligible(
             StateDescriptor<?, ?> descriptor, boolean enabled, int maxEntries) {
-        return enabled
+        TypeSerializer<?> valueSerializer =
+                descriptor instanceof MapStateDescriptor
+                        ? ((MapStateDescriptor<?, ?>) descriptor).getValueSerializer()
+                        : null;
+        boolean eligible =
+                enabled
                 && maxEntries > 0
                 && descriptor != null
                 && descriptor.getType() == StateDescriptor.Type.MAP
                 && descriptor instanceof MapStateDescriptor
                 && descriptor.getName().startsWith("distinctAcc_")
-                && ((MapStateDescriptor<?, ?>) descriptor).getValueSerializer()
-                        instanceof LongSerializer
+                && isExactDistinctResidentValueSerializerEligible(valueSerializer)
                 && !descriptor.getTtlConfig().isEnabled();
+        if (descriptor != null && descriptor.getName().startsWith("distinctAcc_")) {
+            LOG.info(
+                    "[CACHEKIT EXACT DISTINCT ELIGIBILITY] state={} enabled={} maxEntries={} "
+                            + "descriptorType={} valueSerializer={} immutable={} length={} ttl={} eligible={}",
+                    descriptor.getName(),
+                    enabled,
+                    maxEntries,
+                    descriptor.getType(),
+                    valueSerializer == null ? "null" : valueSerializer.getClass().getName(),
+                    valueSerializer != null && valueSerializer.isImmutableType(),
+                    valueSerializer == null ? Integer.MIN_VALUE : valueSerializer.getLength(),
+                    descriptor.getTtlConfig().isEnabled(),
+                    eligible);
+        }
+        return eligible;
+    }
+
+    static boolean isExactDistinctResidentValueSerializerEligible(TypeSerializer<?> serializer) {
+        // Planner-generated DISTINCT MapViews can carry ExternalSerializer(BIGINT), not the
+        // LongSerializer instance directly.  The accumulator value is nevertheless the same
+        // immutable fixed-width 64-bit word.  Match that serializer contract so plugin/user-code
+        // class-loader wrappers do not silently disable the resident path.  Variable-width and
+        // mutable values (including long[] for multi-aggregate DISTINCT) remain fail-closed.
+        return serializer != null && serializer.isImmutableType() && serializer.getLength() == Long.BYTES;
     }
 
     private static int normalizeExactDistinctResidentMaxEntries(int maxEntries) {

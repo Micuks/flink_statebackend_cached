@@ -16,9 +16,10 @@
 package org.apache.flink.contrib.streaming.state.cachekit;
 
 import org.apache.flink.api.common.ExecutionConfig;
-import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.StateTtlConfig;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
@@ -74,6 +75,17 @@ class CacheKitKeyedStateBackendLifecycleTest {
         assertTrue(
                 CacheKitKeyedStateBackend.isExactDistinctResidentWriteBackEligible(
                         equivalentNonSingletonSerializer, true, 128));
+        @SuppressWarnings("unchecked")
+        TypeSerializer<Long> externalLongSerializer = mock(TypeSerializer.class);
+        when(externalLongSerializer.isImmutableType()).thenReturn(true);
+        when(externalLongSerializer.getLength()).thenReturn(Long.BYTES);
+        when(externalLongSerializer.duplicate()).thenReturn(externalLongSerializer);
+        MapStateDescriptor<String, Long> plannerWrappedLong =
+                new MapStateDescriptor<>(
+                        "distinctAcc_planner_wrapped", StringSerializer.INSTANCE, externalLongSerializer);
+        assertTrue(
+                CacheKitKeyedStateBackend.isExactDistinctResidentWriteBackEligible(
+                        plannerWrappedLong, true, 128));
         assertEquals(3885, CacheKitKeyedStateBackend.exactDistinctResidentBackingEntries(777));
         assertEquals(
                 CachePolicyType.LRU,
