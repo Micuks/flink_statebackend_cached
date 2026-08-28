@@ -91,6 +91,9 @@ class NativeRequestPlaneConfigurationTest {
                         .nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabledForTesting());
         assertFalse(
                 disabledBackend
+                        .nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabledForTesting());
+        assertFalse(
+                disabledBackend
                         .nativeMapDistinctBatchPrefetchCrossColumnWaveEnabledForTesting());
         assertEquals(
                 8, disabledBackend.nativeMapDistinctBatchPrefetchAsyncMinUniqueKeysForTesting());
@@ -128,12 +131,19 @@ class NativeRequestPlaneConfigurationTest {
                 CacheKitStateBackendFactory
                         .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_COLUMN_WAVE_ENABLED,
                 true);
+        incomplete.set(
+                CacheKitStateBackendFactory
+                        .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_DIRECT_ARENA_RESULTS_ENABLED,
+                true);
         CacheKitStateBackend dualWorkerWithoutPrerequisites =
                 new CacheKitStateBackendFactory()
                         .createFromConfig(incomplete, getClass().getClassLoader());
         assertFalse(
                 dualWorkerWithoutPrerequisites
                         .nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabledForTesting());
+        assertFalse(
+                dualWorkerWithoutPrerequisites
+                        .nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabledForTesting());
         assertFalse(
                 dualWorkerWithoutPrerequisites
                         .nativeMapDistinctBatchPrefetchCrossColumnWaveEnabledForTesting());
@@ -170,6 +180,10 @@ class NativeRequestPlaneConfigurationTest {
                 true);
         enabled.set(
                 CacheKitStateBackendFactory
+                        .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_DIRECT_ARENA_RESULTS_ENABLED,
+                true);
+        enabled.set(
+                CacheKitStateBackendFactory
                         .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_COLUMN_WAVE_ENABLED,
                 true);
         CacheKitStateBackend enabledBackend =
@@ -182,6 +196,9 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(
                 enabledBackend
                         .nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabledForTesting());
+        assertTrue(
+                enabledBackend
+                        .nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabledForTesting());
         assertTrue(
                 enabledBackend.nativeMapDistinctBatchPrefetchCrossColumnWaveEnabledForTesting());
         assertEquals(

@@ -768,6 +768,20 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                             + "all-or-none wave path is eligible for this experiment.");
 
     public static final ConfigOption<Boolean>
+            NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_DIRECT_ARENA_RESULTS_ENABLED =
+                    ConfigOptions.key(
+                                    "state.backend.cachekit.native.map-distinct-batch-prefetch.cross-key-deferred-wave.direct-arena-results.enabled")
+                            .booleanType()
+                            .defaultValue(false)
+                            .withDescription(
+                                    "Keep one single-column deferred exact-key wave's RocksDB "
+                                            + "result vector in the bounded native request-plane value arena. "
+                                            + "The worker publishes only in-arena result lengths; mailbox "
+                                            + "consumption releases the lease after all tokens complete. Any "
+                                            + "lease, overflow, lifecycle, or protocol failure falls back to "
+                                            + "the established heap-result wave.");
+
+    public static final ConfigOption<Boolean>
             NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_COLUMN_WAVE_ENABLED =
                     ConfigOptions.key(
                                     "state.backend.cachekit.native.map-distinct-batch-prefetch.cross-column-wave.enabled")
@@ -960,6 +974,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 									NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_ENABLED)
 								&& config.get(
 										NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_DUAL_WORKER_ENABLED),
+					config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED)
+							&& config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED)
+							&& config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ENABLED)
+							&& config.get(DISTINCT_BATCH_OVERLAY_ENABLED)
+							&& config.get(
+									NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_ENABLED)
+							&& config.get(
+										NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_DEFERRED_WAVE_DIRECT_ARENA_RESULTS_ENABLED),
 					config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED)
 							&& config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED)
 							&& config.get(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ENABLED)

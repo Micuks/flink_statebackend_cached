@@ -138,6 +138,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private boolean nativeDistinctBatchWorkFirstEnabled;
     private boolean nativeDistinctBatchDeferredWaveEnabled;
     private boolean nativeDistinctBatchDeferredWaveDualWorkerEnabled;
+    private boolean nativeDistinctBatchDeferredWaveDirectArenaResultsEnabled;
     private boolean nativeDistinctBatchCrossColumnWaveEnabled;
     private boolean batchPrefetchActive;
     private K batchPrefetchOuterKey;
@@ -280,6 +281,22 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private final java.util.concurrent.atomic.AtomicLong deferredWaveFound =
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong deferredWaveMissing =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveDirectArenaAttempts =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveDirectArenaBatches =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveDirectArenaKeys =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveDirectArenaCompleted =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveDirectArenaLeaseMisses =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveDirectArenaOverflows =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveDirectArenaProtocolFailures =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong deferredWaveDirectArenaFallbacks =
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong deferredCohortWaveAttempts =
             new java.util.concurrent.atomic.AtomicLong();
@@ -746,10 +763,11 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 workFirstEnabled,
                 deferredWaveEnabled,
                 deferredWaveDualWorkerEnabled,
+                false,
                 false);
     }
 
-    /** Enables one cross-column-family MultiGet task for eligible DISTINCT state columns. */
+    /** Enables direct-arena result transport for single-column deferred waves. */
     public void enableNativeDistinctBatchPrefetch(
             boolean enabled,
             boolean directArenaEnabled,
@@ -757,6 +775,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             boolean workFirstEnabled,
             boolean deferredWaveEnabled,
             boolean deferredWaveDualWorkerEnabled,
+            boolean deferredWaveDirectArenaResultsEnabled,
             boolean crossColumnWaveEnabled) {
         this.nativeDistinctBatchPrefetchEnabled = enabled;
         this.nativeDistinctBatchDirectArenaEnabled = enabled && directArenaEnabled;
@@ -767,8 +786,31 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 enabled && directArenaEnabled && deferredWaveEnabled;
         this.nativeDistinctBatchDeferredWaveDualWorkerEnabled =
                 this.nativeDistinctBatchDeferredWaveEnabled && deferredWaveDualWorkerEnabled;
+        this.nativeDistinctBatchDeferredWaveDirectArenaResultsEnabled =
+                this.nativeDistinctBatchDeferredWaveEnabled
+                        && deferredWaveDirectArenaResultsEnabled;
         this.nativeDistinctBatchCrossColumnWaveEnabled =
                 this.nativeDistinctBatchDeferredWaveEnabled && crossColumnWaveEnabled;
+    }
+
+    /** Compatibility overload retaining the pre-Fix27 cross-column treatment signature. */
+    public void enableNativeDistinctBatchPrefetch(
+            boolean enabled,
+            boolean directArenaEnabled,
+            int asyncMinUniqueKeys,
+            boolean workFirstEnabled,
+            boolean deferredWaveEnabled,
+            boolean deferredWaveDualWorkerEnabled,
+            boolean crossColumnWaveEnabled) {
+        enableNativeDistinctBatchPrefetch(
+                enabled,
+                directArenaEnabled,
+                asyncMinUniqueKeys,
+                workFirstEnabled,
+                deferredWaveEnabled,
+                deferredWaveDualWorkerEnabled,
+                false,
+                crossColumnWaveEnabled);
     }
 
     @Override
@@ -1443,9 +1485,12 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     deferredWaveFallbackWindows.incrementAndGet();
                     return false;
                 }
+            NativeRequestPlaneCoordinator.BatchSlot directSlot =
+                    tryPrepareDeferredWaveDirectSlot(rocksDBKeys, totalKeys);
             DeferredWaveTask task =
                     new DeferredWaveTask(
                             Collections.unmodifiableList(rocksDBKeys),
+                            directSlot,
                             totalKeys,
                             waveTokens.size());
                 int offset = 0;
@@ -1476,6 +1521,44 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 return true;
         }
 
+        private NativeRequestPlaneCoordinator.BatchSlot tryPrepareDeferredWaveDirectSlot(
+                List<byte[]> rocksDBKeys, int totalKeys) {
+            if (!nativeDistinctBatchDeferredWaveDirectArenaResultsEnabled) {
+                return null;
+            }
+            deferredWaveDirectArenaAttempts.incrementAndGet();
+            if (nativeRequestPlaneCoordinator == null
+                    || !nativeRequestPlaneCoordinator.isActive()
+                    || rocksDBBatchMapReader == null
+                    || !rocksDBBatchMapReader.supportsDirectArenaMultiGet()
+                    || nativeStateId <= 0
+                    || totalKeys <= 0
+                    || totalKeys > RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH
+                    || totalKeys > rocksDBBatchMapReader.directArenaMultiGetMaxBatch()) {
+                deferredWaveDirectArenaFallbacks.incrementAndGet();
+                return null;
+            }
+            NativeRequestPlaneCoordinator.BatchSlot slot =
+                    nativeRequestPlaneCoordinator.tryAcquireMapDistinctAsyncReadSlot();
+            if (slot == null) {
+                deferredWaveDirectArenaLeaseMisses.incrementAndGet();
+                deferredWaveDirectArenaFallbacks.incrementAndGet();
+                return null;
+            }
+            try {
+                slot.prepareLatest(nativeStateId, nativeGeneration, rocksDBKeys);
+                slot.prepareContiguousDirectArenaMultiGet(
+                        totalKeys, RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
+                deferredWaveDirectArenaBatches.incrementAndGet();
+                deferredWaveDirectArenaKeys.addAndGet(totalKeys);
+                return slot;
+            } catch (Exception | LinkageError preparationFailure) {
+                slot.close();
+                deferredWaveDirectArenaFallbacks.incrementAndGet();
+                return null;
+            }
+        }
+
         @Override
         public List<?> awaitValues() throws Exception {
             if (consumed) {
@@ -1495,26 +1578,40 @@ public final class CachedInternalMapState<K, N, UK, UV>
             if (waveTask != null) {
                 DeferredWaveResult task = waveTask;
                 try {
-                    List<byte[]> rawValues = task.awaitRawValues();
-                    if (rawValues == null
+                    if (!task.awaitReady()
                             || waveOffset < 0
-                            || waveOffset + orderedKeys.size() > rawValues.size()) {
+                            || waveOffset + orderedKeys.size() > task.valueCount()) {
                     deferredSyncBatchPrefetchFallbacks.incrementAndGet();
                     return null;
                 }
                     ArrayList<UV> values = new ArrayList<>(orderedKeys.size());
                     int waveEnd = waveOffset + orderedKeys.size();
                     for (int index = waveOffset; index < waveEnd; index++) {
-                        byte[] rawValue = rawValues.get(index);
-                        if (rawValue == null) {
-                            values.add(null);
+                        if (task.usesDirectArena()) {
+                            int result = task.directResult(index);
+                            if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
+                                values.add(null);
+                            } else {
+                                DataInputView input = task.directValueInput(index);
+                                boolean isNull = input.readBoolean();
+                                values.add(
+                                        isNull
+                                                ? null
+                                                : userValueSerializer.deserialize(input));
+                            }
                         } else {
-                            batchPrefetchInput.setBuffer(rawValue);
-                            boolean isNull = batchPrefetchInput.readBoolean();
-                            values.add(
-                                    isNull
-                                            ? null
-                                            : userValueSerializer.deserialize(batchPrefetchInput));
+                            byte[] rawValue = task.rawValue(index);
+                            if (rawValue == null) {
+                                values.add(null);
+                            } else {
+                                batchPrefetchInput.setBuffer(rawValue);
+                                boolean isNull = batchPrefetchInput.readBoolean();
+                                values.add(
+                                        isNull
+                                                ? null
+                                                : userValueSerializer.deserialize(
+                                                        batchPrefetchInput));
+                            }
                         }
                     }
                 deferredSyncBatchPrefetchCompleted.incrementAndGet();
@@ -1685,7 +1782,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
 
         @Override
-        public List<byte[]> awaitRawValues() throws InterruptedException {
+        public boolean awaitReady() throws InterruptedException {
             deferredWaveAwaits.incrementAndGet();
             long awaitStarted = System.nanoTime();
             long observedCompleted = completedNanos;
@@ -1701,14 +1798,20 @@ public final class CachedInternalMapState<K, N, UK, UV>
             } finally {
                 deferredWaveWaitNanos.addAndGet(Math.max(0L, System.nanoTime() - awaitStarted));
             }
-            List<byte[]> completedValues = rawValues;
-            if (dropped
-                    || failure != null
-                    || completedValues == null
-                    || completedValues.size() != expectedValues) {
-                return null;
-            }
-            return completedValues;
+            return !dropped
+                    && failure == null
+                    && rawValues != null
+                    && rawValues.size() == expectedValues;
+        }
+
+        @Override
+        public int valueCount() {
+            return expectedValues;
+        }
+
+        @Override
+        public byte[] rawValue(int index) {
+            return rawValues.get(index);
         }
 
         @Override
@@ -1728,7 +1831,25 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     /** Common result lifetime for one state-column wave or one cross-column cohort wave. */
     private interface DeferredWaveResult extends PrefetchExecutor.DropAwareTask {
-        List<byte[]> awaitRawValues() throws InterruptedException;
+        boolean awaitReady() throws InterruptedException;
+
+        int valueCount();
+
+        default boolean usesDirectArena() {
+            return false;
+        }
+
+        default byte[] rawValue(int index) {
+            throw new UnsupportedOperationException("Deferred wave has no heap value vector");
+        }
+
+        default int directResult(int index) {
+            throw new UnsupportedOperationException("Deferred wave has no direct result arena");
+        }
+
+        default DataInputView directValueInput(int index) {
+            throw new UnsupportedOperationException("Deferred wave has no direct value arena");
+        }
 
         void releaseToken();
     }
@@ -1738,20 +1859,29 @@ public final class CachedInternalMapState<K, N, UK, UV>
             implements PrefetchExecutor.DeferredWaveEligibleTask, DeferredWaveResult {
 
         private final List<byte[]> rocksDBKeys;
+        private final NativeRequestPlaneCoordinator.BatchSlot directSlot;
         private final int expectedValues;
         private final java.util.concurrent.CountDownLatch completed =
                 new java.util.concurrent.CountDownLatch(1);
         private final java.util.concurrent.atomic.AtomicInteger state =
                 new java.util.concurrent.atomic.AtomicInteger();
         private final java.util.concurrent.atomic.AtomicInteger remainingTokens;
+        private final java.util.concurrent.atomic.AtomicBoolean directSlotReleased =
+                new java.util.concurrent.atomic.AtomicBoolean();
         private final long submittedNanos = System.nanoTime();
         private volatile List<byte[]> rawValues;
+        private volatile boolean directValuesReady;
         private volatile Throwable failure;
         private volatile boolean dropped;
         private volatile long completedNanos;
 
-        private DeferredWaveTask(List<byte[]> rocksDBKeys, int expectedValues, int tokenCount) {
+        private DeferredWaveTask(
+                List<byte[]> rocksDBKeys,
+                NativeRequestPlaneCoordinator.BatchSlot directSlot,
+                int expectedValues,
+                int tokenCount) {
             this.rocksDBKeys = rocksDBKeys;
+            this.directSlot = directSlot;
             this.expectedValues = expectedValues;
             this.remainingTokens = new java.util.concurrent.atomic.AtomicInteger(tokenCount);
         }
@@ -1770,24 +1900,43 @@ public final class CachedInternalMapState<K, N, UK, UV>
                         throw new IllegalStateException("MapState closed before deferred wave");
                     }
                     deferredWaveJniCalls.incrementAndGet();
-                    List<byte[]> completedValues =
-                            rocksDBBatchMapReader.getSerializedValuesByRocksDBKeys(
-                                    rocksDBKeys, 0, expectedValues);
-                    if (completedValues == null || completedValues.size() != expectedValues) {
-                        deferredWaveProtocolFailures.incrementAndGet();
-                        throw new IllegalStateException("Incomplete deferred wave result");
+                    if (directSlot == null) {
+                        List<byte[]> completedValues =
+                                rocksDBBatchMapReader.getSerializedValuesByRocksDBKeys(
+                                        rocksDBKeys, 0, expectedValues);
+                        if (completedValues == null || completedValues.size() != expectedValues) {
+                            deferredWaveProtocolFailures.incrementAndGet();
+                            throw new IllegalStateException("Incomplete deferred wave result");
+                        }
+                        rawValues = completedValues;
+                    } else {
+                        directValuesReady = executeDirectArenaRead();
+                        if (!directValuesReady) {
+                            throw new IllegalStateException(
+                                    "Incomplete direct-arena deferred wave result");
+                        }
                     }
-                    rawValues = completedValues;
                 } finally {
                     lifecycleLock.readLock().unlock();
                 }
                 int present = 0;
                 int missing = 0;
-                for (byte[] rawValue : rawValues) {
-                    if (rawValue == null) {
-                        missing++;
-                    } else {
-                        present++;
+                if (directSlot == null) {
+                    for (byte[] rawValue : rawValues) {
+                        if (rawValue == null) {
+                            missing++;
+                        } else {
+                            present++;
+                        }
+                    }
+                } else {
+                    for (int index = 0; index < expectedValues; index++) {
+                        if (directSlot.directMultiGetResult(index)
+                                == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
+                            missing++;
+                        } else {
+                            present++;
+                        }
                     }
                 }
                 deferredWaveFound.addAndGet(present);
@@ -1796,6 +1945,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
             } catch (Exception | LinkageError currentFailure) {
                 failure = currentFailure;
                 deferredWaveFailures.incrementAndGet();
+                if (directSlot != null) {
+                    deferredWaveDirectArenaFallbacks.incrementAndGet();
+                }
                 deferredWaveFallbackWindows.incrementAndGet();
             } finally {
                 deferredWaveServiceNanos.addAndGet(Math.max(0L, System.nanoTime() - startedNanos));
@@ -1803,11 +1955,54 @@ public final class CachedInternalMapState<K, N, UK, UV>
             }
         }
 
+        private boolean executeDirectArenaRead() throws Exception {
+            int presentCount =
+                    rocksDBBatchMapReader.getSerializedValuesByRocksDBKeyArena(
+                            directSlot.directMultiGetKeyArena(),
+                            directSlot.directMultiGetDescriptors(),
+                            expectedValues,
+                            directSlot.directMultiGetValueArena(),
+                            directSlot.directMultiGetValueStride());
+            int observedPresent = 0;
+            boolean overflow = false;
+            boolean invalidProtocol = presentCount < 0 || presentCount > expectedValues;
+            for (int index = 0; index < expectedValues && !invalidProtocol; index++) {
+                int result = directSlot.directMultiGetResult(index);
+                if (result >= 0 && result <= directSlot.directMultiGetValueStride()) {
+                    observedPresent++;
+                } else if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
+                    // Missing is an exact, valid result.
+                } else if (result == RocksDBBatchValueReader.DIRECT_ARENA_OVERFLOW) {
+                    observedPresent++;
+                    overflow = true;
+                } else {
+                    invalidProtocol = true;
+                }
+            }
+            if (observedPresent != presentCount) {
+                invalidProtocol = true;
+            }
+            if (invalidProtocol) {
+                deferredWaveDirectArenaProtocolFailures.incrementAndGet();
+                deferredWaveProtocolFailures.incrementAndGet();
+                return false;
+            }
+            if (overflow) {
+                deferredWaveDirectArenaOverflows.incrementAndGet();
+                return false;
+            }
+            deferredWaveDirectArenaCompleted.incrementAndGet();
+            return true;
+        }
+
         @Override
         public void onDrop() {
             if (state.compareAndSet(0, 1)) {
                 dropped = true;
                 deferredWaveDropped.incrementAndGet();
+                if (directSlot != null) {
+                    deferredWaveDirectArenaFallbacks.incrementAndGet();
+                }
                 deferredWaveFallbackWindows.incrementAndGet();
                 finish();
             }
@@ -1818,6 +2013,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
             state.set(2);
             if (remainingTokens.get() == 0) {
                 rawValues = null;
+                releaseDirectSlotOnce();
+            } else if (directSlot != null && !directValuesReady) {
+                releaseDirectSlotOnce();
             }
             completed.countDown();
             synchronized (asyncBatchPrefetchMonitor) {
@@ -1827,7 +2025,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
 
         @Override
-        public List<byte[]> awaitRawValues() throws InterruptedException {
+        public boolean awaitReady() throws InterruptedException {
             deferredWaveAwaits.incrementAndGet();
             long awaitStarted = System.nanoTime();
             long observedCompleted = completedNanos;
@@ -1843,14 +2041,36 @@ public final class CachedInternalMapState<K, N, UK, UV>
             } finally {
                 deferredWaveWaitNanos.addAndGet(Math.max(0L, System.nanoTime() - awaitStarted));
             }
-            List<byte[]> completedValues = rawValues;
-            if (dropped
-                    || failure != null
-                    || completedValues == null
-                    || completedValues.size() != expectedValues) {
-                return null;
-            }
-            return completedValues;
+            return !dropped
+                    && failure == null
+                    && (directSlot == null
+                            ? rawValues != null && rawValues.size() == expectedValues
+                            : directValuesReady);
+        }
+
+        @Override
+        public int valueCount() {
+            return expectedValues;
+        }
+
+        @Override
+        public boolean usesDirectArena() {
+            return directSlot != null;
+        }
+
+        @Override
+        public byte[] rawValue(int index) {
+            return rawValues.get(index);
+        }
+
+        @Override
+        public int directResult(int index) {
+            return directSlot.directMultiGetResult(index);
+        }
+
+        @Override
+        public DataInputView directValueInput(int index) {
+            return directSlot.directMultiGetValueInput(index);
         }
 
         @Override
@@ -1862,7 +2082,14 @@ public final class CachedInternalMapState<K, N, UK, UV>
             if (remaining == 0) {
                 if (!PrefetchExecutor.cancelIfQueued(this) && state.get() == 2) {
                     rawValues = null;
+                    releaseDirectSlotOnce();
                 }
+            }
+        }
+
+        private void releaseDirectSlotOnce() {
+            if (directSlot != null && directSlotReleased.compareAndSet(false, true)) {
+                directSlot.close();
             }
         }
     }
@@ -3487,7 +3714,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
                             ? 0L
                             : nativeRequestPlaneCoordinator.mapDistinctAsyncReadLeaseMisses());
             LOG.info(
-                    "[CACHEKIT NATIVE MAP DISTINCT WAVE] enabled={} dualWorker={} crossColumn={} "
+                    "[CACHEKIT NATIVE MAP DISTINCT WAVE] enabled={} dualWorker={} directArenaResults={} crossColumn={} "
                             + "executorMaxActive={} attempts={} submitted={} "
                             + "windows={} dropped={} groups={} keys={} jniCalls={} found={} "
                             + "missing={} completedGroups={} cancelledGroups={} awaits={} "
@@ -3496,9 +3723,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
                             + "fallbackWindows={} failures={} ownerRejects={} overflows={} "
                             + "protocolFailures={} cohortAttempts={} cohortSubmitted={} "
                             + "cohortColumns={} cohortGroups={} cohortKeys={} cohortJniCalls={} "
-                            + "cohortRejects={}",
+                            + "cohortRejects={} directArenaAttempts={} directArenaBatches={} "
+                            + "directArenaKeys={} directArenaCompleted={} directArenaLeaseMisses={} "
+                            + "directArenaOverflows={} directArenaProtocolFailures={} "
+                            + "directArenaFallbacks={}",
                     nativeDistinctBatchDeferredWaveEnabled,
                     nativeDistinctBatchDeferredWaveDualWorkerEnabled,
+                    nativeDistinctBatchDeferredWaveDirectArenaResultsEnabled,
                     nativeDistinctBatchCrossColumnWaveEnabled,
                     PrefetchExecutor.maxActiveDeferredWaveExecutions(),
                     deferredWaveAttempts.get(),
@@ -3529,7 +3760,15 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     deferredCohortWaveGroups.get(),
                     deferredCohortWaveKeys.get(),
                     deferredCohortWaveJniCalls.get(),
-                    deferredCohortWaveRejects.get());
+                    deferredCohortWaveRejects.get(),
+                    deferredWaveDirectArenaAttempts.get(),
+                    deferredWaveDirectArenaBatches.get(),
+                    deferredWaveDirectArenaKeys.get(),
+                    deferredWaveDirectArenaCompleted.get(),
+                    deferredWaveDirectArenaLeaseMisses.get(),
+                    deferredWaveDirectArenaOverflows.get(),
+                    deferredWaveDirectArenaProtocolFailures.get(),
+                    deferredWaveDirectArenaFallbacks.get());
         }
     }
 

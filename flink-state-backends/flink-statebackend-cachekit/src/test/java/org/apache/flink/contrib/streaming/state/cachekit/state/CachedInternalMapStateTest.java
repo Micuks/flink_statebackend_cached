@@ -888,6 +888,112 @@ class CachedInternalMapStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testDeferredWaveDirectArenaPublishesSlicesAndReleasesSlotAfterLastToken()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer
+                                        .INSTANCE,
+                                IntSerializer.INSTANCE));
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        when(reader.directArenaMultiGetMaxBatch())
+                .thenReturn(RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
+        when(reader.serializeRocksDBKeysByUserKeys(Arrays.asList("u1", "u2")))
+                .thenReturn(Arrays.asList(new byte[] {1}, new byte[] {2}));
+        when(reader.serializeRocksDBKeysByUserKeys(Arrays.asList("u3", "u4")))
+                .thenReturn(Arrays.asList(new byte[] {3}, new byte[] {4}));
+        byte[] first = serializedMapValue(11);
+        byte[] second = serializedMapValue(22);
+        doAnswer(
+                        invocation -> {
+                            ByteBuffer descriptors =
+                                    ((ByteBuffer) invocation.getArgument(1))
+                                            .duplicate()
+                                            .order(ByteOrder.nativeOrder());
+                            ByteBuffer values =
+                                    ((ByteBuffer) invocation.getArgument(3)).duplicate();
+                            int stride = invocation.getArgument(4);
+                            values.position(0);
+                            values.put(first);
+                            values.position(2 * stride);
+                            values.put(second);
+                            for (int index = 0; index < 4; index++) {
+                                int result =
+                                        index == 0
+                                                ? first.length
+                                                : index == 2
+                                                        ? second.length
+                                                        : RocksDBBatchValueReader
+                                                                .DIRECT_ARENA_NOT_FOUND;
+                                descriptors.putInt(
+                                        index
+                                                        * RocksDBBatchValueReader
+                                                                .DIRECT_ARENA_DESCRIPTOR_BYTES
+                                                + RocksDBBatchValueReader
+                                                        .DIRECT_ARENA_RESULT_OFFSET,
+                                        result);
+                            }
+                            return 2;
+                        })
+                .when(reader)
+                .getSerializedValuesByRocksDBKeyArena(
+                        any(ByteBuffer.class),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.eq(4),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.anyInt());
+
+        NativeRequestPlane plane = mock(NativeRequestPlane.class);
+        when(plane.selectedKernel()).thenReturn("test");
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(), plane);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createDeferredWaveState(delegate, currentKey, coordinator);
+        state.enableNativeDistinctBatchPrefetch(true, true, 8, false, true, true, true, false);
+
+        BatchPrefetchableMapState.PreparedValues firstToken =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+        currentKey.set("k2");
+        BatchPrefetchableMapState.PreparedValues secondToken =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u3", "u4"));
+
+        assertTrue(firstToken.executeWave(Arrays.asList(firstToken, secondToken)));
+        currentKey.set("k1");
+        assertEquals(Arrays.asList(11, null), firstToken.awaitValues());
+        assertEquals(1, coordinator.mapDistinctAsyncReadLeases());
+        currentKey.set("k2");
+        assertEquals(Arrays.asList(22, null), secondToken.awaitValues());
+
+        verify(reader, times(1))
+                .getSerializedValuesByRocksDBKeyArena(
+                        any(ByteBuffer.class),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.eq(4),
+                        any(ByteBuffer.class),
+                        org.mockito.ArgumentMatchers.anyInt());
+        verify(reader, times(0))
+                .getSerializedValuesByRocksDBKeys(
+                        any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.anyInt());
+        NativeRequestPlaneCoordinator.BatchSlot returned =
+                coordinator.tryAcquireMapDistinctAsyncReadSlot();
+        assertNotNull(returned);
+        returned.close();
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testDeferredWaveReadOverlapsMailboxAndNeverRunsOnCaller() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
         AtomicReference<String> readerThread = new AtomicReference<>();

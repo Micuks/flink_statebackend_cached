@@ -115,6 +115,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
     private final boolean nativeMapDistinctBatchPrefetchWorkFirstEnabled;
     private final boolean nativeMapDistinctBatchPrefetchDeferredWaveEnabled;
     private final boolean nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabled;
+    private final boolean nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabled;
     private final boolean nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled;
     private final int nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys;
     private final int nativeMapDistinctBatchPrefetchLookaheadGroups;
@@ -289,6 +290,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 false,
                 false,
                 false,
+                false,
                 8,
                 1);
     }
@@ -370,6 +372,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 false,
                 false,
                 false,
+                false,
                 8,
                 1);
     }
@@ -416,6 +419,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
             boolean nativeMapDistinctBatchPrefetchWorkFirstEnabled,
             boolean nativeMapDistinctBatchPrefetchDeferredWaveEnabled,
             boolean nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabled,
+            boolean nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabled,
             boolean nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled,
             int nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys,
             int nativeMapDistinctBatchPrefetchLookaheadGroups) {
@@ -466,6 +470,8 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 nativeMapDistinctBatchPrefetchDeferredWaveEnabled;
         this.nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabled =
                 nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabled;
+        this.nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabled =
+                nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabled;
         this.nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled =
                 nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled;
         this.nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys =
@@ -714,6 +720,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                     nativeMapDistinctBatchPrefetchWorkFirstEnabled,
                     nativeMapDistinctBatchPrefetchDeferredWaveEnabled,
                     nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabled,
+                    nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabled,
                     nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
@@ -922,6 +929,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                     nativeMapDistinctBatchPrefetchWorkFirstEnabled,
                     nativeMapDistinctBatchPrefetchDeferredWaveEnabled,
                     nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabled,
+                    nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabled,
                     nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
