@@ -2349,6 +2349,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 DeferredWaveResult task = waveTask;
                 if (task != null) {
                     releaseWaveToken(task);
+                    deferredWaveCompletedGroups.incrementAndGet();
                 }
                 deferredSyncBatchPrefetchCompleted.incrementAndGet();
                 return new ArrayList<>(residentValues);

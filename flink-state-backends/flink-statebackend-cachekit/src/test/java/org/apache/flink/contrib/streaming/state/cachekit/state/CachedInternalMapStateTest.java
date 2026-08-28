@@ -3012,6 +3012,8 @@ class CachedInternalMapStateTest {
         currentKey.set("k2");
         assertEquals(Arrays.asList(22, 202), mixed.awaitValues());
         verify(reader).getSerializedValuesByRocksDBKeys(missKey, 0, 1);
+        assertEquals(2, state.getDeferredWaveGroupsForTesting());
+        assertEquals(2, state.getDeferredWaveCompletedGroupsForTesting());
         state.close();
     }
 
