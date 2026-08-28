@@ -45,6 +45,10 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
     private static final String DISTINCT_STATE_PREFIX = "distinctAcc_";
     private static final String DISTINCT_BATCH_OVERLAY_KEY =
             "state.backend.cachekit.local-preagg.distinct-overlay.enabled";
+    private static final String DISTINCT_BATCH_FLAT_OVERLAY_KEY =
+            "state.backend.cachekit.local-preagg.distinct-overlay.flat.enabled";
+    private static final String DISTINCT_BATCH_FLAT_OVERLAY_MAX_ENTRIES_KEY =
+            "state.backend.cachekit.local-preagg.distinct-overlay.flat.max-entries";
     private static final String NATIVE_MAP_DISTINCT_BATCH_PREFETCH_KEY =
             "state.backend.cachekit.native.map-distinct-batch-prefetch.enabled";
     private static final String NATIVE_MAP_DISTINCT_BATCH_PREFETCH_MIN_UNIQUE_KEYS_KEY =
@@ -53,6 +57,8 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
     private final RuntimeContext ctx;
     private final StateTtlConfig stateTtlConfig;
     private final boolean distinctBatchOverlayEnabled;
+    private final boolean distinctBatchFlatOverlayEnabled;
+    private final int distinctBatchFlatOverlayMaxEntries;
     private final boolean distinctBatchPrefetchEnabled;
     private final int distinctBatchPrefetchMinUniqueKeys;
     private final List<DistinctBatchStateMapView<?, ?, ?>> distinctBatchViews = new ArrayList<>();
@@ -75,7 +81,12 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
                 Math.max(
                         2,
                         configuration.getInteger(
-                                NATIVE_MAP_DISTINCT_BATCH_PREFETCH_MIN_UNIQUE_KEYS_KEY, 2)));
+                                NATIVE_MAP_DISTINCT_BATCH_PREFETCH_MIN_UNIQUE_KEYS_KEY, 2)),
+                configuration.getBoolean(DISTINCT_BATCH_FLAT_OVERLAY_KEY, false),
+                Math.max(
+                        16,
+                        configuration.getInteger(
+                                DISTINCT_BATCH_FLAT_OVERLAY_MAX_ENTRIES_KEY, 1024)));
     }
 
     static boolean isDistinctBatchEnabled(Configuration configuration) {
@@ -87,7 +98,7 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
             RuntimeContext ctx,
             StateTtlConfig stateTtlConfig,
             boolean distinctBatchOverlayEnabled) {
-        this(ctx, stateTtlConfig, distinctBatchOverlayEnabled, false, 2);
+        this(ctx, stateTtlConfig, distinctBatchOverlayEnabled, false, 2, false, 1024);
     }
 
     PerKeyStateDataViewStore(
@@ -100,7 +111,9 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
                 stateTtlConfig,
                 distinctBatchOverlayEnabled,
                 false,
-                distinctBatchPrefetchMinUniqueKeys);
+                distinctBatchPrefetchMinUniqueKeys,
+                false,
+                1024);
     }
 
     PerKeyStateDataViewStore(
@@ -109,6 +122,24 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
             boolean distinctBatchOverlayEnabled,
             boolean distinctBatchPrefetchEnabled,
             int distinctBatchPrefetchMinUniqueKeys) {
+        this(
+                ctx,
+                stateTtlConfig,
+                distinctBatchOverlayEnabled,
+                distinctBatchPrefetchEnabled,
+                distinctBatchPrefetchMinUniqueKeys,
+                false,
+                1024);
+    }
+
+    PerKeyStateDataViewStore(
+            RuntimeContext ctx,
+            StateTtlConfig stateTtlConfig,
+            boolean distinctBatchOverlayEnabled,
+            boolean distinctBatchPrefetchEnabled,
+            int distinctBatchPrefetchMinUniqueKeys,
+            boolean distinctBatchFlatOverlayEnabled,
+            int distinctBatchFlatOverlayMaxEntries) {
         this.ctx = ctx;
         this.stateTtlConfig = stateTtlConfig;
         // Batching across TTL reads would change access-time refresh semantics. Keep the first
@@ -118,6 +149,9 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
         this.distinctBatchPrefetchEnabled =
                 distinctBatchPrefetchEnabled && this.distinctBatchOverlayEnabled;
         this.distinctBatchPrefetchMinUniqueKeys = Math.max(2, distinctBatchPrefetchMinUniqueKeys);
+        this.distinctBatchFlatOverlayEnabled =
+                distinctBatchFlatOverlayEnabled && this.distinctBatchOverlayEnabled;
+        this.distinctBatchFlatOverlayMaxEntries = Math.max(16, distinctBatchFlatOverlayMaxEntries);
     }
 
     @Override
@@ -155,7 +189,9 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
                         keySerializer,
                         valueSerializer,
                         distinctBatchPrefetchEnabled,
-                        distinctBatchPrefetchMinUniqueKeys);
+                        distinctBatchPrefetchMinUniqueKeys,
+                        distinctBatchFlatOverlayEnabled,
+                        distinctBatchFlatOverlayMaxEntries);
         distinctBatchViews.add(batchingView);
         return batchingView;
     }
@@ -229,6 +265,16 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
         long prefetchSize4To7 = 0;
         long prefetchSize8To15 = 0;
         long prefetchSize16Plus = 0;
+        long flatOverlayBatches = 0;
+        long flatOverlayLookups = 0;
+        long flatOverlayHits = 0;
+        long flatOverlayInsertions = 0;
+        long flatOverlayResizes = 0;
+        long flatOverlayCapacityFallbacks = 0;
+        long flatOverlayFallbackBatches = 0;
+        long flatOverlayCommittedWrites = 0;
+        long flatOverlayCommittedRemoves = 0;
+        long flatOverlayPeakEntries = 0;
         for (DistinctBatchStateMapView<?, ?, ?> view : distinctBatchViews) {
             logicalGets += view.logicalGets();
             delegateGets += view.delegateGets();
@@ -249,6 +295,17 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
             prefetchSize4To7 += view.prefetchSize4To7();
             prefetchSize8To15 += view.prefetchSize8To15();
             prefetchSize16Plus += view.prefetchSize16Plus();
+            flatOverlayBatches += view.flatOverlayBatches();
+            flatOverlayLookups += view.flatOverlayLookups();
+            flatOverlayHits += view.flatOverlayHits();
+            flatOverlayInsertions += view.flatOverlayInsertions();
+            flatOverlayResizes += view.flatOverlayResizes();
+            flatOverlayCapacityFallbacks += view.flatOverlayCapacityFallbacks();
+            flatOverlayFallbackBatches += view.flatOverlayFallbackBatches();
+            flatOverlayCommittedWrites += view.flatOverlayCommittedWrites();
+            flatOverlayCommittedRemoves += view.flatOverlayCommittedRemoves();
+            flatOverlayPeakEntries =
+                    Math.max(flatOverlayPeakEntries, view.flatOverlayPeakEntries());
         }
         return "views="
                 + distinctBatchViews.size()
@@ -289,7 +346,27 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
                 + " prefetchSize8To15="
                 + prefetchSize8To15
                 + " prefetchSize16Plus="
-                + prefetchSize16Plus;
+                + prefetchSize16Plus
+                + " flatOverlayBatches="
+                + flatOverlayBatches
+                + " flatOverlayLookups="
+                + flatOverlayLookups
+                + " flatOverlayHits="
+                + flatOverlayHits
+                + " flatOverlayInsertions="
+                + flatOverlayInsertions
+                + " flatOverlayResizes="
+                + flatOverlayResizes
+                + " flatOverlayCapacityFallbacks="
+                + flatOverlayCapacityFallbacks
+                + " flatOverlayFallbackBatches="
+                + flatOverlayFallbackBatches
+                + " flatOverlayCommittedWrites="
+                + flatOverlayCommittedWrites
+                + " flatOverlayCommittedRemoves="
+                + flatOverlayCommittedRemoves
+                + " flatOverlayPeakEntries="
+                + flatOverlayPeakEntries;
     }
 
     @Override

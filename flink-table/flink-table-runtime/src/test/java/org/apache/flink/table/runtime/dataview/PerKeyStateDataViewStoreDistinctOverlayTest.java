@@ -50,6 +50,11 @@ class PerKeyStateDataViewStoreDistinctOverlayTest {
         configuration.setBoolean(
                 "state.backend.cachekit.local-preagg.distinct-overlay.enabled", true);
         assertTrue(PerKeyStateDataViewStore.isDistinctBatchEnabled(configuration));
+
+        configuration = new Configuration();
+        configuration.setBoolean(
+                "state.backend.cachekit.local-preagg.distinct-overlay.flat.enabled", true);
+        assertFalse(PerKeyStateDataViewStore.isDistinctBatchEnabled(configuration));
     }
 
     @Test
@@ -107,6 +112,28 @@ class PerKeyStateDataViewStoreDistinctOverlayTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void flatFeatureIsWiredIntoConstructedDistinctView() throws Exception {
+        RuntimeContext context = mock(RuntimeContext.class);
+        when(context.getMapState(any())).thenReturn(mock(MapState.class));
+        PerKeyStateDataViewStore store =
+                new PerKeyStateDataViewStore(
+                        context, StateTtlConfig.DISABLED, true, false, 2, true, 64);
+
+        StateMapView<?, String, Long> stateView =
+                store.getStateMapView(
+                        "distinctAcc_0", false, StringSerializer.INSTANCE, LongSerializer.INSTANCE);
+        DistinctBatchStateMapView<?, String, Long> distinctView =
+                (DistinctBatchStateMapView<?, String, Long>) stateView;
+
+        assertTrue(store.beginDistinctBatch());
+        distinctView.put("key", 1L);
+        store.commitDistinctBatch();
+        assertTrue(distinctView.flatOverlayBatches() > 0);
+        assertTrue(distinctView.flatOverlayLookups() > 0);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void failsClosedForTtlState() {
         RuntimeContext context = mock(RuntimeContext.class);
         when(context.getMapState(any())).thenReturn(mock(MapState.class));
@@ -114,7 +141,8 @@ class PerKeyStateDataViewStoreDistinctOverlayTest {
                 StateTtlConfig.newBuilder(Time.seconds(1))
                         .setUpdateType(StateTtlConfig.UpdateType.OnReadAndWrite)
                         .build();
-        PerKeyStateDataViewStore store = new PerKeyStateDataViewStore(context, ttlConfig, true);
+        PerKeyStateDataViewStore store =
+                new PerKeyStateDataViewStore(context, ttlConfig, true, false, 2, true, 64);
 
         store.getStateMapView(
                 "distinctAcc_0", false, StringSerializer.INSTANCE, LongSerializer.INSTANCE);

@@ -662,6 +662,24 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "LocalPreagg outer-key batch. Disabled for TTL state; final values "
                                                                         + "are committed through MapState.putAll before output.");
 
+    public static final ConfigOption<Boolean> DISTINCT_BATCH_FLAT_OVERLAY_ENABLED =
+            ConfigOptions.key("state.backend.cachekit.local-preagg.distinct-overlay.flat.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Store one batch of exact-DISTINCT keys and values in a reusable flat "
+                                    + "open-addressed table and expose a transient direct commit view. "
+                                    + "Capacity overflow falls back to the legacy HashMap overlay.");
+
+    public static final ConfigOption<Integer> DISTINCT_BATCH_FLAT_OVERLAY_MAX_ENTRIES =
+            ConfigOptions.key(
+                            "state.backend.cachekit.local-preagg.distinct-overlay.flat.max-entries")
+                    .intType()
+                    .defaultValue(1024)
+                    .withDescription(
+                            "Maximum unique keys retained by one flat exact-DISTINCT batch before "
+                                    + "transactional fallback to the legacy overlay.");
+
     public static final ConfigOption<Boolean> NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED =
             ConfigOptions.key("state.backend.cachekit.native.map-distinct-batch-prefetch.enabled")
                     .booleanType()

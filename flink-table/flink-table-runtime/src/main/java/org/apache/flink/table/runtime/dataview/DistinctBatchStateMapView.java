@@ -21,6 +21,8 @@ package org.apache.flink.table.runtime.dataview;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 
+import java.util.AbstractMap;
+import java.util.AbstractSet;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -29,6 +31,9 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  * A batch-scoped read-your-writes overlay for a DISTINCT aggregate's {@link StateMapView}.
@@ -55,7 +60,9 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     private final boolean copyValues;
     private final boolean prefetchEnabled;
     private final int minPrefetchUniqueKeys;
-    private final HashMap<EK, BufferedValue<EK, EV>> overlay = new HashMap<>();
+    private final boolean flatOverlayEnabled;
+    private HashMap<EK, BufferedValue<EK, EV>> overlay = new HashMap<>();
+    private final FlatOverlay<EK, EV> flatOverlay;
     private final ArrayList<EK> pendingPrefetchKeys = new ArrayList<>();
     private final HashSet<EK> pendingPrefetchKeySet = new HashSet<>();
     private final PreparedPrefetch<EK, EV> noOpPreparedPrefetch;
@@ -83,6 +90,17 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     private long prefetchSize4To7;
     private long prefetchSize8To15;
     private long prefetchSize16Plus;
+    private long flatOverlayBatches;
+    private long flatOverlayLookups;
+    private long flatOverlayHits;
+    private long flatOverlayInsertions;
+    private long flatOverlayResizes;
+    private long flatOverlayCapacityFallbacks;
+    private long flatOverlayFallbackBatches;
+    private long flatOverlayCommittedWrites;
+    private long flatOverlayCommittedRemoves;
+    private long flatOverlayPeakEntries;
+    private boolean legacyFallbackActive;
 
     DistinctBatchStateMapView(
             StateMapView<N, EK, EV> delegate,
@@ -105,6 +123,24 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             TypeSerializer<EV> valueSerializer,
             boolean prefetchEnabled,
             int minPrefetchUniqueKeys) {
+        this(
+                delegate,
+                keySerializer,
+                valueSerializer,
+                prefetchEnabled,
+                minPrefetchUniqueKeys,
+                false,
+                1024);
+    }
+
+    DistinctBatchStateMapView(
+            StateMapView<N, EK, EV> delegate,
+            TypeSerializer<EK> keySerializer,
+            TypeSerializer<EV> valueSerializer,
+            boolean prefetchEnabled,
+            int minPrefetchUniqueKeys,
+            boolean flatOverlayEnabled,
+            int flatOverlayMaxEntries) {
         this.delegate = delegate;
         this.keySerializer = keySerializer;
         this.valueSerializer = valueSerializer;
@@ -112,15 +148,21 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         this.copyValues = !valueSerializer.isImmutableType();
         this.prefetchEnabled = prefetchEnabled;
         this.minPrefetchUniqueKeys = Math.max(2, minPrefetchUniqueKeys);
+        this.flatOverlayEnabled = flatOverlayEnabled;
+        this.flatOverlay =
+                flatOverlayEnabled ? new FlatOverlay<>(Math.max(16, flatOverlayMaxEntries)) : null;
         this.noOpPreparedPrefetch =
                 new PreparedPrefetch<>(this, Collections.emptyList(), null, true);
     }
 
     void beginBatch() {
-        if (active || (!overlay.isEmpty() && !directValuesPrimed)) {
+        if (active || (!overlayIsEmpty() && !directValuesPrimed)) {
             throw new IllegalStateException("DISTINCT batch overlay is already active");
         }
         active = true;
+        if (useFlatOverlay()) {
+            flatOverlayBatches++;
+        }
     }
 
     void commitBatch() throws Exception {
@@ -131,7 +173,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             flushOverlay(false);
             committedBatches++;
         } finally {
-            overlay.clear();
+            resetOverlayScope();
             active = false;
             directValuesPrimed = false;
             endPrefetchScope();
@@ -142,7 +184,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         if (active) {
             abortedBatches++;
         }
-        overlay.clear();
+        resetOverlayScope();
         active = false;
         directValuesPrimed = false;
         endPrefetchScope();
@@ -213,15 +255,20 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             if (delegate.supportsDirectPrefetchedValues()) {
                 List<EV> values = delegate.prefetchUniqueKeyValues(pendingPrefetchKeys);
                 if (values == null || values.size() != size) {
-                    overlay.clear();
+                    resetOverlayScope();
                     directValuesPrimed = false;
                     return false;
                 }
-                for (int i = 0; i < size; i++) {
-                    EK stableKey = pendingPrefetchKeys.get(i);
-                    EV stableValue = copyValue(values.get(i));
-                    overlay.put(
-                            stableKey, new BufferedValue<>(stableKey, stableValue, false, false));
+                try {
+                    for (int i = 0; i < size; i++) {
+                        EK stableKey = pendingPrefetchKeys.get(i);
+                        EV stableValue = copyValue(values.get(i));
+                        putOverlayValue(stableKey, stableValue, false, false);
+                    }
+                } catch (RuntimeException | Error failure) {
+                    resetOverlayScope();
+                    directValuesPrimed = false;
+                    throw failure;
                 }
                 directValuesPrimed = true;
                 directOverlayValues += size;
@@ -282,14 +329,20 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         List<EK> keys = (List<EK>) token.keys;
         List<EV> values = delegate.awaitPreparedUniqueKeyValues(token.backendPrepared);
         if (values == null || values.size() != keys.size()) {
-            overlay.clear();
+            resetOverlayScope();
             directValuesPrimed = false;
             return false;
         }
-        for (int i = 0; i < keys.size(); i++) {
-            EK stableKey = keys.get(i);
-            EV stableValue = copyValue(values.get(i));
-            overlay.put(stableKey, new BufferedValue<>(stableKey, stableValue, false, false));
+        try {
+            for (int i = 0; i < keys.size(); i++) {
+                EK stableKey = keys.get(i);
+                EV stableValue = copyValue(values.get(i));
+                putOverlayValue(stableKey, stableValue, false, false);
+            }
+        } catch (RuntimeException | Error failure) {
+            resetOverlayScope();
+            directValuesPrimed = false;
+            throw failure;
         }
         directValuesPrimed = true;
         directOverlayValues += keys.size();
@@ -325,7 +378,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
                 delegate.abortPreparedUniqueKeyValues(token.backendPrepared);
             }
             if (!active && directValuesPrimed) {
-                overlay.clear();
+                resetOverlayScope();
                 directValuesPrimed = false;
             }
         }
@@ -337,7 +390,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         pendingPrefetchKeys.clear();
         pendingPrefetchKeySet.clear();
         if (!active && directValuesPrimed) {
-            overlay.clear();
+            resetOverlayScope();
             directValuesPrimed = false;
         }
         endPrefetchScope();
@@ -378,6 +431,21 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             return delegate.get(key);
         }
         logicalGets++;
+        if (useFlatOverlay()) {
+            flatOverlayLookups++;
+            int slot = flatOverlay.find(key);
+            if (slot >= 0) {
+                overlayHits++;
+                flatOverlayHits++;
+                return flatOverlay.isRemoved(slot) ? null : flatOverlay.valueAt(slot);
+            }
+            EV value = delegate.get(key);
+            delegateGets++;
+            EK stableKey = copyKey(key);
+            EV stableValue = copyValue(value);
+            putOverlayValue(stableKey, stableValue, false, false);
+            return stableValue;
+        }
         BufferedValue<EK, EV> buffered = overlay.get(key);
         if (buffered != null) {
             overlayHits++;
@@ -398,6 +466,19 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             return;
         }
         logicalPuts++;
+        if (useFlatOverlay()) {
+            flatOverlayLookups++;
+            int slot = flatOverlay.find(key);
+            EV stableValue = copyValue(value);
+            if (slot < 0) {
+                EK stableKey = copyKey(key);
+                putOverlayValue(stableKey, stableValue, true, false);
+            } else {
+                flatOverlayHits++;
+                flatOverlay.update(slot, stableValue, true, false);
+            }
+            return;
+        }
         BufferedValue<EK, EV> buffered = overlay.get(key);
         if (buffered == null) {
             EK stableKey = copyKey(key);
@@ -427,6 +508,18 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             return;
         }
         logicalRemoves++;
+        if (useFlatOverlay()) {
+            flatOverlayLookups++;
+            int slot = flatOverlay.find(key);
+            if (slot < 0) {
+                EK stableKey = copyKey(key);
+                putOverlayValue(stableKey, null, true, true);
+            } else {
+                flatOverlayHits++;
+                flatOverlay.update(slot, null, true, true);
+            }
+            return;
+        }
         BufferedValue<EK, EV> buffered = overlay.get(key);
         if (buffered == null) {
             EK stableKey = copyKey(key);
@@ -442,6 +535,16 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     public boolean contains(EK key) throws Exception {
         if (!active || key == null) {
             return delegate.contains(key);
+        }
+        if (useFlatOverlay()) {
+            flatOverlayLookups++;
+            int slot = flatOverlay.find(key);
+            if (slot >= 0) {
+                overlayHits++;
+                flatOverlayHits++;
+                return !flatOverlay.isRemoved(slot) && flatOverlay.valueAt(slot) != null;
+            }
+            return get(key) != null;
         }
         BufferedValue<EK, EV> buffered = overlay.get(key);
         if (buffered != null) {
@@ -483,7 +586,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
 
     @Override
     public void clear() {
-        overlay.clear();
+        resetOverlayScope();
         directValuesPrimed = false;
         abortPrefetchKeyCollection();
         endPrefetchScope();
@@ -492,12 +595,12 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
 
     @Override
     public void setCurrentNamespace(N namespace) {
-        if (active && !overlay.isEmpty()) {
+        if (active && !overlayIsEmpty()) {
             throw new IllegalStateException(
                     "Cannot change namespace with an uncommitted DISTINCT batch overlay");
         }
         if (!active && directValuesPrimed) {
-            overlay.clear();
+            resetOverlayScope();
             directValuesPrimed = false;
         }
         endPrefetchScope();
@@ -528,13 +631,36 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     }
 
     private void flushForCompleteView() throws Exception {
-        if (active && !overlay.isEmpty()) {
+        if (active && !overlayIsEmpty()) {
             flushOverlay(true);
         }
     }
 
     private void flushOverlay(boolean forced) throws Exception {
-        if (overlay.isEmpty()) {
+        if (overlayIsEmpty()) {
+            return;
+        }
+        if (useFlatOverlay()) {
+            int writes = flatOverlay.writeCount();
+            if (writes > 0) {
+                delegate.putAllKnownNonNullKeys(flatOverlay.writesView());
+                committedEntries += writes;
+                flatOverlayCommittedWrites += writes;
+            }
+            int removes = 0;
+            for (int i = 0; i < flatOverlay.touchedCount(); i++) {
+                int slot = flatOverlay.touchedSlotAt(i);
+                if (flatOverlay.isDirty(slot) && flatOverlay.isRemoved(slot)) {
+                    delegate.remove(flatOverlay.keyAt(slot));
+                    committedEntries++;
+                    removes++;
+                }
+            }
+            flatOverlayCommittedRemoves += removes;
+            if (forced) {
+                forcedFlushes++;
+            }
+            flatOverlay.clear();
             return;
         }
         LinkedHashMap<EK, EV> writes = new LinkedHashMap<>();
@@ -565,6 +691,62 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
 
     private EV copyValue(EV value) {
         return value != null && copyValues ? valueSerializer.copy(value) : value;
+    }
+
+    private boolean useFlatOverlay() {
+        return flatOverlayEnabled && !legacyFallbackActive;
+    }
+
+    private boolean overlayIsEmpty() {
+        return useFlatOverlay() ? flatOverlay.isEmpty() : overlay.isEmpty();
+    }
+
+    private void putOverlayValue(EK stableKey, EV stableValue, boolean dirty, boolean removed) {
+        if (!useFlatOverlay()) {
+            overlay.put(stableKey, new BufferedValue<>(stableKey, stableValue, dirty, removed));
+            return;
+        }
+        int previousSize = flatOverlay.size();
+        long previousResizes = flatOverlay.resizeCount();
+        if (flatOverlay.put(stableKey, stableValue, dirty, removed)) {
+            if (flatOverlay.size() > previousSize) {
+                flatOverlayInsertions++;
+                flatOverlayPeakEntries = Math.max(flatOverlayPeakEntries, flatOverlay.size());
+            }
+            flatOverlayResizes += flatOverlay.resizeCount() - previousResizes;
+            return;
+        }
+        flatOverlayCapacityFallbacks++;
+        migrateFlatToLegacy();
+        overlay.put(stableKey, new BufferedValue<>(stableKey, stableValue, dirty, removed));
+    }
+
+    private void migrateFlatToLegacy() {
+        HashMap<EK, BufferedValue<EK, EV>> migrated =
+                new HashMap<>(Math.max(16, flatOverlay.size() * 2));
+        for (int i = 0; i < flatOverlay.touchedCount(); i++) {
+            int slot = flatOverlay.touchedSlotAt(i);
+            EK key = flatOverlay.keyAt(slot);
+            migrated.put(
+                    key,
+                    new BufferedValue<>(
+                            key,
+                            flatOverlay.valueAt(slot),
+                            flatOverlay.isDirty(slot),
+                            flatOverlay.isRemoved(slot)));
+        }
+        overlay = migrated;
+        flatOverlay.clear();
+        legacyFallbackActive = true;
+        flatOverlayFallbackBatches++;
+    }
+
+    private void resetOverlayScope() {
+        overlay.clear();
+        if (flatOverlay != null) {
+            flatOverlay.clear();
+        }
+        legacyFallbackActive = false;
     }
 
     long logicalGets() {
@@ -643,6 +825,46 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         return prefetchSize16Plus;
     }
 
+    long flatOverlayBatches() {
+        return flatOverlayBatches;
+    }
+
+    long flatOverlayLookups() {
+        return flatOverlayLookups;
+    }
+
+    long flatOverlayHits() {
+        return flatOverlayHits;
+    }
+
+    long flatOverlayInsertions() {
+        return flatOverlayInsertions;
+    }
+
+    long flatOverlayResizes() {
+        return flatOverlayResizes;
+    }
+
+    long flatOverlayCapacityFallbacks() {
+        return flatOverlayCapacityFallbacks;
+    }
+
+    long flatOverlayFallbackBatches() {
+        return flatOverlayFallbackBatches;
+    }
+
+    long flatOverlayCommittedWrites() {
+        return flatOverlayCommittedWrites;
+    }
+
+    long flatOverlayCommittedRemoves() {
+        return flatOverlayCommittedRemoves;
+    }
+
+    long flatOverlayPeakEntries() {
+        return flatOverlayPeakEntries;
+    }
+
     private static final class BufferedValue<K, V> {
         private final K key;
         private V value;
@@ -654,6 +876,311 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             this.value = value;
             this.dirty = dirty;
             this.removed = removed;
+        }
+    }
+
+    /** Reusable open-addressed batch table. Entries are physically removed only at scope reset. */
+    private static final class FlatOverlay<K, V> {
+        private static final byte OCCUPIED = 1;
+        private static final byte DIRTY = 2;
+        private static final byte REMOVED = 4;
+        private static final float LOAD_FACTOR = 0.625f;
+
+        private final int maxEntries;
+        private final WritesMap writesMap = new WritesMap();
+        private Object[] keys;
+        private Object[] values;
+        private int[] hashes;
+        private byte[] flags;
+        private int[] touchedSlots;
+        private Object[] entryViews;
+        private int mask;
+        private int resizeThreshold;
+        private int size;
+        private int touchedCount;
+        private int writeCount;
+        private long resizeCount;
+
+        private FlatOverlay(int maxEntries) {
+            this.maxEntries = maxEntries;
+            allocate(16);
+        }
+
+        private boolean isEmpty() {
+            return size == 0;
+        }
+
+        private int size() {
+            return size;
+        }
+
+        private long resizeCount() {
+            return resizeCount;
+        }
+
+        private int touchedCount() {
+            return touchedCount;
+        }
+
+        private int touchedSlotAt(int index) {
+            return touchedSlots[index];
+        }
+
+        @SuppressWarnings("unchecked")
+        private K keyAt(int slot) {
+            return (K) keys[slot];
+        }
+
+        @SuppressWarnings("unchecked")
+        private V valueAt(int slot) {
+            return (V) values[slot];
+        }
+
+        private boolean isDirty(int slot) {
+            return (flags[slot] & DIRTY) != 0;
+        }
+
+        private boolean isRemoved(int slot) {
+            return (flags[slot] & REMOVED) != 0;
+        }
+
+        private int writeCount() {
+            return writeCount;
+        }
+
+        private Map<K, V> writesView() {
+            return writesMap;
+        }
+
+        @SuppressWarnings("unchecked")
+        private Map.Entry<K, V> entryAt(int slot) {
+            EntryView entry = (EntryView) entryViews[slot];
+            if (entry == null) {
+                entry = new EntryView(slot);
+                entryViews[slot] = entry;
+            }
+            return entry;
+        }
+
+        private int find(K query) {
+            int hash = spread(query.hashCode());
+            int slot = hash & mask;
+            while ((flags[slot] & OCCUPIED) != 0) {
+                Object stored = keys[slot];
+                if (hashes[slot] == hash && (query == stored || query.equals(stored))) {
+                    return slot;
+                }
+                slot = (slot + 1) & mask;
+            }
+            return -1;
+        }
+
+        private boolean put(K stableKey, V value, boolean dirty, boolean removed) {
+            int hash = spread(stableKey.hashCode());
+            int slot = hash & mask;
+            while ((flags[slot] & OCCUPIED) != 0) {
+                Object stored = keys[slot];
+                if (hashes[slot] == hash && (stableKey == stored || stableKey.equals(stored))) {
+                    update(slot, value, dirty, removed);
+                    return true;
+                }
+                slot = (slot + 1) & mask;
+            }
+            if (size >= maxEntries) {
+                return false;
+            }
+            if (size + 1 > resizeThreshold) {
+                grow();
+                return put(stableKey, value, dirty, removed);
+            }
+            keys[slot] = stableKey;
+            values[slot] = value;
+            hashes[slot] = hash;
+            flags[slot] = flags(dirty, removed);
+            touchedSlots[touchedCount++] = slot;
+            size++;
+            if (dirty && !removed) {
+                writeCount++;
+            }
+            return true;
+        }
+
+        private void update(int slot, V value, boolean dirty, boolean removed) {
+            boolean wasWrite = isDirty(slot) && !isRemoved(slot);
+            values[slot] = value;
+            flags[slot] = flags(dirty, removed);
+            boolean isWrite = dirty && !removed;
+            if (wasWrite != isWrite) {
+                writeCount += isWrite ? 1 : -1;
+            }
+        }
+
+        private void clear() {
+            for (int i = 0; i < touchedCount; i++) {
+                int slot = touchedSlots[i];
+                keys[slot] = null;
+                values[slot] = null;
+                hashes[slot] = 0;
+                flags[slot] = 0;
+                touchedSlots[i] = 0;
+            }
+            size = 0;
+            touchedCount = 0;
+            writeCount = 0;
+        }
+
+        private void grow() {
+            int oldCapacity = keys.length;
+            int newCapacity = oldCapacity << 1;
+            Object[] oldKeys = keys;
+            Object[] oldValues = values;
+            int[] oldHashes = hashes;
+            byte[] oldFlags = flags;
+            int[] oldTouchedSlots = touchedSlots;
+            int oldTouchedCount = touchedCount;
+
+            allocate(newCapacity);
+            size = 0;
+            touchedCount = 0;
+            writeCount = 0;
+            for (int i = 0; i < oldTouchedCount; i++) {
+                int oldSlot = oldTouchedSlots[i];
+                @SuppressWarnings("unchecked")
+                K key = (K) oldKeys[oldSlot];
+                @SuppressWarnings("unchecked")
+                V value = (V) oldValues[oldSlot];
+                insertRehashed(key, value, oldHashes[oldSlot], oldFlags[oldSlot]);
+            }
+            resizeCount++;
+        }
+
+        private void insertRehashed(K key, V value, int hash, byte entryFlags) {
+            int slot = hash & mask;
+            while ((flags[slot] & OCCUPIED) != 0) {
+                slot = (slot + 1) & mask;
+            }
+            keys[slot] = key;
+            values[slot] = value;
+            hashes[slot] = hash;
+            flags[slot] = entryFlags;
+            touchedSlots[touchedCount++] = slot;
+            size++;
+            if ((entryFlags & DIRTY) != 0 && (entryFlags & REMOVED) == 0) {
+                writeCount++;
+            }
+        }
+
+        private void allocate(int capacity) {
+            keys = new Object[capacity];
+            values = new Object[capacity];
+            hashes = new int[capacity];
+            flags = new byte[capacity];
+            touchedSlots = new int[capacity];
+            entryViews = new Object[capacity];
+            mask = capacity - 1;
+            resizeThreshold = Math.min(maxEntries, (int) (capacity * LOAD_FACTOR));
+        }
+
+        private static byte flags(boolean dirty, boolean removed) {
+            return (byte) (OCCUPIED | (dirty ? DIRTY : 0) | (removed ? REMOVED : 0));
+        }
+
+        private static int spread(int hash) {
+            return hash ^ (hash >>> 16);
+        }
+
+        private final class WritesMap extends AbstractMap<K, V> {
+            private final Set<Map.Entry<K, V>> entries = new WriteEntrySet();
+
+            @Override
+            public int size() {
+                return writeCount;
+            }
+
+            @Override
+            public Set<Map.Entry<K, V>> entrySet() {
+                return entries;
+            }
+        }
+
+        private final class WriteEntrySet extends AbstractSet<Map.Entry<K, V>> {
+            @Override
+            public int size() {
+                return writeCount;
+            }
+
+            @Override
+            public Iterator<Map.Entry<K, V>> iterator() {
+                return new WriteIterator();
+            }
+        }
+
+        private final class WriteIterator implements Iterator<Map.Entry<K, V>> {
+            private int scanIndex;
+            private int nextSlot = -1;
+
+            @Override
+            public boolean hasNext() {
+                if (nextSlot >= 0) {
+                    return true;
+                }
+                while (scanIndex < touchedCount) {
+                    int slot = touchedSlots[scanIndex++];
+                    if (isDirty(slot) && !isRemoved(slot)) {
+                        nextSlot = slot;
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            @Override
+            public Map.Entry<K, V> next() {
+                if (!hasNext()) {
+                    throw new NoSuchElementException();
+                }
+                int currentSlot = nextSlot;
+                nextSlot = -1;
+                return entryAt(currentSlot);
+            }
+        }
+
+        private final class EntryView implements Map.Entry<K, V> {
+            private final int slot;
+
+            private EntryView(int slot) {
+                this.slot = slot;
+            }
+
+            @Override
+            public K getKey() {
+                return keyAt(slot);
+            }
+
+            @Override
+            public V getValue() {
+                return valueAt(slot);
+            }
+
+            @Override
+            public V setValue(V value) {
+                throw new UnsupportedOperationException("read-only transient batch entry");
+            }
+
+            @Override
+            public boolean equals(Object other) {
+                if (!(other instanceof Map.Entry)) {
+                    return false;
+                }
+                Map.Entry<?, ?> entry = (Map.Entry<?, ?>) other;
+                return Objects.equals(getKey(), entry.getKey())
+                        && Objects.equals(getValue(), entry.getValue());
+            }
+
+            @Override
+            public int hashCode() {
+                return Objects.hashCode(getKey()) ^ Objects.hashCode(getValue());
+            }
         }
     }
 }

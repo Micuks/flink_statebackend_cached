@@ -20,10 +20,12 @@ package org.apache.flink.table.runtime.dataview;
 
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.typeutils.base.IntValueSerializer;
 import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
 import org.apache.flink.streaming.api.operators.PipelinedBatchableKeyedFunction.BatchWindowPreparationResult;
+import org.apache.flink.types.IntValue;
 
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -673,6 +675,200 @@ class DistinctBatchStateMapViewTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void flatOverlayPreservesCollisionsAndLastWriteWinsWithoutLegacyFallback() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        DistinctBatchStateMapView<Void, String, Long> view = createFlatView(delegate, 64);
+        Map<String, Long> committed = new HashMap<>();
+        doAnswer(
+                        invocation -> {
+                            committed.putAll(invocation.getArgument(0));
+                            return null;
+                        })
+                .when(delegate)
+                .putAllKnownNonNullKeys(anyMap());
+
+        // "Aa" and "BB" deliberately share the same String hash code.
+        view.beginBatch();
+        view.put("Aa", 1L);
+        view.put("BB", 2L);
+        view.remove("Aa");
+        assertNull(view.get("Aa"));
+        assertEquals(2L, view.get("BB"));
+        view.put("Aa", 3L);
+        view.commitBatch();
+
+        verify(delegate, times(1)).putAllKnownNonNullKeys(anyMap());
+        assertEquals(Map.of("Aa", 3L, "BB", 2L), committed);
+        verify(delegate, never()).remove(any());
+        assertEquals(0, view.flatOverlayCapacityFallbacks());
+        assertEquals(0, view.flatOverlayFallbackBatches());
+        assertEquals(2, view.flatOverlayCommittedWrites());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void flatOverlayEntriesRemainDistinctWhenConsumerCollectsBeforeReading() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        DistinctBatchStateMapView<Void, String, Long> view = createFlatView(delegate, 64);
+        List<Map.Entry<String, Long>> captured = new ArrayList<>();
+        Map<String, Long> reconstructed = new HashMap<>();
+        doAnswer(
+                        invocation -> {
+                            captured.addAll(
+                                    invocation.<Map<String, Long>>getArgument(0).entrySet());
+                            for (Map.Entry<String, Long> entry : captured) {
+                                reconstructed.put(entry.getKey(), entry.getValue());
+                            }
+                            return null;
+                        })
+                .when(delegate)
+                .putAllKnownNonNullKeys(anyMap());
+
+        view.beginBatch();
+        view.put("first", 1L);
+        view.put("second", 2L);
+        view.put("third", 3L);
+        view.commitBatch();
+
+        assertEquals(3, captured.size());
+        assertEquals(Map.of("first", 1L, "second", 2L, "third", 3L), reconstructed);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void flatOverlayCapacityFallbackMigratesEveryMutationBeforeCommit() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        DistinctBatchStateMapView<Void, String, Long> view = createFlatView(delegate, 16);
+
+        view.beginBatch();
+        for (int i = 0; i < 17; i++) {
+            view.put("key-" + i, (long) i);
+        }
+        view.remove("key-3");
+        view.commitBatch();
+
+        ArgumentCaptor<Map<String, Long>> writes = ArgumentCaptor.forClass(Map.class);
+        verify(delegate, times(1)).putAll(writes.capture());
+        assertEquals(16, writes.getValue().size());
+        assertFalse(writes.getValue().containsKey("key-3"));
+        assertEquals(16L, writes.getValue().get("key-16"));
+        verify(delegate, times(1)).remove("key-3");
+        assertEquals(1, view.flatOverlayCapacityFallbacks());
+        assertEquals(1, view.flatOverlayFallbackBatches());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void flatOverlayAbortAfterCapacityFallbackNeverTouchesDelegate() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        DistinctBatchStateMapView<Void, String, Long> view = createFlatView(delegate, 16);
+
+        view.beginBatch();
+        for (int i = 0; i < 17; i++) {
+            view.put("key-" + i, (long) i);
+        }
+        view.abortBatch();
+
+        verify(delegate, never()).putAll(anyMap());
+        verify(delegate, never()).putAllKnownNonNullKeys(anyMap());
+        verify(delegate, never()).remove(any());
+        assertEquals(1, view.abortedBatches());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void flatOverlayCopiesMutableKeysAndValuesAtTheStateBoundary() throws Exception {
+        StateMapView<Void, IntValue, IntValue> delegate = mock(StateMapView.class);
+        DistinctBatchStateMapView<Void, IntValue, IntValue> view =
+                new DistinctBatchStateMapView<>(
+                        delegate,
+                        IntValueSerializer.INSTANCE,
+                        IntValueSerializer.INSTANCE,
+                        true,
+                        2,
+                        true,
+                        64);
+        Map<Integer, Integer> committed = new HashMap<>();
+        doAnswer(
+                        invocation -> {
+                            Map<IntValue, IntValue> writes = invocation.getArgument(0);
+                            for (Map.Entry<IntValue, IntValue> entry : writes.entrySet()) {
+                                committed.put(
+                                        entry.getKey().getValue(), entry.getValue().getValue());
+                            }
+                            return null;
+                        })
+                .when(delegate)
+                .putAllKnownNonNullKeys(anyMap());
+        IntValue key = new IntValue(7);
+        IntValue value = new IntValue(9);
+
+        view.beginBatch();
+        view.put(key, value);
+        key.setValue(70);
+        value.setValue(90);
+        assertEquals(new IntValue(9), view.get(new IntValue(7)));
+        view.commitBatch();
+
+        assertEquals(Map.of(7, 9), committed);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void directPrefetchBeforeBatchCanFallbackAndPreserveEveryMutation() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        when(delegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        List<String> keys = new ArrayList<>();
+        List<Long> values = new ArrayList<>();
+        for (int i = 0; i < 17; i++) {
+            keys.add("key-" + i);
+            values.add((long) i);
+        }
+        when(delegate.prefetchUniqueKeyValues(any())).thenReturn(values);
+        DistinctBatchStateMapView<Void, String, Long> view = createFlatView(delegate, 16);
+
+        view.beginPrefetchKeyCollection(keys.size());
+        for (String key : keys) {
+            view.addPrefetchKey(key);
+        }
+        assertTrue(view.finishPrefetchKeyCollection());
+        view.beginBatch();
+        assertEquals(0L, view.get("key-0"));
+        view.put("key-0", 100L);
+        view.remove("key-1");
+        view.commitBatch();
+
+        ArgumentCaptor<Map<String, Long>> writes = ArgumentCaptor.forClass(Map.class);
+        verify(delegate, times(1)).putAll(writes.capture());
+        assertEquals(Map.of("key-0", 100L), writes.getValue());
+        verify(delegate, times(1)).remove("key-1");
+        verify(delegate, never()).get(any());
+        assertEquals(1, view.flatOverlayCapacityFallbacks());
+        assertEquals(1, view.flatOverlayFallbackBatches());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void forcedFlatFlushKeepsBatchActiveForLaterMutations() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        when(delegate.isEmpty()).thenReturn(false);
+        DistinctBatchStateMapView<Void, String, Long> view = createFlatView(delegate, 64);
+
+        view.beginBatch();
+        view.put("before", 1L);
+        assertFalse(view.isEmpty());
+        assertTrue(view.isBatchActive());
+        view.put("after", 2L);
+        view.commitBatch();
+
+        verify(delegate, times(2)).putAllKnownNonNullKeys(anyMap());
+        assertEquals(1, view.forcedFlushes());
+        assertEquals(1, view.committedBatches());
+        assertEquals(2, view.flatOverlayCommittedWrites());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void nullKeyKeepsDedicatedDelegateStateSemantics() throws Exception {
         StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
         when(delegate.get(null)).thenReturn(11L);
@@ -729,9 +925,36 @@ class DistinctBatchStateMapViewTest {
         verify(nullState, times(1)).update(7L);
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void nullableKnownNonNullBatchNeverTouchesNullValueState() throws Exception {
+        MapState<String, Long> mapState = mock(MapState.class);
+        ValueState<Long> nullState = mock(ValueState.class);
+        StateMapView<Void, String, Long> view =
+                new StateMapView.KeyedStateMapViewWithKeysNullable<>(mapState, nullState);
+
+        view.putAllKnownNonNullKeys(Map.of("bidder-1", 3L, "bidder-2", 5L));
+
+        verify(mapState, times(1)).putAll(anyMap());
+        verify(nullState, never()).update(any());
+        verify(nullState, never()).value();
+    }
+
     private static DistinctBatchStateMapView<Void, String, Long> createView(
             StateMapView<Void, String, Long> delegate) {
         return new DistinctBatchStateMapView<>(
                 delegate, StringSerializer.INSTANCE, LongSerializer.INSTANCE);
+    }
+
+    private static DistinctBatchStateMapView<Void, String, Long> createFlatView(
+            StateMapView<Void, String, Long> delegate, int maxEntries) {
+        return new DistinctBatchStateMapView<>(
+                delegate,
+                StringSerializer.INSTANCE,
+                LongSerializer.INSTANCE,
+                true,
+                2,
+                true,
+                maxEntries);
     }
 }

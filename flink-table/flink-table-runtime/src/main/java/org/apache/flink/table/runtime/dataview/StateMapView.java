@@ -75,6 +75,16 @@ public abstract class StateMapView<N, EK, EV> extends MapView<EK, EV> implements
     /** Ends an optional batch-scoped exact-key prefetch. */
     void endPrefetchKeys() {}
 
+    /**
+     * Commits a transient map whose keys are known to be non-null.
+     *
+     * <p>The DISTINCT batch overlay never buffers its nullable-key entry. This internal hook lets
+     * that overlay avoid rebuilding an otherwise identical map in the nullable implementation.
+     */
+    void putAllKnownNonNullKeys(Map<EK, EV> map) throws Exception {
+        putAll(map);
+    }
+
     @Override
     public Map<EK, EV> getMap() {
         final Map<EK, EV> map = new HashMap<>();
@@ -187,6 +197,11 @@ public abstract class StateMapView<N, EK, EV> extends MapView<EK, EV> implements
         }
 
         @Override
+        void putAllKnownNonNullKeys(Map<EK, EV> map) throws Exception {
+            getMapState().putAll(map);
+        }
+
+        @Override
         public void remove(EK key) throws Exception {
             getMapState().remove(key);
         }
@@ -285,6 +300,11 @@ public abstract class StateMapView<N, EK, EV> extends MapView<EK, EV> implements
             if (hasNullKey) {
                 getNullState().update(nullValue);
             }
+        }
+
+        @Override
+        void putAllKnownNonNullKeys(Map<EK, EV> map) throws Exception {
+            getMapState().putAll(map);
         }
 
         @Override
