@@ -20,12 +20,14 @@ package org.apache.flink.table.runtime.keyselector;
 
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.binary.BinaryRowData;
+import org.apache.flink.api.java.functions.TransientKeySelector;
 import org.apache.flink.table.runtime.generated.GeneratedProjection;
 import org.apache.flink.table.runtime.generated.Projection;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 
 /** A KeySelector which will extract key from RowData. The key type is BinaryRowData. */
-public class BinaryRowDataKeySelector implements RowDataKeySelector {
+public class BinaryRowDataKeySelector
+        implements RowDataKeySelector, TransientKeySelector<RowData, RowData> {
 
     private static final long serialVersionUID = 5375355285015381919L;
 
@@ -41,12 +43,17 @@ public class BinaryRowDataKeySelector implements RowDataKeySelector {
 
     @Override
     public RowData getKey(RowData value) throws Exception {
+        return getTransientKey(value).copy();
+    }
+
+    @Override
+    public BinaryRowData getTransientKey(RowData value) throws Exception {
         if (projection == null) {
             ClassLoader cl = Thread.currentThread().getContextClassLoader();
             //noinspection unchecked
             projection = generatedProjection.newInstance(cl);
         }
-        return projection.apply(value).copy();
+        return projection.apply(value);
     }
 
     @Override

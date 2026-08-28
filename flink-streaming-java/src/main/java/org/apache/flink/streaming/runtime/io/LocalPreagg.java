@@ -19,6 +19,7 @@
 package org.apache.flink.streaming.runtime.io;
 
 import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.api.java.functions.TransientKeySelector;
 import org.apache.flink.configuration.GlobalConfiguration;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.runtime.state.BatchKeyGroupingSupport;
@@ -75,6 +76,11 @@ public final class LocalPreagg {
     private static final boolean NATIVE_EXTRACTION_REUSE_ENABLED =
             GlobalConfiguration.loadConfiguration()
                     .getBoolean("state.backend.cachekit.native.local-preagg.enabled", false);
+    private static final boolean NATIVE_TRANSIENT_KEY_GROUPING_ENABLED =
+            GlobalConfiguration.loadConfiguration()
+                    .getBoolean(
+                            "state.backend.cachekit.native.local-preagg.transient-key.enabled",
+                            false);
     private static final ThreadLocal<ExtractionBuffers> NATIVE_EXTRACTION_BUFFERS =
             ThreadLocal.withInitial(ExtractionBuffers::new);
     private static final ThreadLocal<NativeGroupingWorkspace> NATIVE_GROUPING_WORKSPACE =
@@ -402,14 +408,26 @@ public final class LocalPreagg {
         int groupCount = 0;
         boolean nativeMutationBatchStarted = false;
         try {
+            final TransientKeySelector transientSelector =
+                    NATIVE_TRANSIENT_KEY_GROUPING_ENABLED
+                                    && selector instanceof TransientKeySelector
+                            ? (TransientKeySelector) selector
+                            : null;
             for (int bufferIndex = 0; bufferIndex < n; bufferIndex++) {
                 StreamRecord<?> record = buf[bufferIndex];
                 if (record == null) {
                     continue;
                 }
                 lastRecord = record;
-                Object key = selector.getKey(record.getValue());
-                workspace.putIndexedSource(sourceCount, bufferIndex, key, Objects.hashCode(key));
+                if (transientSelector != null) {
+                    Object key = transientSelector.getTransientKey(record.getValue());
+                    workspace.putIndexedTransientSource(
+                            sourceCount, bufferIndex, Objects.hashCode(key));
+                } else {
+                    Object key = selector.getKey(record.getValue());
+                    workspace.putIndexedSource(
+                            sourceCount, bufferIndex, key, Objects.hashCode(key));
+                }
                 sourceCount++;
             }
             if (sourceCount == 0) {
@@ -419,7 +437,16 @@ public final class LocalPreagg {
             groupCount =
                     StatePrefetcher.groupHashTokensNatively(
                             headOperator, workspace.tokens, sourceCount, workspace.plan);
-            IndexedGroups groups = validatePackedIndexedGroups(workspace, sourceCount, groupCount);
+            IndexedGroups groups =
+                    transientSelector == null
+                            ? validatePackedIndexedGroups(workspace, sourceCount, groupCount)
+                            : validatePackedIndexedGroupsTransient(
+                                    workspace,
+                                    buf,
+                                    sourceCount,
+                                    groupCount,
+                                    selector,
+                                    transientSelector);
             if (groups == null) {
                 return false;
             }
@@ -1139,6 +1166,12 @@ public final class LocalPreagg {
             putToken(source, token);
         }
 
+        void putIndexedTransientSource(int source, int bufferIndex, int token) {
+            indexedSourceKeys[source] = null;
+            indexedSourceBufferIndexes[source] = bufferIndex;
+            putToken(source, token);
+        }
+
         private void clearIndexed(int sourceCount, int groupCount) {
             for (int source = 0;
                     source < sourceCount && source < indexedSourceKeys.length;
@@ -1277,6 +1310,132 @@ public final class LocalPreagg {
             }
             workspace.indexedBufferIndexesByGroup[position] =
                     workspace.indexedSourceBufferIndexes[source];
+        }
+        if (nextGroup != groupCount) {
+            return null;
+        }
+        for (int group = 0; group < groupCount; group++) {
+            if (workspace.positions[group]
+                    != plan.getInt(offsetsBase + (group + 1) * Integer.BYTES)) {
+                return null;
+            }
+        }
+        workspace.indexedGroupKeyView.reset(workspace.indexedGroupKeys, groupCount);
+        workspace.indexedGroups.reset(
+                workspace.indexedGroupKeys,
+                workspace.indexedGroupOffsets,
+                workspace.indexedBufferIndexesByGroup,
+                workspace.indexedGroupKeyView,
+                groupCount);
+        return workspace.indexedGroups;
+    }
+
+    /**
+     * Validates a packed hash-grouping plan while retaining only one stable copied key per group.
+     *
+     * <p>The first pass that produced the native hash tokens stored only source indexes. This
+     * second pass replays the deterministic selector: first-seen group keys use the ordinary
+     * retainable API, while every other record uses an ephemeral projection only for immediate
+     * equality validation. A hash collision or malformed native plan returns {@code null} before
+     * any state access, so the caller can use the established materialized fallback.
+     */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    static IndexedGroups validatePackedIndexedGroupsTransient(
+            NativeGroupingWorkspace workspace,
+            StreamRecord<?>[] records,
+            int sourceCount,
+            int returnedGroupCount,
+            KeySelector stableSelector,
+            TransientKeySelector transientSelector)
+            throws Exception {
+        if (records == null
+                || stableSelector == null
+                || transientSelector == null
+                || sourceCount <= 0
+                || returnedGroupCount <= 0
+                || returnedGroupCount > sourceCount) {
+            return null;
+        }
+        final ByteBuffer plan = workspace.plan;
+        if (plan.getInt(0) != BatchKeyGroupingSupport.PACKED_PLAN_MAGIC
+                || plan.getInt(Integer.BYTES) != BatchKeyGroupingSupport.PACKED_PLAN_VERSION
+                || plan.getInt(2 * Integer.BYTES) != sourceCount
+                || plan.getInt(3 * Integer.BYTES) != returnedGroupCount) {
+            return null;
+        }
+        final int groupCount = returnedGroupCount;
+        final int firstSourceBase = BatchKeyGroupingSupport.PACKED_PLAN_HEADER_BYTES;
+        final int offsetsBase = firstSourceBase + groupCount * Integer.BYTES;
+        final int sourceGroupBase = offsetsBase + (groupCount + 1) * Integer.BYTES;
+        final int requiredBytes = sourceGroupBase + sourceCount * Integer.BYTES;
+        if (requiredBytes > plan.capacity()) {
+            return null;
+        }
+
+        for (int group = 0; group < groupCount; group++) {
+            int firstSource = plan.getInt(firstSourceBase + group * Integer.BYTES);
+            if (firstSource < 0
+                    || firstSource >= sourceCount
+                    || (group == 0 && firstSource != 0)
+                    || (group > 0
+                            && firstSource
+                                    <= plan.getInt(
+                                            firstSourceBase + (group - 1) * Integer.BYTES))) {
+                return null;
+            }
+            int bufferIndex = workspace.indexedSourceBufferIndexes[firstSource];
+            if (bufferIndex < 0 || bufferIndex >= records.length || records[bufferIndex] == null) {
+                return null;
+            }
+            workspace.indexedGroupKeys[group] =
+                    stableSelector.getKey(records[bufferIndex].getValue());
+        }
+        if (plan.getInt(offsetsBase) != 0
+                || plan.getInt(offsetsBase + groupCount * Integer.BYTES) != sourceCount) {
+            return null;
+        }
+        for (int group = 0; group < groupCount; group++) {
+            int begin = plan.getInt(offsetsBase + group * Integer.BYTES);
+            int end = plan.getInt(offsetsBase + (group + 1) * Integer.BYTES);
+            if (begin < 0 || begin >= end || end > sourceCount) {
+                return null;
+            }
+            workspace.indexedGroupOffsets[group] = begin;
+            workspace.positions[group] = begin;
+        }
+        workspace.indexedGroupOffsets[groupCount] = sourceCount;
+
+        int nextGroup = 0;
+        for (int source = 0; source < sourceCount; source++) {
+            int group = plan.getInt(sourceGroupBase + source * Integer.BYTES);
+            if (group < 0 || group >= groupCount) {
+                return null;
+            }
+            int firstSource = plan.getInt(firstSourceBase + group * Integer.BYTES);
+            int bufferIndex = workspace.indexedSourceBufferIndexes[source];
+            if (bufferIndex < 0 || bufferIndex >= records.length || records[bufferIndex] == null) {
+                return null;
+            }
+            if (source == firstSource) {
+                if (group != nextGroup) {
+                    return null;
+                }
+                nextGroup++;
+            } else {
+                Object transientKey =
+                        transientSelector.getTransientKey(records[bufferIndex].getValue());
+                if (source < firstSource
+                        || group >= nextGroup
+                        || !Objects.equals(workspace.indexedGroupKeys[group], transientKey)) {
+                    return null;
+                }
+            }
+            int position = workspace.positions[group]++;
+            int groupEnd = plan.getInt(offsetsBase + (group + 1) * Integer.BYTES);
+            if (position >= groupEnd) {
+                return null;
+            }
+            workspace.indexedBufferIndexesByGroup[position] = bufferIndex;
         }
         if (nextGroup != groupCount) {
             return null;

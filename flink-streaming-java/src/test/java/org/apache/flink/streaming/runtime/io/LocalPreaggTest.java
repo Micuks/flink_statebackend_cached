@@ -18,6 +18,7 @@
 
 package org.apache.flink.streaming.runtime.io;
 
+import org.apache.flink.api.java.functions.TransientKeySelector;
 import org.apache.flink.runtime.state.BatchKeyGroupingSupport;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.BatchableKeyedFunction;
@@ -882,6 +883,62 @@ class LocalPreaggTest {
     }
 
     @Test
+    void testTransientIndexedPlanCopiesOnlyFirstKeyPerGroup() throws Exception {
+        LocalPreagg.NativeGroupingWorkspace workspace =
+                packedWorkspace(
+                        5,
+                        3,
+                        new int[] {0, 1, 3},
+                        new int[] {0, 2, 4, 5},
+                        new int[] {0, 1, 0, 2, 1});
+        StreamRecord<?>[] records =
+                new StreamRecord<?>[] {
+                    new StreamRecord<>("a"),
+                    new StreamRecord<>("b"),
+                    new StreamRecord<>("a"),
+                    new StreamRecord<>("c"),
+                    new StreamRecord<>("b")
+                };
+        CountingTransientSelector selector = new CountingTransientSelector();
+        for (int source = 0; source < records.length; source++) {
+            Object key = selector.getTransientKey((String) records[source].getValue());
+            workspace.putIndexedTransientSource(source, source, key.hashCode());
+        }
+
+        LocalPreagg.IndexedGroups groups =
+                LocalPreagg.validatePackedIndexedGroupsTransient(
+                        workspace, records, records.length, 3, selector, selector);
+
+        assertEquals(Arrays.asList(new MutableKey("a"), new MutableKey("b"), new MutableKey("c")), groups.keys);
+        assertEquals(3, selector.stableCalls);
+        assertEquals(7, selector.transientCalls);
+
+        // The selector reuses one mutable transient object. Retained group keys must therefore be
+        // independent stable copies and remain unchanged after later projections.
+        selector.getTransientKey("later");
+        assertEquals(Arrays.asList(new MutableKey("a"), new MutableKey("b"), new MutableKey("c")), groups.keys);
+    }
+
+    @Test
+    void testTransientIndexedPlanRejectsHashCollisionBeforeProcessing() throws Exception {
+        LocalPreagg.NativeGroupingWorkspace workspace =
+                packedWorkspace(2, 1, new int[] {0}, new int[] {0, 2}, new int[] {0, 0});
+        StreamRecord<?>[] records =
+                new StreamRecord<?>[] {
+                    new StreamRecord<>("left"), new StreamRecord<>("right")
+                };
+        CountingTransientSelector selector = new CountingTransientSelector(7);
+        for (int source = 0; source < records.length; source++) {
+            workspace.putIndexedTransientSource(source, source, 7);
+        }
+
+        assertNull(
+                LocalPreagg.validatePackedIndexedGroupsTransient(
+                        workspace, records, 2, 1, selector, selector));
+        assertEquals(1, selector.stableCalls);
+    }
+
+    @Test
     void testIndexedPackedPlanMatchesJavaGroupingAcrossRandomBatchesAndBufferHoles() {
         Random random = new Random(0x4b554e50454e47L);
         for (int trial = 0; trial < 250; trial++) {
@@ -993,6 +1050,65 @@ class LocalPreaggTest {
         @Override
         public boolean equals(Object other) {
             return other instanceof CollisionKey && value.equals(((CollisionKey) other).value);
+        }
+    }
+
+    private static final class CountingTransientSelector
+            implements TransientKeySelector<String, MutableKey> {
+        private final MutableKey reusable = new MutableKey("");
+        private final Integer forcedHash;
+        private int stableCalls;
+        private int transientCalls;
+
+        private CountingTransientSelector() {
+            this(null);
+        }
+
+        private CountingTransientSelector(Integer forcedHash) {
+            this.forcedHash = forcedHash;
+        }
+
+        @Override
+        public MutableKey getKey(String value) {
+            stableCalls++;
+            return new MutableKey(value, forcedHash);
+        }
+
+        @Override
+        public MutableKey getTransientKey(String value) {
+            transientCalls++;
+            reusable.value = value;
+            reusable.forcedHash = forcedHash;
+            return reusable;
+        }
+    }
+
+    private static final class MutableKey {
+        private String value;
+        private Integer forcedHash;
+
+        private MutableKey(String value) {
+            this(value, null);
+        }
+
+        private MutableKey(String value, Integer forcedHash) {
+            this.value = value;
+            this.forcedHash = forcedHash;
+        }
+
+        @Override
+        public int hashCode() {
+            return forcedHash == null ? value.hashCode() : forcedHash;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof MutableKey && value.equals(((MutableKey) other).value);
+        }
+
+        @Override
+        public String toString() {
+            return value;
         }
     }
 
