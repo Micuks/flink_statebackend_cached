@@ -1212,6 +1212,16 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 : 0;
     }
 
+    @Override
+    public int crossKeyPipelineWaveLimit() {
+        return nativeMapDistinctBatchPrefetchEnabled
+                        && nativeMapDistinctBatchPrefetchCrossKeyPipelineEnabled
+                        && nativeMapDistinctBatchPrefetchDeferredWaveEnabled
+                        && nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabled
+                ? 2
+                : 1;
+    }
+
     /**
      * Groups caller-owned Java hash tokens directly into a caller-owned packed plan.
      *

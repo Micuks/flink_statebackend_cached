@@ -109,6 +109,8 @@ public final class LocalPreagg {
     private static final AtomicLong PIPELINE_EXCEPTION_ABORTS = new AtomicLong();
     private static final AtomicLong PIPELINE_PEAK_PREPARED_AHEAD = new AtomicLong();
     private static final AtomicLong PIPELINE_MAX_CONFIGURED_LOOKAHEAD = new AtomicLong();
+    private static final AtomicLong PIPELINE_MAX_CONFIGURED_WAVE_LIMIT = new AtomicLong();
+    private static final AtomicLong PIPELINE_WAVES_EXECUTED = new AtomicLong();
     // RuntimeMXBean reports the PID inside the container PID namespace.  The 2x4 benchmark
     // topology launches four TaskManager JVMs in each container, and every nested JVM therefore
     // reports the same value (for example, "1@taskmanager1").  Append a process-lifetime nonce so
@@ -308,13 +310,15 @@ public final class LocalPreagg {
                 collector.eraseTimestamp();
             }
             int pipelineLookahead = StatePrefetcher.crossKeyPipelineLookaheadGroups(headOperator);
+            int pipelineWaveLimit = StatePrefetcher.crossKeyPipelineWaveLimit(headOperator);
             if (pipelineLookahead > 0 && batchable instanceof PipelinedBatchableKeyedFunction) {
                 dispatchMaterializedPipeline(
                         op,
                         (PipelinedBatchableKeyedFunction) batchable,
                         groups,
                         collector,
-                        pipelineLookahead);
+                        pipelineLookahead,
+                        pipelineWaveLimit);
             } else {
                 for (int group = 0; group < groups.keys.size(); group++) {
                     Object key = groups.keys.get(group);
@@ -332,7 +336,7 @@ public final class LocalPreagg {
                 double collapse = grps == 0 ? 0 : (double) recs / grps;
                 System.err.println(
                         String.format(
-                                "[LOCAL-PREAGG MATERIALIZED] [CACHEKIT DISTINCT PIPELINE] mode=materialized jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx pipelineLookahead=%d pipelineWindows=%d pipelineGroups=%d pipelinePreparationCandidateGroups=%d pipelineBypassedGroups=%d pipelinePreparedGroups=%d pipelinePreparedAheadGroups=%d pipelineConsumedGroups=%d pipelineCancelledGroups=%d pipelineProcessWithFutureInFlight=%d pipelinePeakPreparedAhead=%d pipelineExceptionAborts=%d",
+                                "[LOCAL-PREAGG MATERIALIZED] [CACHEKIT DISTINCT PIPELINE] mode=materialized jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx pipelineLookahead=%d pipelineWaveLimit=%d pipelineWavesExecuted=%d pipelineWindows=%d pipelineGroups=%d pipelinePreparationCandidateGroups=%d pipelineBypassedGroups=%d pipelinePreparedGroups=%d pipelinePreparedAheadGroups=%d pipelineConsumedGroups=%d pipelineCancelledGroups=%d pipelineProcessWithFutureInFlight=%d pipelinePeakPreparedAhead=%d pipelineExceptionAborts=%d",
                                 JVM_ID,
                                 op.getClass().getSimpleName(),
                                 c,
@@ -340,6 +344,8 @@ public final class LocalPreagg {
                                 grps,
                                 collapse,
                                 PIPELINE_MAX_CONFIGURED_LOOKAHEAD.get(),
+                                PIPELINE_MAX_CONFIGURED_WAVE_LIMIT.get(),
+                                PIPELINE_WAVES_EXECUTED.get(),
                                 PIPELINE_WINDOWS.get(),
                                 PIPELINE_GROUPS.get(),
                                 PIPELINE_PREPARATION_CANDIDATE_GROUPS.get(),
@@ -430,6 +436,7 @@ public final class LocalPreagg {
 
             IndexedRecordValueList values = workspace.indexedValues;
             int pipelineLookahead = StatePrefetcher.crossKeyPipelineLookaheadGroups(headOperator);
+            int pipelineWaveLimit = StatePrefetcher.crossKeyPipelineWaveLimit(headOperator);
             if (pipelineLookahead > 0 && batchable instanceof PipelinedBatchableKeyedFunction) {
                 dispatchIndexedPipeline(
                         op,
@@ -438,7 +445,8 @@ public final class LocalPreagg {
                         values,
                         buf,
                         collector,
-                        pipelineLookahead);
+                        pipelineLookahead,
+                        pipelineWaveLimit);
             } else {
                 for (int group = 0; group < groups.groupCount; group++) {
                     Object key = groups.groupKeys[group];
@@ -465,7 +473,7 @@ public final class LocalPreagg {
                 double collapse = groupTotal == 0 ? 0 : (double) records / groupTotal;
                 System.err.println(
                         String.format(
-                                "[LOCAL-PREAGG INDEXED] [CACHEKIT DISTINCT PIPELINE] mode=indexed jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx planFallbacks=%d materializedValueCopiesAvoided=%d allDispatches=%d allRecords=%d allGroups=%d pipelineLookahead=%d pipelineWindows=%d pipelineGroups=%d pipelinePreparationCandidateGroups=%d pipelineBypassedGroups=%d pipelinePreparedGroups=%d pipelinePreparedAheadGroups=%d pipelineConsumedGroups=%d pipelineCancelledGroups=%d pipelineProcessWithFutureInFlight=%d pipelinePeakPreparedAhead=%d pipelineExceptionAborts=%d",
+                                "[LOCAL-PREAGG INDEXED] [CACHEKIT DISTINCT PIPELINE] mode=indexed jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx planFallbacks=%d materializedValueCopiesAvoided=%d allDispatches=%d allRecords=%d allGroups=%d pipelineLookahead=%d pipelineWaveLimit=%d pipelineWavesExecuted=%d pipelineWindows=%d pipelineGroups=%d pipelinePreparationCandidateGroups=%d pipelineBypassedGroups=%d pipelinePreparedGroups=%d pipelinePreparedAheadGroups=%d pipelineConsumedGroups=%d pipelineCancelledGroups=%d pipelineProcessWithFutureInFlight=%d pipelinePeakPreparedAhead=%d pipelineExceptionAborts=%d",
                                 JVM_ID,
                                 op.getClass().getSimpleName(),
                                 dispatches,
@@ -478,6 +486,8 @@ public final class LocalPreagg {
                                 allRecords,
                                 allGroups,
                                 PIPELINE_MAX_CONFIGURED_LOOKAHEAD.get(),
+                                PIPELINE_MAX_CONFIGURED_WAVE_LIMIT.get(),
+                                PIPELINE_WAVES_EXECUTED.get(),
                                 PIPELINE_WINDOWS.get(),
                                 PIPELINE_GROUPS.get(),
                                 PIPELINE_PREPARATION_CANDIDATE_GROUPS.get(),
@@ -517,6 +527,18 @@ public final class LocalPreagg {
             TimestampedCollector collector,
             int lookaheadGroups)
             throws Exception {
+        dispatchMaterializedPipeline(op, pipelined, groups, collector, lookaheadGroups, 1);
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    static void dispatchMaterializedPipeline(
+            AbstractStreamOperator<?> op,
+            PipelinedBatchableKeyedFunction pipelined,
+            GroupedInputs groups,
+            TimestampedCollector collector,
+            int lookaheadGroups,
+            int waveLimit)
+            throws Exception {
         int minimumPreparationInputs = Math.max(1, pipelined.minimumBatchPreparationInputCount());
         if (minimumPreparationInputs > 1) {
             runSparsePreparedWindow(
@@ -540,7 +562,8 @@ public final class LocalPreagg {
                         Object key = groups.keys.get(group);
                         op.setCurrentKey(key);
                         pipelined.processBatchForKey(key, groups.values.get(group), collector);
-                    });
+                    },
+                    waveLimit);
             return;
         }
         runPreparedWindow(
@@ -568,7 +591,8 @@ public final class LocalPreagg {
             IndexedRecordValueList values,
             StreamRecord<?>[] buf,
             TimestampedCollector collector,
-            int lookaheadGroups)
+            int lookaheadGroups,
+            int waveLimit)
             throws Exception {
         int minimumPreparationInputs = Math.max(1, pipelined.minimumBatchPreparationInputCount());
         if (minimumPreparationInputs > 1) {
@@ -595,7 +619,8 @@ public final class LocalPreagg {
                         Object key = groups.groupKeys[group];
                         op.setCurrentKey(key);
                         pipelined.processBatchForKey(key, values, collector);
-                    });
+                    },
+                    waveLimit);
             return;
         }
         runPreparedWindow(
@@ -634,7 +659,8 @@ public final class LocalPreagg {
             GroupSizer groupSizer,
             GroupPreparer preparer,
             GroupConsumer preparedConsumer,
-            GroupSyncConsumer syncConsumer)
+            GroupSyncConsumer syncConsumer,
+            int requestedWaveLimit)
             throws Exception {
         if (groupCount <= 0) {
             return;
@@ -645,7 +671,8 @@ public final class LocalPreagg {
                         Math.min(
                                 BatchKeyGroupingSupport.MAX_CROSS_KEY_PIPELINE_LOOKAHEAD_GROUPS,
                                 requestedLookahead));
-        int capacity = Math.min(groupCount, lookahead + 1);
+        int waveLimit = Math.max(1, Math.min(2, requestedWaveLimit));
+        int capacity = Math.min(groupCount, lookahead * waveLimit + 1);
         PreparedWindowWorkspace workspace = PREPARED_WINDOW_WORKSPACE.get();
         workspace.prepare(capacity);
         Object[] prepared = workspace.prepared;
@@ -660,6 +687,7 @@ public final class LocalPreagg {
         long processWithFutureInFlight = 0L;
         int peakPreparedAhead = 0;
         long exceptionAborts = 0L;
+        long wavesExecuted = 0L;
         int head = 0;
         int preparedCount = 0;
         int waveRemaining = 0;
@@ -686,7 +714,7 @@ public final class LocalPreagg {
                 }
 
                 boolean currentPrepared = preparedCount > 0 && preparedGroupIndexes[head] == group;
-                int desiredPrepared = lookahead + (currentPrepared ? 1 : 0);
+                int desiredPrepared = lookahead * waveLimit + (currentPrepared ? 1 : 0);
                 while (waveRemaining == 0
                         && nextGroupToClassify < groupCount
                         && preparedCount < desiredPrepared) {
@@ -710,17 +738,37 @@ public final class LocalPreagg {
                         && waveSupported
                         && waveCount >= 2) {
                     int waveHead = currentPrepared ? (head + 1) % capacity : head;
-                    BatchWindowPreparationResult waveResult =
-                            pipelined.prepareBatchWindow(prepared, waveHead, waveCount);
-                    if (waveResult == BatchWindowPreparationResult.EXECUTED) {
-                        // A successful all-or-none wave owns exactly this prepared cohort. Do not
-                        // slide new tokens into the ring until every represented group is
-                        // consumed; the next cohort then receives its own bounded wave.
+                    int remainingWaveGroups = waveCount;
+                    int currentWaveHead = waveHead;
+                    int attemptedWaves = 0;
+                    boolean executedAnyWave = false;
+                    boolean retryAfterCohort = false;
+                    while (remainingWaveGroups >= 2 && attemptedWaves < waveLimit) {
+                        int currentWaveCount = Math.min(lookahead, remainingWaveGroups);
+                        BatchWindowPreparationResult waveResult =
+                                pipelined.prepareBatchWindow(
+                                        prepared, currentWaveHead, currentWaveCount);
+                        attemptedWaves++;
+                        if (waveResult == BatchWindowPreparationResult.EXECUTED) {
+                            executedAnyWave = true;
+                            wavesExecuted++;
+                            currentWaveHead = (currentWaveHead + currentWaveCount) % capacity;
+                            remainingWaveGroups -= currentWaveCount;
+                        } else if (waveResult == BatchWindowPreparationResult.RETRY_AFTER_COHORT) {
+                            retryAfterCohort = true;
+                            break;
+                        } else {
+                            waveSupported = false;
+                            break;
+                        }
+                    }
+                    if (executedAnyWave) {
+                        // Every submitted wave owns a disjoint ring segment. Freeze the complete
+                        // prepared window until it drains so no slot can be reused while a worker
+                        // still references its immutable token.
                         waveRemaining = preparedCount;
-                    } else if (waveResult == BatchWindowPreparationResult.RETRY_AFTER_COHORT) {
+                    } else if (retryAfterCohort) {
                         waveRetryRemaining = preparedCount;
-                    } else {
-                        waveSupported = false;
                     }
                 }
 
@@ -788,6 +836,8 @@ public final class LocalPreagg {
                 PIPELINE_EXCEPTION_ABORTS.addAndGet(exceptionAborts);
                 PIPELINE_PEAK_PREPARED_AHEAD.accumulateAndGet(peakPreparedAhead, Math::max);
                 PIPELINE_MAX_CONFIGURED_LOOKAHEAD.accumulateAndGet(lookahead, Math::max);
+                PIPELINE_MAX_CONFIGURED_WAVE_LIMIT.accumulateAndGet(waveLimit, Math::max);
+                PIPELINE_WAVES_EXECUTED.addAndGet(wavesExecuted);
             }
             if (abortFailure instanceof Error) {
                 throw (Error) abortFailure;

@@ -542,6 +542,43 @@ class LocalPreaggTest {
 
     @Test
     @SuppressWarnings({"rawtypes", "unchecked"})
+    void testSparseDoubleBufferSubmitsTwoDisjointWavesBeforeConsumption() throws Exception {
+        LocalPreagg.GroupedInputs groups =
+                LocalPreagg.groupInputs(
+                        Arrays.asList(
+                                "a", "a", "a", "b", "b", "b", "c", "c", "c", "d", "d", "d", "e",
+                                "e", "e"),
+                        Arrays.asList(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+                        null);
+        WaveRecordingPipeline pipeline = new WaveRecordingPipeline(3);
+
+        LocalPreagg.dispatchMaterializedPipeline(
+                mock(AbstractStreamOperator.class),
+                pipeline,
+                groups,
+                mock(TimestampedCollector.class),
+                2,
+                2);
+
+        assertEquals(
+                Arrays.asList(
+                        "prepare:a",
+                        "prepare:b",
+                        "prepare:c",
+                        "prepare:d",
+                        "prepare:e",
+                        "wave:token-b,token-c",
+                        "wave:token-d,token-e",
+                        "process:a:token-a",
+                        "process:b:token-b",
+                        "process:c:token-c",
+                        "process:d:token-d",
+                        "process:e:token-e"),
+                pipeline.events);
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
     void testUnsupportedPreparedWaveIsNotRetriedForEverySlidingGroup() throws Exception {
         LocalPreagg.GroupedInputs groups =
                 LocalPreagg.groupInputs(

@@ -54,6 +54,11 @@ public interface BatchKeyGroupingSupport {
         return 0;
     }
 
+    /** Maximum number of disjoint prepared read waves submitted before keyed consumption starts. */
+    default int crossKeyPipelineWaveLimit() {
+        return 1;
+    }
+
     /**
      * Groups {@code count} native-order 32-bit tokens and writes a packed plan.
      *

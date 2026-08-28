@@ -276,6 +276,23 @@ class StatePrefetcherTest {
         verify(grouping, org.mockito.Mockito.times(3)).crossKeyPipelineLookaheadGroups();
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void testCrossKeyPipelineWaveLimitIsBoundedToTwo() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(BatchKeyGroupingSupport.class));
+        BatchKeyGroupingSupport grouping = (BatchKeyGroupingSupport) backend;
+
+        org.mockito.Mockito.when(grouping.crossKeyPipelineWaveLimit()).thenReturn(2, 99, -1);
+
+        assertEquals(2, StatePrefetcher.crossKeyPipelineWaveLimit(backend));
+        assertEquals(2, StatePrefetcher.crossKeyPipelineWaveLimit(backend));
+        assertEquals(1, StatePrefetcher.crossKeyPipelineWaveLimit(backend));
+        verify(grouping, org.mockito.Mockito.times(3)).crossKeyPipelineWaveLimit();
+    }
+
     public interface ImmediatePrefetchHook {
         void prefetchForImmediateUse(Collection<?> keys);
     }

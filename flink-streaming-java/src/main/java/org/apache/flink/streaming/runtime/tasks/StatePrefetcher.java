@@ -634,6 +634,28 @@ public final class StatePrefetcher {
                         configured));
     }
 
+    /** Returns the bounded number of disjoint read waves allowed to overlap. */
+    public static int crossKeyPipelineWaveLimit(Input<?> headOperator) {
+        if (!(headOperator instanceof AbstractStreamOperator)) {
+            return 1;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            return crossKeyPipelineWaveLimit(backend);
+        } catch (Throwable failure) {
+            return 1;
+        }
+    }
+
+    static int crossKeyPipelineWaveLimit(KeyedStateBackend<?> backend) {
+        if (!(backend instanceof BatchKeyGroupingSupport)) {
+            return 1;
+        }
+        return Math.max(
+                1, Math.min(2, ((BatchKeyGroupingSupport) backend).crossKeyPipelineWaveLimit()));
+    }
+
     static int groupHashTokensNatively(
             KeyedStateBackend<?> backend, ByteBuffer tokens, int count, ByteBuffer packedPlan) {
         if (!(backend instanceof BatchKeyGroupingSupport)) {
