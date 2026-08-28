@@ -19,6 +19,7 @@
 package org.apache.flink.streaming.runtime.io;
 
 import org.apache.flink.streaming.api.operators.Input;
+import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.io.PushingAsyncDataInput.DataOutput;
 import org.apache.flink.streaming.runtime.streamrecord.LatencyMarker;
@@ -34,12 +35,40 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 /** Ordering tests for the mailbox-owned lookahead buffer. */
 class StreamRecordBatchOutputTest {
+
+    @Test
+    void testStableKeySidecarSlidesNullKeysAndRevokesPreviousSelectorLease() {
+        MailboxStableKeySidecar sidecar = new MailboxStableKeySidecar(4);
+        KeySelector<String, String> selector = value -> value;
+        KeySelector<String, String> replacement = value -> value;
+        Object third = new Object();
+        sidecar.capture(0, new Object(), selector);
+        sidecar.capture(2, null, selector);
+        sidecar.capture(3, third, selector);
+
+        sidecar.discardPrefix(2, 4);
+
+        assertTrue(sidecar.isReady(0, selector));
+        assertNull(sidecar.keyAt(0));
+        assertTrue(sidecar.isReady(1, selector));
+        assertSame(third, sidecar.keyAt(1));
+        assertFalse(sidecar.isReady(2, selector));
+        assertFalse(sidecar.isReady(3, selector));
+
+        sidecar.capture(2, "replacement", replacement);
+        assertFalse(sidecar.isReady(0, selector));
+        assertFalse(sidecar.isReady(1, selector));
+        assertTrue(sidecar.isReady(2, replacement));
+    }
 
     @Test
     void testDispatchCancellationRunsBeforeOrdinaryRecordReplay() throws Exception {

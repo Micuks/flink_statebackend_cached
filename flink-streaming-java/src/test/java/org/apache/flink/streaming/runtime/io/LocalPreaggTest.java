@@ -938,6 +938,50 @@ class LocalPreaggTest {
     }
 
     @Test
+    void testTransientIndexedPlanReusesPrefetchedRepresentativeSidecarKeys() throws Exception {
+        LocalPreagg.NativeGroupingWorkspace workspace =
+                packedWorkspace(
+                        5,
+                        3,
+                        new int[] {0, 1, 3},
+                        new int[] {0, 2, 4, 5},
+                        new int[] {0, 1, 0, 2, 1});
+        StreamRecord<?>[] records =
+                new StreamRecord<?>[] {
+                    new StreamRecord<>("a"),
+                    new StreamRecord<>("b"),
+                    new StreamRecord<>("a"),
+                    new StreamRecord<>("c"),
+                    new StreamRecord<>("b")
+                };
+        CountingTransientSelector selector = new CountingTransientSelector();
+        MailboxStableKeySidecar sidecar = new MailboxStableKeySidecar(records.length);
+        for (int source = 0; source < records.length; source++) {
+            Object key = selector.getTransientKey((String) records[source].getValue());
+            workspace.putIndexedTransientSource(source, source, key.hashCode());
+        }
+        sidecar.capture(0, new MutableKey("a"), selector);
+        sidecar.capture(1, new MutableKey("b"), selector);
+        sidecar.capture(3, new MutableKey("c"), selector);
+
+        LocalPreagg.IndexedGroups groups =
+                LocalPreagg.validatePackedIndexedGroupsTransient(
+                        workspace,
+                        records,
+                        records.length,
+                        3,
+                        selector,
+                        selector,
+                        sidecar);
+
+        assertEquals(
+                Arrays.asList(new MutableKey("a"), new MutableKey("b"), new MutableKey("c")),
+                groups.keys);
+        assertEquals(0, selector.stableCalls);
+        assertEquals(7, selector.transientCalls);
+    }
+
+    @Test
     void testIndexedPackedPlanMatchesJavaGroupingAcrossRandomBatchesAndBufferHoles() {
         Random random = new Random(0x4b554e50454e47L);
         for (int trial = 0; trial < 250; trial++) {

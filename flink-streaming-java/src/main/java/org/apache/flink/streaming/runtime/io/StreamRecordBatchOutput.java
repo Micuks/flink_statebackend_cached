@@ -81,10 +81,13 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
     private final int asyncPrefetchSlidingDrainRecords;
     /** Revoke still-speculative prepared-key ownership for records selected for dispatch. */
     private final boolean cancelPrefetchOnDispatch;
+    /** Reuse stable keys already projected for asynchronous prefetch during later dispatch. */
+    private final boolean stableKeySidecarEnabled;
 
     // Reusable record buffer. Sized at construction.
     @SuppressWarnings({"unchecked", "rawtypes"})
     private final StreamRecord<T>[] buf;
+    private final MailboxStableKeySidecar stableKeySidecar;
 
     private int count;
     private long firstAppendNanos;
@@ -275,6 +278,43 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
             int asyncPrefetchHeadGuardRecords,
             int asyncPrefetchSlidingDrainRecords,
             boolean cancelPrefetchOnDispatch) {
+        this(
+                wrapped,
+                headOperator,
+                enabled,
+                commutativeKeySort,
+                batchSize,
+                batchTimeoutNanos,
+                numRecordsIn,
+                prefetchMode,
+                backpressured,
+                backpressureGated,
+                asyncPrefetchChunks,
+                asyncPrefetchChunkSize,
+                asyncPrefetchHeadGuardRecords,
+                asyncPrefetchSlidingDrainRecords,
+                cancelPrefetchOnDispatch,
+                false);
+    }
+
+    /** Full constructor including mailbox-owned stable-key reuse between prefetch and dispatch. */
+    public StreamRecordBatchOutput(
+            DataOutput<T> wrapped,
+            Input<T> headOperator,
+            boolean enabled,
+            boolean commutativeKeySort,
+            int batchSize,
+            long batchTimeoutNanos,
+            Counter numRecordsIn,
+            boolean prefetchMode,
+            java.util.function.BooleanSupplier backpressured,
+            boolean backpressureGated,
+            boolean asyncPrefetchChunks,
+            int asyncPrefetchChunkSize,
+            int asyncPrefetchHeadGuardRecords,
+            int asyncPrefetchSlidingDrainRecords,
+            boolean cancelPrefetchOnDispatch,
+            boolean stableKeySidecarEnabled) {
         this.wrapped = wrapped;
         this.headOperator = headOperator;
         this.enabled = enabled && batchSize > 1;
@@ -295,9 +335,15 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                         : Math.max(
                                 0, Math.min(this.batchSize - 1, asyncPrefetchSlidingDrainRecords));
         this.cancelPrefetchOnDispatch = cancelPrefetchOnDispatch && this.asyncPrefetchChunks;
+        this.stableKeySidecarEnabled =
+                stableKeySidecarEnabled && this.prefetchMode && this.asyncPrefetchChunks;
         @SuppressWarnings({"unchecked", "rawtypes"})
         StreamRecord<T>[] tmp = new StreamRecord[this.batchSize];
         this.buf = tmp;
+        this.stableKeySidecar =
+                this.stableKeySidecarEnabled
+                        ? new MailboxStableKeySidecar(this.batchSize)
+                        : null;
         this.count = 0;
         this.firstAppendNanos = 0L;
         this.batchOperator =
@@ -361,6 +407,9 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
     public void append(StreamRecord<T> record) {
         if (count == 0) {
             firstAppendNanos = System.nanoTime();
+        }
+        if (stableKeySidecarEnabled) {
+            stableKeySidecar.invalidate(count);
         }
         buf[count++] = record;
         scheduleAsyncPrefetchChunks(false);
@@ -428,7 +477,13 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         // the matching prepared-MultiGet reservation before LocalPreagg or ordinary per-record
         // execution can race the worker. Already-published staging remains usable; unsupported
         // backends fail closed inside StatePrefetcher.
-        if (LocalPreagg.dispatch(headOperator, buf, n, numRecordsIn, cancelPrefetchOnDispatch)) {
+        if (LocalPreagg.dispatch(
+                headOperator,
+                buf,
+                n,
+                numRecordsIn,
+                cancelPrefetchOnDispatch,
+                stableKeySidecar)) {
             return;
         }
         // LocalPreagg reuses its already-deduplicated group keys for cancellation. Only the
@@ -490,6 +545,9 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         if (remaining > 0) {
             System.arraycopy(buf, n, buf, 0, remaining);
         }
+        if (stableKeySidecarEnabled) {
+            stableKeySidecar.discardPrefix(n, count);
+        }
         for (int i = remaining; i < count; i++) {
             buf[i] = null;
         }
@@ -531,7 +589,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
             // later grouping/fold work. At flush, immediate prefetch skips staged/in-flight keys,
             // so the two paths do not issue the same batch read twice.
             org.apache.flink.streaming.runtime.tasks.StatePrefetcher.prefetch(
-                    headOperator, buf, start, end);
+                    headOperator, buf, start, end, stableKeySidecar);
             asyncPrefetchScheduledUntil = end;
         }
     }

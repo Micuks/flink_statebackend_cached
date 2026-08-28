@@ -102,6 +102,8 @@ public final class LocalPreagg {
     private static final AtomicLong INDEXED_FOLD_RECORDS = new AtomicLong();
     private static final AtomicLong INDEXED_FOLD_GROUPS = new AtomicLong();
     private static final AtomicLong INDEXED_FOLD_PLAN_FALLBACKS = new AtomicLong();
+    private static final AtomicLong STABLE_KEY_SIDECAR_HITS = new AtomicLong();
+    private static final AtomicLong STABLE_KEY_SIDECAR_MISSES = new AtomicLong();
     private static final AtomicLong PIPELINE_WINDOWS = new AtomicLong();
     private static final AtomicLong PIPELINE_GROUPS = new AtomicLong();
     private static final AtomicLong PIPELINE_PREPARATION_CANDIDATE_GROUPS = new AtomicLong();
@@ -186,6 +188,24 @@ public final class LocalPreagg {
             int n,
             Counter numRecordsIn,
             boolean cancelPrefetchOnDispatch) {
+        return dispatch(
+                headOperator,
+                buf,
+                n,
+                numRecordsIn,
+                cancelPrefetchOnDispatch,
+                null);
+    }
+
+    /** Attempt grouped dispatch while reusing stable keys captured by mailbox prefetch. */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public static boolean dispatch(
+            Input<?> headOperator,
+            StreamRecord<?>[] buf,
+            int n,
+            Counter numRecordsIn,
+            boolean cancelPrefetchOnDispatch,
+            MailboxStableKeySidecar stableKeySidecar) {
         if (!ENABLED || n <= 0 || headOperator == null) {
             return false;
         }
@@ -233,7 +253,8 @@ public final class LocalPreagg {
                         n,
                         numRecordsIn,
                         workspace,
-                        cancelPrefetchOnDispatch)) {
+                        cancelPrefetchOnDispatch,
+                        stableKeySidecar)) {
                     return true;
                 }
             } catch (Throwable t) {
@@ -273,7 +294,10 @@ public final class LocalPreagg {
                 }
                 lastRec = rec;
                 Object value = rec.getValue();
-                Object key = selector.getKey(value);
+                Object key =
+                        isStableKeyReady(stableKeySidecar, selector, i)
+                                ? stableKeySidecar.keyAt(i)
+                                : selector.getKey(value);
                 if (groupingWorkspace != null) {
                     groupingWorkspace.putToken(recordKeys.size(), Objects.hashCode(key));
                 }
@@ -399,7 +423,8 @@ public final class LocalPreagg {
             int n,
             Counter numRecordsIn,
             NativeGroupingWorkspace workspace,
-            boolean cancelPrefetchOnDispatch)
+            boolean cancelPrefetchOnDispatch,
+            MailboxStableKeySidecar stableKeySidecar)
             throws Exception {
         workspace.prepare(n);
         StreamRecord<?> lastRecord = null;
@@ -418,14 +443,21 @@ public final class LocalPreagg {
                     continue;
                 }
                 lastRecord = record;
-                if (transientSelector != null) {
+                if (isStableKeyReady(stableKeySidecar, selector, bufferIndex)) {
+                    Object key = stableKeySidecar.keyAt(bufferIndex);
+                    workspace.putIndexedSource(
+                            sourceCount, bufferIndex, key, Objects.hashCode(key));
+                    STABLE_KEY_SIDECAR_HITS.incrementAndGet();
+                } else if (transientSelector != null) {
                     Object key = transientSelector.getTransientKey(record.getValue());
                     workspace.putIndexedTransientSource(
                             sourceCount, bufferIndex, Objects.hashCode(key));
+                    STABLE_KEY_SIDECAR_MISSES.incrementAndGet();
                 } else {
                     Object key = selector.getKey(record.getValue());
                     workspace.putIndexedSource(
                             sourceCount, bufferIndex, key, Objects.hashCode(key));
+                    STABLE_KEY_SIDECAR_MISSES.incrementAndGet();
                 }
                 sourceCount++;
             }
@@ -445,7 +477,8 @@ public final class LocalPreagg {
                                     sourceCount,
                                     groupCount,
                                     selector,
-                                    transientSelector);
+                                    transientSelector,
+                                    stableKeySidecar);
             if (groups == null) {
                 return false;
             }
@@ -499,7 +532,7 @@ public final class LocalPreagg {
                 double collapse = groupTotal == 0 ? 0 : (double) records / groupTotal;
                 System.err.println(
                         String.format(
-                                "[LOCAL-PREAGG INDEXED] [CACHEKIT DISTINCT PIPELINE] mode=indexed jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx planFallbacks=%d materializedValueCopiesAvoided=%d allDispatches=%d allRecords=%d allGroups=%d pipelineLookahead=%d pipelineWaveLimit=%d pipelineWavesExecuted=%d pipelineWindows=%d pipelineGroups=%d pipelinePreparationCandidateGroups=%d pipelineBypassedGroups=%d pipelinePreparedGroups=%d pipelinePreparedAheadGroups=%d pipelineConsumedGroups=%d pipelineCancelledGroups=%d pipelineProcessWithFutureInFlight=%d pipelinePeakPreparedAhead=%d pipelineExceptionAborts=%d",
+                                "[LOCAL-PREAGG INDEXED] [CACHEKIT DISTINCT PIPELINE] mode=indexed jvm=%s op=%s dispatches=%d records=%d groups=%d collapse=%.2fx planFallbacks=%d materializedValueCopiesAvoided=%d sidecarHits=%d sidecarMisses=%d allDispatches=%d allRecords=%d allGroups=%d pipelineLookahead=%d pipelineWaveLimit=%d pipelineWavesExecuted=%d pipelineWindows=%d pipelineGroups=%d pipelinePreparationCandidateGroups=%d pipelineBypassedGroups=%d pipelinePreparedGroups=%d pipelinePreparedAheadGroups=%d pipelineConsumedGroups=%d pipelineCancelledGroups=%d pipelineProcessWithFutureInFlight=%d pipelinePeakPreparedAhead=%d pipelineExceptionAborts=%d",
                                 JVM_ID,
                                 op.getClass().getSimpleName(),
                                 dispatches,
@@ -508,6 +541,8 @@ public final class LocalPreagg {
                                 collapse,
                                 INDEXED_FOLD_PLAN_FALLBACKS.get(),
                                 records,
+                                STABLE_KEY_SIDECAR_HITS.get(),
+                                STABLE_KEY_SIDECAR_MISSES.get(),
                                 allDispatches,
                                 allRecords,
                                 allGroups,
@@ -1347,6 +1382,26 @@ public final class LocalPreagg {
             KeySelector stableSelector,
             TransientKeySelector transientSelector)
             throws Exception {
+        return validatePackedIndexedGroupsTransient(
+                workspace,
+                records,
+                sourceCount,
+                returnedGroupCount,
+                stableSelector,
+                transientSelector,
+                null);
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    static IndexedGroups validatePackedIndexedGroupsTransient(
+            NativeGroupingWorkspace workspace,
+            StreamRecord<?>[] records,
+            int sourceCount,
+            int returnedGroupCount,
+            KeySelector stableSelector,
+            TransientKeySelector transientSelector,
+            MailboxStableKeySidecar stableKeySidecar)
+            throws Exception {
         if (records == null
                 || stableSelector == null
                 || transientSelector == null
@@ -1387,7 +1442,9 @@ public final class LocalPreagg {
                 return null;
             }
             workspace.indexedGroupKeys[group] =
-                    stableSelector.getKey(records[bufferIndex].getValue());
+                    isStableKeyReady(stableKeySidecar, stableSelector, bufferIndex)
+                            ? stableKeySidecar.keyAt(bufferIndex)
+                            : stableSelector.getKey(records[bufferIndex].getValue());
         }
         if (plan.getInt(offsetsBase) != 0
                 || plan.getInt(offsetsBase + groupCount * Integer.BYTES) != sourceCount) {
@@ -1422,7 +1479,10 @@ public final class LocalPreagg {
                 nextGroup++;
             } else {
                 Object transientKey =
-                        transientSelector.getTransientKey(records[bufferIndex].getValue());
+                        isStableKeyReady(stableKeySidecar, stableSelector, bufferIndex)
+                                ? stableKeySidecar.keyAt(bufferIndex)
+                                : transientSelector.getTransientKey(
+                                        records[bufferIndex].getValue());
                 if (source < firstSource
                         || group >= nextGroup
                         || !Objects.equals(workspace.indexedGroupKeys[group], transientKey)) {
@@ -1453,6 +1513,13 @@ public final class LocalPreagg {
                 workspace.indexedGroupKeyView,
                 groupCount);
         return workspace.indexedGroups;
+    }
+
+    private static boolean isStableKeyReady(
+            MailboxStableKeySidecar stableKeySidecar,
+            KeySelector<?, ?> selector,
+            int bufferIndex) {
+        return stableKeySidecar != null && stableKeySidecar.isReady(bufferIndex, selector);
     }
 
     /** Read-only reusable list view over first-seen group keys. */

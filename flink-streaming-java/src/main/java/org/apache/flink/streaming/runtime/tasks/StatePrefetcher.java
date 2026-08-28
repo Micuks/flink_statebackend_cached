@@ -23,11 +23,14 @@ import org.apache.flink.runtime.state.BatchKeyGroupingSupport;
 import org.apache.flink.runtime.state.KeyedStateBackend;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.Input;
+import org.apache.flink.streaming.runtime.io.MailboxStableKeySidecar;
+import org.apache.flink.streaming.runtime.io.TransientKeySelector;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 /**
  * Backpressure-driven state prefetch (key extraction + submission side).
@@ -59,6 +62,17 @@ import java.nio.ByteBuffer;
  * exclusion. A small static reflection cache mirrors {@link BatchedKeyedOperatorAdapter}.
  */
 public final class StatePrefetcher {
+
+    private static final ThreadLocal<PrefetchGroupingWorkspace> PREFETCH_GROUPING_WORKSPACE =
+            ThreadLocal.withInitial(PrefetchGroupingWorkspace::new);
+    private static final java.util.concurrent.atomic.AtomicLong PREFETCH_KEY_DEDUP_WINDOWS =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong PREFETCH_KEY_DEDUP_SOURCES =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong PREFETCH_KEY_DEDUP_STABLE_KEYS =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong PREFETCH_KEY_DEDUP_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
 
     /** Cache of {@code stateKeySelector1} {@link Field} per operator class. */
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Field>
@@ -152,11 +166,28 @@ public final class StatePrefetcher {
     @SuppressWarnings({"unchecked", "rawtypes"})
     public static void prefetch(
             Input<?> headOperator, StreamRecord<?>[] buf, int fromIndex, int toIndex) {
+        prefetch(headOperator, buf, fromIndex, toIndex, null);
+    }
+
+    /**
+     * Best-effort prefetch that may also retain the stable selector result beside the
+     * mailbox-owned record buffer. The sidecar is written only after a successful selector call;
+     * a partial extraction failure clears the affected range so authoritative dispatch can fall
+     * back to its ordinary selector path.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public static void prefetch(
+            Input<?> headOperator,
+            StreamRecord<?>[] buf,
+            int fromIndex,
+            int toIndex,
+            MailboxStableKeySidecar stableKeySidecar) {
         if (headOperator == null
                 || buf == null
                 || fromIndex < 0
                 || toIndex > buf.length
-                || toIndex - fromIndex <= 1) {
+                || toIndex - fromIndex <= 1
+                || (stableKeySidecar != null && stableKeySidecar.capacity() < toIndex)) {
             return; // single record gains nothing from a batched prefetch
         }
         try {
@@ -192,7 +223,35 @@ public final class StatePrefetcher {
             // AArch64 kernel can compact exact duplicates after serialization. Other backends keep
             // the original LinkedHashSet behavior.
             java.util.Collection keys = newKeyCollection(ksb, Math.max(2, toIndex - fromIndex));
-            if (extractKeys(selector, buf, fromIndex, toIndex, keys) && !keys.isEmpty()) {
+            boolean extracted = false;
+            if (stableKeySidecar != null && selector instanceof TransientKeySelector) {
+                extracted =
+                        extractRepresentativeStableKeys(
+                                ksb,
+                                selector,
+                                (TransientKeySelector) selector,
+                                buf,
+                                fromIndex,
+                                toIndex,
+                                keys,
+                                stableKeySidecar);
+                if (!extracted) {
+                    PREFETCH_KEY_DEDUP_FALLBACKS.incrementAndGet();
+                    keys.clear();
+                    stableKeySidecar.clearRange(fromIndex, toIndex);
+                }
+            }
+            if (!extracted) {
+                extracted =
+                        extractKeys(
+                                selector,
+                                buf,
+                                fromIndex,
+                                toIndex,
+                                keys,
+                                stableKeySidecar);
+            }
+            if (extracted && !keys.isEmpty()) {
                 prefetchMethod.invoke(ksb, keys);
             }
         } catch (Throwable t) {
@@ -207,22 +266,186 @@ public final class StatePrefetcher {
             int fromIndex,
             int toIndex,
             java.util.Collection keys) {
+        return extractKeys(selector, buf, fromIndex, toIndex, keys, null);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    static boolean extractKeys(
+            KeySelector selector,
+            StreamRecord<?>[] buf,
+            int fromIndex,
+            int toIndex,
+            java.util.Collection keys,
+            MailboxStableKeySidecar stableKeySidecar) {
         for (int i = fromIndex; i < toIndex; i++) {
             StreamRecord<?> rec = buf[i];
             if (rec == null) {
+                if (stableKeySidecar != null) {
+                    stableKeySidecar.invalidate(i);
+                }
                 continue;
             }
             Object key;
             try {
                 key = selector.getKey(rec.getValue());
             } catch (Throwable t) {
+                if (stableKeySidecar != null) {
+                    stableKeySidecar.clearRange(fromIndex, toIndex);
+                }
                 return false; // an unkeyed/odd record: bail, the prefetch is optional
+            }
+            if (stableKeySidecar != null) {
+                stableKeySidecar.capture(i, key, selector);
             }
             if (key != null) {
                 keys.add(key);
             }
         }
         return true;
+    }
+
+    /**
+     * Uses the existing native hash-grouping kernel to retain only one stable copied key per exact
+     * Java key. Hashes are merely scheduling tokens: a second transient-selector pass validates
+     * every Java equality before any representative is exposed to the backend or sidecar.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    static boolean extractRepresentativeStableKeys(
+            KeyedStateBackend<?> backend,
+            KeySelector stableSelector,
+            TransientKeySelector transientSelector,
+            StreamRecord<?>[] buf,
+            int fromIndex,
+            int toIndex,
+            java.util.Collection keys,
+            MailboxStableKeySidecar stableKeySidecar) {
+        if (backend == null
+                || stableSelector == null
+                || transientSelector == null
+                || buf == null
+                || keys == null
+                || stableKeySidecar == null
+                || fromIndex < 0
+                || toIndex > buf.length
+                || toIndex <= fromIndex
+                || stableKeySidecar.capacity() < toIndex) {
+            return false;
+        }
+        final PrefetchGroupingWorkspace workspace = PREFETCH_GROUPING_WORKSPACE.get();
+        workspace.prepare(toIndex - fromIndex);
+        int sourceCount = 0;
+        try {
+            for (int bufferIndex = fromIndex; bufferIndex < toIndex; bufferIndex++) {
+                StreamRecord<?> record = buf[bufferIndex];
+                if (record == null) {
+                    continue;
+                }
+                Object transientKey =
+                        transientSelector.getTransientKey(record.getValue());
+                workspace.putSource(
+                        sourceCount, bufferIndex, java.util.Objects.hashCode(transientKey));
+                sourceCount++;
+            }
+            if (sourceCount <= 1) {
+                return false;
+            }
+            int groupCount =
+                    groupHashTokensNatively(
+                            backend, workspace.tokens, sourceCount, workspace.plan);
+            if (!workspace.validateHeader(sourceCount, groupCount)) {
+                return false;
+            }
+
+            final int firstSourceBase = BatchKeyGroupingSupport.PACKED_PLAN_HEADER_BYTES;
+            final int offsetsBase = firstSourceBase + groupCount * Integer.BYTES;
+            final int sourceGroupBase = offsetsBase + (groupCount + 1) * Integer.BYTES;
+            int previousFirst = -1;
+            for (int group = 0; group < groupCount; group++) {
+                int firstSource = workspace.plan.getInt(firstSourceBase + group * Integer.BYTES);
+                if (firstSource < 0
+                        || firstSource >= sourceCount
+                        || (group == 0 && firstSource != 0)
+                        || firstSource <= previousFirst) {
+                    return false;
+                }
+                previousFirst = firstSource;
+                int bufferIndex = workspace.bufferIndexes[firstSource];
+                StreamRecord<?> record = buf[bufferIndex];
+                if (record == null) {
+                    return false;
+                }
+                workspace.groupKeys[group] = stableSelector.getKey(record.getValue());
+            }
+            if (workspace.plan.getInt(offsetsBase) != 0
+                    || workspace.plan.getInt(offsetsBase + groupCount * Integer.BYTES)
+                            != sourceCount) {
+                return false;
+            }
+            for (int group = 0; group < groupCount; group++) {
+                int begin = workspace.plan.getInt(offsetsBase + group * Integer.BYTES);
+                int end = workspace.plan.getInt(offsetsBase + (group + 1) * Integer.BYTES);
+                if (begin < 0 || begin >= end || end > sourceCount) {
+                    return false;
+                }
+            }
+
+            int nextGroup = 0;
+            for (int source = 0; source < sourceCount; source++) {
+                int group = workspace.plan.getInt(sourceGroupBase + source * Integer.BYTES);
+                if (group < 0 || group >= groupCount) {
+                    return false;
+                }
+                int firstSource = workspace.plan.getInt(firstSourceBase + group * Integer.BYTES);
+                if (source == firstSource) {
+                    if (group != nextGroup) {
+                        return false;
+                    }
+                    nextGroup++;
+                } else {
+                    int bufferIndex = workspace.bufferIndexes[source];
+                    Object transientKey =
+                            transientSelector.getTransientKey(buf[bufferIndex].getValue());
+                    if (source < firstSource
+                            || group >= nextGroup
+                            || !java.util.Objects.equals(workspace.groupKeys[group], transientKey)) {
+                        return false;
+                    }
+                }
+            }
+            if (nextGroup != groupCount) {
+                return false;
+            }
+
+            stableKeySidecar.clearRange(fromIndex, toIndex);
+            for (int group = 0; group < groupCount; group++) {
+                int firstSource = workspace.plan.getInt(firstSourceBase + group * Integer.BYTES);
+                int bufferIndex = workspace.bufferIndexes[firstSource];
+                Object stableKey = workspace.groupKeys[group];
+                stableKeySidecar.capture(bufferIndex, stableKey, stableSelector);
+                if (stableKey != null) {
+                    keys.add(stableKey);
+                }
+            }
+            long windows = PREFETCH_KEY_DEDUP_WINDOWS.incrementAndGet();
+            long sources = PREFETCH_KEY_DEDUP_SOURCES.addAndGet(sourceCount);
+            long stable = PREFETCH_KEY_DEDUP_STABLE_KEYS.addAndGet(groupCount);
+            if (windows % 5000L == 1L) {
+                System.err.println(
+                        String.format(
+                                "[CACHEKIT PREFETCH KEY SIDECAR] windows=%d sources=%d stableKeys=%d reduction=%.2fx fallbacks=%d",
+                                windows,
+                                sources,
+                                stable,
+                                stable == 0 ? 0.0 : (double) sources / stable,
+                                PREFETCH_KEY_DEDUP_FALLBACKS.get()));
+            }
+            return !keys.isEmpty();
+        } catch (Throwable failure) {
+            stableKeySidecar.clearRange(fromIndex, toIndex);
+            return false;
+        } finally {
+            workspace.clear(sourceCount);
+        }
     }
 
     /**
@@ -790,6 +1013,71 @@ public final class StatePrefetcher {
             }
         }
         return NO_METHOD;
+    }
+
+    private static final class PrefetchGroupingWorkspace {
+        private ByteBuffer tokens = directBuffer(Integer.BYTES);
+        private ByteBuffer plan =
+                directBuffer(BatchKeyGroupingSupport.requiredPackedPlanBytes(1));
+        private int[] bufferIndexes = new int[1];
+        private Object[] groupKeys = new Object[1];
+
+        private void prepare(int capacity) {
+            int bounded = Math.max(1, capacity);
+            int tokenBytes = Math.multiplyExact(bounded, Integer.BYTES);
+            int planBytes = BatchKeyGroupingSupport.requiredPackedPlanBytes(bounded);
+            if (tokens.capacity() < tokenBytes) {
+                tokens = directBuffer(grownCapacity(tokens.capacity(), tokenBytes));
+            }
+            if (plan.capacity() < planBytes) {
+                plan = directBuffer(grownCapacity(plan.capacity(), planBytes));
+            }
+            if (bufferIndexes.length < bounded) {
+                int grown = grownCapacity(bufferIndexes.length, bounded);
+                bufferIndexes = new int[grown];
+                groupKeys = new Object[grown];
+            }
+            tokens.clear();
+            plan.clear();
+            plan.putInt(0, 0);
+        }
+
+        private void putSource(int source, int bufferIndex, int token) {
+            bufferIndexes[source] = bufferIndex;
+            tokens.putInt(source * Integer.BYTES, token);
+        }
+
+        private boolean validateHeader(int sourceCount, int groupCount) {
+            if (sourceCount <= 0 || groupCount <= 0 || groupCount > sourceCount) {
+                return false;
+            }
+            int required = BatchKeyGroupingSupport.requiredPackedPlanBytes(sourceCount);
+            return required <= plan.capacity()
+                    && plan.getInt(0) == BatchKeyGroupingSupport.PACKED_PLAN_MAGIC
+                    && plan.getInt(Integer.BYTES)
+                            == BatchKeyGroupingSupport.PACKED_PLAN_VERSION
+                    && plan.getInt(2 * Integer.BYTES) == sourceCount
+                    && plan.getInt(3 * Integer.BYTES) == groupCount;
+        }
+
+        private void clear(int sourceCount) {
+            int bounded = Math.max(0, Math.min(sourceCount, groupKeys.length));
+            for (int index = 0; index < bounded; index++) {
+                groupKeys[index] = null;
+            }
+        }
+
+        private static ByteBuffer directBuffer(int bytes) {
+            return ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());
+        }
+
+        private static int grownCapacity(int current, int required) {
+            int grown = Math.max(1, current);
+            while (grown < required) {
+                grown = Math.multiplyExact(grown, 2);
+            }
+            return grown;
+        }
     }
 
     // ------------------------------------------------------------------------

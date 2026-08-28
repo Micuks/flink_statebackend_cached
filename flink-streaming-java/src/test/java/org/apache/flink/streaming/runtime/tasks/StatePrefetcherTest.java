@@ -20,6 +20,8 @@ import org.apache.flink.runtime.state.BatchKeyGroupingSupport;
 import org.apache.flink.runtime.state.KeyedStateBackend;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.Input;
+import org.apache.flink.streaming.runtime.io.MailboxStableKeySidecar;
+import org.apache.flink.streaming.runtime.io.TransientKeySelector;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
 import org.junit.jupiter.api.Test;
@@ -246,6 +248,86 @@ class StatePrefetcherTest {
     }
 
     @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void testRepresentativeExtractionCopiesOneStableKeyPerExactGroup() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(BatchKeyGroupingSupport.class));
+        BatchKeyGroupingSupport grouping = (BatchKeyGroupingSupport) backend;
+        stubPackedPlan(grouping, new int[] {0, 0, 1, 0}, new int[] {0, 2});
+        CountingTransientSelector selector = new CountingTransientSelector(null);
+        StreamRecord<?>[] records =
+                new StreamRecord<?>[] {
+                    new StreamRecord<>("a"),
+                    new StreamRecord<>("a"),
+                    new StreamRecord<>("b"),
+                    new StreamRecord<>("a")
+                };
+        MailboxStableKeySidecar sidecar = new MailboxStableKeySidecar(records.length);
+        List<TestKey> keys = new ArrayList<>();
+
+        assertTrue(
+                StatePrefetcher.extractRepresentativeStableKeys(
+                        backend,
+                        selector,
+                        selector,
+                        records,
+                        0,
+                        records.length,
+                        keys,
+                        sidecar));
+
+        assertEquals(Arrays.asList(new TestKey("a", null), new TestKey("b", null)), keys);
+        assertEquals(2, selector.stableCalls);
+        assertEquals(6, selector.transientCalls);
+        assertTrue(sidecar.isReady(0, selector));
+        assertFalse(sidecar.isReady(1, selector));
+        assertTrue(sidecar.isReady(2, selector));
+        assertFalse(sidecar.isReady(3, selector));
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void testRepresentativeExtractionRejectsCollisionAndFallbackCapturesAllSlots() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(BatchKeyGroupingSupport.class));
+        BatchKeyGroupingSupport grouping = (BatchKeyGroupingSupport) backend;
+        stubPackedPlan(grouping, new int[] {0, 0}, new int[] {0});
+        CountingTransientSelector selector = new CountingTransientSelector(7);
+        StreamRecord<?>[] records =
+                new StreamRecord<?>[] {
+                    new StreamRecord<>("left"), new StreamRecord<>("right")
+                };
+        MailboxStableKeySidecar sidecar = new MailboxStableKeySidecar(records.length);
+        List<TestKey> keys = new ArrayList<>();
+
+        assertFalse(
+                StatePrefetcher.extractRepresentativeStableKeys(
+                        backend,
+                        selector,
+                        selector,
+                        records,
+                        0,
+                        records.length,
+                        keys,
+                        sidecar));
+        assertTrue(keys.isEmpty());
+        assertFalse(sidecar.isReady(0, selector));
+        assertFalse(sidecar.isReady(1, selector));
+
+        assertTrue(
+                StatePrefetcher.extractKeys(
+                        selector, records, 0, records.length, keys, sidecar));
+        assertEquals(
+                Arrays.asList(new TestKey("left", 7), new TestKey("right", 7)), keys);
+        assertTrue(sidecar.isReady(0, selector));
+        assertTrue(sidecar.isReady(1, selector));
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void testIndexedBatchFoldUsesJobScopedBackendCapability() {
         KeyedStateBackend<Object> backend =
@@ -291,6 +373,96 @@ class StatePrefetcherTest {
         assertEquals(2, StatePrefetcher.crossKeyPipelineWaveLimit(backend));
         assertEquals(1, StatePrefetcher.crossKeyPipelineWaveLimit(backend));
         verify(grouping, org.mockito.Mockito.times(3)).crossKeyPipelineWaveLimit();
+    }
+
+    private static void stubPackedPlan(
+            BatchKeyGroupingSupport grouping, int[] sourceGroups, int[] firstSources) {
+        org.mockito.Mockito.when(grouping.maxGroupingEntries()).thenReturn(512);
+        org.mockito.Mockito.when(
+                        grouping.groupHashTokens(
+                                org.mockito.ArgumentMatchers.any(ByteBuffer.class),
+                                org.mockito.ArgumentMatchers.eq(sourceGroups.length),
+                                org.mockito.ArgumentMatchers.any(ByteBuffer.class)))
+                .thenAnswer(
+                        invocation -> {
+                            ByteBuffer plan = invocation.getArgument(2);
+                            int groupCount = firstSources.length;
+                            int firstBase = BatchKeyGroupingSupport.PACKED_PLAN_HEADER_BYTES;
+                            int offsetsBase = firstBase + groupCount * Integer.BYTES;
+                            int sourceGroupsBase =
+                                    offsetsBase + (groupCount + 1) * Integer.BYTES;
+                            int[] counts = new int[groupCount];
+                            for (int sourceGroup : sourceGroups) {
+                                counts[sourceGroup]++;
+                            }
+                            int offset = 0;
+                            for (int group = 0; group < groupCount; group++) {
+                                plan.putInt(firstBase + group * Integer.BYTES, firstSources[group]);
+                                plan.putInt(offsetsBase + group * Integer.BYTES, offset);
+                                offset += counts[group];
+                            }
+                            plan.putInt(offsetsBase + groupCount * Integer.BYTES, offset);
+                            for (int source = 0; source < sourceGroups.length; source++) {
+                                plan.putInt(
+                                        sourceGroupsBase + source * Integer.BYTES,
+                                        sourceGroups[source]);
+                            }
+                            plan.putInt(Integer.BYTES, BatchKeyGroupingSupport.PACKED_PLAN_VERSION);
+                            plan.putInt(2 * Integer.BYTES, sourceGroups.length);
+                            plan.putInt(3 * Integer.BYTES, groupCount);
+                            plan.putInt(0, BatchKeyGroupingSupport.PACKED_PLAN_MAGIC);
+                            return groupCount;
+                        });
+    }
+
+    private static final class CountingTransientSelector
+            implements TransientKeySelector<String, TestKey> {
+        private final TestKey reusable = new TestKey("", null);
+        private final Integer forcedHash;
+        private int stableCalls;
+        private int transientCalls;
+
+        private CountingTransientSelector(Integer forcedHash) {
+            this.forcedHash = forcedHash;
+        }
+
+        @Override
+        public TestKey getKey(String value) {
+            stableCalls++;
+            return new TestKey(value, forcedHash);
+        }
+
+        @Override
+        public TestKey getTransientKey(String value) {
+            transientCalls++;
+            reusable.value = value;
+            return reusable;
+        }
+    }
+
+    private static final class TestKey {
+        private String value;
+        private final Integer forcedHash;
+
+        private TestKey(String value, Integer forcedHash) {
+            this.value = value;
+            this.forcedHash = forcedHash;
+        }
+
+        @Override
+        public int hashCode() {
+            return forcedHash == null ? value.hashCode() : forcedHash;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof TestKey && value.equals(((TestKey) other).value);
+        }
+
+        @Override
+        public String toString() {
+            return value;
+        }
     }
 
     public interface ImmediatePrefetchHook {
