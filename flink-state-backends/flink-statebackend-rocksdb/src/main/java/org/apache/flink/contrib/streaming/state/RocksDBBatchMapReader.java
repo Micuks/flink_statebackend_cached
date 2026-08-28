@@ -8,12 +8,63 @@
 package org.apache.flink.contrib.streaming.state;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import org.apache.flink.annotation.Internal;
 
 /** Internal capability exposed by RocksDB {@code MapState} for exact user-key batch reads. */
 @Internal
 public interface RocksDBBatchMapReader<UK> {
+
+    /**
+     * One fully validated, serialized mutation column that has not yet touched RocksDB.
+     *
+     * <p>Keys and values are owned by the preparing state token. The mutation is intentionally
+     * opaque outside this backend capability so callers cannot bypass the single-write commit
+     * boundary.
+     */
+    final class PreparedMutation {
+        private final RocksDBBatchMapReader<?> reader;
+        private final List<byte[]> rocksDBKeys;
+        private final byte[][] serializedValues;
+        private final boolean[] dirty;
+        private final boolean[] removed;
+
+        public PreparedMutation(
+                RocksDBBatchMapReader<?> reader,
+                List<byte[]> rocksDBKeys,
+                byte[][] serializedValues,
+                boolean[] dirty,
+                boolean[] removed) {
+            this.reader = reader;
+            this.rocksDBKeys =
+                    Collections.unmodifiableList(new ArrayList<byte[]>(rocksDBKeys));
+            this.serializedValues = serializedValues.clone();
+            this.dirty = dirty.clone();
+            this.removed = removed.clone();
+        }
+
+        public RocksDBBatchMapReader<?> reader() {
+            return reader;
+        }
+
+        public List<byte[]> rocksDBKeys() {
+            return rocksDBKeys;
+        }
+
+        public byte[][] serializedValues() {
+            return serializedValues;
+        }
+
+        public boolean[] dirty() {
+            return dirty;
+        }
+
+        public boolean[] removed() {
+            return removed;
+        }
+    }
 
     /**
      * Returns raw null-sensitive MapState values for the current outer key and namespace.
@@ -40,6 +91,39 @@ public interface RocksDBBatchMapReader<UK> {
     /** Stable identity of the RocksDB instance used for an optional multi-column read. */
     default Object multiColumnReadOwner() {
         return null;
+    }
+
+    /** Stable identity of the RocksDB instance used for prepared mutation commits. */
+    default Object preparedWriteOwner() {
+        return null;
+    }
+
+    /** Whether this reader can prepare and atomically commit already-serialized exact keys. */
+    default boolean supportsPreparedMutations() {
+        return false;
+    }
+
+    /**
+     * Serializes dirty values without writing RocksDB.
+     *
+     * <p>A {@code null} result means the capability is unavailable before any write. Exceptions
+     * are fail-loud serializer errors and must not be converted into an authoritative replay.
+     */
+    default PreparedMutation prepareSerializedMutations(
+            List<byte[]> rocksDBKeys, Object[] values, boolean[] dirty, boolean[] removed)
+            throws Exception {
+        return null;
+    }
+
+    /**
+     * Commits one or more prepared columns with one RocksDB WriteBatch.
+     *
+     * <p>Implementations must validate every reader/database before invoking {@code db.write}. Any
+     * exception after that invocation is fail-loud and must never trigger replay.
+     */
+    default void commitPreparedMutations(List<? extends PreparedMutation> mutations)
+            throws Exception {
+        throw new UnsupportedOperationException("Prepared MapState mutations are unavailable.");
     }
 
     /**

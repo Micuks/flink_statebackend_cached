@@ -2583,6 +2583,193 @@ class CachedInternalMapStateTest {
         return count;
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void testPreparedCommitIsDisabledByDefault() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                preparedCommitDelegate();
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        List<byte[]> rocksDBKeys = Arrays.asList(new byte[] {1}, new byte[] {2});
+        when(reader.serializeRocksDBKeysByUserKeys(Arrays.asList("u1", "u2")))
+                .thenReturn(rocksDBKeys);
+        when(reader.supportsPreparedMutations()).thenReturn(true);
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createDeferredWaveState(delegate, currentKey, null);
+        BatchPrefetchableMapState.PreparedValues token =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+
+        assertFalse(token.supportsPreparedCommit());
+        assertFalse(
+                token.commitPreparedValues(
+                        new Object[] {10, 20},
+                        new boolean[] {true, true},
+                        new boolean[] {false, false}));
+        verify(reader, times(0))
+                .prepareSerializedMutations(any(), any(), any(), any());
+        state.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testPreparedCommitWritesOnceAndCannotReplay() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                preparedCommitDelegate();
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        List<byte[]> rocksDBKeys = Arrays.asList(new byte[] {1}, new byte[] {2});
+        Object writeOwner = new Object();
+        RocksDBBatchMapReader.PreparedMutation mutation =
+                new RocksDBBatchMapReader.PreparedMutation(
+                        reader,
+                        rocksDBKeys,
+                        new byte[][] {new byte[] {10}, new byte[] {20}},
+                        new boolean[] {true, true},
+                        new boolean[] {false, false});
+        when(reader.serializeRocksDBKeysByUserKeys(Arrays.asList("u1", "u2")))
+                .thenReturn(rocksDBKeys);
+        when(reader.supportsPreparedMutations()).thenReturn(true);
+        when(reader.preparedWriteOwner()).thenReturn(writeOwner);
+        when(reader.prepareSerializedMutations(any(), any(), any(), any()))
+                .thenReturn(mutation);
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createDeferredWaveState(delegate, currentKey, null);
+        state.enableNativeDistinctPreparedCommit(true);
+        BatchPrefetchableMapState.PreparedValues token =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+        Object[] values = new Object[] {10, 20};
+        boolean[] dirty = new boolean[] {true, true};
+        boolean[] removed = new boolean[] {false, false};
+
+        assertTrue(token.supportsPreparedCommit());
+        assertTrue(token.commitPreparedValues(values, dirty, removed));
+        assertFalse(token.commitPreparedValues(values, dirty, removed));
+        verify(reader, times(1)).prepareSerializedMutations(rocksDBKeys, values, dirty, removed);
+        verify(reader, times(1)).commitPreparedMutations(any());
+        state.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testPreparedCommitRejectsStaleGenerationBeforeWrite() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                preparedCommitDelegate();
+        RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) delegate;
+        when(reader.serializeRocksDBKeysByUserKeys(Arrays.asList("u1", "u2")))
+                .thenReturn(Arrays.asList(new byte[] {1}, new byte[] {2}));
+        when(reader.supportsPreparedMutations()).thenReturn(true);
+        when(reader.preparedWriteOwner()).thenReturn(new Object());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createDeferredWaveState(delegate, currentKey, null);
+        state.enableNativeDistinctPreparedCommit(true);
+        BatchPrefetchableMapState.PreparedValues token =
+                state.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+        state.put("outside", 7);
+
+        assertFalse(
+                token.commitPreparedValues(
+                        new Object[] {10, 20},
+                        new boolean[] {true, true},
+                        new boolean[] {false, false}));
+        verify(reader, times(0))
+                .prepareSerializedMutations(any(), any(), any(), any());
+        verify(reader, times(0)).commitPreparedMutations(any());
+        state.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testPreparedCommitCohortUsesOneBackendWrite() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> firstDelegate =
+                preparedCommitDelegate();
+        InternalMapState<String, VoidNamespace, String, Integer> secondDelegate =
+                preparedCommitDelegate();
+        RocksDBBatchMapReader<String> firstReader =
+                (RocksDBBatchMapReader<String>) firstDelegate;
+        RocksDBBatchMapReader<String> secondReader =
+                (RocksDBBatchMapReader<String>) secondDelegate;
+        List<byte[]> firstKeys = Arrays.asList(new byte[] {1}, new byte[] {2});
+        List<byte[]> secondKeys = Arrays.asList(new byte[] {3}, new byte[] {4});
+        Object writeOwner = new Object();
+        when(firstReader.serializeRocksDBKeysByUserKeys(Arrays.asList("u1", "u2")))
+                .thenReturn(firstKeys);
+        when(secondReader.serializeRocksDBKeysByUserKeys(Arrays.asList("v1", "v2")))
+                .thenReturn(secondKeys);
+        for (RocksDBBatchMapReader<String> reader : Arrays.asList(firstReader, secondReader)) {
+            when(reader.supportsPreparedMutations()).thenReturn(true);
+            when(reader.preparedWriteOwner()).thenReturn(writeOwner);
+        }
+        RocksDBBatchMapReader.PreparedMutation firstMutation =
+                new RocksDBBatchMapReader.PreparedMutation(
+                        firstReader,
+                        firstKeys,
+                        new byte[][] {new byte[] {1}, new byte[] {2}},
+                        new boolean[] {true, true},
+                        new boolean[] {false, false});
+        RocksDBBatchMapReader.PreparedMutation secondMutation =
+                new RocksDBBatchMapReader.PreparedMutation(
+                        secondReader,
+                        secondKeys,
+                        new byte[][] {new byte[] {3}, new byte[] {4}},
+                        new boolean[] {true, true},
+                        new boolean[] {false, false});
+        when(firstReader.prepareSerializedMutations(any(), any(), any(), any()))
+                .thenReturn(firstMutation);
+        when(secondReader.prepareSerializedMutations(any(), any(), any(), any()))
+                .thenReturn(secondMutation);
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> firstState =
+                createDeferredWaveState(firstDelegate, currentKey, null);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> secondState =
+                createDeferredWaveState(secondDelegate, currentKey, null);
+        firstState.enableNativeDistinctPreparedCommit(true);
+        secondState.enableNativeDistinctPreparedCommit(true);
+        BatchPrefetchableMapState.PreparedValues firstToken =
+                firstState.prepareCurrentUniqueKeyValues(Arrays.asList("u1", "u2"));
+        BatchPrefetchableMapState.PreparedValues secondToken =
+                secondState.prepareCurrentUniqueKeyValues(Arrays.asList("v1", "v2"));
+
+        assertTrue(
+                firstToken.commitPreparedCohort(
+                        Arrays.asList(firstToken, secondToken),
+                        Arrays.asList(new Object[] {10, 20}, new Object[] {30, 40}),
+                        Arrays.asList(
+                                new boolean[] {true, true}, new boolean[] {true, true}),
+                        Arrays.asList(
+                                new boolean[] {false, false},
+                                new boolean[] {false, false})));
+        verify(firstReader, times(1)).commitPreparedMutations(any());
+        verify(secondReader, times(0)).commitPreparedMutations(any());
+        assertFalse(
+                firstToken.commitPreparedValues(
+                        new Object[] {10, 20},
+                        new boolean[] {true, true},
+                        new boolean[] {false, false}));
+        firstState.close();
+        secondState.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static InternalMapState<String, VoidNamespace, String, Integer>
+            preparedCommitDelegate() {
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(
+                        InternalMapState.class,
+                        withSettings().extraInterfaces(RocksDBBatchMapReader.class));
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer
+                                        .INSTANCE,
+                                IntSerializer.INSTANCE));
+        return delegate;
+    }
+
     private static byte[] serializedMapValue(Integer value) throws Exception {
         DataOutputSerializer out = new DataOutputSerializer(16);
         out.writeBoolean(value == null);

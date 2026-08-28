@@ -124,6 +124,97 @@ public class RocksDBBatchMapReaderTest {
         }
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testPreparedMutationsCommitPutsAndRemovesBySerializedKey() throws Exception {
+        try (RocksDBKeyedStateBackendTestFactory factory =
+                new RocksDBKeyedStateBackendTestFactory()) {
+            RocksDBKeyedStateBackend<Integer> backend =
+                    factory.create(tmp, IntSerializer.INSTANCE, 128);
+            InternalMapState<Integer, VoidNamespace, String, Integer> state =
+                    (InternalMapState<Integer, VoidNamespace, String, Integer>)
+                            backend.getPartitionedState(
+                                    VoidNamespace.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE,
+                                    new MapStateDescriptor<>(
+                                            "prepared-write-map",
+                                            StringSerializer.INSTANCE,
+                                            IntSerializer.INSTANCE));
+
+            backend.setCurrentKey(11);
+            state.put("keep", 1);
+            state.put("remove", 2);
+
+            RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) state;
+            List<byte[]> keys =
+                    reader.serializeRocksDBKeysByUserKeys(
+                            Arrays.asList("keep", "remove", "insert"));
+            RocksDBBatchMapReader.PreparedMutation mutation =
+                    reader.prepareSerializedMutations(
+                            keys,
+                            new Object[] {10, null, 30},
+                            new boolean[] {true, true, true},
+                            new boolean[] {false, true, false});
+
+            reader.commitPreparedMutations(Arrays.asList(mutation));
+
+            assertEquals(Integer.valueOf(10), state.get("keep"));
+            assertNull(state.get("remove"));
+            assertEquals(Integer.valueOf(30), state.get("insert"));
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testPreparedMutationsCommitAcrossColumnFamilies() throws Exception {
+        try (RocksDBKeyedStateBackendTestFactory factory =
+                new RocksDBKeyedStateBackendTestFactory()) {
+            RocksDBKeyedStateBackend<Integer> backend =
+                    factory.create(tmp, IntSerializer.INSTANCE, 128);
+            InternalMapState<Integer, VoidNamespace, String, Integer> firstState =
+                    (InternalMapState<Integer, VoidNamespace, String, Integer>)
+                            backend.getPartitionedState(
+                                    VoidNamespace.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE,
+                                    new MapStateDescriptor<>(
+                                            "prepared-write-first",
+                                            StringSerializer.INSTANCE,
+                                            IntSerializer.INSTANCE));
+            InternalMapState<Integer, VoidNamespace, String, Integer> secondState =
+                    (InternalMapState<Integer, VoidNamespace, String, Integer>)
+                            backend.getPartitionedState(
+                                    VoidNamespace.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE,
+                                    new MapStateDescriptor<>(
+                                            "prepared-write-second",
+                                            StringSerializer.INSTANCE,
+                                            IntSerializer.INSTANCE));
+
+            backend.setCurrentKey(12);
+            firstState.put("first", 1);
+            secondState.put("second", 2);
+            RocksDBBatchMapReader<String> first = (RocksDBBatchMapReader<String>) firstState;
+            RocksDBBatchMapReader<String> second = (RocksDBBatchMapReader<String>) secondState;
+            RocksDBBatchMapReader.PreparedMutation firstMutation =
+                    first.prepareSerializedMutations(
+                            first.serializeRocksDBKeysByUserKeys(Arrays.asList("first")),
+                            new Object[] {101},
+                            new boolean[] {true},
+                            new boolean[] {false});
+            RocksDBBatchMapReader.PreparedMutation secondMutation =
+                    second.prepareSerializedMutations(
+                            second.serializeRocksDBKeysByUserKeys(Arrays.asList("second")),
+                            new Object[] {null},
+                            new boolean[] {true},
+                            new boolean[] {true});
+
+            first.commitPreparedMutations(Arrays.asList(firstMutation, secondMutation));
+
+            assertEquals(Integer.valueOf(101), firstState.get("first"));
+            assertNull(secondState.get("second"));
+        }
+    }
+
     private static Integer deserializeMapValue(byte[] value) throws Exception {
         if (value == null) {
             return null;

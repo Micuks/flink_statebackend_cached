@@ -20,6 +20,7 @@ package org.apache.flink.table.runtime.dataview;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
 
 import java.util.AbstractMap;
 import java.util.AbstractSet;
@@ -61,6 +62,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     private final boolean prefetchEnabled;
     private final int minPrefetchUniqueKeys;
     private final boolean flatOverlayEnabled;
+    private final boolean preparedCommitEnabled;
     private HashMap<EK, BufferedValue<EK, EV>> overlay = new HashMap<>();
     private final FlatOverlay<EK, EV> flatOverlay;
     private final ArrayList<EK> pendingPrefetchKeys = new ArrayList<>();
@@ -101,6 +103,11 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
     private long flatOverlayCommittedRemoves;
     private long flatOverlayPeakEntries;
     private boolean legacyFallbackActive;
+    private PreparedPrefetch<EK, EV> installedPreparedPrefetch;
+    private long preparedCommitAttempts;
+    private long preparedCommitBatches;
+    private long preparedCommitEntries;
+    private long preparedCommitFallbacks;
 
     DistinctBatchStateMapView(
             StateMapView<N, EK, EV> delegate,
@@ -130,7 +137,8 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
                 prefetchEnabled,
                 minPrefetchUniqueKeys,
                 false,
-                1024);
+                1024,
+                false);
     }
 
     DistinctBatchStateMapView(
@@ -141,6 +149,26 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             int minPrefetchUniqueKeys,
             boolean flatOverlayEnabled,
             int flatOverlayMaxEntries) {
+        this(
+                delegate,
+                keySerializer,
+                valueSerializer,
+                prefetchEnabled,
+                minPrefetchUniqueKeys,
+                flatOverlayEnabled,
+                flatOverlayMaxEntries,
+                false);
+    }
+
+    DistinctBatchStateMapView(
+            StateMapView<N, EK, EV> delegate,
+            TypeSerializer<EK> keySerializer,
+            TypeSerializer<EV> valueSerializer,
+            boolean prefetchEnabled,
+            int minPrefetchUniqueKeys,
+            boolean flatOverlayEnabled,
+            int flatOverlayMaxEntries,
+            boolean preparedCommitEnabled) {
         this.delegate = delegate;
         this.keySerializer = keySerializer;
         this.valueSerializer = valueSerializer;
@@ -151,6 +179,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         this.flatOverlayEnabled = flatOverlayEnabled;
         this.flatOverlay =
                 flatOverlayEnabled ? new FlatOverlay<>(Math.max(16, flatOverlayMaxEntries)) : null;
+        this.preparedCommitEnabled = preparedCommitEnabled;
         this.noOpPreparedPrefetch =
                 new PreparedPrefetch<>(this, Collections.emptyList(), null, true);
     }
@@ -346,6 +375,7 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
         }
         directValuesPrimed = true;
         directOverlayValues += keys.size();
+        installedPreparedPrefetch = (PreparedPrefetch<EK, EV>) token;
         return true;
     }
 
@@ -747,6 +777,127 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
             flatOverlay.clear();
         }
         legacyFallbackActive = false;
+        installedPreparedPrefetch = null;
+    }
+
+    /**
+     * Builds one all-or-none prepared commit plan without touching authoritative state.
+     *
+     * <p>The plan is available only when the installed exact-key token still covers every dirty
+     * overlay entry. A missing token, an extra key, or an unsupported backend returns {@code null}
+     * so the owning store can execute the established MapView commit for every DISTINCT column.
+     */
+    PreparedCommitPlan prepareCommitPlan() {
+        if (!preparedCommitEnabled || !active) {
+            return null;
+        }
+        preparedCommitAttempts++;
+        PreparedPrefetch<EK, EV> token = installedPreparedPrefetch;
+        if (token == null
+                || token.noOp
+                || !(token.backendPrepared instanceof BatchPrefetchableMapState.PreparedValues)) {
+            preparedCommitFallbacks++;
+            return null;
+        }
+        BatchPrefetchableMapState.PreparedValues backend =
+                (BatchPrefetchableMapState.PreparedValues) token.backendPrepared;
+        if (!backend.supportsPreparedCommit()) {
+            preparedCommitFallbacks++;
+            return null;
+        }
+        Object[] values = new Object[token.keys.size()];
+        boolean[] dirty = new boolean[token.keys.size()];
+        boolean[] removed = new boolean[token.keys.size()];
+        int dirtyCount = 0;
+        for (int index = 0; index < token.keys.size(); index++) {
+            EK key = token.keys.get(index);
+            if (useFlatOverlay()) {
+                int slot = flatOverlay.find(key);
+                if (slot >= 0 && flatOverlay.isDirty(slot)) {
+                    dirty[index] = true;
+                    removed[index] = flatOverlay.isRemoved(slot);
+                    values[index] = flatOverlay.valueAt(slot);
+                    dirtyCount++;
+                }
+            } else {
+                BufferedValue<EK, EV> buffered = overlay.get(key);
+                if (buffered != null && buffered.dirty) {
+                    dirty[index] = true;
+                    removed[index] = buffered.removed;
+                    values[index] = buffered.value;
+                    dirtyCount++;
+                }
+            }
+        }
+        if (dirtyCount != overlayDirtyCount()) {
+            preparedCommitFallbacks++;
+            return null;
+        }
+        return new PreparedCommitPlan(this, backend, values, dirty, removed, dirtyCount);
+    }
+
+    private int overlayDirtyCount() {
+        int count = 0;
+        if (useFlatOverlay()) {
+            for (int i = 0; i < flatOverlay.touchedCount(); i++) {
+                if (flatOverlay.isDirty(flatOverlay.touchedSlotAt(i))) {
+                    count++;
+                }
+            }
+            return count;
+        }
+        for (BufferedValue<EK, EV> buffered : overlay.values()) {
+            if (buffered.dirty) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    void completePreparedCommit(PreparedCommitPlan plan) {
+        if (plan == null || plan.owner != this || !active) {
+            throw new IllegalStateException("Prepared DISTINCT commit plan is not owned here");
+        }
+        committedEntries += plan.dirtyCount;
+        committedBatches++;
+        preparedCommitBatches++;
+        preparedCommitEntries += plan.dirtyCount;
+        resetOverlayScope();
+        active = false;
+        directValuesPrimed = false;
+        endPrefetchScope();
+    }
+
+    void recordPreparedCommitFallback() {
+        preparedCommitFallbacks++;
+    }
+
+    boolean hasDirtyEntries() {
+        return active && overlayDirtyCount() > 0;
+    }
+
+    static final class PreparedCommitPlan {
+        final DistinctBatchStateMapView<?, ?, ?> owner;
+        final BatchPrefetchableMapState.PreparedValues backend;
+        final Object[] values;
+        final boolean[] dirty;
+        final boolean[] removed;
+        final int dirtyCount;
+
+        private PreparedCommitPlan(
+                DistinctBatchStateMapView<?, ?, ?> owner,
+                BatchPrefetchableMapState.PreparedValues backend,
+                Object[] values,
+                boolean[] dirty,
+                boolean[] removed,
+                int dirtyCount) {
+            this.owner = owner;
+            this.backend = backend;
+            this.values = values;
+            this.dirty = dirty;
+            this.removed = removed;
+            this.dirtyCount = dirtyCount;
+        }
     }
 
     long logicalGets() {
@@ -863,6 +1014,22 @@ final class DistinctBatchStateMapView<N, EK, EV> extends StateMapView<N, EK, EV>
 
     long flatOverlayPeakEntries() {
         return flatOverlayPeakEntries;
+    }
+
+    long preparedCommitAttempts() {
+        return preparedCommitAttempts;
+    }
+
+    long preparedCommitBatches() {
+        return preparedCommitBatches;
+    }
+
+    long preparedCommitEntries() {
+        return preparedCommitEntries;
+    }
+
+    long preparedCommitFallbacks() {
+        return preparedCommitFallbacks;
     }
 
     private static final class BufferedValue<K, V> {

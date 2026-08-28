@@ -111,6 +111,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
     private final boolean nativePrefetchAccessGuidedStateEnabled;
     private final boolean nativeMapDistinctBatchPrefetchEnabled;
     private final boolean nativeMapDistinctBatchPrefetchDirectArenaEnabled;
+    private final boolean nativeMapDistinctPreparedCommitEnabled;
     private final boolean nativeMapDistinctBatchPrefetchCrossKeyPipelineEnabled;
     private final boolean nativeMapDistinctBatchPrefetchWorkFirstEnabled;
     private final boolean nativeMapDistinctBatchPrefetchDeferredWaveEnabled;
@@ -291,6 +292,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 false,
                 false,
                 false,
+                false,
                 8,
                 1);
     }
@@ -373,6 +375,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 false,
                 false,
                 false,
+                false,
                 8,
                 1);
     }
@@ -421,6 +424,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
             boolean nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabled,
             boolean nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabled,
             boolean nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled,
+            boolean nativeMapDistinctPreparedCommitEnabled,
             int nativeMapDistinctBatchPrefetchAsyncMinUniqueKeys,
             int nativeMapDistinctBatchPrefetchLookaheadGroups) {
         super(
@@ -462,6 +466,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
         this.nativeMapDistinctBatchPrefetchEnabled = nativeMapDistinctBatchPrefetchEnabled;
         this.nativeMapDistinctBatchPrefetchDirectArenaEnabled =
                 nativeMapDistinctBatchPrefetchDirectArenaEnabled;
+        this.nativeMapDistinctPreparedCommitEnabled = nativeMapDistinctPreparedCommitEnabled;
         this.nativeMapDistinctBatchPrefetchCrossKeyPipelineEnabled =
                 nativeMapDistinctBatchPrefetchCrossKeyPipelineEnabled;
         this.nativeMapDistinctBatchPrefetchWorkFirstEnabled =
@@ -722,6 +727,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                     nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabled,
                     nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabled,
                     nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled);
+            wrapped.enableNativeDistinctPreparedCommit(nativeMapDistinctPreparedCommitEnabled);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
         }
@@ -931,6 +937,7 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                     nativeMapDistinctBatchPrefetchDeferredWaveDualWorkerEnabled,
                     nativeMapDistinctBatchPrefetchDeferredWaveDirectArenaResultsEnabled,
                     nativeMapDistinctBatchPrefetchCrossColumnWaveEnabled);
+            wrapped.enableNativeDistinctPreparedCommit(nativeMapDistinctPreparedCommitEnabled);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
         }

@@ -53,6 +53,7 @@ import org.rocksdb.ReadOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.Slice;
+import org.rocksdb.WriteBatch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -177,6 +178,117 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
     @Override
     public Object multiColumnReadOwner() {
         return backend.db;
+    }
+
+    @Override
+    public Object preparedWriteOwner() {
+        return backend;
+    }
+
+    @Override
+    public boolean supportsPreparedMutations() {
+        return true;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public PreparedMutation prepareSerializedMutations(
+            List<byte[]> rocksDBKeys, Object[] values, boolean[] dirty, boolean[] removed)
+            throws Exception {
+        validatePreparedMutationCardinality(rocksDBKeys, values, dirty, removed);
+        byte[][] serializedValues = new byte[values.length][];
+        for (int index = 0; index < values.length; index++) {
+            if (dirty[index] && !removed[index]) {
+                serializedValues[index] =
+                        serializeValueNullSensitive((UV) values[index], userValueSerializer);
+            }
+        }
+        return new PreparedMutation(this, rocksDBKeys, serializedValues, dirty, removed);
+    }
+
+    @Override
+    public void commitPreparedMutations(List<? extends PreparedMutation> mutations)
+            throws Exception {
+        if (mutations == null || mutations.isEmpty()) {
+            throw new IllegalArgumentException("Prepared mutation cohort must not be empty");
+        }
+
+        int operationCount = 0;
+        for (PreparedMutation mutation : mutations) {
+            validatePreparedMutationForCommit(mutation);
+            for (boolean isDirty : mutation.dirty()) {
+                if (isDirty) {
+                    operationCount++;
+                }
+            }
+        }
+        if (operationCount == 0) {
+            return;
+        }
+
+        try (WriteBatch writeBatch = new WriteBatch()) {
+            for (PreparedMutation mutation : mutations) {
+                RocksDBMapState<?, ?, ?, ?> state =
+                        (RocksDBMapState<?, ?, ?, ?>) mutation.reader();
+                for (int index = 0; index < mutation.dirty().length; index++) {
+                    if (!mutation.dirty()[index]) {
+                        continue;
+                    }
+                    if (mutation.removed()[index]) {
+                        writeBatch.remove(state.columnFamily, mutation.rocksDBKeys().get(index));
+                    } else {
+                        writeBatch.put(
+                                state.columnFamily,
+                                mutation.rocksDBKeys().get(index),
+                                mutation.serializedValues()[index]);
+                    }
+                }
+            }
+            backend.db.write(writeOptions, writeBatch);
+        }
+    }
+
+    private static void validatePreparedMutationCardinality(
+            List<byte[]> rocksDBKeys, Object[] values, boolean[] dirty, boolean[] removed) {
+        if (rocksDBKeys == null || values == null || dirty == null || removed == null) {
+            throw new IllegalArgumentException("Prepared mutation arrays must not be null");
+        }
+        if (rocksDBKeys.size() != values.length
+                || dirty.length != values.length
+                || removed.length != values.length) {
+            throw new IllegalArgumentException("Prepared mutation cardinality mismatch");
+        }
+        for (int index = 0; index < values.length; index++) {
+            if (rocksDBKeys.get(index) == null) {
+                throw new IllegalArgumentException("Prepared RocksDB key must not be null");
+            }
+            if (removed[index] && !dirty[index]) {
+                throw new IllegalArgumentException("Removed mutation must also be dirty");
+            }
+        }
+    }
+
+    private void validatePreparedMutationForCommit(PreparedMutation mutation) {
+        if (mutation == null || !(mutation.reader() instanceof RocksDBMapState)) {
+            throw new IllegalArgumentException("Prepared mutation is not a RocksDB MapState");
+        }
+        RocksDBMapState<?, ?, ?, ?> state = (RocksDBMapState<?, ?, ?, ?>) mutation.reader();
+        if (state.backend != backend) {
+            throw new IllegalArgumentException(
+                    "Prepared mutation cohort uses different RocksDB backends");
+        }
+        validatePreparedMutationCardinality(
+                mutation.rocksDBKeys(),
+                mutation.serializedValues(),
+                mutation.dirty(),
+                mutation.removed());
+        for (int index = 0; index < mutation.dirty().length; index++) {
+            if (mutation.dirty()[index]
+                    && !mutation.removed()[index]
+                    && mutation.serializedValues()[index] == null) {
+                throw new IllegalArgumentException("Dirty put has no serialized value");
+            }
+        }
     }
 
     @Override

@@ -711,6 +711,17 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                             + "per hit. Requires the native request plane and direct-arena "
                                             + "MultiGet; any rejected chunk falls back transactionally.");
 
+    public static final ConfigOption<Boolean> NATIVE_MAP_DISTINCT_PREPARED_COMMIT_ENABLED =
+            ConfigOptions.key(
+                            "state.backend.cachekit.native.map-distinct-batch-prefetch.prepared-commit.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Reuse validated exact-DISTINCT prepared RocksDB keys for final mutations "
+                                    + "and commit eligible state columns through one WriteBatch. The "
+                                    + "feature is disabled by default and any pre-write validation "
+                                    + "mismatch falls back to the established MapState path.");
+
     public static final ConfigOption<Boolean>
             NATIVE_MAP_DISTINCT_BATCH_PREFETCH_CROSS_KEY_PIPELINE_ENABLED =
                     ConfigOptions.key(

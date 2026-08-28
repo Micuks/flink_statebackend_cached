@@ -30,6 +30,7 @@ import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.GlobalConfiguration;
+import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -53,6 +54,8 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
             "state.backend.cachekit.native.map-distinct-batch-prefetch.enabled";
     private static final String NATIVE_MAP_DISTINCT_BATCH_PREFETCH_MIN_UNIQUE_KEYS_KEY =
             "state.backend.cachekit.native.map-distinct-batch-prefetch.min-unique-keys";
+    private static final String NATIVE_MAP_DISTINCT_PREPARED_COMMIT_KEY =
+            "state.backend.cachekit.native.map-distinct-batch-prefetch.prepared-commit.enabled";
 
     private final RuntimeContext ctx;
     private final StateTtlConfig stateTtlConfig;
@@ -61,6 +64,7 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
     private final int distinctBatchFlatOverlayMaxEntries;
     private final boolean distinctBatchPrefetchEnabled;
     private final int distinctBatchPrefetchMinUniqueKeys;
+    private final boolean distinctPreparedCommitEnabled;
     private final List<DistinctBatchStateMapView<?, ?, ?>> distinctBatchViews = new ArrayList<>();
 
     public PerKeyStateDataViewStore(RuntimeContext ctx) {
@@ -86,19 +90,21 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
                 Math.max(
                         16,
                         configuration.getInteger(
-                                DISTINCT_BATCH_FLAT_OVERLAY_MAX_ENTRIES_KEY, 1024)));
+                                DISTINCT_BATCH_FLAT_OVERLAY_MAX_ENTRIES_KEY, 1024)),
+                configuration.getBoolean(NATIVE_MAP_DISTINCT_PREPARED_COMMIT_KEY, false));
     }
 
     static boolean isDistinctBatchEnabled(Configuration configuration) {
         return configuration.getBoolean(DISTINCT_BATCH_OVERLAY_KEY, false)
-                || configuration.getBoolean(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_KEY, false);
+                || configuration.getBoolean(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_KEY, false)
+                || configuration.getBoolean(NATIVE_MAP_DISTINCT_PREPARED_COMMIT_KEY, false);
     }
 
     PerKeyStateDataViewStore(
             RuntimeContext ctx,
             StateTtlConfig stateTtlConfig,
             boolean distinctBatchOverlayEnabled) {
-        this(ctx, stateTtlConfig, distinctBatchOverlayEnabled, false, 2, false, 1024);
+        this(ctx, stateTtlConfig, distinctBatchOverlayEnabled, false, 2, false, 1024, false);
     }
 
     PerKeyStateDataViewStore(
@@ -113,7 +119,8 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
                 false,
                 distinctBatchPrefetchMinUniqueKeys,
                 false,
-                1024);
+                1024,
+                false);
     }
 
     PerKeyStateDataViewStore(
@@ -129,7 +136,8 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
                 distinctBatchPrefetchEnabled,
                 distinctBatchPrefetchMinUniqueKeys,
                 false,
-                1024);
+                1024,
+                false);
     }
 
     PerKeyStateDataViewStore(
@@ -140,6 +148,26 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
             int distinctBatchPrefetchMinUniqueKeys,
             boolean distinctBatchFlatOverlayEnabled,
             int distinctBatchFlatOverlayMaxEntries) {
+        this(
+                ctx,
+                stateTtlConfig,
+                distinctBatchOverlayEnabled,
+                distinctBatchPrefetchEnabled,
+                distinctBatchPrefetchMinUniqueKeys,
+                distinctBatchFlatOverlayEnabled,
+                distinctBatchFlatOverlayMaxEntries,
+                false);
+    }
+
+    PerKeyStateDataViewStore(
+            RuntimeContext ctx,
+            StateTtlConfig stateTtlConfig,
+            boolean distinctBatchOverlayEnabled,
+            boolean distinctBatchPrefetchEnabled,
+            int distinctBatchPrefetchMinUniqueKeys,
+            boolean distinctBatchFlatOverlayEnabled,
+            int distinctBatchFlatOverlayMaxEntries,
+            boolean distinctPreparedCommitEnabled) {
         this.ctx = ctx;
         this.stateTtlConfig = stateTtlConfig;
         // Batching across TTL reads would change access-time refresh semantics. Keep the first
@@ -152,6 +180,8 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
         this.distinctBatchFlatOverlayEnabled =
                 distinctBatchFlatOverlayEnabled && this.distinctBatchOverlayEnabled;
         this.distinctBatchFlatOverlayMaxEntries = Math.max(16, distinctBatchFlatOverlayMaxEntries);
+        this.distinctPreparedCommitEnabled =
+                distinctPreparedCommitEnabled && this.distinctBatchPrefetchEnabled;
     }
 
     @Override
@@ -191,7 +221,8 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
                         distinctBatchPrefetchEnabled,
                         distinctBatchPrefetchMinUniqueKeys,
                         distinctBatchFlatOverlayEnabled,
-                        distinctBatchFlatOverlayMaxEntries);
+                        distinctBatchFlatOverlayMaxEntries,
+                        distinctPreparedCommitEnabled);
         distinctBatchViews.add(batchingView);
         return batchingView;
     }
@@ -218,6 +249,48 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
 
     /** Commits final per-distinct-key values before accumulator state/output becomes visible. */
     public void commitDistinctBatch() throws Exception {
+        List<DistinctBatchStateMapView.PreparedCommitPlan> preparedPlans = new ArrayList<>();
+        boolean allDirtyViewsPrepared = distinctPreparedCommitEnabled;
+        for (DistinctBatchStateMapView<?, ?, ?> view : distinctBatchViews) {
+            if (!view.hasDirtyEntries()) {
+                continue;
+            }
+            DistinctBatchStateMapView.PreparedCommitPlan plan = view.prepareCommitPlan();
+            if (plan == null) {
+                allDirtyViewsPrepared = false;
+                break;
+            }
+            preparedPlans.add(plan);
+        }
+        if (allDirtyViewsPrepared && !preparedPlans.isEmpty()) {
+            List<BatchPrefetchableMapState.PreparedValues> tokens =
+                    new ArrayList<>(preparedPlans.size());
+            List<Object[]> values = new ArrayList<>(preparedPlans.size());
+            List<boolean[]> dirty = new ArrayList<>(preparedPlans.size());
+            List<boolean[]> removed = new ArrayList<>(preparedPlans.size());
+            for (DistinctBatchStateMapView.PreparedCommitPlan plan : preparedPlans) {
+                tokens.add(plan.backend);
+                values.add(plan.values);
+                dirty.add(plan.dirty);
+                removed.add(plan.removed);
+            }
+            // A false result is permitted only before any backend write. Once db.write begins,
+            // exceptions propagate and must never replay the established MapView path.
+            if (tokens.get(0).commitPreparedCohort(tokens, values, dirty, removed)) {
+                for (DistinctBatchStateMapView.PreparedCommitPlan plan : preparedPlans) {
+                    plan.owner.completePreparedCommit(plan);
+                }
+                // End the scope for views that had no dirty entries. Completed plan owners are
+                // already inactive, so their ordinary commit is an idempotent no-op.
+                for (DistinctBatchStateMapView<?, ?, ?> view : distinctBatchViews) {
+                    view.commitBatch();
+                }
+                return;
+            }
+            for (DistinctBatchStateMapView.PreparedCommitPlan plan : preparedPlans) {
+                plan.owner.recordPreparedCommitFallback();
+            }
+        }
         Exception failure = null;
         for (DistinctBatchStateMapView<?, ?, ?> view : distinctBatchViews) {
             try {
@@ -275,6 +348,10 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
         long flatOverlayCommittedWrites = 0;
         long flatOverlayCommittedRemoves = 0;
         long flatOverlayPeakEntries = 0;
+        long preparedCommitAttempts = 0;
+        long preparedCommitBatches = 0;
+        long preparedCommitEntries = 0;
+        long preparedCommitFallbacks = 0;
         for (DistinctBatchStateMapView<?, ?, ?> view : distinctBatchViews) {
             logicalGets += view.logicalGets();
             delegateGets += view.delegateGets();
@@ -306,6 +383,10 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
             flatOverlayCommittedRemoves += view.flatOverlayCommittedRemoves();
             flatOverlayPeakEntries =
                     Math.max(flatOverlayPeakEntries, view.flatOverlayPeakEntries());
+            preparedCommitAttempts += view.preparedCommitAttempts();
+            preparedCommitBatches += view.preparedCommitBatches();
+            preparedCommitEntries += view.preparedCommitEntries();
+            preparedCommitFallbacks += view.preparedCommitFallbacks();
         }
         return "views="
                 + distinctBatchViews.size()
@@ -366,7 +447,15 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
                 + " flatOverlayCommittedRemoves="
                 + flatOverlayCommittedRemoves
                 + " flatOverlayPeakEntries="
-                + flatOverlayPeakEntries;
+                + flatOverlayPeakEntries
+                + " preparedCommitAttempts="
+                + preparedCommitAttempts
+                + " preparedCommitBatches="
+                + preparedCommitBatches
+                + " preparedCommitEntries="
+                + preparedCommitEntries
+                + " preparedCommitFallbacks="
+                + preparedCommitFallbacks;
     }
 
     @Override

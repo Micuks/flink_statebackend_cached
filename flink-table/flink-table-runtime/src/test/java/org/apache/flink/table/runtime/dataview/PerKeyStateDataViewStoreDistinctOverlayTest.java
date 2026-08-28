@@ -25,15 +25,25 @@ import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 class PerKeyStateDataViewStoreDistinctOverlayTest {
 
@@ -148,5 +158,137 @@ class PerKeyStateDataViewStoreDistinctOverlayTest {
                 "distinctAcc_0", false, StringSerializer.INSTANCE, LongSerializer.INSTANCE);
 
         assertFalse(store.beginDistinctBatch());
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void preparedCommitFusesDirtyDistinctColumnsWithoutMapStateReplay() throws Exception {
+        RuntimeContext context = mock(RuntimeContext.class);
+        MapState<String, Long> firstState = preparedMapState();
+        MapState<String, Long> secondState = preparedMapState();
+        BatchPrefetchableMapState.PreparedValues firstToken = preparedToken(List.of(1L, 2L));
+        BatchPrefetchableMapState.PreparedValues secondToken = preparedToken(List.of(3L, 4L));
+        BatchPrefetchableMapState<String> firstBatch = (BatchPrefetchableMapState) firstState;
+        BatchPrefetchableMapState<String> secondBatch = (BatchPrefetchableMapState) secondState;
+        when(firstBatch.prepareCurrentUniqueKeyValues(List.of("a", "b")))
+                .thenReturn(firstToken);
+        when(secondBatch.prepareCurrentUniqueKeyValues(List.of("a", "b")))
+                .thenReturn(secondToken);
+        when(firstToken.commitPreparedCohort(anyList(), anyList(), anyList(), anyList()))
+                .thenReturn(true);
+        when(context.<Object, Object>getMapState(any()))
+                .thenReturn((MapState) firstState, (MapState) secondState);
+        PerKeyStateDataViewStore store = preparedCommitStore(context);
+        StateMapView<?, String, Long> firstView =
+                store.getStateMapView(
+                        "distinctAcc_0", false, StringSerializer.INSTANCE, LongSerializer.INSTANCE);
+        StateMapView<?, String, Long> secondView =
+                store.getStateMapView(
+                        "distinctAcc_1", false, StringSerializer.INSTANCE, LongSerializer.INSTANCE);
+
+        installPrepared(List.of(firstView, secondView), List.of("a", "b"));
+        assertTrue(store.beginDistinctBatch());
+        firstView.put("a", 11L);
+        secondView.put("b", 44L);
+        store.commitDistinctBatch();
+
+        verify(firstToken, times(1))
+                .commitPreparedCohort(anyList(), anyList(), anyList(), anyList());
+        verify(firstState, never()).putAll(any());
+        verify(secondState, never()).putAll(any());
+        assertTrue(store.distinctBatchDiagnosticSummary().contains("preparedCommitBatches=2"));
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void preparedCommitFalseFallsBackBeforeWrite() throws Exception {
+        RuntimeContext context = mock(RuntimeContext.class);
+        MapState<String, Long> state = preparedMapState();
+        BatchPrefetchableMapState<String> batchState = (BatchPrefetchableMapState) state;
+        BatchPrefetchableMapState.PreparedValues token = preparedToken(List.of(1L, 2L));
+        when(batchState.prepareCurrentUniqueKeyValues(List.of("a", "b"))).thenReturn(token);
+        when(token.commitPreparedCohort(anyList(), anyList(), anyList(), anyList()))
+                .thenReturn(false);
+        when(context.<Object, Object>getMapState(any())).thenReturn((MapState) state);
+        PerKeyStateDataViewStore store = preparedCommitStore(context);
+        StateMapView<?, String, Long> view =
+                store.getStateMapView(
+                        "distinctAcc_0", false, StringSerializer.INSTANCE, LongSerializer.INSTANCE);
+
+        installPrepared(List.of(view), List.of("a", "b"));
+        assertTrue(store.beginDistinctBatch());
+        view.put("a", 11L);
+        store.commitDistinctBatch();
+
+        verify(state, times(1)).putAll(any());
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void preparedCommitExceptionNeverReplaysMapStateWrites() throws Exception {
+        RuntimeContext context = mock(RuntimeContext.class);
+        MapState<String, Long> state = preparedMapState();
+        BatchPrefetchableMapState<String> batchState = (BatchPrefetchableMapState) state;
+        BatchPrefetchableMapState.PreparedValues token = preparedToken(List.of(1L, 2L));
+        when(batchState.prepareCurrentUniqueKeyValues(List.of("a", "b"))).thenReturn(token);
+        when(token.commitPreparedCohort(anyList(), anyList(), anyList(), anyList()))
+                .thenThrow(new IllegalStateException("db.write outcome unknown"));
+        when(context.<Object, Object>getMapState(any())).thenReturn((MapState) state);
+        PerKeyStateDataViewStore store = preparedCommitStore(context);
+        StateMapView<?, String, Long> view =
+                store.getStateMapView(
+                        "distinctAcc_0", false, StringSerializer.INSTANCE, LongSerializer.INSTANCE);
+
+        installPrepared(List.of(view), List.of("a", "b"));
+        assertTrue(store.beginDistinctBatch());
+        view.put("a", 11L);
+
+        assertThrows(IllegalStateException.class, store::commitDistinctBatch);
+        verify(state, never()).putAll(any());
+        store.abortDistinctBatch();
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static MapState<String, Long> preparedMapState() {
+        MapState<String, Long> state =
+                mock(MapState.class, withSettings().extraInterfaces(BatchPrefetchableMapState.class));
+        BatchPrefetchableMapState<String> batchState = (BatchPrefetchableMapState) state;
+        when(batchState.supportsDirectPrefetchedValues()).thenReturn(true);
+        return state;
+    }
+
+    private static BatchPrefetchableMapState.PreparedValues preparedToken(List<Long> values)
+            throws Exception {
+        BatchPrefetchableMapState.PreparedValues token =
+                mock(BatchPrefetchableMapState.PreparedValues.class);
+        doReturn(values).when(token).awaitValues();
+        when(token.supportsPreparedCommit()).thenReturn(true);
+        return token;
+    }
+
+    private static PerKeyStateDataViewStore preparedCommitStore(RuntimeContext context) {
+        return new PerKeyStateDataViewStore(
+                context, StateTtlConfig.DISABLED, true, true, 2, false, 64, true);
+    }
+
+    private static void installPrepared(
+            List<? extends StateMapView<?, String, Long>> views, List<String> keys)
+            throws Exception {
+        List<Object> sessions = new java.util.ArrayList<>(views.size());
+        for (StateMapView<?, String, Long> view : views) {
+            sessions.add(DistinctBatchPrefetchSupport.beginSession(view, keys.size()));
+        }
+        DistinctBatchPrefetchSupport.beginPreparedCapture();
+        for (String key : keys) {
+            for (Object session : sessions) {
+                DistinctBatchPrefetchSupport.addSession(session, key);
+            }
+        }
+        for (Object session : sessions) {
+            assertTrue(DistinctBatchPrefetchSupport.finishSession(session));
+        }
+        assertTrue(
+                DistinctBatchPrefetchSupport.installPreparedCapture(
+                        DistinctBatchPrefetchSupport.endPreparedCapture()));
     }
 }

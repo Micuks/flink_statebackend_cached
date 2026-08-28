@@ -90,6 +90,46 @@ public interface BatchPrefetchableMapState<UK> {
                 throws Exception {
             return false;
         }
+
+        /**
+         * Whether this token can commit mutations through its prepared exact-key backend session.
+         *
+         * <p>This is an optional, fail-closed capability. A false result leaves the established
+         * MapState mutation path authoritative.
+         */
+        default boolean supportsPreparedCommit() {
+            return false;
+        }
+
+        /**
+         * Commits mutations aligned with this token's insertion-ordered user keys.
+         *
+         * <p>A false result means the token was rejected before any backend write and the caller
+         * may use its established fallback. Once the implementation invokes a backend write, all
+         * failures must be thrown; they must never be converted to false because replay could
+         * duplicate a partially successful mutation.
+         */
+        default boolean commitPreparedValues(
+                Object[] values, boolean[] dirty, boolean[] removed) throws Exception {
+            return false;
+        }
+
+        /**
+         * Commits several prepared state columns through one backend write when supported.
+         *
+         * <p>Every values/dirty/removed row is aligned with the corresponding token's ordered
+         * keys. Implementations must validate the complete cohort before writing. False has the
+         * same pre-write-only meaning as {@link #commitPreparedValues(Object[], boolean[],
+         * boolean[])}.
+         */
+        default boolean commitPreparedCohort(
+                List<? extends PreparedValues> tokens,
+                List<Object[]> values,
+                List<boolean[]> dirty,
+                List<boolean[]> removed)
+                throws Exception {
+            return false;
+        }
     }
 
     /**

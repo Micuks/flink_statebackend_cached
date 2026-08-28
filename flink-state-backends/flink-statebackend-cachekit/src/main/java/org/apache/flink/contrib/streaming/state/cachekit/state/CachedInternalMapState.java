@@ -140,6 +140,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private boolean nativeDistinctBatchDeferredWaveDualWorkerEnabled;
     private boolean nativeDistinctBatchDeferredWaveDirectArenaResultsEnabled;
     private boolean nativeDistinctBatchCrossColumnWaveEnabled;
+    private boolean nativeDistinctPreparedCommitEnabled;
     private boolean batchPrefetchActive;
     private K batchPrefetchOuterKey;
     private N batchPrefetchNamespace;
@@ -793,6 +794,11 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 this.nativeDistinctBatchDeferredWaveEnabled && crossColumnWaveEnabled;
     }
 
+    /** Enables the fail-closed prepared exact-key mutation path. Disabled by default. */
+    public void enableNativeDistinctPreparedCommit(boolean enabled) {
+        this.nativeDistinctPreparedCommitEnabled = enabled;
+    }
+
     /** Compatibility overload retaining the pre-Fix27 cross-column treatment signature. */
     public void enableNativeDistinctBatchPrefetch(
             boolean enabled,
@@ -903,10 +909,11 @@ public final class CachedInternalMapState<K, N, UK, UV>
         // RocksDB keys while this outer key/namespace is current; the worker never reads mutable
         // Flink key context or serializers.
         List<UK> orderedKeys = (List<UK>) (List<?>) uniqueUserKeys;
+        KeyNamespace<K, N> stableContext = newStoredKeyNamespace(currentKey, namespace);
+        List<UK> stableOrderedKeys = new ArrayList<>(orderedKeys);
         if (nativeDistinctBatchDeferredWaveEnabled
                 && orderedKeys.size() < nativeDistinctBatchAsyncMinUniqueKeys
                 && orderedKeys.size() <= RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
-            KeyNamespace<K, N> stableContext = newStoredKeyNamespace(currentKey, namespace);
             flushCurrentKey(currentKey);
             ensureDelegateNamespace(currentKey);
             List<byte[]> rocksDBKeys =
@@ -919,15 +926,29 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return new DeferredDirectMapValues(
                     stableContext.key,
                     stableContext.namespace,
-                    new ArrayList<>(orderedKeys),
-                    rocksDBKeys);
+                    stableOrderedKeys,
+                    rocksDBKeys,
+                    nativeGeneration);
         }
         if (nativeDistinctBatchDirectArenaEnabled
                 && orderedKeys.size() < nativeDistinctBatchAsyncMinUniqueKeys) {
+            List<byte[]> rocksDBKeys = null;
+            if (nativeDistinctPreparedCommitEnabled) {
+                flushCurrentKey(currentKey);
+                ensureDelegateNamespace(currentKey);
+                rocksDBKeys = rocksDBBatchMapReader.serializeRocksDBKeysByUserKeys(orderedKeys);
+                if (rocksDBKeys.size() != orderedKeys.size()) {
+                    return null;
+                }
+            }
             deferredSyncBatchPrefetchBatches.incrementAndGet();
             deferredSyncBatchPrefetchKeys.addAndGet(orderedKeys.size());
             return new DeferredDirectMapValues(
-                    currentKey, namespace, new ArrayList<>(orderedKeys), null);
+                    stableContext.key,
+                    stableContext.namespace,
+                    stableOrderedKeys,
+                    rocksDBKeys,
+                    nativeGeneration);
         }
         flushCurrentKey(currentKey);
         ensureDelegateNamespace(currentKey);
@@ -960,8 +981,20 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
         PreparedMapValues prepared =
                 directSlot == null
-                        ? new PreparedMapValues(rocksDBKeys, orderedKeys.size())
-                        : new PreparedMapValues(directSlot, orderedKeys.size());
+                        ? new PreparedMapValues(
+                                stableContext.key,
+                                stableContext.namespace,
+                                stableOrderedKeys,
+                                rocksDBKeys,
+                                null,
+                                nativeGeneration)
+                        : new PreparedMapValues(
+                                stableContext.key,
+                                stableContext.namespace,
+                                stableOrderedKeys,
+                                rocksDBKeys,
+                                directSlot,
+                                nativeGeneration);
         synchronized (asyncBatchPrefetchMonitor) {
             if (closed) {
                 prepared.releaseDirectSlotOnce();
@@ -1005,11 +1038,188 @@ public final class CachedInternalMapState<K, N, UK, UV>
         return prepared;
     }
 
+    private interface PreparedCommitHandle {
+        boolean preparedCommitAvailable();
+
+        boolean validatePreparedCommit(Object[] values, boolean[] dirty, boolean[] removed);
+
+        Object preparedWriteOwner();
+
+        RocksDBBatchMapReader.PreparedMutation prepareMutation(
+                Object[] values, boolean[] dirty, boolean[] removed) throws Exception;
+
+        void commitMutations(List<? extends RocksDBBatchMapReader.PreparedMutation> mutations)
+                throws Exception;
+
+        void markPreparedCommitConsumed();
+
+        void completePreparedCommit(Object[] values, boolean[] dirty, boolean[] removed)
+                throws Exception;
+    }
+
+    private boolean commitPreparedCohortInternal(
+            List<? extends PreparedValues> tokens,
+            List<Object[]> values,
+            List<boolean[]> dirty,
+            List<boolean[]> removed)
+            throws Exception {
+        if (tokens == null
+                || values == null
+                || dirty == null
+                || removed == null
+                || tokens.isEmpty()
+                || values.size() != tokens.size()
+                || dirty.size() != tokens.size()
+                || removed.size() != tokens.size()) {
+            return false;
+        }
+
+        ArrayList<PreparedCommitHandle> handles = new ArrayList<>(tokens.size());
+        Object writeOwner = null;
+        for (int index = 0; index < tokens.size(); index++) {
+            PreparedValues token = tokens.get(index);
+            if (!(token instanceof PreparedCommitHandle)) {
+                return false;
+            }
+            PreparedCommitHandle handle = (PreparedCommitHandle) token;
+            if (!handle.preparedCommitAvailable()
+                    || !handle.validatePreparedCommit(
+                            values.get(index), dirty.get(index), removed.get(index))) {
+                return false;
+            }
+            Object currentWriteOwner = handle.preparedWriteOwner();
+            if (currentWriteOwner == null
+                    || writeOwner != null && currentWriteOwner != writeOwner) {
+                return false;
+            }
+            for (PreparedCommitHandle prior : handles) {
+                if (prior == handle) {
+                    return false;
+                }
+            }
+            if (writeOwner == null) {
+                writeOwner = currentWriteOwner;
+            }
+            handles.add(handle);
+        }
+
+        ArrayList<RocksDBBatchMapReader.PreparedMutation> mutations =
+                new ArrayList<>(handles.size());
+        for (int index = 0; index < handles.size(); index++) {
+            RocksDBBatchMapReader.PreparedMutation mutation =
+                    handles.get(index)
+                            .prepareMutation(
+                                    values.get(index), dirty.get(index), removed.get(index));
+            if (mutation == null) {
+                return false;
+            }
+            mutations.add(mutation);
+        }
+
+        // This is the point of no replay. The backend validates the entire mutation cohort before
+        // invoking db.write; any exception from this call must escape rather than become false.
+        handles.get(0).commitMutations(mutations);
+        for (PreparedCommitHandle handle : handles) {
+            handle.markPreparedCommitConsumed();
+        }
+        for (int index = 0; index < handles.size(); index++) {
+            handles.get(index)
+                    .completePreparedCommit(
+                            values.get(index), dirty.get(index), removed.get(index));
+        }
+        return true;
+    }
+
+    private boolean preparedCommitAvailable(
+            boolean consumed, List<UK> orderedKeys, List<byte[]> rocksDBKeys) {
+        return nativeDistinctPreparedCommitEnabled
+                && !closed
+                && !consumed
+                && rocksDBBatchMapReader != null
+                && rocksDBBatchMapReader.supportsPreparedMutations()
+                && rocksDBBatchMapReader.preparedWriteOwner() != null
+                && orderedKeys != null
+                && rocksDBKeys != null
+                && orderedKeys.size() == rocksDBKeys.size();
+    }
+
+    private boolean validatePreparedCommit(
+            boolean consumed,
+            K preparedOuterKey,
+            N preparedNamespace,
+            List<UK> orderedKeys,
+            List<byte[]> rocksDBKeys,
+            long preparedGeneration,
+            Object[] values,
+            boolean[] dirty,
+            boolean[] removed) {
+        if (!preparedCommitAvailable(consumed, orderedKeys, rocksDBKeys)
+                || preparedGeneration != nativeGeneration
+                || !Objects.equals(preparedOuterKey, currentKeyProvider.getCurrentKey())
+                || !Objects.equals(preparedNamespace, currentNamespace)
+                || values == null
+                || dirty == null
+                || removed == null
+                || values.length != orderedKeys.size()
+                || dirty.length != values.length
+                || removed.length != values.length) {
+            return false;
+        }
+        for (int index = 0; index < values.length; index++) {
+            if (orderedKeys.get(index) == null
+                    || rocksDBKeys.get(index) == null
+                    || removed[index] && !dirty[index]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void completePreparedCommit(
+            List<UK> orderedKeys, Object[] values, boolean[] dirty, boolean[] removed) {
+        boolean changed = false;
+        K currentKey = currentKeyProvider.getCurrentKey();
+        for (int index = 0; index < orderedKeys.size(); index++) {
+            if (!dirty[index]) {
+                continue;
+            }
+            changed = true;
+            UK userKey = orderedKeys.get(index);
+            UV value = (UV) values[index];
+            if (removed[index]) {
+                updateBatchPrefetchStaging(currentKey, userKey, false, null);
+                if (mapCacheEnabled) {
+                    updateValueCache(currentKey, userKey, null, false);
+                }
+                if (presenceCacheEnabled) {
+                    updatePresence(currentKey, userKey, false);
+                }
+            } else {
+                updateBatchPrefetchStaging(currentKey, userKey, true, value);
+                if (mapCacheEnabled) {
+                    updateValueCache(currentKey, userKey, value, false);
+                }
+                if (presenceCacheEnabled) {
+                    updatePresence(currentKey, userKey, value != null);
+                }
+            }
+        }
+        if (changed) {
+            advanceNativeGeneration();
+            invalidateSnapshot(currentKey);
+        }
+    }
+
     private final class PreparedMapValues
-            implements PreparedValues, PrefetchExecutor.WorkFirstEligibleTask {
+            implements PreparedValues, PreparedCommitHandle, PrefetchExecutor.WorkFirstEligibleTask {
 
         private final List<byte[]> rocksDBKeys;
         private final NativeRequestPlaneCoordinator.BatchSlot directSlot;
+        private final K preparedOuterKey;
+        private final N preparedNamespace;
+        private final List<UK> orderedKeys;
+        private final long preparedGeneration;
         private final int expectedValues;
         private final java.util.concurrent.CountDownLatch completed =
                 new java.util.concurrent.CountDownLatch(1);
@@ -1024,18 +1234,99 @@ public final class CachedInternalMapState<K, N, UK, UV>
         private final long submittedNanos = System.nanoTime();
         private final java.util.concurrent.atomic.AtomicBoolean directSlotReleased =
                 new java.util.concurrent.atomic.AtomicBoolean();
-
-        private PreparedMapValues(List<byte[]> rocksDBKeys, int expectedValues) {
-            this.rocksDBKeys = rocksDBKeys;
-            this.directSlot = null;
-            this.expectedValues = expectedValues;
-        }
+        private boolean preparedCommitConsumed;
 
         private PreparedMapValues(
-                NativeRequestPlaneCoordinator.BatchSlot directSlot, int expectedValues) {
-            this.rocksDBKeys = null;
+                K preparedOuterKey,
+                N preparedNamespace,
+                List<UK> orderedKeys,
+                List<byte[]> rocksDBKeys,
+                NativeRequestPlaneCoordinator.BatchSlot directSlot,
+                long preparedGeneration) {
+            this.preparedOuterKey = preparedOuterKey;
+            this.preparedNamespace = preparedNamespace;
+            this.orderedKeys = orderedKeys;
+            this.rocksDBKeys = rocksDBKeys;
             this.directSlot = directSlot;
-            this.expectedValues = expectedValues;
+            this.preparedGeneration = preparedGeneration;
+            this.expectedValues = orderedKeys.size();
+        }
+
+        @Override
+        public boolean supportsPreparedCommit() {
+            return preparedCommitAvailable();
+        }
+
+        @Override
+        public boolean commitPreparedValues(Object[] values, boolean[] dirty, boolean[] removed)
+                throws Exception {
+            return commitPreparedCohortInternal(
+                    Collections.<PreparedValues>singletonList(this),
+                    Collections.singletonList(values),
+                    Collections.singletonList(dirty),
+                    Collections.singletonList(removed));
+        }
+
+        @Override
+        public boolean commitPreparedCohort(
+                List<? extends PreparedValues> tokens,
+                List<Object[]> values,
+                List<boolean[]> dirty,
+                List<boolean[]> removed)
+                throws Exception {
+            return commitPreparedCohortInternal(tokens, values, dirty, removed);
+        }
+
+        @Override
+        public boolean preparedCommitAvailable() {
+            return CachedInternalMapState.this.preparedCommitAvailable(
+                    preparedCommitConsumed, orderedKeys, rocksDBKeys);
+        }
+
+        @Override
+        public boolean validatePreparedCommit(
+                Object[] values, boolean[] dirty, boolean[] removed) {
+            return CachedInternalMapState.this.validatePreparedCommit(
+                    preparedCommitConsumed,
+                    preparedOuterKey,
+                    preparedNamespace,
+                    orderedKeys,
+                    rocksDBKeys,
+                    preparedGeneration,
+                    values,
+                    dirty,
+                    removed);
+        }
+
+        @Override
+        public Object preparedWriteOwner() {
+            return rocksDBBatchMapReader.preparedWriteOwner();
+        }
+
+        @Override
+        public RocksDBBatchMapReader.PreparedMutation prepareMutation(
+                Object[] values, boolean[] dirty, boolean[] removed) throws Exception {
+            return rocksDBBatchMapReader.prepareSerializedMutations(
+                    rocksDBKeys, values, dirty, removed);
+        }
+
+        @Override
+        public void commitMutations(
+                List<? extends RocksDBBatchMapReader.PreparedMutation> mutations)
+                throws Exception {
+            rocksDBBatchMapReader.commitPreparedMutations(mutations);
+        }
+
+        @Override
+        public void markPreparedCommitConsumed() {
+            preparedCommitConsumed = true;
+        }
+
+        @Override
+        public void completePreparedCommit(
+                Object[] values, boolean[] dirty, boolean[] removed) {
+            CachedInternalMapState.this.completePreparedCommit(
+                    orderedKeys, values, dirty, removed);
         }
 
         @Override
@@ -1238,26 +1529,107 @@ public final class CachedInternalMapState<K, N, UK, UV>
      * mailbox. Any drop, failure, incomplete vector, or context mismatch returns {@code null} so
      * the existing caller takes its authoritative state-read fallback.
      */
-    private final class DeferredDirectMapValues implements PreparedValues {
+    private final class DeferredDirectMapValues implements PreparedValues, PreparedCommitHandle {
 
         private final K preparedOuterKey;
         private final N preparedNamespace;
         private final List<UK> orderedKeys;
         private final List<byte[]> preparedRocksDBKeys;
+        private final long preparedGeneration;
         private DeferredWaveResult waveTask;
         private int waveOffset;
         private boolean consumed;
         private boolean waveTokenReleased;
+        private boolean preparedCommitConsumed;
 
         private DeferredDirectMapValues(
                 K preparedOuterKey,
                 N preparedNamespace,
                 List<UK> orderedKeys,
-                List<byte[]> preparedRocksDBKeys) {
+                List<byte[]> preparedRocksDBKeys,
+                long preparedGeneration) {
             this.preparedOuterKey = preparedOuterKey;
             this.preparedNamespace = preparedNamespace;
             this.orderedKeys = orderedKeys;
             this.preparedRocksDBKeys = preparedRocksDBKeys;
+            this.preparedGeneration = preparedGeneration;
+        }
+
+        @Override
+        public boolean supportsPreparedCommit() {
+            return preparedCommitAvailable();
+        }
+
+        @Override
+        public boolean commitPreparedValues(Object[] values, boolean[] dirty, boolean[] removed)
+                throws Exception {
+            return commitPreparedCohortInternal(
+                    Collections.<PreparedValues>singletonList(this),
+                    Collections.singletonList(values),
+                    Collections.singletonList(dirty),
+                    Collections.singletonList(removed));
+        }
+
+        @Override
+        public boolean commitPreparedCohort(
+                List<? extends PreparedValues> tokens,
+                List<Object[]> values,
+                List<boolean[]> dirty,
+                List<boolean[]> removed)
+                throws Exception {
+            return commitPreparedCohortInternal(tokens, values, dirty, removed);
+        }
+
+        @Override
+        public boolean preparedCommitAvailable() {
+            return CachedInternalMapState.this.preparedCommitAvailable(
+                    preparedCommitConsumed, orderedKeys, preparedRocksDBKeys);
+        }
+
+        @Override
+        public boolean validatePreparedCommit(
+                Object[] values, boolean[] dirty, boolean[] removed) {
+            return CachedInternalMapState.this.validatePreparedCommit(
+                    preparedCommitConsumed,
+                    preparedOuterKey,
+                    preparedNamespace,
+                    orderedKeys,
+                    preparedRocksDBKeys,
+                    preparedGeneration,
+                    values,
+                    dirty,
+                    removed);
+        }
+
+        @Override
+        public Object preparedWriteOwner() {
+            return rocksDBBatchMapReader.preparedWriteOwner();
+        }
+
+        @Override
+        public RocksDBBatchMapReader.PreparedMutation prepareMutation(
+                Object[] values, boolean[] dirty, boolean[] removed) throws Exception {
+            return rocksDBBatchMapReader.prepareSerializedMutations(
+                    preparedRocksDBKeys, values, dirty, removed);
+        }
+
+        @Override
+        public void commitMutations(
+                List<? extends RocksDBBatchMapReader.PreparedMutation> mutations)
+                throws Exception {
+            rocksDBBatchMapReader.commitPreparedMutations(mutations);
+        }
+
+        @Override
+        public void markPreparedCommitConsumed() {
+            preparedCommitConsumed = true;
+        }
+
+        @Override
+        public void completePreparedCommit(
+                Object[] values, boolean[] dirty, boolean[] removed) {
+            CachedInternalMapState.this.completePreparedCommit(
+                    orderedKeys, values, dirty, removed);
         }
 
         @Override
@@ -2943,7 +3315,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
     }
 
     private void advanceNativeGeneration() {
-        if (nativeMapCacheEnabled || nativeMapSnapshotEnabled) {
+        if (nativeMapCacheEnabled
+                || nativeMapSnapshotEnabled
+                || nativeDistinctPreparedCommitEnabled) {
             nativeGeneration++;
         }
     }

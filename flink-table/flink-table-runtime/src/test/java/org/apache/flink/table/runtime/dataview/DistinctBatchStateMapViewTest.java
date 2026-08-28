@@ -37,8 +37,10 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -362,6 +364,88 @@ class DistinctBatchStateMapViewTest {
         verify(delegate, never()).get(any());
         assertEquals(2, view.directOverlayValues());
         assertEquals(2, view.overlayHits());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void preparedCommitPlanReusesInstalledExactKeyToken() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        BatchPrefetchableMapState.PreparedValues backend =
+                mock(BatchPrefetchableMapState.PreparedValues.class);
+        when(delegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        when(delegate.prepareUniqueKeyValues(List.of("a", "b"))).thenReturn(backend);
+        when(delegate.awaitPreparedUniqueKeyValues(backend)).thenReturn(List.of(1L, 2L));
+        when(backend.supportsPreparedCommit()).thenReturn(true);
+        DistinctBatchStateMapView<Void, String, Long> view = createPreparedCommitView(delegate);
+
+        view.beginPrefetchKeyCollection(2);
+        view.addPrefetchKey("a");
+        view.addPrefetchKey("b");
+        Object prepared = view.finishPreparedPrefetchKeyCollection();
+        assertTrue(view.installPreparedPrefetch(prepared));
+        view.beginBatch();
+        view.put("a", 11L);
+
+        DistinctBatchStateMapView.PreparedCommitPlan plan = view.prepareCommitPlan();
+        assertSame(backend, plan.backend);
+        assertArrayEquals(new Object[] {11L, null}, plan.values);
+        assertArrayEquals(new boolean[] {true, false}, plan.dirty);
+        assertArrayEquals(new boolean[] {false, false}, plan.removed);
+        view.completePreparedCommit(plan);
+
+        assertFalse(view.isBatchActive());
+        assertEquals(1, view.preparedCommitBatches());
+        assertEquals(1, view.preparedCommitEntries());
+        verify(delegate, never()).putAll(anyMap());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void preparedCommitRejectsDirtyKeyOutsideInstalledToken() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        BatchPrefetchableMapState.PreparedValues backend =
+                mock(BatchPrefetchableMapState.PreparedValues.class);
+        when(delegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        when(delegate.prepareUniqueKeyValues(List.of("a", "b"))).thenReturn(backend);
+        when(delegate.awaitPreparedUniqueKeyValues(backend)).thenReturn(List.of(1L, 2L));
+        when(backend.supportsPreparedCommit()).thenReturn(true);
+        DistinctBatchStateMapView<Void, String, Long> view = createPreparedCommitView(delegate);
+
+        view.beginPrefetchKeyCollection(2);
+        view.addPrefetchKey("a");
+        view.addPrefetchKey("b");
+        assertTrue(view.installPreparedPrefetch(view.finishPreparedPrefetchKeyCollection()));
+        view.beginBatch();
+        view.put("outside", 3L);
+
+        assertNull(view.prepareCommitPlan());
+        assertEquals(1, view.preparedCommitFallbacks());
+        view.abortBatch();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void abortClearsPreparedCommitToken() throws Exception {
+        StateMapView<Void, String, Long> delegate = mock(StateMapView.class);
+        BatchPrefetchableMapState.PreparedValues backend =
+                mock(BatchPrefetchableMapState.PreparedValues.class);
+        when(delegate.supportsDirectPrefetchedValues()).thenReturn(true);
+        when(delegate.prepareUniqueKeyValues(List.of("a", "b"))).thenReturn(backend);
+        when(delegate.awaitPreparedUniqueKeyValues(backend)).thenReturn(List.of(1L, 2L));
+        when(backend.supportsPreparedCommit()).thenReturn(true);
+        DistinctBatchStateMapView<Void, String, Long> view = createPreparedCommitView(delegate);
+
+        view.beginPrefetchKeyCollection(2);
+        view.addPrefetchKey("a");
+        view.addPrefetchKey("b");
+        assertTrue(view.installPreparedPrefetch(view.finishPreparedPrefetchKeyCollection()));
+        view.beginBatch();
+        view.abortBatch();
+        view.beginBatch();
+        view.put("a", 3L);
+
+        assertNull(view.prepareCommitPlan());
+        view.abortBatch();
     }
 
     private static Object capturePrepared(
@@ -956,5 +1040,18 @@ class DistinctBatchStateMapViewTest {
                 2,
                 true,
                 maxEntries);
+    }
+
+    private static DistinctBatchStateMapView<Void, String, Long> createPreparedCommitView(
+            StateMapView<Void, String, Long> delegate) {
+        return new DistinctBatchStateMapView<>(
+                delegate,
+                StringSerializer.INSTANCE,
+                LongSerializer.INSTANCE,
+                true,
+                2,
+                false,
+                64,
+                true);
     }
 }
