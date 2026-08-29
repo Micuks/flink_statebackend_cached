@@ -1185,10 +1185,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         recordPrefetchAccessObserved = true;
         K currentKey = currentKeyProvider.getCurrentKey();
 
-        // Worker-side native MultiGet retains one immutable completed batch. Consume it on the
-        // mailbox before any cache lookup so the current key can hit L1 without a per-key
-        // staging-map publication/removal round trip.
-        drainCompletedPrefetchBatches();
+        // Worker-side native MultiGet retains one immutable completed batch. Probe only the
+        // mailbox's current exact key; materializing an entire speculative batch here moves all
+        // unused deserialization work onto the critical mailbox thread and pollutes L1.
+        promoteCompletedPrefetchValueForCurrentKey(currentKey, currentNamespace);
 
         // 1. Check Sticky Cache (Always Check L0 - Fast Path)
         // Use direct comparison if possible or rely on isSame with current objects (no
@@ -3935,50 +3935,62 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return true;
     }
 
-    private void drainCompletedPrefetchBatches() throws IOException {
+    private void promoteCompletedPrefetchValueForCurrentKey(K currentKey, N namespace)
+            throws IOException {
         if (!nativeMailboxBatchHandoffEnabled
                 || completedPrefetchBatchReadyCount.get() == 0) {
             return;
         }
-        CompletedPrefetchBatch<K, N, V> completed;
-        while ((completed = completedPrefetchBatches.poll()) != null) {
-            completedPrefetchBatchReadyCount.decrementAndGet();
-            try {
-                drainCompletedPrefetchBatch(completed);
-            } finally {
-                releaseCompletedPrefetchBatch(completed);
+        for (CompletedPrefetchBatch<K, N, V> completed : completedPrefetchBatches) {
+            if (closed || completed.generation != writeGen) {
+                discardCompletedPrefetchBatch(completed);
+                continue;
             }
-        }
-    }
-
-    private void drainCompletedPrefetchBatch(CompletedPrefetchBatch<K, N, V> completed)
-            throws IOException {
-        for (int index = 0; index < completed.storageKeys.size(); index++) {
+            int index = completed.find(currentKey, namespace);
+            if (index < 0) {
+                continue;
+            }
             KeyNamespaceKey<K, N> storageKey = completed.storageKeys.get(index);
-            if (closed
-                    || completed.generation != writeGen
-                    || findCachedValueFor(storageKey.key, storageKey.namespace) != null
+            if (findCachedValueFor(storageKey.key, storageKey.namespace) != null
                     || !inFlight.remove(storageKey, completed.reservation)) {
                 inFlight.remove(storageKey, completed.reservation);
                 nativeMailboxBatchHandoffInvalidatedKeys++;
-                continue;
+            } else {
+                byte[] serializedValue = completed.serializedValues.get(index);
+                try {
+                    V value =
+                            materializeCompletedPrefetchValue(
+                                    serializedValue, completed.defaultValue);
+                    CachedValue<V> cachedValue = CachedValue.of(storageKey, value, false);
+                    l1Cache.put(storageKey, cachedValue);
+                    prefetchValuesPromoted++;
+                    prefetchLazyValuesMaterialized++;
+                    nativeMailboxBatchHandoffPromotedKeys++;
+                } catch (IOException | RuntimeException materializationFailure) {
+                    prefetchLazyMaterializationFailures++;
+                    nativeMailboxBatchHandoffInvalidatedKeys++;
+                }
             }
-
-            byte[] serializedValue = completed.serializedValues.get(index);
-            V value;
-            try {
-                value = materializeCompletedPrefetchValue(serializedValue, completed.defaultValue);
-            } catch (IOException | RuntimeException materializationFailure) {
-                prefetchLazyMaterializationFailures++;
-                nativeMailboxBatchHandoffInvalidatedKeys++;
-                continue;
+            completedPrefetchBatchRetainedBytes.addAndGet(-completed.resolve(index));
+            if (completed.remainingKeys == 0) {
+                removeCompletedPrefetchBatch(completed);
             }
+            return;
+        }
+    }
 
-            CachedValue<V> cachedValue = CachedValue.of(storageKey, value, false);
-            l1Cache.put(storageKey, cachedValue);
-            prefetchValuesPromoted++;
-            prefetchLazyValuesMaterialized++;
-            nativeMailboxBatchHandoffPromotedKeys++;
+    private void removeCompletedPrefetchBatch(CompletedPrefetchBatch<K, N, V> completed) {
+        if (completedPrefetchBatches.remove(completed)) {
+            completedPrefetchBatchReadyCount.decrementAndGet();
+            releaseCompletedPrefetchBatch(completed);
+        }
+    }
+
+    private void discardCompletedPrefetchBatch(CompletedPrefetchBatch<K, N, V> completed) {
+        if (completedPrefetchBatches.remove(completed)) {
+            completedPrefetchBatchReadyCount.decrementAndGet();
+            nativeMailboxBatchHandoffInvalidatedKeys += completed.remainingKeys;
+            releaseCompletedPrefetchBatch(completed);
         }
     }
 
@@ -3996,7 +4008,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     private void releaseCompletedPrefetchBatch(CompletedPrefetchBatch<K, N, V> completed) {
-        completedPrefetchBatchRetainedBytes.addAndGet(-completed.retainedBytes);
+        completedPrefetchBatchRetainedBytes.addAndGet(-completed.remainingRetainedBytes);
+        completed.remainingRetainedBytes = 0L;
         if (completed.reservation.cancelRetainedHandoffBatch()) {
             releaseReservations(completed.reservationKeys, completed.reservation);
         }
@@ -4006,7 +4019,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         CompletedPrefetchBatch<K, N, V> completed;
         while ((completed = completedPrefetchBatches.poll()) != null) {
             completedPrefetchBatchReadyCount.decrementAndGet();
-            nativeMailboxBatchHandoffInvalidatedKeys += completed.storageKeys.size();
+            nativeMailboxBatchHandoffInvalidatedKeys += completed.remainingKeys;
             releaseCompletedPrefetchBatch(completed);
         }
     }
@@ -6333,7 +6346,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         private final V defaultValue;
         private final long generation;
         private final PrefetchReservation reservation;
-        private final long retainedBytes;
+        private int remainingKeys;
+        private long remainingRetainedBytes;
+        private int nextSearchIndex;
 
         private CompletedPrefetchBatch(
                 java.util.List<KeyNamespaceKey<K, N>> storageKeys,
@@ -6349,7 +6364,42 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             this.defaultValue = defaultValue;
             this.generation = generation;
             this.reservation = reservation;
-            this.retainedBytes = retainedBytes;
+            this.remainingKeys = storageKeys.size();
+            this.remainingRetainedBytes = retainedBytes;
+        }
+
+        private int find(K key, N namespace) {
+            for (int index = nextSearchIndex; index < storageKeys.size(); index++) {
+                KeyNamespaceKey<K, N> candidate = storageKeys.get(index);
+                if (candidate != null && candidate.isSame(key, namespace)) {
+                    return index;
+                }
+            }
+            for (int index = 0; index < nextSearchIndex; index++) {
+                KeyNamespaceKey<K, N> candidate = storageKeys.get(index);
+                if (candidate != null && candidate.isSame(key, namespace)) {
+                    return index;
+                }
+            }
+            return -1;
+        }
+
+        private long resolve(int index) {
+            if (storageKeys.set(index, null) == null) {
+                return 0L;
+            }
+            byte[] serializedValue = serializedValues.set(index, null);
+            long releasedBytes = 0L;
+            if (serializedValue != null) {
+                remainingRetainedBytes -= serializedValue.length;
+                releasedBytes = serializedValue.length;
+            }
+            remainingKeys--;
+            nextSearchIndex = index + 1;
+            if (nextSearchIndex == storageKeys.size()) {
+                nextSearchIndex = 0;
+            }
+            return releasedBytes;
         }
     }
 

@@ -1044,6 +1044,9 @@ class NativePreparedValueStateTest {
 
         currentKey.set("k1");
         assertEquals(11, state.value());
+        assertEquals(1, state.getNativeMailboxBatchHandoffReadyBatchesForTesting());
+        assertEquals(1, state.getNativeMailboxBatchHandoffPromotedKeysForTesting());
+        assertTrue(state.hasInFlightReservationForTesting("k2", "window-mailbox-batch-handoff"));
         currentKey.set("k2");
         assertEquals(99, state.value());
         assertEquals(0, state.getNativeMailboxBatchHandoffReadyBatchesForTesting());
