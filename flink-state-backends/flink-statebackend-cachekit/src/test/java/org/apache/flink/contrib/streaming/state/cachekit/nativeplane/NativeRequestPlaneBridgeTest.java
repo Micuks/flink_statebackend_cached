@@ -156,6 +156,21 @@ class NativeRequestPlaneBridgeTest {
             assertEquals(0, probeValueLength(probeResults, 2));
             assertEquals(NativeRequestPlaneBridge.PROBE_MISS, probeStatus(probeResults, 3));
             assertEquals(0, probeValueLength(probeResults, 3));
+
+            ByteBuffer presenceResults =
+                    directNative(4 * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
+            assertEquals(4, bridge.probePresenceBatch(keys, presenceResults));
+            assertEquals(NativeRequestPlaneBridge.PROBE_MISS, probeStatus(presenceResults, 0));
+            assertEquals(NativeRequestPlaneBridge.PROBE_HIT, probeStatus(presenceResults, 1));
+            assertEquals(
+                    NativeRequestPlaneBridge.PROBE_NEGATIVE,
+                    probeStatus(presenceResults, 2));
+            assertEquals(NativeRequestPlaneBridge.PROBE_MISS, probeStatus(presenceResults, 3));
+            for (int index = 0; index < 4; index++) {
+                assertEquals(0, probeError(presenceResults, index));
+                assertEquals(0, probeValueOffset(presenceResults, index));
+                assertEquals(0, probeValueLength(presenceResults, index));
+            }
         }
     }
 

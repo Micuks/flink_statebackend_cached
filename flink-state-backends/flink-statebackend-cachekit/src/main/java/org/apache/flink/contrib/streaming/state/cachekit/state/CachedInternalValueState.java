@@ -480,6 +480,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeResidentHandoffUpdated;
     private volatile long nativeResidentHandoffRejected;
     private volatile long nativeResidentHandoffLegacyPublicationsAvoided;
+    private volatile long nativeResidentReuseProbeBatches;
+    private volatile long nativeResidentReuseProbeKeys;
+    private volatile long nativeResidentReuseProbeHits;
+    private volatile long nativeResidentReuseProbeNegativeHits;
+    private volatile long nativeResidentReuseProbeMisses;
     private volatile long nativeMailboxDirectSerializationFallbackKeys;
     private volatile long nativeMailboxDirectSerializationFallbackBytes;
     private volatile long nativeDirectPreparedBatches;
@@ -2199,7 +2204,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             LOG.info(
                     "[CACHEKIT NATIVE PREFETCH RESIDENT HANDOFF] enabled={} batches={} keys={} "
                             + "present={} negative={} cancelledAfterRead={} inserted={} updated={} "
-                            + "rejected={} legacyPublicationsAvoided={}",
+                            + "rejected={} legacyPublicationsAvoided={} reuseProbeBatches={} "
+                            + "reuseProbeKeys={} reuseProbeHits={} reuseProbeNegativeHits={} "
+                            + "reuseProbeMisses={}",
                     nativeResidentHandoffEnabled,
                     nativeResidentHandoffBatches,
                     nativeResidentHandoffKeys,
@@ -2209,7 +2216,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeResidentHandoffInserted,
                     nativeResidentHandoffUpdated,
                     nativeResidentHandoffRejected,
-                    nativeResidentHandoffLegacyPublicationsAvoided);
+                    nativeResidentHandoffLegacyPublicationsAvoided,
+                    nativeResidentReuseProbeBatches,
+                    nativeResidentReuseProbeKeys,
+                    nativeResidentReuseProbeHits,
+                    nativeResidentReuseProbeNegativeHits,
+                    nativeResidentReuseProbeMisses);
         }
     }
 
@@ -2315,6 +2327,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getNativeResidentHandoffRejectedForTesting() {
         return nativeResidentHandoffRejected;
+    }
+
+    long getNativeResidentReuseProbeKeysForTesting() {
+        return nativeResidentReuseProbeKeys;
+    }
+
+    long getNativeResidentReuseProbeHitsForTesting() {
+        return nativeResidentReuseProbeHits;
+    }
+
+    long getNativeResidentReuseProbeNegativeHitsForTesting() {
+        return nativeResidentReuseProbeNegativeHits;
+    }
+
+    long getNativeResidentReuseProbeMissesForTesting() {
+        return nativeResidentReuseProbeMisses;
     }
 
     int getNativeMailboxBatchHandoffReadyBatchesForTesting() {
@@ -4288,9 +4316,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      * Issues the authoritative RocksDB read directly from the mailbox-compacted native key arena.
      *
      * <p>This mode is intended for write-heavy states where generation fencing makes the native
-     * point cache effectively hitless. It deliberately skips both native probe and fill while
-     * preserving the existing exact reservation, generation, cancellation, and staging guards.
-     * Returning false is fail-open to the existing prepared-key Java MultiGet path.
+     * point cache effectively hitless. With resident handoff disabled it skips both native probe
+     * and fill. With resident handoff enabled, speculative reads first issue a status-only native
+     * probe so exact keys already resident in the native plane do not enter another RocksDB
+     * MultiGet; misses still use the direct-arena read/fill path. Both modes preserve the existing
+     * exact reservation, generation, cancellation, and staging guards. Returning false is
+     * fail-open to the existing prepared-key Java MultiGet path.
      */
     @SuppressWarnings("unchecked")
     private boolean executeNativeDirectReadOnlyBatch(
@@ -4320,14 +4351,85 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         int[] preparedIndices = new int[rocksDBKeys.size()];
         int activeCount = 0;
-        for (int index = 0; index < rocksDBKeys.size(); index++) {
-            if (reservation != null
-                    && !isPrefetchReservationActive(storageKeys.get(index), reservation)) {
-                prefetchWorkerCancelledBeforeRead++;
-                nativeDirectArenaReadOnlyCancelledKeys++;
-                continue;
+        if (nativeResidentHandoffEnabled && reservation != null && !immediate) {
+            final int processed;
+            try {
+                processed = nativeRequestPlaneCoordinator.probePresence(slot);
+            } catch (RuntimeException | LinkageError failure) {
+                nativeRuntimeFailures++;
+                nativeFallbackBatches++;
+                return false;
             }
-            preparedIndices[activeCount++] = index;
+            if (processed != rocksDBKeys.size()) {
+                IllegalStateException failure =
+                        new IllegalStateException(
+                                "Native resident reuse probe processed "
+                                        + processed
+                                        + " of "
+                                        + rocksDBKeys.size()
+                                        + " prepared keys.");
+                nativeRequestPlaneCoordinator.disable(failure);
+                nativeRuntimeFailures++;
+                nativeFallbackBatches++;
+                return false;
+            }
+            nativeResidentReuseProbeBatches++;
+            nativeResidentReuseProbeKeys += processed;
+            for (int index = 0; index < processed; index++) {
+                if (!isPrefetchReservationActive(storageKeys.get(index), reservation)) {
+                    prefetchWorkerCancelledBeforeRead++;
+                    nativeDirectArenaReadOnlyCancelledKeys++;
+                    continue;
+                }
+                int error = slot.probeError(index);
+                int status = slot.probeStatus(index);
+                if (error != NativeRequestPlaneBridge.ERROR_OK) {
+                    IllegalStateException failure =
+                            new IllegalStateException(
+                                    "Native resident reuse probe returned error="
+                                            + error
+                                            + " at index "
+                                            + index
+                                            + ".");
+                    nativeRequestPlaneCoordinator.disable(failure);
+                    nativeRuntimeFailures++;
+                    nativeFallbackBatches++;
+                    return false;
+                }
+                if (status == NativeRequestPlaneBridge.PROBE_HIT) {
+                    nativeResidentReuseProbeHits++;
+                    continue;
+                }
+                if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
+                    nativeResidentReuseProbeNegativeHits++;
+                    continue;
+                }
+                if (status != NativeRequestPlaneBridge.PROBE_MISS) {
+                    IllegalStateException failure =
+                            new IllegalStateException(
+                                    "Native resident reuse probe returned status="
+                                            + status
+                                            + " at index "
+                                            + index
+                                            + ".");
+                    nativeRequestPlaneCoordinator.disable(failure);
+                    nativeRuntimeFailures++;
+                    nativeFallbackBatches++;
+                    return false;
+                }
+                nativeResidentReuseProbeMisses++;
+                preparedIndices[activeCount++] = index;
+            }
+        } else {
+            for (int index = 0; index < rocksDBKeys.size(); index++) {
+                if (reservation != null
+                        && !isPrefetchReservationActive(storageKeys.get(index), reservation)) {
+                    prefetchWorkerCancelledBeforeRead++;
+                    nativeDirectArenaReadOnlyCancelledKeys++;
+                    continue;
+                }
+                preparedIndices[activeCount++] = index;
+            }
         }
         if (activeCount == 0) {
             return true;

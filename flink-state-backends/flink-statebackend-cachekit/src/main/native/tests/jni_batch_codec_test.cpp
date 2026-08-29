@@ -161,6 +161,34 @@ void TestFillAndProbeRoundTrip() {
     const std::size_t miss = 2 * kProbeResultRecordBytes;
     CHECK(Read<std::uint32_t>(probe_results, miss + kProbeResultStatusOffset) == 0);
     CHECK(Read<std::uint32_t>(probe_results, miss + kProbeResultLengthOffset) == 0);
+
+    std::vector<std::uint8_t> presence_results(
+            3 * kProbeResultRecordBytes, 0xff);
+    CHECK(ProbePresenceDirectBatch(
+                  plane.get(),
+                  {reinterpret_cast<const std::uint8_t*>(key_arena.data()),
+                   key_arena.size()},
+                  {key_metadata.data(), key_metadata.size()},
+                  3,
+                  {presence_results.data(), presence_results.size()}) ==
+          BatchBridgeCode::kOk);
+    CHECK(Read<std::uint32_t>(
+                  presence_results, kProbeResultStatusOffset) == 1);
+    CHECK(Read<std::uint32_t>(
+                  presence_results,
+                  kProbeResultRecordBytes + kProbeResultStatusOffset) == 2);
+    CHECK(Read<std::uint32_t>(
+                  presence_results,
+                  2 * kProbeResultRecordBytes + kProbeResultStatusOffset) == 0);
+    for (std::size_t index = 0; index < 3; ++index) {
+        const std::size_t base = index * kProbeResultRecordBytes;
+        CHECK(Read<std::uint32_t>(
+                      presence_results, base + kProbeResultErrorOffset) == 0);
+        CHECK(Read<std::uint32_t>(
+                      presence_results, base + kProbeResultArenaOffsetOffset) == 0);
+        CHECK(Read<std::uint32_t>(
+                      presence_results, base + kProbeResultLengthOffset) == 0);
+    }
 }
 
 void TestMalformedFillIsRejectedBeforeMutation() {

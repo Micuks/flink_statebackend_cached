@@ -1049,11 +1049,20 @@ class NativePreparedValueStateTest {
         assertEquals(0, state.getNativeResidentHandoffRejectedForTesting());
         assertEquals(1, coordinator.fillCalls());
 
+        // A later speculative batch for the same exact keys is screened by a native
+        // status-only probe. It must not issue a second RocksDB MultiGet or construct Java values.
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
+        assertEquals(2, coordinator.probeCalls());
+        assertEquals(4, state.getNativeResidentReuseProbeKeysForTesting());
+        assertEquals(1, state.getNativeResidentReuseProbeHitsForTesting());
+        assertEquals(1, state.getNativeResidentReuseProbeNegativeHitsForTesting());
+        assertEquals(2, state.getNativeResidentReuseProbeMissesForTesting());
+
         currentKey.set("k1");
         assertEquals(11, state.value());
         currentKey.set("k2");
         assertEquals(99, state.value());
-        assertEquals(2, coordinator.probeCalls());
+        assertEquals(4, coordinator.probeCalls());
         verify(reader, times(1))
                 .getSerializedValuesByRocksDBKeyArena(any(), any(), anyInt(), any(), anyInt());
         verify(reader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
@@ -4516,6 +4525,38 @@ class NativePreparedValueStateTest {
                     corruptNextProbeSlice = false;
                 }
                 valueOffset += length;
+            }
+            return keys.entryCount();
+        }
+
+        @Override
+        public int probePresenceBatch(
+                SerializedKeyBatch<?, ?> keys, ByteBuffer probeResults) {
+            if (failNextProbe) {
+                failNextProbe = false;
+                throw new IllegalStateException("injected presence probe failure");
+            }
+            ByteBuffer results = probeResults.duplicate().order(ByteOrder.nativeOrder());
+            for (int i = 0; i < keys.entryCount(); i++) {
+                NativeKey requestedKey = nativeKey(keys, i);
+                StoredValue stored = values.get(requestedKey);
+                if (stored != null
+                        && requestedKey.generation
+                                != NativeRequestPlaneBridge.PROBE_LATEST_GENERATION
+                        && requestedKey.generation != stored.generation) {
+                    stored = null;
+                }
+                int status =
+                        stored == null
+                                ? NativeRequestPlaneBridge.PROBE_MISS
+                                : stored.negative
+                                        ? NativeRequestPlaneBridge.PROBE_NEGATIVE
+                                        : NativeRequestPlaneBridge.PROBE_HIT;
+                int base = i * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES;
+                results.putInt(base + NativeRequestPlaneBridge.PROBE_RESULT_STATUS_OFFSET, status);
+                results.putInt(base + NativeRequestPlaneBridge.PROBE_RESULT_ERROR_OFFSET, 0);
+                results.putInt(base + NativeRequestPlaneBridge.PROBE_RESULT_ARENA_OFFSET, 0);
+                results.putInt(base + NativeRequestPlaneBridge.PROBE_RESULT_LENGTH_OFFSET, 0);
             }
             return keys.entryCount();
         }

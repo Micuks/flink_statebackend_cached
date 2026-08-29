@@ -129,6 +129,14 @@ private:
             MutableBuffer value_output,
             MutableBuffer probe_results) noexcept;
 
+    friend BatchBridgeCode ProbePresenceDirectBatch(
+            RequestPlane* plane,
+            BatchScratch* scratch,
+            ConstBuffer key_arena,
+            ConstBuffer key_metadata,
+            std::size_t count,
+            MutableBuffer probe_results) noexcept;
+
     friend BatchBridgeCode CompactDirectBatch(
             RequestPlane* plane,
             BatchScratch* scratch,
@@ -196,6 +204,14 @@ BatchBridgeCode ProbeDirectBatch(
         MutableBuffer value_output,
         MutableBuffer probe_results) noexcept;
 
+BatchBridgeCode ProbePresenceDirectBatch(
+        RequestPlane* plane,
+        BatchScratch* scratch,
+        ConstBuffer key_arena,
+        ConstBuffer key_metadata,
+        std::size_t count,
+        MutableBuffer probe_results) noexcept;
+
 BatchBridgeCode CompactDirectBatch(
         RequestPlane* plane,
         BatchScratch* scratch,
@@ -229,6 +245,13 @@ BatchBridgeCode ProbeDirectBatch(
         ConstBuffer key_metadata,
         std::size_t count,
         MutableBuffer value_output,
+        MutableBuffer probe_results) noexcept;
+
+BatchBridgeCode ProbePresenceDirectBatch(
+        RequestPlane* plane,
+        ConstBuffer key_arena,
+        ConstBuffer key_metadata,
+        std::size_t count,
         MutableBuffer probe_results) noexcept;
 
 const char* BatchBridgeCodeName(BatchBridgeCode code) noexcept;

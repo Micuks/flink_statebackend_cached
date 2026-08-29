@@ -567,6 +567,65 @@ BatchBridgeCode ProbeDirectBatch(
     }
 }
 
+BatchBridgeCode ProbePresenceDirectBatch(
+        RequestPlane* plane,
+        BatchScratch* scratch,
+        ConstBuffer key_arena,
+        ConstBuffer key_metadata,
+        std::size_t count,
+        MutableBuffer probe_results) noexcept {
+    if (plane == nullptr || scratch == nullptr || !IsValid(probe_results)) {
+        return BatchBridgeCode::kInvalidArgument;
+    }
+    std::size_t required_results = 0;
+    if (!RequiredBytes(count, kProbeResultRecordBytes, &required_results)) {
+        return BatchBridgeCode::kOverflow;
+    }
+    if (probe_results.size < required_results) {
+        return BatchBridgeCode::kOutputTooSmall;
+    }
+
+    try {
+        scratch->ReserveEntries(count);
+        BatchBridgeCode code =
+                DecodeKeys(key_arena, key_metadata, count, &scratch->keys_);
+        if (code != BatchBridgeCode::kOk) {
+            return code;
+        }
+        scratch->probe_results_.resize(count);
+        if (plane->ProbeBatch(
+                    scratch->keys_.data(),
+                    scratch->probe_results_.data(),
+                    count) != ErrorCode::kOk) {
+            return BatchBridgeCode::kNativeError;
+        }
+
+        for (std::size_t index = 0; index < count; ++index) {
+            const ProbeResult& result = scratch->probe_results_[index];
+            if (result.error != ErrorCode::kOk) {
+                return BatchBridgeCode::kNativeError;
+            }
+            std::uint8_t* record =
+                    probe_results.data + index * kProbeResultRecordBytes;
+            WriteNative<std::uint32_t>(
+                    record + kProbeResultStatusOffset,
+                    static_cast<std::uint32_t>(result.status));
+            WriteNative<std::uint32_t>(
+                    record + kProbeResultErrorOffset,
+                    static_cast<std::uint32_t>(result.error));
+            WriteNative<std::uint32_t>(record + kProbeResultArenaOffsetOffset, 0U);
+            WriteNative<std::uint32_t>(record + kProbeResultLengthOffset, 0U);
+        }
+        return BatchBridgeCode::kOk;
+    } catch (const std::bad_alloc&) {
+        return BatchBridgeCode::kAllocationFailed;
+    } catch (const std::length_error&) {
+        return BatchBridgeCode::kOverflow;
+    } catch (...) {
+        return BatchBridgeCode::kNativeError;
+    }
+}
+
 BatchBridgeCode FillDirectBatch(
         RequestPlane* plane,
         ConstBuffer key_arena,
@@ -606,6 +665,22 @@ BatchBridgeCode ProbeDirectBatch(
             key_metadata,
             count,
             value_output,
+            probe_results);
+}
+
+BatchBridgeCode ProbePresenceDirectBatch(
+        RequestPlane* plane,
+        ConstBuffer key_arena,
+        ConstBuffer key_metadata,
+        std::size_t count,
+        MutableBuffer probe_results) noexcept {
+    BatchScratch scratch;
+    return ProbePresenceDirectBatch(
+            plane,
+            &scratch,
+            key_arena,
+            key_metadata,
+            count,
             probe_results);
 }
 

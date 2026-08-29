@@ -45,11 +45,12 @@ using cachekit::native::bridge::GroupTokenPlanDirectBatch;
 using cachekit::native::bridge::FillDirectBatch;
 using cachekit::native::bridge::MutableBuffer;
 using cachekit::native::bridge::ProbeDirectBatch;
+using cachekit::native::bridge::ProbePresenceDirectBatch;
 
 constexpr const char* kIllegalArgument = "java/lang/IllegalArgumentException";
 constexpr const char* kIllegalState = "java/lang/IllegalStateException";
 constexpr const char* kOutOfMemory = "java/lang/OutOfMemoryError";
-constexpr jint kJniAbiVersion = 4;
+constexpr jint kJniAbiVersion = 5;
 
 struct BridgeHandle final {
     BridgeHandle(
@@ -334,6 +335,55 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
         Throw(environment, kIllegalState, exception.what());
     } catch (...) {
         Throw(environment, kIllegalState, "unknown JNI probe failure");
+    }
+    return -1;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequestPlaneBridge_nativeProbePresence(
+        JNIEnv* environment,
+        jclass,
+        jlong handle,
+        jobject key_arena_object,
+        jobject key_metadata_object,
+        jint count,
+        jobject probe_results_object) {
+    try {
+        BridgeHandle* bridge = nullptr;
+        std::size_t unsigned_count = 0;
+        ConstBuffer key_arena;
+        ConstBuffer key_metadata;
+        MutableBuffer probe_results;
+        if (!ValidateCall(
+                    environment, handle, count, &bridge, &unsigned_count) ||
+            !GetConstBuffer(environment, key_arena_object, "keyArena", &key_arena) ||
+            !GetConstBuffer(
+                    environment, key_metadata_object, "keyMetadata", &key_metadata) ||
+            !GetMutableBuffer(
+                    environment,
+                    probe_results_object,
+                    "probeResults",
+                    &probe_results)) {
+            return -1;
+        }
+        const BatchBridgeCode code = ProbePresenceDirectBatch(
+                bridge->plane.get(),
+                &bridge->scratch,
+                key_arena,
+                key_metadata,
+                unsigned_count,
+                probe_results);
+        if (code != BatchBridgeCode::kOk) {
+            ThrowBridgeFailure(environment, code);
+            return -1;
+        }
+        return count;
+    } catch (const std::bad_alloc&) {
+        Throw(environment, kOutOfMemory, "JNI presence probe allocation failed");
+    } catch (const std::exception& exception) {
+        Throw(environment, kIllegalState, exception.what());
+    } catch (...) {
+        Throw(environment, kIllegalState, "unknown JNI presence probe failure");
     }
     return -1;
 }

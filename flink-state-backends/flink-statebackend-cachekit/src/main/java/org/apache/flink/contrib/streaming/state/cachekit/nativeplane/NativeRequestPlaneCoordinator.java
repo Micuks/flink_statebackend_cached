@@ -349,6 +349,23 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         }
     }
 
+    /** Probes status only; positive values remain resident and never enter the JNI output arena. */
+    public int probePresence(BatchSlot slot) {
+        requireOwnedSlot(slot);
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                int processed =
+                        plane.probePresenceBatch(slot.preparedKeys, slot.probeResults());
+                probeCalls++;
+                return processed;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
     public int fill(BatchSlot slot) {
         requireOwnedSlot(slot);
         synchronized (planeLock) {

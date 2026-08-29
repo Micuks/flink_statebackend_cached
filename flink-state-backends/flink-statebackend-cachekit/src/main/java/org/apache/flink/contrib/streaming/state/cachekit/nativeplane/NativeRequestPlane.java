@@ -35,6 +35,17 @@ public interface NativeRequestPlane extends AutoCloseable {
     int probeBatch(SerializedKeyBatch<?, ?> keys, ByteBuffer valueOutput, ByteBuffer probeResults);
 
     /**
+     * Probes only exact-key presence/status and never copies resident value bytes.
+     *
+     * <p>The default is deliberately unsupported so an older native implementation cannot be
+     * mistaken for the zero-copy presence kernel.
+     */
+    default int probePresenceBatch(
+            SerializedKeyBatch<?, ?> keys, ByteBuffer probeResults) {
+        throw new UnsupportedOperationException("Native presence-only probe is unavailable.");
+    }
+
+    /**
      * Writes source indexes for the first occurrence of each exact key in arrival order.
      * Implementations without a native compactor retain every entry.
      */

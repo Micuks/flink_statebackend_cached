@@ -102,7 +102,7 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
     // Deliberately no SVE2 bit: the native runtime currently proves SVE and vector length only.
 
     private static final String LIBRARY_NAME = "cachekit_native_request_plane_jni";
-    private static final int EXPECTED_JNI_ABI_VERSION = 4;
+    private static final int EXPECTED_JNI_ABI_VERSION = 5;
     private static final Object LIBRARY_LOAD_LOCK = new Object();
 
     private static volatile boolean libraryLoaded;
@@ -206,7 +206,7 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
      * Fills clean positive/negative entries from direct buffers in one JNI call.
      *
      * <p>{@code valueMetadata} has one 16-byte record per key: arena offset, length, value flags,
-     * and ABI4 mutation-control flags. A negative entry uses flag {@link
+     * and ABI5 mutation-control/presence-probe semantics. A negative entry uses flag {@link
      * #FILL_VALUE_NEGATIVE_FLAG} and must have zero offset and length. The control field accepts
      * either {@link #FILL_VALUE_CHECK_ONLY_FLAG} or {@link #FILL_VALUE_UPDATE_ONLY_FLAG}; ordinary
      * fills use zero. {@code fillResults} receives status and error integers.
@@ -253,6 +253,22 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
                 keys.metadataSlice(),
                 count,
                 nativeValueOutput,
+                nativeProbeResults);
+    }
+
+    /** Probes exact-key status without copying positive values into a JNI output arena. */
+    @Override
+    public int probePresenceBatch(
+            SerializedKeyBatch<?, ?> keys, ByteBuffer probeResults) {
+        Objects.requireNonNull(keys, "keys");
+        int count = keys.entryCount();
+        ByteBuffer nativeProbeResults = directOutputSlice(probeResults, "probeResults");
+        requireCapacity(nativeProbeResults, count, PROBE_RESULT_RECORD_BYTES, "probeResults");
+        return nativeProbePresence(
+                requireOpenHandle(),
+                keys.arenaSlice(),
+                keys.metadataSlice(),
+                count,
                 nativeProbeResults);
     }
 
@@ -439,6 +455,13 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
             ByteBuffer keyMetadata,
             int count,
             ByteBuffer valueOutput,
+            ByteBuffer probeResults);
+
+    private static native int nativeProbePresence(
+            long handle,
+            ByteBuffer keyArena,
+            ByteBuffer keyMetadata,
+            int count,
             ByteBuffer probeResults);
 
     private static native int nativeCompact(
