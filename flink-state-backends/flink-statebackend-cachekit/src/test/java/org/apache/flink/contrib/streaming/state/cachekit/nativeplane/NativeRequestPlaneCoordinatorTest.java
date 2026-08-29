@@ -32,6 +32,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 import org.junit.jupiter.api.Test;
 
 class NativeRequestPlaneCoordinatorTest {
@@ -538,6 +539,50 @@ class NativeRequestPlaneCoordinatorTest {
             assertArrayEquals(new byte[] {30, 31, 32}, plane.fillKey);
             assertArrayEquals(new byte[] {1, 2, 3, 4}, plane.fillValue);
             assertEquals(23L, plane.fillGeneration);
+        }
+        coordinator.close();
+    }
+
+    @Test
+    void testResidentFillReferencesDirectMultiGetArenaWithoutHeapCopy() throws Exception {
+        FakePlane plane = new FakePlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(1), plane);
+
+        try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
+            slot.prepareLatest(
+                    7,
+                    23L,
+                    java.util.Arrays.asList(
+                            new byte[] {10, 11}, new byte[] {20}, new byte[] {30, 31, 32}));
+            int[] selection = new int[] {2, 0};
+            slot.prepareDirectArenaMultiGet(selection, 0, 2, 128);
+
+            byte[] directValue = new byte[] {1, 2, 3, 4};
+            slot.directMultiGetValueArena().put(directValue);
+            ByteBuffer descriptors =
+                    slot.directMultiGetDescriptors().order(ByteOrder.nativeOrder());
+            descriptors.putInt(
+                    RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET, directValue.length);
+            descriptors.putInt(
+                    RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES
+                            + RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET,
+                    RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND);
+
+            slot.prepareResidentFillFromDirectMultiGet(
+                    7, 23L, new int[] {2, 0}, new int[] {0, 1}, 2);
+            assertEquals(2, coordinator.fill(slot));
+            assertArrayEquals(new byte[] {30, 31, 32}, plane.fillKey);
+            assertArrayEquals(directValue, plane.fillValue);
+            assertFalse(plane.fillNegative);
+            assertEquals(23L, plane.fillGeneration);
+
+            slot.prepareResidentFillFromDirectMultiGet(
+                    7, 23L, new int[] {0}, new int[] {1}, 1);
+            assertEquals(1, coordinator.fill(slot));
+            assertArrayEquals(new byte[] {10, 11}, plane.fillKey);
+            assertTrue(plane.fillNegative);
+            assertNull(plane.fillValue);
         }
         coordinator.close();
     }

@@ -1008,6 +1008,64 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testDirectArenaResidentHandoffAvoidsJavaStagingAndServesNativeHits()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        stubDirectPreparedSerialization(reader);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                serializedKey(
+                                        invocation.getArgument(0), invocation.getArgument(1)));
+        byte[] first = KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE);
+        stubDirectArenaValues(reader, first, null);
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        residentHandoffOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedCachedState(delegate, currentKey, coordinator, 79);
+        state.setNativeResidentHandoffEnabledForTesting(true);
+        state.setCurrentNamespace("window-resident-handoff");
+
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
+
+        assertEquals(0, state.getStagingSizeForTesting());
+        assertEquals(1, state.getNativeResidentHandoffBatchesForTesting());
+        assertEquals(2, state.getNativeResidentHandoffKeysForTesting());
+        assertEquals(2, state.getNativeResidentHandoffInsertedForTesting());
+        assertEquals(0, state.getNativeResidentHandoffRejectedForTesting());
+        assertEquals(1, coordinator.fillCalls());
+
+        currentKey.set("k1");
+        assertEquals(11, state.value());
+        currentKey.set("k2");
+        assertEquals(99, state.value());
+        assertEquals(2, coordinator.probeCalls());
+        verify(reader, times(1))
+                .getSerializedValuesByRocksDBKeyArena(any(), any(), anyInt(), any(), anyInt());
+        verify(reader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+        verify(reader, never()).getSerializedValueByRocksDBKey(any());
+        verify(delegate, never()).value();
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testDirectArenaMailboxBatchHandoffPromotesWithoutPerKeyStaging() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
@@ -4195,6 +4253,39 @@ class NativePreparedValueStateTest {
 
     private static NativeRequestPlaneOptions directArenaReadOnlyOptions() {
         return directArenaReadOnlyOptions(16);
+    }
+
+    private static NativeRequestPlaneOptions residentHandoffOptions() {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                128,
+                1 << 20,
+                1 << 20,
+                16,
+                1 << 20,
+                1 << 20,
+                1,
+                2,
+                false,
+                true,
+                true,
+                false,
+                false,
+                true,
+                true,
+                false,
+                true,
+                true,
+                false,
+                8192,
+                0.02,
+                262144,
+                false,
+                false,
+                false,
+                true);
     }
 
     private static NativeRequestPlaneOptions directArenaReadOnlyOptions(int batchEntries) {

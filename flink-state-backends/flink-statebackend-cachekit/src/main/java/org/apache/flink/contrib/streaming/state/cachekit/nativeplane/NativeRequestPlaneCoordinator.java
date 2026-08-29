@@ -1808,6 +1808,75 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             }
         }
 
+        /**
+         * Prepares a native point-table fill directly from completed direct-MultiGet slots.
+         *
+         * <p>The value bytes remain in this slot's direct arena. Metadata refers to those existing
+         * slices, so the handoff performs no per-key heap allocation and no direct-to-heap-to-direct
+         * copy. The caller supplies only results whose exact reservation is still active.
+         */
+        public void prepareResidentFillFromDirectMultiGet(
+                int stateId,
+                long generation,
+                int[] preparedSourceIndices,
+                int[] directResultIndices,
+                int count)
+                throws IOException {
+            requireDirectMultiGetPrepared();
+            Objects.requireNonNull(preparedSourceIndices, "preparedSourceIndices");
+            Objects.requireNonNull(directResultIndices, "directResultIndices");
+            if (count < 0
+                    || count > preparedSourceIndices.length
+                    || count > directResultIndices.length
+                    || count > missKeys.maxEntries()) {
+                throw new IllegalArgumentException("Invalid resident handoff fill count: " + count);
+            }
+            missKeys.clear();
+            valueArena.clear();
+            fillValueBytes = 0;
+            ByteBuffer preparedArena = preparedKeys.arenaSlice();
+            for (int index = 0; index < count; index++) {
+                int source = preparedSourceIndices[index];
+                int resultIndex = directResultIndices[index];
+                checkPreparedIndex(source);
+                requireDirectMultiGetIndex(resultIndex);
+                missKeys.appendSerialized(
+                        stateId,
+                        generation,
+                        preparedArena,
+                        preparedKeys.arenaOffset(source),
+                        preparedKeys.serializedLength(source));
+
+                int result = directMultiGetResult(resultIndex);
+                int metadataBase = index * NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES;
+                if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
+                    valueMetadata.putInt(
+                            metadataBase + NativeRequestPlaneBridge.FILL_VALUE_ARENA_OFFSET, 0);
+                    valueMetadata.putInt(
+                            metadataBase + NativeRequestPlaneBridge.FILL_VALUE_LENGTH_OFFSET, 0);
+                    valueMetadata.putInt(
+                            metadataBase + NativeRequestPlaneBridge.FILL_VALUE_FLAGS_OFFSET,
+                            NativeRequestPlaneBridge.FILL_VALUE_NEGATIVE_FLAG);
+                } else if (result >= 0 && result <= directMultiGetValueStride) {
+                    int offset = resultIndex * directMultiGetValueStride;
+                    valueMetadata.putInt(
+                            metadataBase + NativeRequestPlaneBridge.FILL_VALUE_ARENA_OFFSET,
+                            offset);
+                    valueMetadata.putInt(
+                            metadataBase + NativeRequestPlaneBridge.FILL_VALUE_LENGTH_OFFSET,
+                            result);
+                    valueMetadata.putInt(
+                            metadataBase + NativeRequestPlaneBridge.FILL_VALUE_FLAGS_OFFSET, 0);
+                    fillValueBytes = Math.max(fillValueBytes, offset + result);
+                } else {
+                    throw new IllegalStateException(
+                            "Direct MultiGet result cannot be handed off: " + result);
+                }
+                valueMetadata.putInt(
+                        metadataBase + NativeRequestPlaneBridge.FILL_VALUE_RESERVED_OFFSET, 0);
+            }
+        }
+
         public int preparedEntryCount() {
             return preparedKeys.entryCount();
         }

@@ -497,6 +497,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         .withDescription(
                                                         "Maximum completed direct-read-only batches retained for mailbox consumption per ValueState wrapper.");
 
+        public static final ConfigOption<Boolean> NATIVE_PREFETCH_RESIDENT_HANDOFF_ENABLED =
+            ConfigOptions.key(
+                                            "state.backend.cachekit.native.prefetch.resident-handoff.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Publish completed direct-arena MultiGet results into the ARM native ValueState point table without creating per-key Java staging objects. "
+                                                                        + "Mailbox reads probe the resident table only after sticky/L1/L2 misses; requires native ValueState cache and write-through mutation coherence.");
+
         public static final ConfigOption<Boolean> NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED =
             ConfigOptions.key("state.backend.cachekit.native.prefetch.access-guided-state.enabled")
                                         .booleanType()

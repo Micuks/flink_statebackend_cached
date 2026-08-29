@@ -172,6 +172,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     4,
                     1,
                     64);
+    private boolean nativeResidentHandoffEnabled =
+            loadBooleanConfig(
+                    "state.backend.cachekit.native.prefetch.resident-handoff.enabled", false);
     private static final boolean NATIVE_MAILBOX_ADAPTIVE_DENSITY_ENABLED =
             loadBooleanConfig(
                     "state.backend.cachekit.native.mailbox-batch.adaptive-density.enabled", false);
@@ -468,6 +471,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeMailboxBatchHandoffQueueFullFallbacks;
     private volatile long nativeMailboxBatchHandoffRetainedBytesFallbacks;
     private volatile long nativeMailboxBatchHandoffLegacyPublicationsAvoided;
+    private volatile long nativeResidentHandoffBatches;
+    private volatile long nativeResidentHandoffKeys;
+    private volatile long nativeResidentHandoffPresent;
+    private volatile long nativeResidentHandoffNegative;
+    private volatile long nativeResidentHandoffCancelledAfterRead;
+    private volatile long nativeResidentHandoffInserted;
+    private volatile long nativeResidentHandoffUpdated;
+    private volatile long nativeResidentHandoffRejected;
+    private volatile long nativeResidentHandoffLegacyPublicationsAvoided;
     private volatile long nativeMailboxDirectSerializationFallbackKeys;
     private volatile long nativeMailboxDirectSerializationFallbackBytes;
     private volatile long nativeDirectPreparedBatches;
@@ -1093,6 +1105,25 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         this.nativeRequestPlaneCoordinator = nativeRequestPlaneCoordinator;
         this.nativeStateId = nativeStateId;
+        if (nativeResidentHandoffEnabled) {
+            if (nativeRequestPlaneCoordinator == null
+                    || !nativeRequestPlaneCoordinator.options().valueCacheEnabled()
+                    || !nativeRequestPlaneCoordinator.options().writeThroughMutations()
+                    || !nativeRequestPlaneCoordinator.options().directArenaMultiGetEnabled()
+                    || !nativeRequestPlaneCoordinator.options().directArenaReadOnlyEnabled()) {
+                throw new IllegalArgumentException(
+                        "Native resident prefetch handoff requires ValueState cache, mutation "
+                                + "write-through, direct-arena MultiGet, and direct-read-only mode.");
+            }
+            if (nativeMailboxBatchHandoffEnabled
+                    || nativeRequestPlaneCoordinator
+                            .options()
+                            .directArenaEagerMaterializationEnabled()) {
+                throw new IllegalArgumentException(
+                        "Native resident prefetch handoff is mutually exclusive with Java batch "
+                                + "handoff and worker-side eager materialization.");
+            }
+        }
         this.nativeValueReadActivation =
                 nativeRequestPlaneCoordinator != null
                                 && nativeRequestPlaneCoordinator
@@ -2164,6 +2195,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     completedPrefetchBatchReadyCount.get(),
                     completedPrefetchBatchRetainedBytes.get());
         }
+        if (nativeResidentHandoffEnabled || nativeResidentHandoffBatches > 0) {
+            LOG.info(
+                    "[CACHEKIT NATIVE PREFETCH RESIDENT HANDOFF] enabled={} batches={} keys={} "
+                            + "present={} negative={} cancelledAfterRead={} inserted={} updated={} "
+                            + "rejected={} legacyPublicationsAvoided={}",
+                    nativeResidentHandoffEnabled,
+                    nativeResidentHandoffBatches,
+                    nativeResidentHandoffKeys,
+                    nativeResidentHandoffPresent,
+                    nativeResidentHandoffNegative,
+                    nativeResidentHandoffCancelledAfterRead,
+                    nativeResidentHandoffInserted,
+                    nativeResidentHandoffUpdated,
+                    nativeResidentHandoffRejected,
+                    nativeResidentHandoffLegacyPublicationsAvoided);
+        }
     }
 
     long getPrefetchMultiGetCallsForTesting() {
@@ -2248,6 +2295,26 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     void setNativeMailboxBatchHandoffEnabledForTesting(boolean enabled) {
         nativeMailboxBatchHandoffEnabled = enabled;
+    }
+
+    void setNativeResidentHandoffEnabledForTesting(boolean enabled) {
+        nativeResidentHandoffEnabled = enabled;
+    }
+
+    long getNativeResidentHandoffBatchesForTesting() {
+        return nativeResidentHandoffBatches;
+    }
+
+    long getNativeResidentHandoffKeysForTesting() {
+        return nativeResidentHandoffKeys;
+    }
+
+    long getNativeResidentHandoffInsertedForTesting() {
+        return nativeResidentHandoffInserted;
+    }
+
+    long getNativeResidentHandoffRejectedForTesting() {
+        return nativeResidentHandoffRejected;
     }
 
     int getNativeMailboxBatchHandoffReadyBatchesForTesting() {
@@ -4299,6 +4366,21 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     immediate);
         }
 
+        if (nativeResidentHandoffEnabled && reservation != null && !immediate) {
+            nativeDirectArenaReadOnlyBatches++;
+            nativeDirectArenaReadOnlyKeys += activeCount;
+            if (fetchAndFillResidentDirectArenaValues(
+                    batchReader,
+                    slot,
+                    preparedIndices,
+                    activeCount,
+                    storageKeys,
+                    gen,
+                    reservation)) {
+                return true;
+            }
+        }
+
         java.util.List<byte[]> values =
                 fetchDirectArenaPreparedMissValues(
                         batchReader,
@@ -4365,6 +4447,182 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
         }
         return true;
+    }
+
+    /**
+     * Fills the ARM native point table directly from completed direct-MultiGet value slots.
+     *
+     * <p>No value crosses through a Java {@code byte[]} and no per-key staging entry is published.
+     * The exact reservation is revalidated after RocksDB I/O. Rejected/stale fills are safe: the
+     * later mailbox probe misses and performs its established authoritative RocksDB read.
+     */
+    private boolean fetchAndFillResidentDirectArenaValues(
+            RocksDBBatchValueReader<K, N, V> batchReader,
+            NativeRequestPlaneCoordinator.BatchSlot slot,
+            int[] preparedIndices,
+            int count,
+            java.util.List<KeyNamespaceKey<K, N>> storageKeys,
+            long gen,
+            PrefetchReservation reservation)
+            throws Exception {
+        int directChunkSize = directArenaChunkSize(batchReader);
+        boolean completedAny = false;
+        int[] fillPreparedSources = new int[directChunkSize];
+        int[] fillResultIndices = new int[directChunkSize];
+        for (int start = 0; start < count; start += directChunkSize) {
+            if (closed || gen != writeGen) {
+                prefetchStaleAborts++;
+                return true;
+            }
+            int chunkCount = Math.min(directChunkSize, count - start);
+            if (chunkCount < multiGetMinBatchSize) {
+                nativeDirectArenaMultiGetThresholdFallbacks++;
+                return completedAny;
+            }
+
+            slot.prepareDirectArenaMultiGet(
+                    preparedIndices,
+                    start,
+                    chunkCount,
+                    RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
+            int presentCount;
+            try {
+                lifecycleLock.readLock().lock();
+                try {
+                    if (closed || gen != writeGen) {
+                        prefetchStaleAborts++;
+                        return true;
+                    }
+                    nativeDirectArenaMultiGetBatches++;
+                    nativeDirectArenaMultiGetKeys += chunkCount;
+                    recordNativeDirectArenaMultiGetBatchSize(chunkCount);
+                    presentCount =
+                            batchReader.getSerializedValuesByRocksDBKeyArena(
+                                    slot.directMultiGetKeyArena(),
+                                    slot.directMultiGetDescriptors(),
+                                    chunkCount,
+                                    slot.directMultiGetValueArena(),
+                                    slot.directMultiGetValueStride());
+                    prefetchMultiGetCalls++;
+                    prefetchMultiGetKeys += chunkCount;
+                } finally {
+                    lifecycleLock.readLock().unlock();
+                }
+            } catch (LinkageError missingNativeSymbol) {
+                nativeDirectArenaMultiGetLinkageFallbacks++;
+                nativeDirectArenaMultiGetDisabled = true;
+                return completedAny;
+            } catch (UnsupportedOperationException | IllegalArgumentException invalidDirectAbi) {
+                nativeDirectArenaMultiGetProtocolFallbacks++;
+                nativeDirectArenaMultiGetDisabled = true;
+                return completedAny;
+            }
+
+            int observedPresent = 0;
+            int observedNotFound = 0;
+            int observedOverflow = 0;
+            boolean invalidProtocol = presentCount < 0 || presentCount > chunkCount;
+            for (int index = 0; index < chunkCount && !invalidProtocol; index++) {
+                int result = slot.directMultiGetResult(index);
+                if (result >= 0 && result <= slot.directMultiGetValueStride()) {
+                    observedPresent++;
+                } else if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
+                    observedNotFound++;
+                } else if (result == RocksDBBatchValueReader.DIRECT_ARENA_OVERFLOW) {
+                    observedPresent++;
+                    observedOverflow++;
+                } else {
+                    invalidProtocol = true;
+                }
+            }
+            if (observedPresent != presentCount) {
+                invalidProtocol = true;
+            }
+            if (invalidProtocol) {
+                nativeDirectArenaMultiGetProtocolFallbacks++;
+                nativeDirectArenaMultiGetDisabled = true;
+                return completedAny;
+            }
+            if (observedOverflow > 0) {
+                nativeDirectArenaMultiGetFound += observedPresent - observedOverflow;
+                nativeDirectArenaMultiGetNotFound += observedNotFound;
+                nativeDirectArenaMultiGetOverflowStatuses += observedOverflow;
+                nativeDirectArenaMultiGetOverflows++;
+                return completedAny;
+            }
+
+            nativeDirectArenaMultiGetFound += observedPresent;
+            nativeDirectArenaMultiGetNotFound += observedNotFound;
+            nativeDirectArenaMultiGetCompletedBatches++;
+            nativeDirectArenaMultiGetCompletedKeys += chunkCount;
+            recordAsyncPrefetchOutcomes(chunkCount, observedPresent);
+
+            int fillCount = 0;
+            int selectedPresent = 0;
+            int selectedNegative = 0;
+            for (int resultIndex = 0; resultIndex < chunkCount; resultIndex++) {
+                int preparedSource = preparedIndices[start + resultIndex];
+                KeyNamespaceKey<K, N> storageKey = storageKeys.get(preparedSource);
+                if (!isPrefetchReservationActive(storageKey, reservation)) {
+                    nativeResidentHandoffCancelledAfterRead++;
+                    continue;
+                }
+                fillPreparedSources[fillCount] = preparedSource;
+                fillResultIndices[fillCount] = resultIndex;
+                fillCount++;
+                if (slot.directMultiGetResult(resultIndex)
+                        == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
+                    selectedNegative++;
+                } else {
+                    selectedPresent++;
+                }
+            }
+            if (fillCount == 0) {
+                completedAny = true;
+                continue;
+            }
+
+            slot.prepareResidentFillFromDirectMultiGet(
+                    nativeStateId,
+                    slot.preparedGeneration(),
+                    fillPreparedSources,
+                    fillResultIndices,
+                    fillCount);
+            int filled = nativeRequestPlaneCoordinator.fill(slot);
+            if (filled != fillCount) {
+                throw new IllegalStateException(
+                        "Native resident handoff filled " + filled + " of " + fillCount + " keys.");
+            }
+            nativeResidentHandoffBatches++;
+            nativeResidentHandoffKeys += fillCount;
+            nativeResidentHandoffPresent += selectedPresent;
+            nativeResidentHandoffNegative += selectedNegative;
+            nativeResidentHandoffLegacyPublicationsAvoided += fillCount;
+            for (int index = 0; index < filled; index++) {
+                int status = slot.fillStatus(index);
+                int error = slot.fillError(index);
+                if (error == NativeRequestPlaneBridge.ERROR_OK
+                        && status == NativeRequestPlaneBridge.FILL_INSERTED) {
+                    nativeResidentHandoffInserted++;
+                } else if (error == NativeRequestPlaneBridge.ERROR_OK
+                        && status == NativeRequestPlaneBridge.FILL_UPDATED) {
+                    nativeResidentHandoffUpdated++;
+                } else if (isNonFatalNativeFillRejection(status, error)) {
+                    nativeResidentHandoffRejected++;
+                } else {
+                    throw new IllegalStateException(
+                            "Native resident handoff returned status="
+                                    + status
+                                    + ", error="
+                                    + error
+                                    + " at index "
+                                    + index
+                                    + ".");
+                }
+            }
+            completedAny = true;
+        }
+        return completedAny;
     }
 
     /**
