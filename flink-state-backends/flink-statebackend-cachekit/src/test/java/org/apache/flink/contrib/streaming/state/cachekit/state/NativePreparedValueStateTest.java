@@ -1076,7 +1076,8 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void testFusedResidentReuseScreeningIsIndependentOfResidentHandoff() throws Exception {
+    void testFusedResidentReuseDirectMissIndexesAreIndependentOfResidentHandoff()
+            throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
                 mock(
@@ -1115,6 +1116,7 @@ class NativePreparedValueStateTest {
                 newNativePreparedCachedState(delegate, currentKey, coordinator, 80);
         state.setNativeResidentReuseScreeningEnabledForTesting(true);
         state.setNativeResidentReuseFusedFilterEnabledForTesting(true);
+        state.setNativeResidentReuseDirectMissIndexEnabledForTesting(true);
         state.setCurrentNamespace(namespace);
 
         state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2", "k3", "k4")).run();
@@ -1125,6 +1127,8 @@ class NativePreparedValueStateTest {
         assertEquals(1, state.getNativeResidentReuseProbeHitsForTesting());
         assertEquals(1, state.getNativeResidentReuseProbeNegativeHitsForTesting());
         assertEquals(2, state.getNativeResidentReuseProbeMissesForTesting());
+        assertEquals(1, state.getNativeResidentReuseDirectMissIndexBatchesForTesting());
+        assertEquals(2, state.getNativeResidentReuseDirectMissIndexKeysForTesting());
         assertEquals(2, state.getStagingSizeForTesting());
         assertEquals(0, state.getNativeResidentHandoffBatchesForTesting());
         assertEquals(0, coordinator.fillCalls());

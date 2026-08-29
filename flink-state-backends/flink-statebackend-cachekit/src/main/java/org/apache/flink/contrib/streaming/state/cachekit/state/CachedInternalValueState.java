@@ -183,6 +183,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             loadBooleanConfig(
                     "state.backend.cachekit.native.prefetch.resident-reuse-fused-filter.enabled",
                     false);
+    private boolean nativeResidentReuseDirectMissIndexEnabled =
+            loadBooleanConfig(
+                    "state.backend.cachekit.native.prefetch.resident-reuse-direct-miss-index.enabled",
+                    false);
     private static final boolean NATIVE_MAILBOX_ADAPTIVE_DENSITY_ENABLED =
             loadBooleanConfig(
                     "state.backend.cachekit.native.mailbox-batch.adaptive-density.enabled", false);
@@ -493,6 +497,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeResidentReuseProbeHits;
     private volatile long nativeResidentReuseProbeNegativeHits;
     private volatile long nativeResidentReuseProbeMisses;
+    private volatile long nativeResidentReuseDirectMissIndexBatches;
+    private volatile long nativeResidentReuseDirectMissIndexKeys;
     private volatile long nativeMailboxDirectSerializationFallbackKeys;
     private volatile long nativeMailboxDirectSerializationFallbackBytes;
     private volatile long nativeDirectPreparedBatches;
@@ -1151,6 +1157,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 && !nativeResidentReuseScreeningEnabled) {
             throw new IllegalArgumentException(
                     "Native resident fused filtering requires resident reuse screening.");
+        }
+        if (nativeResidentReuseDirectMissIndexEnabled
+                && !nativeResidentReuseFusedFilterEnabled) {
+            throw new IllegalArgumentException(
+                    "Native resident direct miss indexes require fused resident filtering.");
         }
         this.nativeValueReadActivation =
                 nativeRequestPlaneCoordinator != null
@@ -2229,15 +2240,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 || nativeResidentReuseProbeBatches > 0) {
             LOG.info(
                     "[CACHEKIT NATIVE PREFETCH RESIDENT HANDOFF] enabled={} screeningEnabled={} "
-                            + "fusedFilterEnabled={} "
+                            + "fusedFilterEnabled={} directMissIndexEnabled={} "
                             + "batches={} keys={} "
                             + "present={} negative={} cancelledAfterRead={} inserted={} updated={} "
                             + "rejected={} legacyPublicationsAvoided={} reuseProbeBatches={} "
                             + "reuseProbeKeys={} reuseProbeHits={} reuseProbeNegativeHits={} "
-                            + "reuseProbeMisses={}",
+                            + "reuseProbeMisses={} directMissIndexBatches={} directMissIndexKeys={}",
                     nativeResidentHandoffEnabled,
                     nativeResidentReuseScreeningEnabled,
                     nativeResidentReuseFusedFilterEnabled,
+                    nativeResidentReuseDirectMissIndexEnabled,
                     nativeResidentHandoffBatches,
                     nativeResidentHandoffKeys,
                     nativeResidentHandoffPresent,
@@ -2251,7 +2263,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeResidentReuseProbeKeys,
                     nativeResidentReuseProbeHits,
                     nativeResidentReuseProbeNegativeHits,
-                    nativeResidentReuseProbeMisses);
+                    nativeResidentReuseProbeMisses,
+                    nativeResidentReuseDirectMissIndexBatches,
+                    nativeResidentReuseDirectMissIndexKeys);
         }
     }
 
@@ -2351,6 +2365,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         nativeResidentReuseFusedFilterEnabled = enabled;
     }
 
+    void setNativeResidentReuseDirectMissIndexEnabledForTesting(boolean enabled) {
+        nativeResidentReuseDirectMissIndexEnabled = enabled;
+    }
+
     long getNativeResidentHandoffBatchesForTesting() {
         return nativeResidentHandoffBatches;
     }
@@ -2381,6 +2399,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getNativeResidentReuseProbeMissesForTesting() {
         return nativeResidentReuseProbeMisses;
+    }
+
+    long getNativeResidentReuseDirectMissIndexBatchesForTesting() {
+        return nativeResidentReuseDirectMissIndexBatches;
+    }
+
+    long getNativeResidentReuseDirectMissIndexKeysForTesting() {
+        return nativeResidentReuseDirectMissIndexKeys;
     }
 
     int getNativeMailboxBatchHandoffReadyBatchesForTesting() {
@@ -4387,7 +4413,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return false;
         }
 
-        int[] preparedIndices;
+        int[] preparedIndices = null;
+        boolean directMissIndexSelection = false;
         int activeCount = 0;
         if (nativeResidentReuseScreeningEnabled && reservation != null && !immediate) {
             if (nativeResidentReuseFusedFilterEnabled) {
@@ -4407,16 +4434,32 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 nativeResidentReuseProbeHits += hits;
                 nativeResidentReuseProbeNegativeHits += negatives;
                 nativeResidentReuseProbeMisses += misses;
-                preparedIndices = new int[misses];
-                for (int missIndex = 0; missIndex < misses; missIndex++) {
-                    int sourceIndex = slot.presencePartitionMissSourceIndex(missIndex);
-                    if (!isPrefetchReservationActive(
-                            storageKeys.get(sourceIndex), reservation)) {
-                        prefetchWorkerCancelledBeforeRead++;
-                        nativeDirectArenaReadOnlyCancelledKeys++;
-                        continue;
+                if (nativeResidentReuseDirectMissIndexEnabled) {
+                    for (int missIndex = 0; missIndex < misses; missIndex++) {
+                        int sourceIndex = slot.presencePartitionMissSourceIndex(missIndex);
+                        if (!isPrefetchReservationActive(
+                                storageKeys.get(sourceIndex), reservation)) {
+                            prefetchWorkerCancelledBeforeRead++;
+                            nativeDirectArenaReadOnlyCancelledKeys++;
+                            continue;
+                        }
+                        slot.retainCompactedSource(missIndex, activeCount++);
                     }
-                    preparedIndices[activeCount++] = sourceIndex;
+                    directMissIndexSelection = true;
+                    nativeResidentReuseDirectMissIndexBatches++;
+                    nativeResidentReuseDirectMissIndexKeys += activeCount;
+                } else {
+                    preparedIndices = new int[misses];
+                    for (int missIndex = 0; missIndex < misses; missIndex++) {
+                        int sourceIndex = slot.presencePartitionMissSourceIndex(missIndex);
+                        if (!isPrefetchReservationActive(
+                                storageKeys.get(sourceIndex), reservation)) {
+                            prefetchWorkerCancelledBeforeRead++;
+                            nativeDirectArenaReadOnlyCancelledKeys++;
+                            continue;
+                        }
+                        preparedIndices[activeCount++] = sourceIndex;
+                    }
                 }
             } else {
                 final int processed;
@@ -4524,6 +4567,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (nativeRequestPlaneCoordinator
                 .options()
                 .directArenaEagerMaterializationEnabled()) {
+            if (directMissIndexSelection) {
+                preparedIndices = materializeCompactedSourceIndexes(slot, activeCount);
+                directMissIndexSelection = false;
+            }
             nativeDirectArenaReadOnlyBatches++;
             nativeDirectArenaReadOnlyKeys += activeCount;
             return fetchAndPublishDirectArenaPreparedValues(
@@ -4539,6 +4586,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
 
         if (nativeResidentHandoffEnabled && reservation != null && !immediate) {
+            if (directMissIndexSelection) {
+                preparedIndices = materializeCompactedSourceIndexes(slot, activeCount);
+                directMissIndexSelection = false;
+            }
             nativeDirectArenaReadOnlyBatches++;
             nativeDirectArenaReadOnlyKeys += activeCount;
             if (fetchAndFillResidentDirectArenaValues(
@@ -4558,6 +4609,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         batchReader,
                         slot,
                         preparedIndices,
+                        directMissIndexSelection,
                         activeCount,
                         gen,
                         reservation != null && !immediate);
@@ -4570,7 +4622,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.ArrayList<KeyNamespaceKey<K, N>> activeStorageKeys =
                     new java.util.ArrayList<>(activeCount);
             for (int resultIndex = 0; resultIndex < activeCount; resultIndex++) {
-                activeStorageKeys.add(storageKeys.get(preparedIndices[resultIndex]));
+                activeStorageKeys.add(
+                        storageKeys.get(
+                                selectedPreparedSourceIndex(
+                                        slot,
+                                        preparedIndices,
+                                        directMissIndexSelection,
+                                        resultIndex)));
             }
             if (offerCompletedPrefetchBatch(
                     storageKeys,
@@ -4587,7 +4645,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 prefetchStaleAborts++;
                 return true;
             }
-            int originalIndex = preparedIndices[resultIndex];
+            int originalIndex =
+                    selectedPreparedSourceIndex(
+                            slot,
+                            preparedIndices,
+                            directMissIndexSelection,
+                            resultIndex);
             byte[] serializedValue = values.get(resultIndex);
             boolean published;
             if (immediate) {
@@ -4950,7 +5013,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (fallback) {
                 java.util.List<byte[]> fallbackValues =
                         fetchPreparedIndexFallbackValues(
-                                batchReader, slot, preparedIndices, start, chunkCount, gen);
+                                batchReader,
+                                slot,
+                                preparedIndices,
+                                false,
+                                start,
+                                chunkCount,
+                                gen);
                 if (fallbackValues == null) {
                     return true;
                 }
@@ -5238,6 +5307,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             batchReader,
                             slot,
                             missOriginalIndices,
+                            false,
                             missCount,
                             gen,
                             recordAdaptiveFeedback);
@@ -5391,6 +5461,25 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         && error == NativeRequestPlaneBridge.ERROR_CAPACITY_EXCEEDED);
     }
 
+    private static int selectedPreparedSourceIndex(
+            NativeRequestPlaneCoordinator.BatchSlot slot,
+            int[] preparedIndices,
+            boolean directMissIndexSelection,
+            int selectedIndex) {
+        return directMissIndexSelection
+                ? slot.compactedSourceIndex(selectedIndex)
+                : preparedIndices[selectedIndex];
+    }
+
+    private static int[] materializeCompactedSourceIndexes(
+            NativeRequestPlaneCoordinator.BatchSlot slot, int count) {
+        int[] indexes = new int[count];
+        for (int index = 0; index < count; index++) {
+            indexes[index] = slot.compactedSourceIndex(index);
+        }
+        return indexes;
+    }
+
     /**
      * Reads compacted native misses without first materializing the prepared key arena on heap.
      *
@@ -5402,6 +5491,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             RocksDBBatchValueReader<K, N, V> batchReader,
             NativeRequestPlaneCoordinator.BatchSlot slot,
             int[] preparedIndices,
+            boolean directMissIndexSelection,
             int count,
             long gen,
             boolean recordAdaptiveFeedback)
@@ -5423,11 +5513,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 fallback = true;
             }
             if (!fallback) {
-                slot.prepareDirectArenaMultiGet(
-                        preparedIndices,
-                        start,
-                        chunkCount,
-                        RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
+                if (directMissIndexSelection) {
+                    slot.prepareCompactedSourceDirectArenaMultiGet(
+                            start,
+                            chunkCount,
+                            RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
+                } else {
+                    slot.prepareDirectArenaMultiGet(
+                            preparedIndices,
+                            start,
+                            chunkCount,
+                            RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
+                }
                 int presentCount;
                 try {
                     lifecycleLock.readLock().lock();
@@ -5528,7 +5625,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (fallback) {
                 java.util.List<byte[]> fallbackValues =
                         fetchPreparedIndexFallbackValues(
-                                batchReader, slot, preparedIndices, start, chunkCount, gen);
+                                batchReader,
+                                slot,
+                                preparedIndices,
+                                directMissIndexSelection,
+                                start,
+                                chunkCount,
+                                gen);
                 if (fallbackValues == null) {
                     return null;
                 }
@@ -5591,13 +5694,20 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             RocksDBBatchValueReader<K, N, V> batchReader,
             NativeRequestPlaneCoordinator.BatchSlot slot,
             int[] preparedIndices,
+            boolean directMissIndexSelection,
             int fromIndex,
             int count,
             long gen)
             throws Exception {
         java.util.ArrayList<byte[]> keys = new java.util.ArrayList<>(count);
         for (int index = 0; index < count; index++) {
-            keys.add(slot.copyPreparedKey(preparedIndices[fromIndex + index]));
+            keys.add(
+                    slot.copyPreparedKey(
+                            selectedPreparedSourceIndex(
+                                    slot,
+                                    preparedIndices,
+                                    directMissIndexSelection,
+                                    fromIndex + index)));
         }
         nativeDirectArenaMultiGetFallbackBatches++;
         nativeDirectArenaMultiGetFallbackKeys += count;

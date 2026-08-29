@@ -544,6 +544,35 @@ class NativeRequestPlaneCoordinatorTest {
     }
 
     @Test
+    void testDirectArenaDescriptorsConsumeNativePresenceMissIndexesWithoutHeapSelection()
+            throws Exception {
+        FakePlane plane = new FakePlane();
+        plane.partitionMissIndexes = new int[] {0, 2};
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaOptions(1), plane);
+
+        try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
+            slot.prepareLatest(
+                    7,
+                    23L,
+                    java.util.Arrays.asList(
+                            new byte[] {10, 11}, new byte[] {20}, new byte[] {30, 31, 32}));
+            assertEquals(3, coordinator.partitionPresence(slot));
+            assertEquals(2, slot.presencePartitionMissCount());
+
+            slot.prepareCompactedSourceDirectArenaMultiGet(0, 2, 128);
+            ByteBuffer descriptors =
+                    slot.directMultiGetDescriptors().order(ByteOrder.nativeOrder());
+            assertEquals(0, descriptors.getInt(4));
+            assertEquals(2, descriptors.getInt(20));
+            int second = RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES;
+            assertEquals(2, descriptors.getInt(second + 4));
+            assertEquals(3, descriptors.getInt(second + 20));
+        }
+        coordinator.close();
+    }
+
+    @Test
     void testResidentFillReferencesDirectMultiGetArenaWithoutHeapCopy() throws Exception {
         FakePlane plane = new FakePlane();
         NativeRequestPlaneCoordinator coordinator =
@@ -795,6 +824,7 @@ class NativeRequestPlaneCoordinatorTest {
         private long probeGeneration;
         private long featureBits;
         private int[] compactIndexes;
+        private int[] partitionMissIndexes;
         private byte[] fillKey;
         private byte[] fillValue;
         private boolean fillNegative;
@@ -852,6 +882,34 @@ class NativeRequestPlaneCoordinatorTest {
             if (keys.entryCount() > 0) {
                 probeGeneration = keys.generation(0);
             }
+            return keys.entryCount();
+        }
+
+        @Override
+        public int partitionPresenceBatch(
+                SerializedKeyBatch<?, ?> keys,
+                ByteBuffer summary,
+                ByteBuffer missSourceIndexes) {
+            if (partitionMissIndexes == null) {
+                return NativeRequestPlane.super.partitionPresenceBatch(
+                        keys, summary, missSourceIndexes);
+            }
+            ByteBuffer counts = summary.duplicate().order(ByteOrder.nativeOrder());
+            ByteBuffer misses =
+                    missSourceIndexes.duplicate().order(ByteOrder.nativeOrder());
+            for (int index = 0; index < partitionMissIndexes.length; index++) {
+                misses.putInt(index * Integer.BYTES, partitionMissIndexes[index]);
+            }
+            counts.putInt(
+                    NativeRequestPlaneBridge.PRESENCE_PARTITION_HIT_OFFSET,
+                    keys.entryCount() - partitionMissIndexes.length);
+            counts.putInt(NativeRequestPlaneBridge.PRESENCE_PARTITION_NEGATIVE_OFFSET, 0);
+            counts.putInt(
+                    NativeRequestPlaneBridge.PRESENCE_PARTITION_MISS_OFFSET,
+                    partitionMissIndexes.length);
+            counts.putInt(
+                    NativeRequestPlaneBridge.PRESENCE_PARTITION_PROCESSED_OFFSET,
+                    keys.entryCount());
             return keys.entryCount();
         }
 

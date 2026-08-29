@@ -523,6 +523,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         .withDescription(
                                                         "Fuse resident presence probing with native miss-index compaction. Only misses cross back to the Java RocksDB path; exact-key semantics and authoritative fallback are unchanged.");
 
+        public static final ConfigOption<Boolean> NATIVE_PREFETCH_RESIDENT_REUSE_DIRECT_MISS_INDEX_ENABLED =
+            ConfigOptions.key(
+                                            "state.backend.cachekit.native.prefetch.resident-reuse-direct-miss-index.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Consume the fused native miss-index buffer directly when constructing RocksDB direct-arena descriptors, avoiding a per-batch heap int array while preserving reservation and exact-key checks.");
+
         public static final ConfigOption<Boolean> NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED =
             ConfigOptions.key("state.backend.cachekit.native.prefetch.access-guided-state.enabled")
                                         .booleanType()

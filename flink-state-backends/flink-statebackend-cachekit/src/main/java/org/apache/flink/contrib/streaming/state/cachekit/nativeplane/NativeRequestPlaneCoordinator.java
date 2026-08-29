@@ -1654,6 +1654,67 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             directMultiGetValueStride = stride;
         }
 
+        /**
+         * Builds one direct-arena MultiGet descriptor chunk from the reusable compacted-source
+         * index buffer.
+         *
+         * <p>This is the allocation-free counterpart of {@link #prepareDirectArenaMultiGet(int[],
+         * int, int, int)}. It is used after a native presence partition has written only the miss
+         * source indexes into {@code uniqueSourceIndexes}; no heap {@code int[]} is materialized.
+         */
+        public void prepareCompactedSourceDirectArenaMultiGet(
+                int fromIndex, int count, int valueSlotCount) {
+            requireLeased();
+            if (fromIndex < 0
+                    || count <= 0
+                    || count > RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH
+                    || fromIndex > compactedEntryCount - count) {
+                throw new IllegalArgumentException(
+                        "Invalid compacted-source direct-arena MultiGet chunk.");
+            }
+            if (valueSlotCount < count
+                    || valueSlotCount > RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
+                throw new IllegalArgumentException("Invalid direct-arena value-slot count.");
+            }
+            int stride = valueArena.capacity() / valueSlotCount;
+            if (stride <= 0) {
+                throw new IllegalStateException(
+                        "Native batch value arena is too small for direct MultiGet slots.");
+            }
+            directMultiGetDescriptors.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            for (int target = 0; target < count; target++) {
+                int source =
+                        uniqueSourceIndexes.getInt(
+                                (fromIndex + target) * Integer.BYTES);
+                checkPreparedIndex(source);
+                int base = target * RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES;
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_STATE_ID_OFFSET,
+                        preparedKeys.stateId(source));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_ORIGINAL_INDEX_OFFSET, source);
+                directMultiGetDescriptors.putLong(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_GENERATION_OFFSET,
+                        preparedKeys.generation(source));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_KEY_OFFSET,
+                        preparedKeys.arenaOffset(source));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_KEY_LENGTH_OFFSET,
+                        preparedKeys.serializedLength(source));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_VALUE_OFFSET,
+                        target * stride);
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET,
+                        Integer.MIN_VALUE);
+            }
+            directMultiGetCount = count;
+            directMultiGetValueStride = stride;
+        }
+
         /** Builds descriptors for a contiguous prefix without allocating an index vector. */
         public void prepareContiguousDirectArenaMultiGet(int count, int valueSlotCount) {
             requireLeased();
