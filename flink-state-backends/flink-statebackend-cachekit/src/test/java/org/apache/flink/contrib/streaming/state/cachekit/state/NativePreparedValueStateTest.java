@@ -897,6 +897,8 @@ class NativePreparedValueStateTest {
         assertEquals(2, state.getNativeDirectArenaMultiGetFoundForTesting());
         assertEquals(1, state.getNativeDirectArenaMultiGetNotFoundForTesting());
         assertEquals(0, state.getNativeDirectArenaMultiGetOverflowStatusesForTesting());
+        assertEquals(3, state.getPrefetchAsyncValuesReadForTesting());
+        assertEquals(2, state.getPrefetchAsyncUsefulValuesForTesting());
         assertArrayEquals(
                 new long[] {0, 1, 0, 0, 0, 0, 0},
                 state.getNativeDirectArenaMultiGetBatchHistogramForTesting());
@@ -978,6 +980,8 @@ class NativePreparedValueStateTest {
         assertEquals(0, state.getNativeDirectArenaReadOnlyCancelledKeysForTesting());
         assertEquals(1, state.getNativeDirectArenaMultiGetBatchesForTesting());
         assertEquals(0, state.getNativeCompactSelectedProbeBatchesForTesting());
+        assertEquals(2, state.getPrefetchAsyncValuesReadForTesting());
+        assertEquals(1, state.getPrefetchAsyncUsefulValuesForTesting());
         verify(reader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
 
         currentKey.set("k1");
@@ -991,6 +995,8 @@ class NativePreparedValueStateTest {
         assertEquals(0, coordinator.fillCalls());
         assertEquals(2, state.getNativeDirectArenaReadOnlyBatchesForTesting());
         assertEquals(4, state.getNativeDirectArenaReadOnlyKeysForTesting());
+        assertEquals(2, state.getPrefetchAsyncValuesReadForTesting());
+        assertEquals(1, state.getPrefetchAsyncUsefulValuesForTesting());
         currentKey.set("k3");
         assertEquals(11, state.value());
         currentKey.set("k4");
@@ -1066,6 +1072,8 @@ class NativePreparedValueStateTest {
                 state.getNativeDirectArenaEagerMaterializedValueBytesForTesting());
         assertEquals(1, state.getNativeDirectArenaEagerMissingValuesForTesting());
         assertEquals(0, state.getNativeDirectArenaEagerFallbackValuesForTesting());
+        assertEquals(2, state.getPrefetchAsyncValuesReadForTesting());
+        assertEquals(1, state.getPrefetchAsyncUsefulValuesForTesting());
         verify(reader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
 
         currentKey.set("k1");
@@ -1086,6 +1094,8 @@ class NativePreparedValueStateTest {
                 2L * first.length,
                 state.getNativeDirectArenaEagerMaterializedValueBytesForTesting());
         assertEquals(2, state.getNativeDirectArenaEagerMissingValuesForTesting());
+        assertEquals(2, state.getPrefetchAsyncValuesReadForTesting());
+        assertEquals(1, state.getPrefetchAsyncUsefulValuesForTesting());
 
         state.close();
         coordinator.close();
@@ -2637,6 +2647,8 @@ class NativePreparedValueStateTest {
 
         assertEquals(2, readerState.getNativeHitsForTesting());
         assertEquals(0, readerState.getNativeMissesForTesting());
+        assertEquals(2, readerState.getPrefetchAsyncValuesReadForTesting());
+        assertEquals(2, readerState.getPrefetchAsyncUsefulValuesForTesting());
 
         currentKey.set("a");
         writer.clear();
@@ -2676,6 +2688,8 @@ class NativePreparedValueStateTest {
         assertEquals(1, afterClear.getNativeNegativeHitsForTesting());
         assertEquals(1, afterClear.getNativeHitsForTesting());
         assertEquals(0, afterClear.getNativeMissesForTesting());
+        assertEquals(2, afterClear.getPrefetchAsyncValuesReadForTesting());
+        assertEquals(1, afterClear.getPrefetchAsyncUsefulValuesForTesting());
 
         verify(reader, times(1)).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
         verify(delegate, never()).value();

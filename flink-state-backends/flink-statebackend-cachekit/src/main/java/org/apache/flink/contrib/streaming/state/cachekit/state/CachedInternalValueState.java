@@ -2118,6 +2118,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return prefetchPointGetCalls;
     }
 
+    long getPrefetchAsyncValuesReadForTesting() {
+        return prefetchAsyncValuesRead;
+    }
+
+    long getPrefetchAsyncUsefulValuesForTesting() {
+        return prefetchAsyncUsefulValues;
+    }
+
     long getPrefetchSmallBatchDropsForTesting() {
         return prefetchSmallBatchDrops;
     }
@@ -2968,10 +2976,32 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     private void recordAsyncPrefetchOutcome(byte[] serializedValue) {
-        prefetchAsyncValuesRead++;
-        if (serializedValue != null) {
-            prefetchAsyncUsefulValues++;
+        recordAsyncPrefetchOutcomes(1, serializedValue == null ? 0 : 1);
+    }
+
+    private void recordAsyncPrefetchOutcomes(java.util.List<byte[]> serializedValues) {
+        long usefulValues = 0L;
+        for (byte[] serializedValue : serializedValues) {
+            if (serializedValue != null) {
+                usefulValues++;
+            }
         }
+        recordAsyncPrefetchOutcomes(serializedValues.size(), usefulValues);
+    }
+
+    private void recordAsyncPrefetchOutcomes(long valuesRead, long usefulValues) {
+        if (valuesRead <= 0) {
+            return;
+        }
+        if (usefulValues < 0 || usefulValues > valuesRead) {
+            throw new IllegalArgumentException(
+                    "Useful async-prefetch values must be within the observed read count.");
+        }
+        // These are approximate admission/diagnostic counters. Update once per native chunk so
+        // Direct Arena keeps its allocation-free advantage instead of crossing this helper once
+        // per key.
+        prefetchAsyncValuesRead += valuesRead;
+        prefetchAsyncUsefulValues += usefulValues;
     }
 
     private NativeRequestPlaneCoordinator.BatchSlot prepareNativeBatchSlotDirect(
@@ -4046,7 +4076,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         java.util.List<byte[]> values =
                 fetchDirectArenaPreparedMissValues(
-                        batchReader, slot, preparedIndices, activeCount, gen);
+                        batchReader,
+                        slot,
+                        preparedIndices,
+                        activeCount,
+                        gen,
+                        reservation != null && !immediate);
         if (values == null) {
             return true;
         }
@@ -4207,6 +4242,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         nativeDirectArenaMultiGetNotFound += observedNotFound;
                         nativeDirectArenaMultiGetCompletedBatches++;
                         nativeDirectArenaMultiGetCompletedKeys += chunkCount;
+                        if (reservation != null && !immediate) {
+                            recordAsyncPrefetchOutcomes(chunkCount, observedPresent);
+                        }
                         for (int index = 0; index < chunkCount; index++) {
                             if (closed || gen != writeGen) {
                                 prefetchStaleAborts++;
@@ -4246,6 +4284,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     return true;
                 }
                 nativeDirectArenaEagerFallbackValues += chunkCount;
+                if (reservation != null && !immediate) {
+                    recordAsyncPrefetchOutcomes(fallbackValues);
+                }
                 for (int index = 0; index < chunkCount; index++) {
                     if (closed || gen != writeGen) {
                         prefetchStaleAborts++;
@@ -4491,6 +4532,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         nativeHitBytesDirect += batchHitBytesDirect;
         nativeNegativeHits += batchNegativeHits;
         nativeMisses += batchMisses;
+        boolean recordAdaptiveFeedback = reservation != null && !immediate;
+        if (recordAdaptiveFeedback) {
+            recordAsyncPrefetchOutcomes(
+                    batchHits + batchNegativeHits,
+                    batchHits);
+        }
         if (compactSelectedPrepared && adaptiveNativeProbeController != null) {
             adaptiveNativeProbeController.recordProbe(
                     processed, batchHits + batchNegativeHits);
@@ -4517,9 +4564,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         } else if (directArenaMultiGet) {
             missValues =
                     fetchDirectArenaPreparedMissValues(
-                            batchReader, slot, missOriginalIndices, missCount, gen);
+                            batchReader,
+                            slot,
+                            missOriginalIndices,
+                            missCount,
+                            gen,
+                            recordAdaptiveFeedback);
         } else {
-            missValues = fetchCompactPreparedMissValues(missKeys, gen);
+            missValues =
+                    fetchCompactPreparedMissValues(
+                            missKeys, gen, recordAdaptiveFeedback);
         }
         if (missValues == null) {
             return true;
@@ -4678,7 +4732,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             NativeRequestPlaneCoordinator.BatchSlot slot,
             int[] preparedIndices,
             int count,
-            long gen)
+            long gen,
+            boolean recordAdaptiveFeedback)
             throws Exception {
         if (count == 0) {
             return java.util.Collections.emptyList();
@@ -4783,6 +4838,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         nativeDirectArenaMultiGetNotFound += observedNotFound;
                         nativeDirectArenaMultiGetCompletedBatches++;
                         nativeDirectArenaMultiGetCompletedKeys += chunkCount;
+                        if (recordAdaptiveFeedback) {
+                            recordAsyncPrefetchOutcomes(chunkCount, observedPresent);
+                        }
                         for (int index = 0; index < chunkCount; index++) {
                             int result = slot.directMultiGetResult(index);
                             if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
@@ -4802,6 +4860,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 batchReader, slot, preparedIndices, start, chunkCount, gen);
                 if (fallbackValues == null) {
                     return null;
+                }
+                if (recordAdaptiveFeedback) {
+                    recordAsyncPrefetchOutcomes(fallbackValues);
                 }
                 values.addAll(fallbackValues);
             }
@@ -4903,7 +4964,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     @SuppressWarnings("unchecked")
     private java.util.List<byte[]> fetchCompactPreparedMissValues(
-            java.util.List<byte[]> missKeys, long gen) throws Exception {
+            java.util.List<byte[]> missKeys,
+            long gen,
+            boolean recordAdaptiveFeedback)
+            throws Exception {
         if (missKeys.isEmpty()) {
             return java.util.Collections.emptyList();
         }
@@ -4943,6 +5007,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (chunkValues.size() != end - start) {
                 throw new IllegalStateException(
                         "RocksDB compacted MultiGet result count does not match miss count.");
+            }
+            if (recordAdaptiveFeedback) {
+                recordAsyncPrefetchOutcomes(chunkValues);
             }
             values.addAll(chunkValues);
         }
