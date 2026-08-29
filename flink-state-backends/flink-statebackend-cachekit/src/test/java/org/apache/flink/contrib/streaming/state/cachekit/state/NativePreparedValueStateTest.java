@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -3887,6 +3888,134 @@ class NativePreparedValueStateTest {
         assertEquals(1, fakePlane.closeCalls);
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void testPreparedEvictionWriteCommitsExactBytesAndReusesThemForNativeCoherence()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("hot-key");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        byte[] expectedKey = serializedKey("hot-key", "prepared-write");
+        byte[] expectedValue = KvStateSerializer.serializeValue(42, IntSerializer.INSTANCE);
+        when(reader.supportsPreparedValueMutation()).thenReturn(true);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenReturn(expectedKey);
+        when(reader.serializeBatchValue(any(), any())).thenReturn(expectedValue);
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        preparedEvictionWriteOptions(), new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> state =
+                newPreparedEvictionValueState(delegate, currentKey, coordinator, 71);
+        state.setCurrentNamespace("prepared-write");
+
+        state.update(42);
+        state.flush();
+
+        verify(reader).putPreparedValue(eq(expectedKey), eq(expectedValue));
+        verify(delegate, never()).update(any());
+        assertEquals(1, state.getNativePreparedEvictionWritesForTesting());
+        assertEquals(0, state.getNativePreparedEvictionDeletesForTesting());
+        assertEquals(expectedKey.length, state.getNativePreparedEvictionKeyBytesForTesting());
+        assertEquals(expectedValue.length, state.getNativePreparedEvictionValueBytesForTesting());
+        assertEquals(1, state.getNativeMutationAttemptsForTesting());
+        assertEquals(1, state.getNativeMutationAppliedForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testPreparedEvictionDeleteCommitsTombstoneAndPreservesNativeGenerationFence()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("dead-key");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        byte[] expectedKey = serializedKey("dead-key", "prepared-delete");
+        when(reader.supportsPreparedValueMutation()).thenReturn(true);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenReturn(expectedKey);
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        preparedEvictionWriteOptions(), new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> state =
+                newPreparedEvictionValueState(delegate, currentKey, coordinator, 72);
+        state.setCurrentNamespace("prepared-delete");
+
+        state.clear();
+        state.flush();
+
+        verify(reader).deletePreparedValue(eq(expectedKey));
+        verify(delegate, never()).clear();
+        assertEquals(0, state.getNativePreparedEvictionWritesForTesting());
+        assertEquals(1, state.getNativePreparedEvictionDeletesForTesting());
+        assertEquals(expectedKey.length, state.getNativePreparedEvictionKeyBytesForTesting());
+        assertEquals(0, state.getNativePreparedEvictionValueBytesForTesting());
+        assertEquals(1, state.getNativeMutationAppliedForTesting());
+        assertEquals(1, state.getNativeMutationTombstonesAppliedForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testPreparedEvictionWriteFallsBackWhenRocksDBCapabilityIsUnavailable()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("fallback-key");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                serializedKey(
+                                        invocation.getArgument(0), invocation.getArgument(1)));
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        preparedEvictionWriteOptions(), new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> state =
+                newPreparedEvictionValueState(delegate, currentKey, coordinator, 73);
+        state.setCurrentNamespace("prepared-fallback");
+
+        state.update(17);
+        state.flush();
+
+        verify(delegate).update(17);
+        verify(reader, never()).putPreparedValue(any(), any());
+        verify(reader, never()).deletePreparedValue(any());
+        assertEquals(0, state.getNativePreparedEvictionWritesForTesting());
+        assertEquals(0, state.getNativePreparedEvictionDeletesForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
     private static void stubDirectPreparedSerialization(
             RocksDBBatchValueReader<String, String, Integer> reader) throws Exception {
         when(reader.directArenaMultiGetMaxBatch())
@@ -4043,6 +4172,29 @@ class NativePreparedValueStateTest {
                 stateId);
     }
 
+    private static CachedInternalValueState<String, String, Integer>
+            newPreparedEvictionValueState(
+                    InternalValueState<String, String, Integer> delegate,
+                    AtomicReference<String> currentKey,
+                    NativeRequestPlaneCoordinator coordinator,
+                    int stateId) {
+        return new CachedInternalValueState<>(
+                delegate,
+                currentKey::get,
+                currentKey::set,
+                128,
+                CachePolicyType.LRU,
+                0,
+                false,
+                0.05,
+                1000,
+                false,
+                false,
+                false,
+                coordinator,
+                stateId);
+    }
+
     private static NativeRequestPlaneOptions testOptions() {
         return testOptions(false);
     }
@@ -4085,6 +4237,30 @@ class NativePreparedValueStateTest {
                 false,
                 false,
                 false);
+    }
+
+    private static NativeRequestPlaneOptions preparedEvictionWriteOptions() {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                128,
+                4096,
+                4096,
+                16,
+                4096,
+                4096,
+                1,
+                2,
+                false,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false)
+                .withPreparedEvictionWriteEnabled(true);
     }
 
     private static NativeRequestPlaneOptions readActivatedWriteThroughOptions() {

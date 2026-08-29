@@ -528,6 +528,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeMutationAdaptiveBatchObservedScopes;
     private volatile long nativeMutationAdaptiveBatchBypassedScopes;
     private volatile long nativeMutationAdaptiveBatchAttempts;
+    private volatile long nativePreparedEvictionWrites;
+    private volatile long nativePreparedEvictionDeletes;
+    private volatile long nativePreparedEvictionKeyBytes;
+    private volatile long nativePreparedEvictionValueBytes;
     private long nativeMutationAdaptiveBatchStartAttempts;
     private boolean nativeResidentMutationBatchActive;
     private long nativeResidentMutationBatchEpoch;
@@ -1954,6 +1958,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "nativeMutationAdaptiveBatchObservedScopes={} "
                             + "nativeMutationAdaptiveBatchBypassedScopes={} "
                             + "nativeMutationAdaptiveBatchAttempts={} "
+                            + "nativePreparedEvictionWrites={} "
+                            + "nativePreparedEvictionDeletes={} "
+                            + "nativePreparedEvictionKeyBytes={} "
+                            + "nativePreparedEvictionValueBytes={} "
                             + "nativeMutationAdaptiveBatchEnabled={} nativeActive={} "
                             + "nativeKernel={} nativeFeatureBits={} nativeFeatures={} "
                             + "nativeDisableCause={} coordinatorProbeCalls={} "
@@ -2084,6 +2092,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeMutationAdaptiveBatchObservedScopes,
                     nativeMutationAdaptiveBatchBypassedScopes,
                     nativeMutationAdaptiveBatchAttempts,
+                    nativePreparedEvictionWrites,
+                    nativePreparedEvictionDeletes,
+                    nativePreparedEvictionKeyBytes,
+                    nativePreparedEvictionValueBytes,
                     NATIVE_RESIDENT_MUTATION_ADAPTIVE_ENABLED,
                     nativeRequestPlaneCoordinator != null
                             && nativeRequestPlaneCoordinator.isActive(),
@@ -2825,6 +2837,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getNativeMutationBatchCoalescedForTesting() {
         return nativeMutationBatchCoalesced;
+    }
+
+    long getNativePreparedEvictionWritesForTesting() {
+        return nativePreparedEvictionWrites;
+    }
+
+    long getNativePreparedEvictionDeletesForTesting() {
+        return nativePreparedEvictionDeletes;
+    }
+
+    long getNativePreparedEvictionKeyBytesForTesting() {
+        return nativePreparedEvictionKeyBytes;
+    }
+
+    long getNativePreparedEvictionValueBytesForTesting() {
+        return nativePreparedEvictionValueBytes;
     }
 
     long getNativeMutationResidentHintChecksForTesting() {
@@ -6343,6 +6371,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
             // A dirty flush changes RocksDB content: a concurrent prefetch read may now be stale.
             long nativeEpoch = prepareDelegateWrite(key);
+            if (canUsePreparedEvictionWrite()) {
+                flushPreparedEntryToDelegate(key, value, nativeEpoch);
+                return;
+            }
             // Save current context
             K previousKey = currentKeyProvider.getCurrentKey();
             // We rely on 'currentNamespace' field in this class but it might have changed.
@@ -6385,6 +6417,57 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
         } finally {
             lifecycleLock.readLock().unlock();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean canUsePreparedEvictionWrite() {
+        if (nativeResidentMutationBatchActive
+                || nativeRequestPlaneCoordinator == null
+                || !nativeRequestPlaneCoordinator.isActive()
+                || !nativeRequestPlaneCoordinator.options().preparedEvictionWriteEnabled()
+                || !nativeRequestPlaneCoordinator.options().valueCacheEnabled()
+                || !nativeRequestPlaneCoordinator.options().writeThroughMutations()
+                || !(delegate instanceof RocksDBBatchValueReader<?, ?, ?>)) {
+            return false;
+        }
+        if (nativeRequestPlaneCoordinator.options().readActivatedWriteThrough()
+                && nativeValueReadActivation != null
+                && !nativeValueReadActivation.isActive()) {
+            return false;
+        }
+        return ((RocksDBBatchValueReader<K, N, V>) delegate).supportsPreparedValueMutation();
+    }
+
+    @SuppressWarnings("unchecked")
+    private void flushPreparedEntryToDelegate(
+            KeyNamespaceKey<K, N> key, CachedValue<V> value, long nativeEpoch) {
+        RocksDBBatchValueReader<K, N, V> batchReader =
+                (RocksDBBatchValueReader<K, N, V>) delegate;
+        try {
+            byte[] preparedKey =
+                    batchReader.serializeBatchKeyAndNamespace(
+                            key.key,
+                            key.namespace,
+                            nativeMutationKeySerializer,
+                            nativeMutationNamespaceSerializer);
+            byte[] serializedValue =
+                    value.isNull
+                            ? null
+                            : batchReader.serializeBatchValue(
+                                    value.value, nativeMutationValueSerializer);
+            if (value.isNull) {
+                batchReader.deletePreparedValue(preparedKey);
+                nativePreparedEvictionDeletes++;
+            } else {
+                batchReader.putPreparedValue(preparedKey, serializedValue);
+                nativePreparedEvictionWrites++;
+                nativePreparedEvictionValueBytes += serializedValue.length;
+            }
+            nativePreparedEvictionKeyBytes += preparedKey.length;
+            publishPreparedNativeMutation(preparedKey, serializedValue, nativeEpoch);
+        } catch (Exception failure) {
+            throw new RuntimeException("Failed to flush prepared state mutation", failure);
         }
     }
 
@@ -6545,6 +6628,50 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             } else {
                 nativeMutationApplied++;
                 if (value == null) {
+                    nativeMutationTombstonesApplied++;
+                }
+            }
+        } catch (Exception | LinkageError failure) {
+            nativeRequestPlaneCoordinator.disable(failure);
+            nativeMutationFailures++;
+            nativeRuntimeFailures++;
+        }
+    }
+
+    /**
+     * Publishes an already-serialized authoritative eviction to the non-authoritative native point
+     * cache.
+     *
+     * <p>The exact bytes have already been committed to RocksDB. Reusing them removes duplicate
+     * key/value serialization while preserving update-only admission, generation fencing, and the
+     * established fail-closed native-disable behavior.
+     */
+    private void publishPreparedNativeMutation(
+            byte[] preparedKey, byte[] serializedValue, long nativeEpoch) {
+        nativeMutationAttempts++;
+        try {
+            int status;
+            if (nativeRequestPlaneCoordinator.options().readActivatedWriteThrough()) {
+                status =
+                        nativeRequestPlaneCoordinator.updateExactKeyIfPresent(
+                                nativeStateId,
+                                nativeEpoch,
+                                output -> output.write(preparedKey),
+                                serializedValue == null
+                                        ? null
+                                        : output -> output.write(serializedValue));
+            } else {
+                status =
+                        nativeRequestPlaneCoordinator.updateExactKey(
+                                nativeStateId, nativeEpoch, preparedKey, serializedValue);
+            }
+            if (status == NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION) {
+                nativeMutationSuperseded++;
+            } else if (status == NativeRequestPlaneBridge.FILL_NOT_PRESENT) {
+                nativeMutationResidentMissSkipped++;
+            } else {
+                nativeMutationApplied++;
+                if (serializedValue == null) {
                     nativeMutationTombstonesApplied++;
                 }
             }

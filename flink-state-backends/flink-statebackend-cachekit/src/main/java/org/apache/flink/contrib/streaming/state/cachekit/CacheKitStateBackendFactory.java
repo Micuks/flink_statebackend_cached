@@ -303,6 +303,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "The batch advances the native generation fence before dispatch, bypasses native reads for pending dirty keys, "
                                                                         + "and publishes only prechecked resident keys in one bounded JNI fill at batch end.");
 
+        public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_PREPARED_EVICTION_WRITE =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.value-cache.prepared-eviction-write.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Serialize a dirty ValueState eviction once and reuse the exact prepared key/value bytes for the authoritative RocksDB mutation and native resident-cache coherence update. "
+                                                                        + "Disabled by default; RocksDB remains authoritative and the path is used only when the backend explicitly advertises prepared mutation support.");
+
     public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH_ADAPTIVE =
                                         ConfigOptions.key(
                                                                         "state.backend.cachekit.native.value-cache.resident-mutation-batch.adaptive.enabled")
@@ -1150,7 +1159,9 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_ENTRIES),
                                 config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_KEY_ARENA_BYTES),
                                 config.get(NATIVE_DIRECT_ARENA_EAGER_MATERIALIZATION_ENABLED))
-                                .withDirectArenaBatchSize(config.get(NATIVE_DIRECT_ARENA_BATCH_SIZE));
+                                .withDirectArenaBatchSize(config.get(NATIVE_DIRECT_ARENA_BATCH_SIZE))
+                                .withPreparedEvictionWriteEnabled(
+                                                config.get(NATIVE_VALUE_CACHE_PREPARED_EVICTION_WRITE));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {

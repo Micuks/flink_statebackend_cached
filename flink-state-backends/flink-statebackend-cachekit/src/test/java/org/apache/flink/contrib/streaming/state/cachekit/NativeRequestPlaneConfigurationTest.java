@@ -31,6 +31,16 @@ import org.junit.jupiter.api.Test;
 class NativeRequestPlaneConfigurationTest {
 
     @Test
+    void testPreparedEvictionWriteRequiresNativeValueCacheAndWriteThrough() {
+        Configuration invalid = new Configuration();
+        invalid.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_PREPARED_EVICTION_WRITE, true);
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalid));
+    }
+
+    @Test
     void testExactDistinctResidentWriteBackIsExplicitAndCarriesCapacity() throws Exception {
         Configuration disabled = new Configuration();
         disabled.set(
@@ -247,6 +257,7 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(options.aarch64Only());
         assertFalse(options.writeThroughMutations());
         assertFalse(options.readActivatedWriteThrough());
+        assertFalse(options.preparedEvictionWriteEnabled());
         assertFalse(options.valueCacheEnabled());
         assertFalse(options.mapCacheEnabled());
         assertFalse(options.mapSnapshotEnabled());
@@ -284,6 +295,8 @@ class NativeRequestPlaneConfigurationTest {
         config.set(
                 CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH, true);
         config.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ENABLED, true);
+        config.set(
+                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_PREPARED_EVICTION_WRITE, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_CACHE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_BYPASS_ENABLED, true);
@@ -326,6 +339,7 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(options.aarch64Only());
         assertTrue(options.writeThroughMutations());
         assertTrue(options.readActivatedWriteThrough());
+        assertTrue(options.preparedEvictionWriteEnabled());
         assertTrue(options.valueCacheEnabled());
         assertTrue(options.mapCacheEnabled());
         assertTrue(options.mapSnapshotEnabled());

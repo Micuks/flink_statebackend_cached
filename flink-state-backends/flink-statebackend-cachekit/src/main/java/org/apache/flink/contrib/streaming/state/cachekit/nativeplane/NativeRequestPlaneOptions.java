@@ -53,6 +53,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final boolean writeThroughMutations;
     private final boolean readActivatedWriteThrough;
     private final boolean residentMutationBatchEnabled;
+    private final boolean preparedEvictionWriteEnabled;
     private final boolean valueCacheEnabled;
     private final boolean mapCacheEnabled;
     private final boolean mapSnapshotEnabled;
@@ -1149,6 +1150,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
                     "Resident mutation batching requires resident-only native mutation write-through.");
         }
         this.residentMutationBatchEnabled = residentMutationBatchEnabled;
+        this.preparedEvictionWriteEnabled = false;
         if (valueCacheEnabled && !enabled) {
             throw new IllegalArgumentException(
                     "Native ValueState cache requires the native request plane to be enabled.");
@@ -1350,6 +1352,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
         return residentMutationBatchEnabled;
     }
 
+    /** Whether dirty ValueState evictions reuse one prepared serialization for both sinks. */
+    public boolean preparedEvictionWriteEnabled() {
+        return preparedEvictionWriteEnabled;
+    }
+
     /** Whether the separately gated native ValueState point-cache path is enabled. */
     public boolean valueCacheEnabled() {
         return valueCacheEnabled;
@@ -1421,10 +1428,25 @@ public final class NativeRequestPlaneOptions implements Serializable {
         }
         return batchSize == directArenaBatchSize
                 ? this
-                : new NativeRequestPlaneOptions(this, batchSize);
+                : new NativeRequestPlaneOptions(
+                        this, batchSize, preparedEvictionWriteEnabled);
     }
 
-    private NativeRequestPlaneOptions(NativeRequestPlaneOptions source, int batchSize) {
+    /** Returns an otherwise identical immutable option set with prepared eviction reuse toggled. */
+    public NativeRequestPlaneOptions withPreparedEvictionWriteEnabled(boolean enabled) {
+        if (enabled && (!this.enabled || !writeThroughMutations || !valueCacheEnabled)) {
+            throw new IllegalArgumentException(
+                    "Prepared eviction writes require native request plane, write-through mutations, and native ValueState cache.");
+        }
+        return enabled == preparedEvictionWriteEnabled
+                ? this
+                : new NativeRequestPlaneOptions(this, directArenaBatchSize, enabled);
+    }
+
+    private NativeRequestPlaneOptions(
+            NativeRequestPlaneOptions source,
+            int batchSize,
+            boolean preparedEvictionWriteEnabled) {
         this.enabled = source.enabled;
         this.libraryPath = source.libraryPath;
         this.kernel = source.kernel;
@@ -1440,6 +1462,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
         this.writeThroughMutations = source.writeThroughMutations;
         this.readActivatedWriteThrough = source.readActivatedWriteThrough;
         this.residentMutationBatchEnabled = source.residentMutationBatchEnabled;
+        this.preparedEvictionWriteEnabled = preparedEvictionWriteEnabled;
         this.valueCacheEnabled = source.valueCacheEnabled;
         this.mapCacheEnabled = source.mapCacheEnabled;
         this.mapSnapshotEnabled = source.mapSnapshotEnabled;

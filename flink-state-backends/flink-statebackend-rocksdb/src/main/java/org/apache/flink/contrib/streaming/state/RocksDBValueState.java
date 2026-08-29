@@ -196,6 +196,37 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
     }
 
     @Override
+    public boolean supportsPreparedValueMutation() {
+        return true;
+    }
+
+    @Override
+    public byte[] serializeBatchValue(V value, TypeSerializer<V> safeValueSerializer)
+            throws IOException {
+        return serializeValue(value, safeValueSerializer);
+    }
+
+    @Override
+    public void putPreparedValue(byte[] preparedRocksDBKey, byte[] serializedValue) {
+        try {
+            backend.db.put(columnFamily, writeOptions, preparedRocksDBKey, serializedValue);
+        } catch (RocksDBException failure) {
+            throw new FlinkRuntimeException(
+                    "Error while adding prepared data to RocksDB", failure);
+        }
+    }
+
+    @Override
+    public void deletePreparedValue(byte[] preparedRocksDBKey) {
+        try {
+            backend.db.delete(columnFamily, writeOptions, preparedRocksDBKey);
+        } catch (RocksDBException failure) {
+            throw new FlinkRuntimeException(
+                    "Error while removing prepared entry from RocksDB", failure);
+        }
+    }
+
+    @Override
     public int getSerializedValuesByRocksDBKeyArena(
             ByteBuffer keyArena,
             ByteBuffer descriptors,

@@ -109,6 +109,36 @@ public interface RocksDBBatchValueReader<K, N, V> {
     }
 
     /**
+     * Whether this reader can serialize and commit one authoritative ValueState mutation from
+     * caller-owned prepared bytes.
+     *
+     * <p>This capability lets an upper state wrapper serialize an eviction exactly once and reuse
+     * the same immutable key/value bytes for both the RocksDB write and a non-authoritative native
+     * cache coherence update. The authoritative write must retain the ordinary {@code put/delete}
+     * semantics and write options.
+     */
+    default boolean supportsPreparedValueMutation() {
+        return false;
+    }
+
+    /** Serializes one ValueState value with the supplied mailbox-confined serializer. */
+    default byte[] serializeBatchValue(V value, TypeSerializer<V> safeValueSerializer)
+            throws Exception {
+        throw new UnsupportedOperationException("Prepared ValueState mutation is unavailable.");
+    }
+
+    /** Performs the authoritative RocksDB put using an exact prepared key and value. */
+    default void putPreparedValue(byte[] preparedRocksDBKey, byte[] serializedValue)
+            throws Exception {
+        throw new UnsupportedOperationException("Prepared ValueState mutation is unavailable.");
+    }
+
+    /** Performs the authoritative RocksDB delete using an exact prepared key. */
+    default void deletePreparedValue(byte[] preparedRocksDBKey) throws Exception {
+        throw new UnsupportedOperationException("Prepared ValueState mutation is unavailable.");
+    }
+
+    /**
      * Executes one ordered RocksDB MultiGet using the 32-byte native-order descriptor ABI.
      *
      * <p>The first three descriptor fields are caller-owned. The final field is overwritten with
