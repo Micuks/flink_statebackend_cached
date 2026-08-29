@@ -55,6 +55,12 @@ constexpr std::size_t kProbeResultErrorOffset = 4;
 constexpr std::size_t kProbeResultArenaOffsetOffset = 8;
 constexpr std::size_t kProbeResultLengthOffset = 12;
 
+constexpr std::size_t kPresencePartitionSummaryBytes = 16;
+constexpr std::size_t kPresencePartitionHitOffset = 0;
+constexpr std::size_t kPresencePartitionNegativeOffset = 4;
+constexpr std::size_t kPresencePartitionMissOffset = 8;
+constexpr std::size_t kPresencePartitionProcessedOffset = 12;
+
 // Token32 packed grouping plan V1, written in native byte order.  The magic is
 // the commit marker and is written last; zero always means invalid/incomplete.
 constexpr std::uint32_t kTokenPlanMagic = 0x434b4750U;
@@ -137,6 +143,15 @@ private:
             std::size_t count,
             MutableBuffer probe_results) noexcept;
 
+    friend BatchBridgeCode PartitionPresenceDirectBatch(
+            RequestPlane* plane,
+            BatchScratch* scratch,
+            ConstBuffer key_arena,
+            ConstBuffer key_metadata,
+            std::size_t count,
+            MutableBuffer summary,
+            MutableBuffer miss_source_indexes) noexcept;
+
     friend BatchBridgeCode CompactDirectBatch(
             RequestPlane* plane,
             BatchScratch* scratch,
@@ -212,6 +227,15 @@ BatchBridgeCode ProbePresenceDirectBatch(
         std::size_t count,
         MutableBuffer probe_results) noexcept;
 
+BatchBridgeCode PartitionPresenceDirectBatch(
+        RequestPlane* plane,
+        BatchScratch* scratch,
+        ConstBuffer key_arena,
+        ConstBuffer key_metadata,
+        std::size_t count,
+        MutableBuffer summary,
+        MutableBuffer miss_source_indexes) noexcept;
+
 BatchBridgeCode CompactDirectBatch(
         RequestPlane* plane,
         BatchScratch* scratch,
@@ -253,6 +277,14 @@ BatchBridgeCode ProbePresenceDirectBatch(
         ConstBuffer key_metadata,
         std::size_t count,
         MutableBuffer probe_results) noexcept;
+
+BatchBridgeCode PartitionPresenceDirectBatch(
+        RequestPlane* plane,
+        ConstBuffer key_arena,
+        ConstBuffer key_metadata,
+        std::size_t count,
+        MutableBuffer summary,
+        MutableBuffer miss_source_indexes) noexcept;
 
 const char* BatchBridgeCodeName(BatchBridgeCode code) noexcept;
 

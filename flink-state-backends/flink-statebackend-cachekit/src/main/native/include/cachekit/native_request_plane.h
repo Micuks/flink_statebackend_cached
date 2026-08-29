@@ -127,6 +127,12 @@ struct ProbeResult {
     std::size_t value_size = 0;
 };
 
+struct PresencePartitionSummary {
+    std::size_t hits = 0;
+    std::size_t negative_hits = 0;
+    std::size_t misses = 0;
+};
+
 struct FillResult {
     FillStatus status = FillStatus::kInternalError;
     ErrorCode error = ErrorCode::kInternal;
@@ -159,6 +165,14 @@ public:
 
     ErrorCode ProbeBatch(
             const KeyView* keys, ProbeResult* results, std::size_t count) noexcept;
+    // Probes exact-key presence and emits only miss source indexes. This avoids
+    // materializing a full ProbeResult record for keys already resident in the
+    // request plane while preserving exact-key validation in ProbeOne().
+    ErrorCode PartitionPresenceBatch(
+            const KeyView* keys,
+            std::uint32_t* miss_source_indexes,
+            std::size_t count,
+            PresencePartitionSummary* summary) noexcept;
     ErrorCode FillBatch(
             const FillView* fills, FillResult* results, std::size_t count) noexcept;
     // Keeps first occurrence order and writes source indexes for exact duplicate keys.

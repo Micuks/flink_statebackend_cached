@@ -626,6 +626,77 @@ BatchBridgeCode ProbePresenceDirectBatch(
     }
 }
 
+BatchBridgeCode PartitionPresenceDirectBatch(
+        RequestPlane* plane,
+        BatchScratch* scratch,
+        ConstBuffer key_arena,
+        ConstBuffer key_metadata,
+        std::size_t count,
+        MutableBuffer summary,
+        MutableBuffer miss_source_indexes) noexcept {
+    if (plane == nullptr || scratch == nullptr || !IsValid(summary) ||
+        !IsValid(miss_source_indexes)) {
+        return BatchBridgeCode::kInvalidArgument;
+    }
+    std::size_t required_indexes = 0;
+    if (!RequiredBytes(count, sizeof(std::uint32_t), &required_indexes)) {
+        return BatchBridgeCode::kOverflow;
+    }
+    if (summary.size < kPresencePartitionSummaryBytes ||
+        miss_source_indexes.size < required_indexes) {
+        return BatchBridgeCode::kOutputTooSmall;
+    }
+
+    try {
+        scratch->ReserveEntries(count);
+        BatchBridgeCode code =
+                DecodeKeys(key_arena, key_metadata, count, &scratch->keys_);
+        if (code != BatchBridgeCode::kOk) {
+            return code;
+        }
+        scratch->unique_source_indexes_.resize(count);
+        PresencePartitionSummary partition;
+        if (plane->PartitionPresenceBatch(
+                    scratch->keys_.data(),
+                    scratch->unique_source_indexes_.data(),
+                    count,
+                    &partition) != ErrorCode::kOk) {
+            return BatchBridgeCode::kNativeError;
+        }
+        if (partition.hits > std::numeric_limits<std::uint32_t>::max() ||
+            partition.negative_hits > std::numeric_limits<std::uint32_t>::max() ||
+            partition.misses > std::numeric_limits<std::uint32_t>::max() ||
+            count > std::numeric_limits<std::uint32_t>::max()) {
+            return BatchBridgeCode::kOverflow;
+        }
+        for (std::size_t index = 0; index < partition.misses; ++index) {
+            WriteNative<std::uint32_t>(
+                    miss_source_indexes.data + index * sizeof(std::uint32_t),
+                    scratch->unique_source_indexes_[index]);
+        }
+        WriteNative<std::uint32_t>(
+                summary.data + kPresencePartitionHitOffset,
+                static_cast<std::uint32_t>(partition.hits));
+        WriteNative<std::uint32_t>(
+                summary.data + kPresencePartitionNegativeOffset,
+                static_cast<std::uint32_t>(partition.negative_hits));
+        WriteNative<std::uint32_t>(
+                summary.data + kPresencePartitionMissOffset,
+                static_cast<std::uint32_t>(partition.misses));
+        // Commit marker: written last so Java never accepts a partial summary.
+        WriteNative<std::uint32_t>(
+                summary.data + kPresencePartitionProcessedOffset,
+                static_cast<std::uint32_t>(count));
+        return BatchBridgeCode::kOk;
+    } catch (const std::bad_alloc&) {
+        return BatchBridgeCode::kAllocationFailed;
+    } catch (const std::length_error&) {
+        return BatchBridgeCode::kOverflow;
+    } catch (...) {
+        return BatchBridgeCode::kNativeError;
+    }
+}
+
 BatchBridgeCode FillDirectBatch(
         RequestPlane* plane,
         ConstBuffer key_arena,
@@ -682,6 +753,24 @@ BatchBridgeCode ProbePresenceDirectBatch(
             key_metadata,
             count,
             probe_results);
+}
+
+BatchBridgeCode PartitionPresenceDirectBatch(
+        RequestPlane* plane,
+        ConstBuffer key_arena,
+        ConstBuffer key_metadata,
+        std::size_t count,
+        MutableBuffer summary,
+        MutableBuffer miss_source_indexes) noexcept {
+    BatchScratch scratch;
+    return PartitionPresenceDirectBatch(
+            plane,
+            &scratch,
+            key_arena,
+            key_metadata,
+            count,
+            summary,
+            miss_source_indexes);
 }
 
 const char* BatchBridgeCodeName(BatchBridgeCode code) noexcept {

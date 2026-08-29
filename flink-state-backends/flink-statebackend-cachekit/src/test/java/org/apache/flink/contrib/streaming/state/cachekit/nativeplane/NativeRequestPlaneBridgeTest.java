@@ -171,6 +171,32 @@ class NativeRequestPlaneBridgeTest {
                 assertEquals(0, probeValueOffset(presenceResults, index));
                 assertEquals(0, probeValueLength(presenceResults, index));
             }
+
+            ByteBuffer presenceSummary =
+                    directNative(NativeRequestPlaneBridge.PRESENCE_PARTITION_SUMMARY_BYTES);
+            ByteBuffer missSourceIndexes = directNative(4 * Integer.BYTES);
+            assertEquals(
+                    4,
+                    bridge.partitionPresenceBatch(
+                            keys, presenceSummary, missSourceIndexes));
+            assertEquals(
+                    1,
+                    presenceSummary.getInt(
+                            NativeRequestPlaneBridge.PRESENCE_PARTITION_HIT_OFFSET));
+            assertEquals(
+                    1,
+                    presenceSummary.getInt(
+                            NativeRequestPlaneBridge.PRESENCE_PARTITION_NEGATIVE_OFFSET));
+            assertEquals(
+                    2,
+                    presenceSummary.getInt(
+                            NativeRequestPlaneBridge.PRESENCE_PARTITION_MISS_OFFSET));
+            assertEquals(
+                    4,
+                    presenceSummary.getInt(
+                            NativeRequestPlaneBridge.PRESENCE_PARTITION_PROCESSED_OFFSET));
+            assertEquals(0, missSourceIndexes.getInt(0));
+            assertEquals(3, missSourceIndexes.getInt(Integer.BYTES));
         }
     }
 

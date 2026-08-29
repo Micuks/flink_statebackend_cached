@@ -912,6 +912,38 @@ ErrorCode RequestPlane::ProbeBatch(
     return ErrorCode::kOk;
 }
 
+ErrorCode RequestPlane::PartitionPresenceBatch(
+        const KeyView* keys,
+        std::uint32_t* miss_source_indexes,
+        std::size_t count,
+        PresencePartitionSummary* summary) noexcept {
+    if (summary == nullptr ||
+        (count != 0 && (keys == nullptr || miss_source_indexes == nullptr)) ||
+        count > std::numeric_limits<std::uint32_t>::max()) {
+        return ErrorCode::kInvalidArgument;
+    }
+    *summary = PresencePartitionSummary{};
+    for (std::size_t index = 0; index < count; ++index) {
+        const ProbeResult result = impl_->ProbeOne(keys[index]);
+        if (result.error != ErrorCode::kOk) {
+            return result.error;
+        }
+        switch (result.status) {
+            case ProbeStatus::kHit:
+                ++summary->hits;
+                break;
+            case ProbeStatus::kNegative:
+                ++summary->negative_hits;
+                break;
+            case ProbeStatus::kMiss:
+                miss_source_indexes[summary->misses++] =
+                        static_cast<std::uint32_t>(index);
+                break;
+        }
+    }
+    return ErrorCode::kOk;
+}
+
 ErrorCode RequestPlane::FillBatch(
         const FillView* fills, FillResult* results, std::size_t count) noexcept {
     if (count != 0 && (fills == nullptr || results == nullptr)) {

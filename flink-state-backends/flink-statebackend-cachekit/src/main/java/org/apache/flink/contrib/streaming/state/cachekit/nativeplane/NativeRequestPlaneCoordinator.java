@@ -366,6 +366,27 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         }
     }
 
+    /** Probes exact-key presence and compacts only miss source indexes in the leased slot. */
+    public int partitionPresence(BatchSlot slot) {
+        requireOwnedSlot(slot);
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                int processed =
+                        plane.partitionPresenceBatch(
+                                slot.preparedKeys,
+                                slot.presencePartitionSummary(),
+                                slot.uniqueSourceIndexes());
+                slot.acceptPresencePartition(processed);
+                probeCalls++;
+                return processed;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
     public int fill(BatchSlot slot) {
         requireOwnedSlot(slot);
         synchronized (planeLock) {
@@ -1911,6 +1932,34 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             return uniqueSourceIndexes.getInt(compactedIndex * Integer.BYTES);
         }
 
+        public int presencePartitionHitCount() {
+            requireLeased();
+            return probeResults.getInt(
+                    NativeRequestPlaneBridge.PRESENCE_PARTITION_HIT_OFFSET);
+        }
+
+        public int presencePartitionNegativeCount() {
+            requireLeased();
+            return probeResults.getInt(
+                    NativeRequestPlaneBridge.PRESENCE_PARTITION_NEGATIVE_OFFSET);
+        }
+
+        public int presencePartitionMissCount() {
+            requireLeased();
+            return probeResults.getInt(
+                    NativeRequestPlaneBridge.PRESENCE_PARTITION_MISS_OFFSET);
+        }
+
+        public int presencePartitionMissSourceIndex(int missIndex) {
+            requireLeased();
+            int misses = presencePartitionMissCount();
+            if (missIndex < 0 || missIndex >= misses) {
+                throw new IndexOutOfBoundsException(
+                        "Presence miss index " + missIndex + " outside [0, " + misses + ").");
+            }
+            return uniqueSourceIndexes.getInt(missIndex * Integer.BYTES);
+        }
+
         /** Retains one compacted source index after Java reservation filtering. */
         public void retainCompactedSource(int compactedIndex, int retainedIndex) {
             requireLeased();
@@ -2076,6 +2125,47 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             results.limit(
                     preparedKeys.entryCount() * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
             return results.slice().order(ByteOrder.nativeOrder());
+        }
+
+        private ByteBuffer presencePartitionSummary() {
+            requireLeased();
+            ByteBuffer summary = probeResults.duplicate().order(ByteOrder.nativeOrder());
+            summary.position(0);
+            summary.limit(NativeRequestPlaneBridge.PRESENCE_PARTITION_SUMMARY_BYTES);
+            summary.putInt(NativeRequestPlaneBridge.PRESENCE_PARTITION_PROCESSED_OFFSET, 0);
+            return summary.slice().order(ByteOrder.nativeOrder());
+        }
+
+        private void acceptPresencePartition(int processed) {
+            requireLeased();
+            int committed =
+                    probeResults.getInt(
+                            NativeRequestPlaneBridge.PRESENCE_PARTITION_PROCESSED_OFFSET);
+            int hits = presencePartitionHitCount();
+            int negatives = presencePartitionNegativeCount();
+            int misses = presencePartitionMissCount();
+            if (processed < 0
+                    || committed != processed
+                    || hits < 0
+                    || negatives < 0
+                    || misses < 0
+                    || hits + negatives + misses != processed
+                    || processed != preparedKeys.entryCount()) {
+                throw new IllegalStateException(
+                        "Invalid native presence partition: processed="
+                                + processed
+                                + ", committed="
+                                + committed
+                                + ", hits="
+                                + hits
+                                + ", negatives="
+                                + negatives
+                                + ", misses="
+                                + misses
+                                + ", prepared="
+                                + preparedKeys.entryCount());
+            }
+            compactedEntryCount = misses;
         }
 
         private ByteBuffer uniqueSourceIndexes() {

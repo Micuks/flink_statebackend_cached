@@ -46,6 +46,19 @@ public interface NativeRequestPlane extends AutoCloseable {
     }
 
     /**
+     * Probes exact-key presence and writes only source indexes that missed.
+     *
+     * <p>The summary contains hit, negative-hit, miss, and processed counts. Implementations must
+     * write the processed count last so callers can reject a partially published result.
+     */
+    default int partitionPresenceBatch(
+            SerializedKeyBatch<?, ?> keys,
+            ByteBuffer summary,
+            ByteBuffer missSourceIndexes) {
+        throw new UnsupportedOperationException("Native presence partition is unavailable.");
+    }
+
+    /**
      * Writes source indexes for the first occurrence of each exact key in arrival order.
      * Implementations without a native compactor retain every entry.
      */

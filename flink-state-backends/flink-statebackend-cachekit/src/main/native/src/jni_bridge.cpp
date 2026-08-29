@@ -46,11 +46,12 @@ using cachekit::native::bridge::FillDirectBatch;
 using cachekit::native::bridge::MutableBuffer;
 using cachekit::native::bridge::ProbeDirectBatch;
 using cachekit::native::bridge::ProbePresenceDirectBatch;
+using cachekit::native::bridge::PartitionPresenceDirectBatch;
 
 constexpr const char* kIllegalArgument = "java/lang/IllegalArgumentException";
 constexpr const char* kIllegalState = "java/lang/IllegalStateException";
 constexpr const char* kOutOfMemory = "java/lang/OutOfMemoryError";
-constexpr jint kJniAbiVersion = 5;
+constexpr jint kJniAbiVersion = 6;
 
 struct BridgeHandle final {
     BridgeHandle(
@@ -384,6 +385,59 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
         Throw(environment, kIllegalState, exception.what());
     } catch (...) {
         Throw(environment, kIllegalState, "unknown JNI presence probe failure");
+    }
+    return -1;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequestPlaneBridge_nativePartitionPresence(
+        JNIEnv* environment,
+        jclass,
+        jlong handle,
+        jobject key_arena_object,
+        jobject key_metadata_object,
+        jint count,
+        jobject summary_object,
+        jobject miss_source_indexes_object) {
+    try {
+        BridgeHandle* bridge = nullptr;
+        std::size_t unsigned_count = 0;
+        ConstBuffer key_arena;
+        ConstBuffer key_metadata;
+        MutableBuffer summary;
+        MutableBuffer miss_source_indexes;
+        if (!ValidateCall(
+                    environment, handle, count, &bridge, &unsigned_count) ||
+            !GetConstBuffer(environment, key_arena_object, "keyArena", &key_arena) ||
+            !GetConstBuffer(
+                    environment, key_metadata_object, "keyMetadata", &key_metadata) ||
+            !GetMutableBuffer(environment, summary_object, "summary", &summary) ||
+            !GetMutableBuffer(
+                    environment,
+                    miss_source_indexes_object,
+                    "missSourceIndexes",
+                    &miss_source_indexes)) {
+            return -1;
+        }
+        const BatchBridgeCode code = PartitionPresenceDirectBatch(
+                bridge->plane.get(),
+                &bridge->scratch,
+                key_arena,
+                key_metadata,
+                unsigned_count,
+                summary,
+                miss_source_indexes);
+        if (code != BatchBridgeCode::kOk) {
+            ThrowBridgeFailure(environment, code);
+            return -1;
+        }
+        return count;
+    } catch (const std::bad_alloc&) {
+        Throw(environment, kOutOfMemory, "JNI presence partition allocation failed");
+    } catch (const std::exception& exception) {
+        Throw(environment, kIllegalState, exception.what());
+    } catch (...) {
+        Throw(environment, kIllegalState, "unknown JNI presence partition failure");
     }
     return -1;
 }

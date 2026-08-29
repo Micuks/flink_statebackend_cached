@@ -515,6 +515,14 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Probe exact-key status in the native ValueState point table before speculative RocksDB MultiGet and omit already-resident positive or negative keys. "
                                                                         + "This switch is independent of resident handoff so screened misses can retain the standard Java staging path.");
 
+        public static final ConfigOption<Boolean> NATIVE_PREFETCH_RESIDENT_REUSE_FUSED_FILTER_ENABLED =
+            ConfigOptions.key(
+                                            "state.backend.cachekit.native.prefetch.resident-reuse-fused-filter.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Fuse resident presence probing with native miss-index compaction. Only misses cross back to the Java RocksDB path; exact-key semantics and authoritative fallback are unchanged.");
+
         public static final ConfigOption<Boolean> NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED =
             ConfigOptions.key("state.backend.cachekit.native.prefetch.access-guided-state.enabled")
                                         .booleanType()

@@ -189,6 +189,29 @@ void TestFillAndProbeRoundTrip() {
         CHECK(Read<std::uint32_t>(
                       presence_results, base + kProbeResultLengthOffset) == 0);
     }
+
+    std::vector<std::uint8_t> presence_summary(
+            kPresencePartitionSummaryBytes, 0);
+    std::vector<std::uint8_t> miss_indexes(
+            3 * sizeof(std::uint32_t), 0xff);
+    CHECK(PartitionPresenceDirectBatch(
+                  plane.get(),
+                  {reinterpret_cast<const std::uint8_t*>(key_arena.data()),
+                   key_arena.size()},
+                  {key_metadata.data(), key_metadata.size()},
+                  3,
+                  {presence_summary.data(), presence_summary.size()},
+                  {miss_indexes.data(), miss_indexes.size()}) ==
+          BatchBridgeCode::kOk);
+    CHECK(Read<std::uint32_t>(
+                  presence_summary, kPresencePartitionHitOffset) == 1);
+    CHECK(Read<std::uint32_t>(
+                  presence_summary, kPresencePartitionNegativeOffset) == 1);
+    CHECK(Read<std::uint32_t>(
+                  presence_summary, kPresencePartitionMissOffset) == 1);
+    CHECK(Read<std::uint32_t>(
+                  presence_summary, kPresencePartitionProcessedOffset) == 3);
+    CHECK(Read<std::uint32_t>(miss_indexes, 0) == 2);
 }
 
 void TestMalformedFillIsRejectedBeforeMutation() {

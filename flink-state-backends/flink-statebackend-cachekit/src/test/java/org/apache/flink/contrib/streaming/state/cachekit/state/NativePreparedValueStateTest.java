@@ -1076,7 +1076,7 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void testResidentReuseScreeningIsIndependentOfResidentHandoff() throws Exception {
+    void testFusedResidentReuseScreeningIsIndependentOfResidentHandoff() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
                 mock(
@@ -1114,11 +1114,13 @@ class NativePreparedValueStateTest {
         CachedInternalValueState<String, String, Integer> state =
                 newNativePreparedCachedState(delegate, currentKey, coordinator, 80);
         state.setNativeResidentReuseScreeningEnabledForTesting(true);
+        state.setNativeResidentReuseFusedFilterEnabledForTesting(true);
         state.setCurrentNamespace(namespace);
 
         state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2", "k3", "k4")).run();
 
         assertEquals(1, coordinator.probeCalls());
+        assertEquals(1, fakePlane.partitionPresenceCalls);
         assertEquals(4, state.getNativeResidentReuseProbeKeysForTesting());
         assertEquals(1, state.getNativeResidentReuseProbeHitsForTesting());
         assertEquals(1, state.getNativeResidentReuseProbeNegativeHitsForTesting());
@@ -4439,6 +4441,7 @@ class NativePreparedValueStateTest {
         private CountDownLatch probeEntered;
         private CountDownLatch releaseProbe;
         private int compactCalls;
+        private int partitionPresenceCalls;
         private int closeCalls;
 
         private FakeNativeRequestPlane() {
@@ -4632,6 +4635,45 @@ class NativePreparedValueStateTest {
                 results.putInt(base + NativeRequestPlaneBridge.PROBE_RESULT_ARENA_OFFSET, 0);
                 results.putInt(base + NativeRequestPlaneBridge.PROBE_RESULT_LENGTH_OFFSET, 0);
             }
+            return keys.entryCount();
+        }
+
+        @Override
+        public int partitionPresenceBatch(
+                SerializedKeyBatch<?, ?> keys,
+                ByteBuffer summary,
+                ByteBuffer missSourceIndexes) {
+            partitionPresenceCalls++;
+            ByteBuffer counts = summary.duplicate().order(ByteOrder.nativeOrder());
+            ByteBuffer misses =
+                    missSourceIndexes.duplicate().order(ByteOrder.nativeOrder());
+            int hits = 0;
+            int negatives = 0;
+            int missCount = 0;
+            for (int i = 0; i < keys.entryCount(); i++) {
+                NativeKey requestedKey = nativeKey(keys, i);
+                StoredValue stored = values.get(requestedKey);
+                if (stored != null
+                        && requestedKey.generation
+                                != NativeRequestPlaneBridge.PROBE_LATEST_GENERATION
+                        && requestedKey.generation != stored.generation) {
+                    stored = null;
+                }
+                if (stored == null) {
+                    misses.putInt(missCount++ * Integer.BYTES, i);
+                } else if (stored.negative) {
+                    negatives++;
+                } else {
+                    hits++;
+                }
+            }
+            counts.putInt(NativeRequestPlaneBridge.PRESENCE_PARTITION_HIT_OFFSET, hits);
+            counts.putInt(
+                    NativeRequestPlaneBridge.PRESENCE_PARTITION_NEGATIVE_OFFSET, negatives);
+            counts.putInt(NativeRequestPlaneBridge.PRESENCE_PARTITION_MISS_OFFSET, missCount);
+            counts.putInt(
+                    NativeRequestPlaneBridge.PRESENCE_PARTITION_PROCESSED_OFFSET,
+                    keys.entryCount());
             return keys.entryCount();
         }
 

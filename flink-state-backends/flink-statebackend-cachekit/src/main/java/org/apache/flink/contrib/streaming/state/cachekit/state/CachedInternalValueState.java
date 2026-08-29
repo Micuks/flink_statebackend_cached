@@ -179,6 +179,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             loadBooleanConfig(
                     "state.backend.cachekit.native.prefetch.resident-reuse-screening.enabled",
                     false);
+    private boolean nativeResidentReuseFusedFilterEnabled =
+            loadBooleanConfig(
+                    "state.backend.cachekit.native.prefetch.resident-reuse-fused-filter.enabled",
+                    false);
     private static final boolean NATIVE_MAILBOX_ADAPTIVE_DENSITY_ENABLED =
             loadBooleanConfig(
                     "state.backend.cachekit.native.mailbox-batch.adaptive-density.enabled", false);
@@ -1142,6 +1146,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             throw new IllegalArgumentException(
                     "Native resident reuse screening requires ValueState cache, mutation "
                             + "write-through, direct-arena MultiGet, and direct-read-only mode.");
+        }
+        if (nativeResidentReuseFusedFilterEnabled
+                && !nativeResidentReuseScreeningEnabled) {
+            throw new IllegalArgumentException(
+                    "Native resident fused filtering requires resident reuse screening.");
         }
         this.nativeValueReadActivation =
                 nativeRequestPlaneCoordinator != null
@@ -2220,6 +2229,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 || nativeResidentReuseProbeBatches > 0) {
             LOG.info(
                     "[CACHEKIT NATIVE PREFETCH RESIDENT HANDOFF] enabled={} screeningEnabled={} "
+                            + "fusedFilterEnabled={} "
                             + "batches={} keys={} "
                             + "present={} negative={} cancelledAfterRead={} inserted={} updated={} "
                             + "rejected={} legacyPublicationsAvoided={} reuseProbeBatches={} "
@@ -2227,6 +2237,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "reuseProbeMisses={}",
                     nativeResidentHandoffEnabled,
                     nativeResidentReuseScreeningEnabled,
+                    nativeResidentReuseFusedFilterEnabled,
                     nativeResidentHandoffBatches,
                     nativeResidentHandoffKeys,
                     nativeResidentHandoffPresent,
@@ -2334,6 +2345,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     void setNativeResidentReuseScreeningEnabledForTesting(boolean enabled) {
         nativeResidentReuseScreeningEnabled = enabled;
+    }
+
+    void setNativeResidentReuseFusedFilterEnabledForTesting(boolean enabled) {
+        nativeResidentReuseFusedFilterEnabled = enabled;
     }
 
     long getNativeResidentHandoffBatchesForTesting() {
@@ -4372,78 +4387,110 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return false;
         }
 
-        int[] preparedIndices = new int[rocksDBKeys.size()];
+        int[] preparedIndices;
         int activeCount = 0;
         if (nativeResidentReuseScreeningEnabled && reservation != null && !immediate) {
-            final int processed;
-            try {
-                processed = nativeRequestPlaneCoordinator.probePresence(slot);
-            } catch (RuntimeException | LinkageError failure) {
-                nativeRuntimeFailures++;
-                nativeFallbackBatches++;
-                return false;
-            }
-            if (processed != rocksDBKeys.size()) {
-                IllegalStateException failure =
-                        new IllegalStateException(
-                                "Native resident reuse probe processed "
-                                        + processed
-                                        + " of "
-                                        + rocksDBKeys.size()
-                                        + " prepared keys.");
-                nativeRequestPlaneCoordinator.disable(failure);
-                nativeRuntimeFailures++;
-                nativeFallbackBatches++;
-                return false;
-            }
-            nativeResidentReuseProbeBatches++;
-            nativeResidentReuseProbeKeys += processed;
-            for (int index = 0; index < processed; index++) {
-                if (!isPrefetchReservationActive(storageKeys.get(index), reservation)) {
-                    prefetchWorkerCancelledBeforeRead++;
-                    nativeDirectArenaReadOnlyCancelledKeys++;
-                    continue;
+            if (nativeResidentReuseFusedFilterEnabled) {
+                final int processed;
+                try {
+                    processed = nativeRequestPlaneCoordinator.partitionPresence(slot);
+                } catch (RuntimeException | LinkageError failure) {
+                    nativeRuntimeFailures++;
+                    nativeFallbackBatches++;
+                    return false;
                 }
-                int error = slot.probeError(index);
-                int status = slot.probeStatus(index);
-                if (error != NativeRequestPlaneBridge.ERROR_OK) {
+                int hits = slot.presencePartitionHitCount();
+                int negatives = slot.presencePartitionNegativeCount();
+                int misses = slot.presencePartitionMissCount();
+                nativeResidentReuseProbeBatches++;
+                nativeResidentReuseProbeKeys += processed;
+                nativeResidentReuseProbeHits += hits;
+                nativeResidentReuseProbeNegativeHits += negatives;
+                nativeResidentReuseProbeMisses += misses;
+                preparedIndices = new int[misses];
+                for (int missIndex = 0; missIndex < misses; missIndex++) {
+                    int sourceIndex = slot.presencePartitionMissSourceIndex(missIndex);
+                    if (!isPrefetchReservationActive(
+                            storageKeys.get(sourceIndex), reservation)) {
+                        prefetchWorkerCancelledBeforeRead++;
+                        nativeDirectArenaReadOnlyCancelledKeys++;
+                        continue;
+                    }
+                    preparedIndices[activeCount++] = sourceIndex;
+                }
+            } else {
+                final int processed;
+                try {
+                    processed = nativeRequestPlaneCoordinator.probePresence(slot);
+                } catch (RuntimeException | LinkageError failure) {
+                    nativeRuntimeFailures++;
+                    nativeFallbackBatches++;
+                    return false;
+                }
+                if (processed != rocksDBKeys.size()) {
                     IllegalStateException failure =
                             new IllegalStateException(
-                                    "Native resident reuse probe returned error="
-                                            + error
-                                            + " at index "
-                                            + index
-                                            + ".");
+                                    "Native resident reuse probe processed "
+                                            + processed
+                                            + " of "
+                                            + rocksDBKeys.size()
+                                            + " prepared keys.");
                     nativeRequestPlaneCoordinator.disable(failure);
                     nativeRuntimeFailures++;
                     nativeFallbackBatches++;
                     return false;
                 }
-                if (status == NativeRequestPlaneBridge.PROBE_HIT) {
-                    nativeResidentReuseProbeHits++;
-                    continue;
+                nativeResidentReuseProbeBatches++;
+                nativeResidentReuseProbeKeys += processed;
+                preparedIndices = new int[rocksDBKeys.size()];
+                for (int index = 0; index < processed; index++) {
+                    if (!isPrefetchReservationActive(storageKeys.get(index), reservation)) {
+                        prefetchWorkerCancelledBeforeRead++;
+                        nativeDirectArenaReadOnlyCancelledKeys++;
+                        continue;
+                    }
+                    int error = slot.probeError(index);
+                    int status = slot.probeStatus(index);
+                    if (error != NativeRequestPlaneBridge.ERROR_OK) {
+                        IllegalStateException failure =
+                                new IllegalStateException(
+                                        "Native resident reuse probe returned error="
+                                                + error
+                                                + " at index "
+                                                + index
+                                                + ".");
+                        nativeRequestPlaneCoordinator.disable(failure);
+                        nativeRuntimeFailures++;
+                        nativeFallbackBatches++;
+                        return false;
+                    }
+                    if (status == NativeRequestPlaneBridge.PROBE_HIT) {
+                        nativeResidentReuseProbeHits++;
+                        continue;
+                    }
+                    if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
+                        nativeResidentReuseProbeNegativeHits++;
+                        continue;
+                    }
+                    if (status != NativeRequestPlaneBridge.PROBE_MISS) {
+                        IllegalStateException failure =
+                                new IllegalStateException(
+                                        "Native resident reuse probe returned status="
+                                                + status
+                                                + " at index "
+                                                + index
+                                                + ".");
+                        nativeRequestPlaneCoordinator.disable(failure);
+                        nativeRuntimeFailures++;
+                        nativeFallbackBatches++;
+                        return false;
+                    }
+                    nativeResidentReuseProbeMisses++;
+                    preparedIndices[activeCount++] = index;
                 }
-                if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
-                    nativeResidentReuseProbeNegativeHits++;
-                    continue;
-                }
-                if (status != NativeRequestPlaneBridge.PROBE_MISS) {
-                    IllegalStateException failure =
-                            new IllegalStateException(
-                                    "Native resident reuse probe returned status="
-                                            + status
-                                            + " at index "
-                                            + index
-                                            + ".");
-                    nativeRequestPlaneCoordinator.disable(failure);
-                    nativeRuntimeFailures++;
-                    nativeFallbackBatches++;
-                    return false;
-                }
-                nativeResidentReuseProbeMisses++;
-                preparedIndices[activeCount++] = index;
             }
         } else {
+            preparedIndices = new int[rocksDBKeys.size()];
             for (int index = 0; index < rocksDBKeys.size(); index++) {
                 if (reservation != null
                         && !isPrefetchReservationActive(storageKeys.get(index), reservation)) {

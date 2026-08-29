@@ -90,6 +90,12 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
     public static final int PROBE_RESULT_LENGTH_OFFSET = 12;
     public static final int PROBE_RESULT_RECORD_BYTES = 16;
 
+    public static final int PRESENCE_PARTITION_HIT_OFFSET = 0;
+    public static final int PRESENCE_PARTITION_NEGATIVE_OFFSET = 4;
+    public static final int PRESENCE_PARTITION_MISS_OFFSET = 8;
+    public static final int PRESENCE_PARTITION_PROCESSED_OFFSET = 12;
+    public static final int PRESENCE_PARTITION_SUMMARY_BYTES = 16;
+
     public static final int PROBE_MISS = 0;
     public static final int PROBE_HIT = 1;
     public static final int PROBE_NEGATIVE = 2;
@@ -102,7 +108,7 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
     // Deliberately no SVE2 bit: the native runtime currently proves SVE and vector length only.
 
     private static final String LIBRARY_NAME = "cachekit_native_request_plane_jni";
-    private static final int EXPECTED_JNI_ABI_VERSION = 5;
+    private static final int EXPECTED_JNI_ABI_VERSION = 6;
     private static final Object LIBRARY_LOAD_LOCK = new Object();
 
     private static volatile boolean libraryLoaded;
@@ -270,6 +276,32 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
                 keys.metadataSlice(),
                 count,
                 nativeProbeResults);
+    }
+
+    /** Probes exact-key status and materializes only miss source indexes. */
+    @Override
+    public int partitionPresenceBatch(
+            SerializedKeyBatch<?, ?> keys,
+            ByteBuffer summary,
+            ByteBuffer missSourceIndexes) {
+        Objects.requireNonNull(keys, "keys");
+        int count = keys.entryCount();
+        ByteBuffer nativeSummary = directOutputSlice(summary, "summary");
+        ByteBuffer nativeMissIndexes =
+                directOutputSlice(missSourceIndexes, "missSourceIndexes");
+        requireCapacity(
+                nativeSummary,
+                1,
+                PRESENCE_PARTITION_SUMMARY_BYTES,
+                "summary");
+        requireCapacity(nativeMissIndexes, count, Integer.BYTES, "missSourceIndexes");
+        return nativePartitionPresence(
+                requireOpenHandle(),
+                keys.arenaSlice(),
+                keys.metadataSlice(),
+                count,
+                nativeSummary,
+                nativeMissIndexes);
     }
 
     @Override
@@ -463,6 +495,14 @@ public final class NativeRequestPlaneBridge implements NativeRequestPlane {
             ByteBuffer keyMetadata,
             int count,
             ByteBuffer probeResults);
+
+    private static native int nativePartitionPresence(
+            long handle,
+            ByteBuffer keyArena,
+            ByteBuffer keyMetadata,
+            int count,
+            ByteBuffer summary,
+            ByteBuffer missSourceIndexes);
 
     private static native int nativeCompact(
             long handle,
