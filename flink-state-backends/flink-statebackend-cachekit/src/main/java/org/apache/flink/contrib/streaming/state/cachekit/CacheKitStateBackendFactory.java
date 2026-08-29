@@ -506,6 +506,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Publish completed direct-arena MultiGet results into the ARM native ValueState point table without creating per-key Java staging objects. "
                                                                         + "Mailbox reads probe the resident table only after sticky/L1/L2 misses; requires native ValueState cache and write-through mutation coherence.");
 
+        public static final ConfigOption<Boolean> NATIVE_PREFETCH_RESIDENT_REUSE_SCREENING_ENABLED =
+            ConfigOptions.key(
+                                            "state.backend.cachekit.native.prefetch.resident-reuse-screening.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Probe exact-key status in the native ValueState point table before speculative RocksDB MultiGet and omit already-resident positive or negative keys. "
+                                                                        + "This switch is independent of resident handoff so screened misses can retain the standard Java staging path.");
+
         public static final ConfigOption<Boolean> NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED =
             ConfigOptions.key("state.backend.cachekit.native.prefetch.access-guided-state.enabled")
                                         .booleanType()

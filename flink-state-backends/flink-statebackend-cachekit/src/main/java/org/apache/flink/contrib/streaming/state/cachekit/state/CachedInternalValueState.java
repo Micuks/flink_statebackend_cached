@@ -175,6 +175,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private boolean nativeResidentHandoffEnabled =
             loadBooleanConfig(
                     "state.backend.cachekit.native.prefetch.resident-handoff.enabled", false);
+    private boolean nativeResidentReuseScreeningEnabled =
+            loadBooleanConfig(
+                    "state.backend.cachekit.native.prefetch.resident-reuse-screening.enabled",
+                    false);
     private static final boolean NATIVE_MAILBOX_ADAPTIVE_DENSITY_ENABLED =
             loadBooleanConfig(
                     "state.backend.cachekit.native.mailbox-batch.adaptive-density.enabled", false);
@@ -1128,6 +1132,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         "Native resident prefetch handoff is mutually exclusive with Java batch "
                                 + "handoff and worker-side eager materialization.");
             }
+        }
+        if (nativeResidentReuseScreeningEnabled
+                && (nativeRequestPlaneCoordinator == null
+                        || !nativeRequestPlaneCoordinator.options().valueCacheEnabled()
+                        || !nativeRequestPlaneCoordinator.options().writeThroughMutations()
+                        || !nativeRequestPlaneCoordinator.options().directArenaMultiGetEnabled()
+                        || !nativeRequestPlaneCoordinator.options().directArenaReadOnlyEnabled())) {
+            throw new IllegalArgumentException(
+                    "Native resident reuse screening requires ValueState cache, mutation "
+                            + "write-through, direct-arena MultiGet, and direct-read-only mode.");
         }
         this.nativeValueReadActivation =
                 nativeRequestPlaneCoordinator != null
@@ -2200,14 +2214,19 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     completedPrefetchBatchReadyCount.get(),
                     completedPrefetchBatchRetainedBytes.get());
         }
-        if (nativeResidentHandoffEnabled || nativeResidentHandoffBatches > 0) {
+        if (nativeResidentHandoffEnabled
+                || nativeResidentReuseScreeningEnabled
+                || nativeResidentHandoffBatches > 0
+                || nativeResidentReuseProbeBatches > 0) {
             LOG.info(
-                    "[CACHEKIT NATIVE PREFETCH RESIDENT HANDOFF] enabled={} batches={} keys={} "
+                    "[CACHEKIT NATIVE PREFETCH RESIDENT HANDOFF] enabled={} screeningEnabled={} "
+                            + "batches={} keys={} "
                             + "present={} negative={} cancelledAfterRead={} inserted={} updated={} "
                             + "rejected={} legacyPublicationsAvoided={} reuseProbeBatches={} "
                             + "reuseProbeKeys={} reuseProbeHits={} reuseProbeNegativeHits={} "
                             + "reuseProbeMisses={}",
                     nativeResidentHandoffEnabled,
+                    nativeResidentReuseScreeningEnabled,
                     nativeResidentHandoffBatches,
                     nativeResidentHandoffKeys,
                     nativeResidentHandoffPresent,
@@ -2311,6 +2330,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     void setNativeResidentHandoffEnabledForTesting(boolean enabled) {
         nativeResidentHandoffEnabled = enabled;
+    }
+
+    void setNativeResidentReuseScreeningEnabledForTesting(boolean enabled) {
+        nativeResidentReuseScreeningEnabled = enabled;
     }
 
     long getNativeResidentHandoffBatchesForTesting() {
@@ -4316,12 +4339,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      * Issues the authoritative RocksDB read directly from the mailbox-compacted native key arena.
      *
      * <p>This mode is intended for write-heavy states where generation fencing makes the native
-     * point cache effectively hitless. With resident handoff disabled it skips both native probe
-     * and fill. With resident handoff enabled, speculative reads first issue a status-only native
-     * probe so exact keys already resident in the native plane do not enter another RocksDB
-     * MultiGet; misses still use the direct-arena read/fill path. Both modes preserve the existing
-     * exact reservation, generation, cancellation, and staging guards. Returning false is
-     * fail-open to the existing prepared-key Java MultiGet path.
+     * point cache effectively hitless. Resident reuse screening is independent of resident
+     * handoff: when enabled, speculative reads first issue a status-only native probe so exact
+     * keys already resident in the native plane do not enter another RocksDB MultiGet. Misses use
+     * either resident fill or the standard Java staging path according to the handoff switch.
+     * Both modes preserve the existing exact reservation, generation, cancellation, and staging
+     * guards. Returning false is fail-open to the existing prepared-key Java MultiGet path.
      */
     @SuppressWarnings("unchecked")
     private boolean executeNativeDirectReadOnlyBatch(
@@ -4351,7 +4374,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         int[] preparedIndices = new int[rocksDBKeys.size()];
         int activeCount = 0;
-        if (nativeResidentHandoffEnabled && reservation != null && !immediate) {
+        if (nativeResidentReuseScreeningEnabled && reservation != null && !immediate) {
             final int processed;
             try {
                 processed = nativeRequestPlaneCoordinator.probePresence(slot);

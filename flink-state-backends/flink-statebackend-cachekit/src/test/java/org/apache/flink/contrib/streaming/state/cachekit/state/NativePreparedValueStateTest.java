@@ -1038,6 +1038,7 @@ class NativePreparedValueStateTest {
         CachedInternalValueState<String, String, Integer> state =
                 newNativePreparedCachedState(delegate, currentKey, coordinator, 79);
         state.setNativeResidentHandoffEnabledForTesting(true);
+        state.setNativeResidentReuseScreeningEnabledForTesting(true);
         state.setCurrentNamespace("window-resident-handoff");
 
         state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
@@ -1063,6 +1064,79 @@ class NativePreparedValueStateTest {
         currentKey.set("k2");
         assertEquals(99, state.value());
         assertEquals(4, coordinator.probeCalls());
+        verify(reader, times(1))
+                .getSerializedValuesByRocksDBKeyArena(any(), any(), anyInt(), any(), anyInt());
+        verify(reader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+        verify(reader, never()).getSerializedValueByRocksDBKey(any());
+        verify(delegate, never()).value();
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testResidentReuseScreeningIsIndependentOfResidentHandoff() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        stubDirectPreparedSerialization(reader);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                serializedKey(
+                                        invocation.getArgument(0), invocation.getArgument(1)));
+        byte[] present = KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE);
+        stubDirectArenaValues(reader, present, null);
+
+        String namespace = "window-resident-screen";
+        byte[] preparedK1 =
+                KvStateSerializer.serializeKeyAndNamespace(
+                        "k1", StringSerializer.INSTANCE, namespace, StringSerializer.INSTANCE);
+        byte[] preparedK2 =
+                KvStateSerializer.serializeKeyAndNamespace(
+                        "k2", StringSerializer.INSTANCE, namespace, StringSerializer.INSTANCE);
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        fakePlane.preload(80, 0, preparedK1, present);
+        fakePlane.preloadNegative(80, 0, preparedK2);
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        residentHandoffOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedCachedState(delegate, currentKey, coordinator, 80);
+        state.setNativeResidentReuseScreeningEnabledForTesting(true);
+        state.setCurrentNamespace(namespace);
+
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2", "k3", "k4")).run();
+
+        assertEquals(1, coordinator.probeCalls());
+        assertEquals(4, state.getNativeResidentReuseProbeKeysForTesting());
+        assertEquals(1, state.getNativeResidentReuseProbeHitsForTesting());
+        assertEquals(1, state.getNativeResidentReuseProbeNegativeHitsForTesting());
+        assertEquals(2, state.getNativeResidentReuseProbeMissesForTesting());
+        assertEquals(2, state.getStagingSizeForTesting());
+        assertEquals(0, state.getNativeResidentHandoffBatchesForTesting());
+        assertEquals(0, coordinator.fillCalls());
+        assertEquals(1, state.getNativeDirectArenaReadOnlyBatchesForTesting());
+        assertEquals(2, state.getNativeDirectArenaReadOnlyKeysForTesting());
+
+        currentKey.set("k1");
+        assertEquals(11, state.value());
+        currentKey.set("k2");
+        assertEquals(99, state.value());
+        currentKey.set("k3");
+        assertEquals(11, state.value());
+        currentKey.set("k4");
+        assertEquals(99, state.value());
         verify(reader, times(1))
                 .getSerializedValuesByRocksDBKeyArena(any(), any(), anyInt(), any(), anyInt());
         verify(reader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
