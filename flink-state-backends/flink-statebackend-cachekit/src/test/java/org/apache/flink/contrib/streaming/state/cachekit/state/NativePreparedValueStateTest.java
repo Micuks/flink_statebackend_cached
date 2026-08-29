@@ -1033,27 +1033,29 @@ class NativePreparedValueStateTest {
         state.setNativeMailboxBatchHandoffEnabledForTesting(true);
         state.setCurrentNamespace("window-mailbox-batch-handoff");
 
-        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
+        // "Aa" and "BB" deliberately collide under String.hashCode(). Consume them in reverse
+        // order to exercise both open-address collision handling and out-of-order exact lookup.
+        state.buildAsyncPrefetchTask(Arrays.asList("Aa", "BB")).run();
 
         assertEquals(0, state.getStagingSizeForTesting());
         assertEquals(1, state.getNativeMailboxBatchHandoffReadyBatchesForTesting());
         assertEquals(1, state.getNativeMailboxBatchHandoffOfferedBatchesForTesting());
         assertEquals(2, state.getNativeMailboxBatchHandoffOfferedKeysForTesting());
         assertEquals(2, state.getNativeMailboxBatchHandoffLegacyPublicationsAvoidedForTesting());
-        assertTrue(state.hasInFlightReservationForTesting("k1", "window-mailbox-batch-handoff"));
+        assertTrue(state.hasInFlightReservationForTesting("Aa", "window-mailbox-batch-handoff"));
 
-        currentKey.set("k1");
-        assertEquals(11, state.value());
+        currentKey.set("BB");
+        assertEquals(99, state.value());
         assertEquals(1, state.getNativeMailboxBatchHandoffReadyBatchesForTesting());
         assertEquals(1, state.getNativeMailboxBatchHandoffPromotedKeysForTesting());
-        assertTrue(state.hasInFlightReservationForTesting("k2", "window-mailbox-batch-handoff"));
-        currentKey.set("k2");
-        assertEquals(99, state.value());
+        assertTrue(state.hasInFlightReservationForTesting("Aa", "window-mailbox-batch-handoff"));
+        currentKey.set("Aa");
+        assertEquals(11, state.value());
         assertEquals(0, state.getNativeMailboxBatchHandoffReadyBatchesForTesting());
         assertEquals(2, state.getNativeMailboxBatchHandoffPromotedKeysForTesting());
         assertEquals(0, state.getNativeMailboxBatchHandoffInvalidatedKeysForTesting());
-        assertFalse(state.hasInFlightReservationForTesting("k1", "window-mailbox-batch-handoff"));
-        assertFalse(state.hasInFlightReservationForTesting("k2", "window-mailbox-batch-handoff"));
+        assertFalse(state.hasInFlightReservationForTesting("Aa", "window-mailbox-batch-handoff"));
+        assertFalse(state.hasInFlightReservationForTesting("BB", "window-mailbox-batch-handoff"));
         verify(delegate, never()).value();
 
         state.close();

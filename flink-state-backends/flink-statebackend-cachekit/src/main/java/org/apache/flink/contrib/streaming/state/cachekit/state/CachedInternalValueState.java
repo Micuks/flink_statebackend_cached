@@ -6346,9 +6346,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         private final V defaultValue;
         private final long generation;
         private final PrefetchReservation reservation;
+        private final int[] indexSlots;
+        private final int indexMask;
         private int remainingKeys;
         private long remainingRetainedBytes;
-        private int nextSearchIndex;
 
         private CompletedPrefetchBatch(
                 java.util.List<KeyNamespaceKey<K, N>> storageKeys,
@@ -6366,22 +6367,37 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             this.reservation = reservation;
             this.remainingKeys = storageKeys.size();
             this.remainingRetainedBytes = retainedBytes;
+            int indexCapacity = 1;
+            while (indexCapacity < storageKeys.size() * 2) {
+                indexCapacity <<= 1;
+            }
+            this.indexSlots = new int[indexCapacity];
+            this.indexMask = indexCapacity - 1;
+            for (int index = 0; index < storageKeys.size(); index++) {
+                int slot = spreadHash(storageKeys.get(index).hashCode()) & indexMask;
+                while (indexSlots[slot] != 0) {
+                    slot = (slot + 1) & indexMask;
+                }
+                indexSlots[slot] = index + 1;
+            }
         }
 
         private int find(K key, N namespace) {
-            for (int index = nextSearchIndex; index < storageKeys.size(); index++) {
+            int slot = spreadHash(CacheKeyHash.hash(key, namespace)) & indexMask;
+            int encodedIndex;
+            while ((encodedIndex = indexSlots[slot]) != 0) {
+                int index = encodedIndex - 1;
                 KeyNamespaceKey<K, N> candidate = storageKeys.get(index);
                 if (candidate != null && candidate.isSame(key, namespace)) {
                     return index;
                 }
-            }
-            for (int index = 0; index < nextSearchIndex; index++) {
-                KeyNamespaceKey<K, N> candidate = storageKeys.get(index);
-                if (candidate != null && candidate.isSame(key, namespace)) {
-                    return index;
-                }
+                slot = (slot + 1) & indexMask;
             }
             return -1;
+        }
+
+        private static int spreadHash(int hash) {
+            return hash ^ (hash >>> 16);
         }
 
         private long resolve(int index) {
@@ -6395,10 +6411,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 releasedBytes = serializedValue.length;
             }
             remainingKeys--;
-            nextSearchIndex = index + 1;
-            if (nextSearchIndex == storageKeys.size()) {
-                nextSearchIndex = 0;
-            }
             return releasedBytes;
         }
     }
