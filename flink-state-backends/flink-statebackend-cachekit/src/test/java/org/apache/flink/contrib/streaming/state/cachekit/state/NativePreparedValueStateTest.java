@@ -1098,13 +1098,18 @@ class NativePreparedValueStateTest {
         currentKey.set("k2");
         assertEquals(88, state.value());
         assertEquals(1, state.getNativeMailboxBatchHandoffPromotedKeysForTesting());
-        assertEquals(1, state.getNativeMailboxBatchHandoffInvalidatedKeysForTesting());
+        // The dirty L1 value fences the stale speculative payload, so the miss-gated path does
+        // not pay to visit and retire that payload on this cache hit. It remains bounded by the
+        // handoff queue and is released at close.
+        assertEquals(0, state.getNativeMailboxBatchHandoffInvalidatedKeysForTesting());
+        assertEquals(1, state.getNativeMailboxBatchHandoffReadyBatchesForTesting());
 
         state.setCurrentNamespace("window-mailbox-batch-close");
         state.buildAsyncPrefetchTask(Arrays.asList("k3", "k4")).run();
-        assertEquals(1, state.getNativeMailboxBatchHandoffReadyBatchesForTesting());
+        assertEquals(2, state.getNativeMailboxBatchHandoffReadyBatchesForTesting());
         state.close();
         assertEquals(0, state.getNativeMailboxBatchHandoffReadyBatchesForTesting());
+        assertEquals(3, state.getNativeMailboxBatchHandoffInvalidatedKeysForTesting());
         assertFalse(state.hasInFlightReservationForTesting("k3", "window-mailbox-batch-close"));
         assertFalse(state.hasInFlightReservationForTesting("k4", "window-mailbox-batch-close"));
 

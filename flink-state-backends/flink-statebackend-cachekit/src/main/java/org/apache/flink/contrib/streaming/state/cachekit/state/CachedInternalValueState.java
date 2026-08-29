@@ -1185,11 +1185,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         recordPrefetchAccessObserved = true;
         K currentKey = currentKeyProvider.getCurrentKey();
 
-        // Worker-side native MultiGet retains one immutable completed batch. Probe only the
-        // mailbox's current exact key; materializing an entire speculative batch here moves all
-        // unused deserialization work onto the critical mailbox thread and pollutes L1.
-        promoteCompletedPrefetchValueForCurrentKey(currentKey, currentNamespace);
-
         // 1. Check Sticky Cache (Always Check L0 - Fast Path)
         // Use direct comparison if possible or rely on isSame with current objects (no
         // allocation)
@@ -1235,6 +1230,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             updateSticky(storageKey, newValue);
             recordAccess(true); // Hit
             return l2Cached.valueOrNull();
+        }
+
+        // Worker-side native MultiGet retains immutable completed batches. Consult them only
+        // after the ordinary sticky/L1/L2 path misses: probing speculative batches before these
+        // caches charges every hot-state read for handoff lookup even though no promotion is
+        // needed. A successful exact-key promotion becomes the cache hit for this access.
+        CachedValue<V> handedOff =
+                promoteCompletedPrefetchValueForCurrentKey(currentKey, currentNamespace);
+        if (handedOff != null) {
+            updateSticky(handedOff.storageKey(), handedOff);
+            recordAccess(true);
+            return handedOff.valueOrNull();
         }
 
         // 4b. Check async-prefetch staging. Sound only when no write/dirty-flush happened on
@@ -3935,11 +3942,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return true;
     }
 
-    private void promoteCompletedPrefetchValueForCurrentKey(K currentKey, N namespace)
+    private CachedValue<V> promoteCompletedPrefetchValueForCurrentKey(K currentKey, N namespace)
             throws IOException {
         if (!nativeMailboxBatchHandoffEnabled
                 || completedPrefetchBatchReadyCount.get() == 0) {
-            return;
+            return null;
         }
         for (CompletedPrefetchBatch<K, N, V> completed : completedPrefetchBatches) {
             if (closed || completed.generation != writeGen) {
@@ -3951,8 +3958,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 continue;
             }
             KeyNamespaceKey<K, N> storageKey = completed.storageKeys.get(index);
-            if (findCachedValueFor(storageKey.key, storageKey.namespace) != null
-                    || !inFlight.remove(storageKey, completed.reservation)) {
+            CachedValue<V> promotedValue = null;
+            if (!inFlight.remove(storageKey, completed.reservation)) {
                 inFlight.remove(storageKey, completed.reservation);
                 nativeMailboxBatchHandoffInvalidatedKeys++;
             } else {
@@ -3961,8 +3968,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     V value =
                             materializeCompletedPrefetchValue(
                                     serializedValue, completed.defaultValue);
-                    CachedValue<V> cachedValue = CachedValue.of(storageKey, value, false);
-                    l1Cache.put(storageKey, cachedValue);
+                    promotedValue = CachedValue.of(storageKey, value, false);
+                    l1Cache.put(storageKey, promotedValue);
                     prefetchValuesPromoted++;
                     prefetchLazyValuesMaterialized++;
                     nativeMailboxBatchHandoffPromotedKeys++;
@@ -3975,8 +3982,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (completed.remainingKeys == 0) {
                 removeCompletedPrefetchBatch(completed);
             }
-            return;
+            return promotedValue;
         }
+        return null;
     }
 
     private void removeCompletedPrefetchBatch(CompletedPrefetchBatch<K, N, V> completed) {
