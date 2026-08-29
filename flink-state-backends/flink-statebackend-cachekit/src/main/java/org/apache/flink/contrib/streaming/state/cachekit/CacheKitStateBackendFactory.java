@@ -480,6 +480,23 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Retain speculative direct-read-only NOT_FOUND results without allocating one lazy staged-value wrapper per key. "
                                                                         + "The exact prepared-key reservation and key-scoped write invalidation remain authoritative.");
 
+        public static final ConfigOption<Boolean> NATIVE_PREFETCH_MAILBOX_BATCH_HANDOFF_ENABLED =
+            ConfigOptions.key(
+                                            "state.backend.cachekit.native.prefetch.mailbox-batch-handoff.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Publish one completed direct-read-only batch to the mailbox instead of one staging-map entry per key. "
+                                                                        + "The mailbox validates the original exact-key reservations before clean L1 insertion; queue pressure falls back to the legacy staging path.");
+
+        public static final ConfigOption<Integer> NATIVE_PREFETCH_MAILBOX_BATCH_HANDOFF_CAPACITY =
+            ConfigOptions.key(
+                                            "state.backend.cachekit.native.prefetch.mailbox-batch-handoff.capacity")
+                                        .intType()
+                                        .defaultValue(4)
+                                        .withDescription(
+                                                        "Maximum completed direct-read-only batches retained for mailbox consumption per ValueState wrapper.");
+
         public static final ConfigOption<Boolean> NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED =
             ConfigOptions.key("state.backend.cachekit.native.prefetch.access-guided-state.enabled")
                                         .booleanType()

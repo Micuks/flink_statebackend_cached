@@ -1008,6 +1008,106 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testDirectArenaMailboxBatchHandoffPromotesWithoutPerKeyStaging() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        stubDirectPreparedSerialization(reader);
+        byte[] first = KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE);
+        stubDirectArenaValues(reader, first, null);
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaReadOnlyOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedCachedState(delegate, currentKey, coordinator, 76);
+        state.setNativeMailboxBatchHandoffEnabledForTesting(true);
+        state.setCurrentNamespace("window-mailbox-batch-handoff");
+
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
+
+        assertEquals(0, state.getStagingSizeForTesting());
+        assertEquals(1, state.getNativeMailboxBatchHandoffReadyBatchesForTesting());
+        assertEquals(1, state.getNativeMailboxBatchHandoffOfferedBatchesForTesting());
+        assertEquals(2, state.getNativeMailboxBatchHandoffOfferedKeysForTesting());
+        assertEquals(2, state.getNativeMailboxBatchHandoffLegacyPublicationsAvoidedForTesting());
+        assertTrue(state.hasInFlightReservationForTesting("k1", "window-mailbox-batch-handoff"));
+
+        currentKey.set("k1");
+        assertEquals(11, state.value());
+        currentKey.set("k2");
+        assertEquals(99, state.value());
+        assertEquals(0, state.getNativeMailboxBatchHandoffReadyBatchesForTesting());
+        assertEquals(2, state.getNativeMailboxBatchHandoffPromotedKeysForTesting());
+        assertEquals(0, state.getNativeMailboxBatchHandoffInvalidatedKeysForTesting());
+        assertFalse(state.hasInFlightReservationForTesting("k1", "window-mailbox-batch-handoff"));
+        assertFalse(state.hasInFlightReservationForTesting("k2", "window-mailbox-batch-handoff"));
+        verify(delegate, never()).value();
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testDirectArenaMailboxBatchHandoffHonorsExactWriteAndCloseFences() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        stubDirectPreparedSerialization(reader);
+        byte[] first = KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE);
+        byte[] second = KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE);
+        stubDirectArenaValues(reader, first, second);
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaReadOnlyOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedCachedState(delegate, currentKey, coordinator, 77);
+        state.setNativeMailboxBatchHandoffEnabledForTesting(true);
+        state.setCurrentNamespace("window-mailbox-batch-fence");
+
+        state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
+        currentKey.set("k2");
+        state.update(88);
+        currentKey.set("k1");
+        assertEquals(11, state.value());
+        currentKey.set("k2");
+        assertEquals(88, state.value());
+        assertEquals(1, state.getNativeMailboxBatchHandoffPromotedKeysForTesting());
+        assertEquals(1, state.getNativeMailboxBatchHandoffInvalidatedKeysForTesting());
+
+        state.setCurrentNamespace("window-mailbox-batch-close");
+        state.buildAsyncPrefetchTask(Arrays.asList("k3", "k4")).run();
+        assertEquals(1, state.getNativeMailboxBatchHandoffReadyBatchesForTesting());
+        state.close();
+        assertEquals(0, state.getNativeMailboxBatchHandoffReadyBatchesForTesting());
+        assertFalse(state.hasInFlightReservationForTesting("k3", "window-mailbox-batch-close"));
+        assertFalse(state.hasInFlightReservationForTesting("k4", "window-mailbox-batch-close"));
+
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testDirectArenaReadOnlyEagerMaterializesWithoutHeapValueCopy() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
@@ -3607,6 +3707,43 @@ class NativePreparedValueStateTest {
                 .serializeBatchKeyAndNamespace(any(), any(), any(), any(), any());
     }
 
+    private static void stubDirectArenaValues(
+            RocksDBBatchValueReader<String, String, Integer> reader, byte[]... serializedValues)
+            throws Exception {
+        doAnswer(
+                        invocation -> {
+                            ByteBuffer descriptors =
+                                    ((ByteBuffer) invocation.getArgument(1))
+                                            .duplicate()
+                                            .order(ByteOrder.nativeOrder());
+                            ByteBuffer values = invocation.getArgument(3);
+                            int count = invocation.getArgument(2);
+                            int stride = invocation.getArgument(4);
+                            int present = 0;
+                            assertEquals(serializedValues.length, count);
+                            for (int index = 0; index < count; index++) {
+                                byte[] serializedValue = serializedValues[index];
+                                int result = RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND;
+                                if (serializedValue != null) {
+                                    values.duplicate().position(index * stride).put(serializedValue);
+                                    result = serializedValue.length;
+                                    present++;
+                                }
+                                descriptors.putInt(
+                                        index
+                                                        * RocksDBBatchValueReader
+                                                                .DIRECT_ARENA_DESCRIPTOR_BYTES
+                                                + RocksDBBatchValueReader
+                                                        .DIRECT_ARENA_RESULT_OFFSET,
+                                        result);
+                            }
+                            return present;
+                        })
+                .when(reader)
+                .getSerializedValuesByRocksDBKeyArena(
+                        any(), any(), anyInt(), any(), anyInt());
+    }
+
     private static byte[] serializedKey(String key, String namespace) throws Exception {
         return KvStateSerializer.serializeKeyAndNamespace(
                 key, StringSerializer.INSTANCE, namespace, StringSerializer.INSTANCE);
@@ -3649,6 +3786,34 @@ class NativePreparedValueStateTest {
                 Math.max(8, chunkSize),
                 1 << 20,
                 keyScopedPrefetchInvalidationEnabled,
+                coordinator,
+                stateId);
+    }
+
+    private static CachedInternalValueState<String, String, Integer>
+            newNativePreparedCachedState(
+                    InternalValueState<String, String, Integer> delegate,
+                    AtomicReference<String> currentKey,
+                    NativeRequestPlaneCoordinator coordinator,
+                    int stateId) {
+        return new CachedInternalValueState<>(
+                delegate,
+                currentKey::get,
+                currentKey::set,
+                128,
+                CachePolicyType.LRU,
+                0,
+                false,
+                0.05,
+                1000,
+                true,
+                8,
+                2,
+                false,
+                true,
+                128,
+                1 << 20,
+                true,
                 coordinator,
                 stateId);
     }

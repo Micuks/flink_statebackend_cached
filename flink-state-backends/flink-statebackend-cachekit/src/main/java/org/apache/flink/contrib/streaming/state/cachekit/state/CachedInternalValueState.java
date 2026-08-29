@@ -163,6 +163,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     256,
                     1,
                     1_000_000);
+    private boolean nativeMailboxBatchHandoffEnabled =
+            loadBooleanConfig(
+                    "state.backend.cachekit.native.prefetch.mailbox-batch-handoff.enabled", false);
+    private final int nativeMailboxBatchHandoffCapacity =
+            loadIntConfig(
+                    "state.backend.cachekit.native.prefetch.mailbox-batch-handoff.capacity",
+                    4,
+                    1,
+                    64);
     private static final boolean NATIVE_MAILBOX_ADAPTIVE_DENSITY_ENABLED =
             loadBooleanConfig(
                     "state.backend.cachekit.native.mailbox-batch.adaptive-density.enabled", false);
@@ -309,6 +318,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             inFlight = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.atomic.AtomicLong prefetchReservationSequence =
             new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.ArrayBlockingQueue<CompletedPrefetchBatch<K, N, V>>
+            completedPrefetchBatches =
+                    new java.util.concurrent.ArrayBlockingQueue<>(
+                            nativeMailboxBatchHandoffCapacity);
+    private final java.util.concurrent.atomic.AtomicInteger completedPrefetchBatchReadyCount =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicLong completedPrefetchBatchRetainedBytes =
+            new java.util.concurrent.atomic.AtomicLong();
 
     /**
      * State-wide write generation used by the conservative invalidation mode. When key-scoped
@@ -444,6 +461,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeDirectArenaNegativeHandoffStaged;
     private volatile long nativeDirectArenaNegativeHandoffPromoted;
     private volatile long nativeDirectArenaNegativeHandoffInvalidated;
+    private volatile long nativeMailboxBatchHandoffOfferedBatches;
+    private volatile long nativeMailboxBatchHandoffOfferedKeys;
+    private volatile long nativeMailboxBatchHandoffPromotedKeys;
+    private volatile long nativeMailboxBatchHandoffInvalidatedKeys;
+    private volatile long nativeMailboxBatchHandoffQueueFullFallbacks;
+    private volatile long nativeMailboxBatchHandoffRetainedBytesFallbacks;
+    private volatile long nativeMailboxBatchHandoffLegacyPublicationsAvoided;
     private volatile long nativeMailboxDirectSerializationFallbackKeys;
     private volatile long nativeMailboxDirectSerializationFallbackBytes;
     private volatile long nativeDirectPreparedBatches;
@@ -1161,6 +1185,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         recordPrefetchAccessObserved = true;
         K currentKey = currentKeyProvider.getCurrentKey();
 
+        // Worker-side native MultiGet retains one immutable completed batch. Consume it on the
+        // mailbox before any cache lookup so the current key can hit L1 without a per-key
+        // staging-map publication/removal round trip.
+        drainCompletedPrefetchBatches();
+
         // 1. Check Sticky Cache (Always Check L0 - Fast Path)
         // Use direct comparison if possible or rely on isSame with current objects (no
         // allocation)
@@ -1764,6 +1793,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         cancelQueuedAndAwaitPrefetchTasks();
         lifecycleLock.writeLock().lock();
         try {
+            discardCompletedPrefetchBatches();
             prefetchUnusedStagedOnClose += staging.size();
             clearStaging();
             inFlight.clear();
@@ -2108,6 +2138,25 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     adaptiveNativeMailboxDensityController.bypassedInputKeys(),
                     adaptiveNativeMailboxDensityController.droppedSpeculativePrefetchTasks());
         }
+        if (nativeMailboxBatchHandoffEnabled || nativeMailboxBatchHandoffOfferedBatches > 0) {
+            LOG.info(
+                    "[CACHEKIT NATIVE PREFETCH MAILBOX BATCH] enabled={} capacity={} "
+                            + "offeredBatches={} offeredKeys={} promotedKeys={} "
+                            + "invalidatedKeys={} queueFullFallbacks={} "
+                            + "retainedBytesFallbacks={} legacyPublicationsAvoided={} "
+                            + "readyBatches={} retainedBytes={}",
+                    nativeMailboxBatchHandoffEnabled,
+                    nativeMailboxBatchHandoffCapacity,
+                    nativeMailboxBatchHandoffOfferedBatches,
+                    nativeMailboxBatchHandoffOfferedKeys,
+                    nativeMailboxBatchHandoffPromotedKeys,
+                    nativeMailboxBatchHandoffInvalidatedKeys,
+                    nativeMailboxBatchHandoffQueueFullFallbacks,
+                    nativeMailboxBatchHandoffRetainedBytesFallbacks,
+                    nativeMailboxBatchHandoffLegacyPublicationsAvoided,
+                    completedPrefetchBatchReadyCount.get(),
+                    completedPrefetchBatchRetainedBytes.get());
+        }
     }
 
     long getPrefetchMultiGetCallsForTesting() {
@@ -2188,6 +2237,34 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getStagingRetainedBytesForTesting() {
         return stagingRetainedBytes.get();
+    }
+
+    void setNativeMailboxBatchHandoffEnabledForTesting(boolean enabled) {
+        nativeMailboxBatchHandoffEnabled = enabled;
+    }
+
+    int getNativeMailboxBatchHandoffReadyBatchesForTesting() {
+        return completedPrefetchBatchReadyCount.get();
+    }
+
+    long getNativeMailboxBatchHandoffOfferedBatchesForTesting() {
+        return nativeMailboxBatchHandoffOfferedBatches;
+    }
+
+    long getNativeMailboxBatchHandoffOfferedKeysForTesting() {
+        return nativeMailboxBatchHandoffOfferedKeys;
+    }
+
+    long getNativeMailboxBatchHandoffPromotedKeysForTesting() {
+        return nativeMailboxBatchHandoffPromotedKeys;
+    }
+
+    long getNativeMailboxBatchHandoffInvalidatedKeysForTesting() {
+        return nativeMailboxBatchHandoffInvalidatedKeys;
+    }
+
+    long getNativeMailboxBatchHandoffLegacyPublicationsAvoidedForTesting() {
+        return nativeMailboxBatchHandoffLegacyPublicationsAvoided;
     }
 
     long getPrefetchStagingAdmissionDropsForTesting() {
@@ -3739,7 +3816,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     if (dropped) {
                         prefetchTasksDropped++;
                     }
-                    releaseReservations(reservations, reservation);
+                    if (reservation.finishWorker()) {
+                        releaseReservations(reservations, reservation);
+                    }
                     if (completion != null) {
                         completion.run();
                     }
@@ -3804,6 +3883,127 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             PrefetchReservation reservation) {
         for (KeyNamespaceKey<K, N> key : reservations) {
             inFlight.remove(key, reservation);
+        }
+    }
+
+    private boolean offerCompletedPrefetchBatch(
+            java.util.List<KeyNamespaceKey<K, N>> reservationKeys,
+            java.util.List<KeyNamespaceKey<K, N>> storageKeys,
+            java.util.List<byte[]> serializedValues,
+            V defaultValue,
+            long gen,
+            PrefetchReservation reservation) {
+        long retainedBytes = 0L;
+        for (byte[] serializedValue : serializedValues) {
+            if (serializedValue != null) {
+                retainedBytes += serializedValue.length;
+            }
+        }
+        long totalRetainedBytes = completedPrefetchBatchRetainedBytes.addAndGet(retainedBytes);
+        if (totalRetainedBytes > asyncStagingMaxRetainedBytes) {
+            completedPrefetchBatchRetainedBytes.addAndGet(-retainedBytes);
+            nativeMailboxBatchHandoffRetainedBytesFallbacks++;
+            return false;
+        }
+
+        CompletedPrefetchBatch<K, N, V> completed =
+                new CompletedPrefetchBatch<>(
+                        storageKeys,
+                        serializedValues,
+                        reservationKeys,
+                        defaultValue,
+                        gen,
+                        reservation,
+                        retainedBytes);
+        reservation.retainHandoffBatch();
+        if (!completedPrefetchBatches.offer(completed)) {
+            completedPrefetchBatchRetainedBytes.addAndGet(-retainedBytes);
+            if (reservation.cancelRetainedHandoffBatch()) {
+                releaseReservations(reservationKeys, reservation);
+            }
+            nativeMailboxBatchHandoffQueueFullFallbacks++;
+            return false;
+        }
+        completedPrefetchBatchReadyCount.incrementAndGet();
+        nativeMailboxBatchHandoffOfferedBatches++;
+        nativeMailboxBatchHandoffOfferedKeys += storageKeys.size();
+        nativeMailboxBatchHandoffLegacyPublicationsAvoided += storageKeys.size();
+        return true;
+    }
+
+    private void drainCompletedPrefetchBatches() throws IOException {
+        if (!nativeMailboxBatchHandoffEnabled
+                || completedPrefetchBatchReadyCount.get() == 0) {
+            return;
+        }
+        CompletedPrefetchBatch<K, N, V> completed;
+        while ((completed = completedPrefetchBatches.poll()) != null) {
+            completedPrefetchBatchReadyCount.decrementAndGet();
+            try {
+                drainCompletedPrefetchBatch(completed);
+            } finally {
+                releaseCompletedPrefetchBatch(completed);
+            }
+        }
+    }
+
+    private void drainCompletedPrefetchBatch(CompletedPrefetchBatch<K, N, V> completed)
+            throws IOException {
+        for (int index = 0; index < completed.storageKeys.size(); index++) {
+            KeyNamespaceKey<K, N> storageKey = completed.storageKeys.get(index);
+            if (closed
+                    || completed.generation != writeGen
+                    || findCachedValueFor(storageKey.key, storageKey.namespace) != null
+                    || !inFlight.remove(storageKey, completed.reservation)) {
+                inFlight.remove(storageKey, completed.reservation);
+                nativeMailboxBatchHandoffInvalidatedKeys++;
+                continue;
+            }
+
+            byte[] serializedValue = completed.serializedValues.get(index);
+            V value;
+            try {
+                value = materializeCompletedPrefetchValue(serializedValue, completed.defaultValue);
+            } catch (IOException | RuntimeException materializationFailure) {
+                prefetchLazyMaterializationFailures++;
+                nativeMailboxBatchHandoffInvalidatedKeys++;
+                continue;
+            }
+
+            CachedValue<V> cachedValue = CachedValue.of(storageKey, value, false);
+            l1Cache.put(storageKey, cachedValue);
+            prefetchValuesPromoted++;
+            prefetchLazyValuesMaterialized++;
+            nativeMailboxBatchHandoffPromotedKeys++;
+        }
+    }
+
+    private V materializeCompletedPrefetchValue(byte[] serializedValue, V defaultValue)
+            throws IOException {
+        if (stagedValueSerializer == null) {
+            stagedValueSerializer = delegate.getValueSerializer().duplicate();
+            stagedValueInput = new org.apache.flink.core.memory.DataInputDeserializer();
+        }
+        if (serializedValue == null) {
+            return defaultValue == null ? null : stagedValueSerializer.copy(defaultValue);
+        }
+        stagedValueInput.setBuffer(serializedValue, 0, serializedValue.length);
+        return stagedValueSerializer.deserialize(stagedValueInput);
+    }
+
+    private void releaseCompletedPrefetchBatch(CompletedPrefetchBatch<K, N, V> completed) {
+        completedPrefetchBatchRetainedBytes.addAndGet(-completed.retainedBytes);
+        if (completed.reservation.cancelRetainedHandoffBatch()) {
+            releaseReservations(completed.reservationKeys, completed.reservation);
+        }
+    }
+
+    private void discardCompletedPrefetchBatches() {
+        CompletedPrefetchBatch<K, N, V> completed;
+        while ((completed = completedPrefetchBatches.poll()) != null) {
+            completedPrefetchBatchReadyCount.decrementAndGet();
+            nativeMailboxBatchHandoffInvalidatedKeys += completed.storageKeys.size();
+            releaseCompletedPrefetchBatch(completed);
         }
     }
 
@@ -4087,6 +4287,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         nativeDirectArenaReadOnlyBatches++;
         nativeDirectArenaReadOnlyKeys += activeCount;
+        if (nativeMailboxBatchHandoffEnabled && reservation != null && !immediate) {
+            java.util.ArrayList<KeyNamespaceKey<K, N>> activeStorageKeys =
+                    new java.util.ArrayList<>(activeCount);
+            for (int resultIndex = 0; resultIndex < activeCount; resultIndex++) {
+                activeStorageKeys.add(storageKeys.get(preparedIndices[resultIndex]));
+            }
+            if (offerCompletedPrefetchBatch(
+                    storageKeys,
+                    activeStorageKeys,
+                    values,
+                    defaultValue,
+                    gen,
+                    reservation)) {
+                return true;
+            }
+        }
         for (int resultIndex = 0; resultIndex < activeCount; resultIndex++) {
             if (closed || gen != writeGen) {
                 prefetchStaleAborts++;
@@ -6070,11 +6286,66 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         @SuppressWarnings("unused")
         private final long ticket;
         private final long submittedNanos;
+        private final java.util.concurrent.atomic.AtomicInteger retainedHandoffBatches =
+                new java.util.concurrent.atomic.AtomicInteger();
+        private final java.util.concurrent.atomic.AtomicBoolean reservationsReleased =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        private volatile boolean workerFinished;
 
         private PrefetchReservation(long generation, long ticket, long submittedNanos) {
             this.generation = generation;
             this.ticket = ticket;
             this.submittedNanos = submittedNanos;
+        }
+
+        private void retainHandoffBatch() {
+            retainedHandoffBatches.incrementAndGet();
+        }
+
+        private boolean cancelRetainedHandoffBatch() {
+            int remaining = retainedHandoffBatches.decrementAndGet();
+            if (remaining < 0) {
+                throw new IllegalStateException("Completed prefetch handoff retain count underflow.");
+            }
+            return tryReleaseReservations();
+        }
+
+        private boolean finishWorker() {
+            workerFinished = true;
+            return tryReleaseReservations();
+        }
+
+        private boolean tryReleaseReservations() {
+            return workerFinished
+                    && retainedHandoffBatches.get() == 0
+                    && reservationsReleased.compareAndSet(false, true);
+        }
+    }
+
+    private static final class CompletedPrefetchBatch<K, N, V> {
+        private final java.util.List<KeyNamespaceKey<K, N>> storageKeys;
+        private final java.util.List<byte[]> serializedValues;
+        private final java.util.List<KeyNamespaceKey<K, N>> reservationKeys;
+        private final V defaultValue;
+        private final long generation;
+        private final PrefetchReservation reservation;
+        private final long retainedBytes;
+
+        private CompletedPrefetchBatch(
+                java.util.List<KeyNamespaceKey<K, N>> storageKeys,
+                java.util.List<byte[]> serializedValues,
+                java.util.List<KeyNamespaceKey<K, N>> reservationKeys,
+                V defaultValue,
+                long generation,
+                PrefetchReservation reservation,
+                long retainedBytes) {
+            this.storageKeys = storageKeys;
+            this.serializedValues = serializedValues;
+            this.reservationKeys = reservationKeys;
+            this.defaultValue = defaultValue;
+            this.generation = generation;
+            this.reservation = reservation;
+            this.retainedBytes = retainedBytes;
         }
     }
 
