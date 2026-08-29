@@ -2263,6 +2263,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return nativeMailboxBatchHandoffInvalidatedKeys;
     }
 
+    long getNativeMailboxBatchHandoffQueueFullFallbacksForTesting() {
+        return nativeMailboxBatchHandoffQueueFullFallbacks;
+    }
+
     long getNativeMailboxBatchHandoffLegacyPublicationsAvoidedForTesting() {
         return nativeMailboxBatchHandoffLegacyPublicationsAvoided;
     }

@@ -1108,6 +1108,47 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testDirectArenaMailboxBatchHandoffFallsBackWhenQueueIsFull() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        when(reader.supportsDirectArenaMultiGet()).thenReturn(true);
+        stubDirectPreparedSerialization(reader);
+        stubDirectArenaValues(
+                reader,
+                KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE),
+                KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE));
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(directArenaReadOnlyOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedCachedState(delegate, currentKey, coordinator, 78);
+        state.setNativeMailboxBatchHandoffEnabledForTesting(true);
+
+        for (int batch = 0; batch < 5; batch++) {
+            state.setCurrentNamespace("window-mailbox-batch-full-" + batch);
+            state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2")).run();
+        }
+
+        assertEquals(4, state.getNativeMailboxBatchHandoffReadyBatchesForTesting());
+        assertEquals(1, state.getNativeMailboxBatchHandoffQueueFullFallbacksForTesting());
+        assertEquals(2, state.getStagingSizeForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testDirectArenaReadOnlyEagerMaterializesWithoutHeapValueCopy() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =
