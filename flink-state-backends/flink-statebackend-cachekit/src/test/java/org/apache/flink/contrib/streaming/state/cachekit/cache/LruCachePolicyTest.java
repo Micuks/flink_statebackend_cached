@@ -30,6 +30,48 @@ import org.junit.jupiter.api.Test;
 class LruCachePolicyTest {
 
     @Test
+    void testBatchListenerDoesNotHoldCacheMonitorNeededByAsyncCompletion() {
+        java.util.concurrent.atomic.AtomicReference<LruCachePolicy<String, Integer>> cacheRef =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.CountDownLatch removed = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicInteger removedCount =
+                new java.util.concurrent.atomic.AtomicInteger();
+        BatchEvictionListener<String, Integer> listener =
+                entries -> {
+                    Thread worker =
+                            new Thread(
+                                    () -> {
+                                        removedCount.set(
+                                                cacheRef.get().removeAllIfSame(entries));
+                                        removed.countDown();
+                                    },
+                                    "lru-async-identity-remover");
+                    worker.start();
+                    try {
+                        assertTrue(
+                                removed.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                                "async completion could not acquire the cache monitor");
+                        worker.join(5000);
+                        assertFalse(worker.isAlive());
+                    } catch (InterruptedException interruption) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(interruption);
+                    }
+                };
+        LruCachePolicy<String, Integer> cache = new LruCachePolicy<>(2, 0, listener);
+        cacheRef.set(cache);
+
+        cache.put("a", 1);
+        cache.put("b", 2);
+        cache.put("c", 3);
+
+        assertEquals(1, removedCount.get());
+        assertEquals(2, cache.size());
+        assertEquals(2, cache.get("b"));
+        assertEquals(3, cache.get("c"));
+    }
+
+    @Test
     void testOverflowIsCommittedAsOneOrderedBatch() {
         List<List<String>> batches = new ArrayList<>();
         BatchEvictionListener<String, Integer> listener =

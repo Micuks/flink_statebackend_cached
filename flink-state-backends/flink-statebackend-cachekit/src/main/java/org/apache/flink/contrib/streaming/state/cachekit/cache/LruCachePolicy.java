@@ -26,6 +26,7 @@ public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
     private final int maxEntriesWithOverflow;
     private final LinkedHashMap<K, V> map;
     private final java.util.function.BiConsumer<K, V> evictionListener;
+    private final java.util.Set<K> evictionInProgress = new java.util.HashSet<>();
 
     public LruCachePolicy(int maxEntries) {
         this(maxEntries, Math.max(1, maxEntries / 16), (k, v) -> {
@@ -53,10 +54,54 @@ public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
     }
 
     @Override
-    public synchronized V put(K key, V value) {
+    public V put(K key, V value) {
         Objects.requireNonNull(key, "key");
-        V previous = map.put(key, value);
-        evictIfNeeded();
+        V previous;
+        java.util.List<Map.Entry<K, V>> candidates;
+        BatchEvictionListener<K, V> batchListener;
+        synchronized (this) {
+            previous = map.put(key, value);
+            batchListener = batchEvictionListener();
+            candidates = selectEvictionCandidates(batchListener);
+            for (Map.Entry<K, V> entry : candidates) {
+                evictionInProgress.add(entry.getKey());
+            }
+        }
+        if (candidates.isEmpty()) {
+            return previous;
+        }
+
+        boolean accepted = false;
+        try {
+            // The listener can perform synchronous RocksDB I/O or apply bounded write-behind
+            // backpressure. It must run outside the cache monitor: an async completion removes
+            // the exact accepted objects through removeAllIfSame(), and holding this monitor
+            // while waiting for executor queue capacity would deadlock the producer and worker.
+            if (batchListener != null) {
+                batchListener.acceptAll(Collections.unmodifiableList(candidates));
+            } else if (evictionListener != null) {
+                for (Map.Entry<K, V> entry : candidates) {
+                    evictionListener.accept(entry.getKey(), entry.getValue());
+                }
+            }
+            accepted = true;
+        } finally {
+            synchronized (this) {
+                for (Map.Entry<K, V> entry : candidates) {
+                    evictionInProgress.remove(entry.getKey());
+                    if (!accepted) {
+                        continue;
+                    }
+                    V current = map.get(entry.getKey());
+                    if (current == entry.getValue()
+                            && (batchListener == null
+                                    || !batchListener.retainAfterAccept(
+                                            entry.getKey(), entry.getValue()))) {
+                        map.remove(entry.getKey());
+                    }
+                }
+            }
+        }
         return previous;
     }
 
@@ -110,48 +155,33 @@ public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
         return Collections.unmodifiableList(snapshot);
     }
 
-    private void evictIfNeeded() {
+    @SuppressWarnings("unchecked")
+    private BatchEvictionListener<K, V> batchEvictionListener() {
+        return evictionListener instanceof BatchEvictionListener<?, ?>
+                ? (BatchEvictionListener<K, V>) evictionListener
+                : null;
+    }
+
+    private java.util.List<Map.Entry<K, V>> selectEvictionCandidates(
+            BatchEvictionListener<K, V> batchListener) {
         if (maxEntries <= 0 || map.size() <= maxEntriesWithOverflow) {
-            return;
-        }
-        BatchEvictionListener<K, V> batchListener = null;
-        if (evictionListener instanceof BatchEvictionListener<?, ?>) {
-            @SuppressWarnings("unchecked")
-            BatchEvictionListener<K, V> castListener =
-                    (BatchEvictionListener<K, V>) evictionListener;
-            batchListener = castListener;
+            return Collections.emptyList();
         }
         java.util.List<Map.Entry<K, V>> candidates = new java.util.ArrayList<>();
         java.util.Iterator<Map.Entry<K, V>> iterator = map.entrySet().iterator();
         int removalsNeeded = map.size() - maxEntries;
         while (candidates.size() < removalsNeeded && iterator.hasNext()) {
             Map.Entry<K, V> entry = iterator.next();
-            if (batchListener != null
-                    && batchListener.retainAfterAccept(entry.getKey(), entry.getValue())) {
+            if (evictionInProgress.contains(entry.getKey())
+                    || (batchListener != null
+                            && batchListener.retainAfterAccept(
+                                    entry.getKey(), entry.getValue()))) {
                 continue;
             }
             candidates.add(
                     new java.util.AbstractMap.SimpleImmutableEntry<>(
                             entry.getKey(), entry.getValue()));
         }
-        if (candidates.isEmpty()) {
-            return;
-        }
-        if (batchListener != null) {
-            batchListener.acceptAll(Collections.unmodifiableList(candidates));
-        } else if (evictionListener != null) {
-            for (Map.Entry<K, V> entry : candidates) {
-                evictionListener.accept(entry.getKey(), entry.getValue());
-            }
-        }
-        // Listener completion is the eviction commit point. A write-back listener may throw;
-        // retaining every candidate makes the complete batch available for retry instead of
-        // silently discarding dirty state.
-        for (Map.Entry<K, V> entry : candidates) {
-            if (batchListener == null
-                    || !batchListener.retainAfterAccept(entry.getKey(), entry.getValue())) {
-                map.remove(entry.getKey());
-            }
-        }
+        return candidates;
     }
 }
