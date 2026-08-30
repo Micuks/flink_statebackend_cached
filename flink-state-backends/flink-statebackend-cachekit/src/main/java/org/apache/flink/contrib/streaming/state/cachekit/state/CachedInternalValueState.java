@@ -167,6 +167,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     32,
                     1,
                     1024);
+    private static final int ASYNC_PREPARED_EVICTION_WRITE_BEHIND_COALESCE_MAX_BATCHES =
+            loadIntConfig(
+                    "state.backend.cachekit.native.value-cache.async-prepared-eviction-write-behind.coalesce-max-batches",
+                    64,
+                    2,
+                    1024);
+    private static final int ASYNC_PREPARED_EVICTION_WRITE_BEHIND_COALESCE_MAX_ENTRIES =
+            loadIntConfig(
+                    "state.backend.cachekit.native.value-cache.async-prepared-eviction-write-behind.coalesce-max-entries",
+                    4096,
+                    2,
+                    1 << 20);
     private static final java.util.concurrent.ThreadPoolExecutor
             ASYNC_PREPARED_EVICTION_WRITE_EXECUTOR = createAsyncPreparedEvictionWriteExecutor();
     private static final boolean INLINE_RESERVATION_SLOT_HANDOFF_ENABLED =
@@ -183,6 +195,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     KeyNamespaceKey<K, N>, PendingPreparedWrite<K, N, V>>
             pendingPreparedWrites = new java.util.concurrent.ConcurrentHashMap<>();
     private final Object asyncPreparedWriteMonitor = new Object();
+    private final java.util.ArrayDeque<AsyncPreparedWriteBatch<K, N, V>>
+            asyncPreparedWriteQueue = new java.util.ArrayDeque<>();
+    private boolean asyncPreparedWriteDrainScheduled;
     private int asyncPreparedWritesOutstanding;
     private final java.util.concurrent.atomic.AtomicReference<Throwable>
             asyncPreparedWriteFailure = new java.util.concurrent.atomic.AtomicReference<>();
@@ -199,6 +214,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final java.util.concurrent.atomic.AtomicLong asyncPreparedWriteFailures =
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong asyncPreparedWriteMaxOutstanding =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncPreparedWritePhysicalBatches =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncPreparedWriteLogicalBatchesCoalesced =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncPreparedWriteMaxPhysicalEntries =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncPreparedWriteMaxLogicalBatchesPerPhysical =
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong asyncPreparedInPlacePendingEntries =
             new java.util.concurrent.atomic.AtomicLong();
@@ -745,8 +768,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         1,
                         30L,
                         java.util.concurrent.TimeUnit.SECONDS,
-                        new java.util.concurrent.ArrayBlockingQueue<>(
-                                ASYNC_PREPARED_EVICTION_WRITE_BEHIND_QUEUE_CAPACITY),
+                        // At most one drain token is scheduled per ValueState instance. Logical
+                        // write batches are bounded by that state's queue below, so this executor
+                        // queue contains only a finite set of fair drain tokens rather than every
+                        // RocksDB write.
+                        new java.util.concurrent.LinkedBlockingQueue<>(),
                         threadFactory,
                         (task, rejectedExecutor) -> {
                             if (rejectedExecutor.isShutdown()) {
@@ -2541,6 +2567,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     "[CACHEKIT NATIVE ASYNC PREPARED WRITEBEHIND] enabled={} inPlace={} "
                             + "submittedBatches={} submittedEntries={} completedBatches={} "
                             + "completedEntries={} overlayHits={} failures={} maxOutstanding={} "
+                            + "physicalBatches={} coalescedLogicalBatches={} "
+                            + "maxPhysicalEntries={} maxLogicalBatchesPerPhysical={} "
+                            + "queuedLogicalBatches={} "
                             + "overlayPendingEntries={} inPlacePendingEntries={} "
                             + "inPlaceRemoved={} inPlaceSuperseded={}",
                     asyncPreparedEvictionWriteBehindEnabled,
@@ -2552,6 +2581,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     asyncPreparedWriteOverlayHits.get(),
                     asyncPreparedWriteFailures.get(),
                     asyncPreparedWriteMaxOutstanding.get(),
+                    asyncPreparedWritePhysicalBatches.get(),
+                    asyncPreparedWriteLogicalBatchesCoalesced.get(),
+                    asyncPreparedWriteMaxPhysicalEntries.get(),
+                    asyncPreparedWriteMaxLogicalBatchesPerPhysical.get(),
+                    getAsyncPreparedWriteQueueSizeForAudit(),
                     pendingPreparedWrites.size(),
                     asyncPreparedInPlacePendingEntries.get(),
                     asyncPreparedInPlaceEntriesRemoved.get(),
@@ -3171,6 +3205,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getAsyncPreparedWriteFailuresForTesting() {
         return asyncPreparedWriteFailures.get();
+    }
+
+    long getAsyncPreparedWritePhysicalBatchesForTesting() {
+        return asyncPreparedWritePhysicalBatches.get();
+    }
+
+    long getAsyncPreparedWriteLogicalBatchesCoalescedForTesting() {
+        return asyncPreparedWriteLogicalBatchesCoalesced.get();
+    }
+
+    long getAsyncPreparedWriteMaxPhysicalEntriesForTesting() {
+        return asyncPreparedWriteMaxPhysicalEntries.get();
+    }
+
+    long getAsyncPreparedWriteMaxLogicalBatchesPerPhysicalForTesting() {
+        return asyncPreparedWriteMaxLogicalBatchesPerPhysical.get();
     }
 
     long getAsyncPreparedInPlacePendingEntriesForTesting() {
@@ -7234,53 +7284,176 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.List<byte[]> serializedValues,
             java.util.List<PendingPreparedWrite<K, N, V>> pendingWrites) {
         checkAsyncPreparedWriteFailure();
+        AsyncPreparedWriteBatch<K, N, V> batch =
+                new AsyncPreparedWriteBatch<>(
+                        batchReader, preparedKeys, serializedValues, pendingWrites);
+        boolean scheduleDrain = false;
+        boolean interrupted = false;
         synchronized (asyncPreparedWriteMonitor) {
+            while (asyncPreparedWriteQueue.size()
+                            >= ASYNC_PREPARED_EVICTION_WRITE_BEHIND_QUEUE_CAPACITY
+                    && asyncPreparedWriteFailure.get() == null) {
+                try {
+                    asyncPreparedWriteMonitor.wait();
+                } catch (InterruptedException interruption) {
+                    // Ownership of these dirty values has already moved from the LRU to this
+                    // write-behind path. Finish the ordered enqueue before restoring cancellation.
+                    interrupted = true;
+                }
+            }
+            Throwable priorFailure = asyncPreparedWriteFailure.get();
+            if (priorFailure != null) {
+                abortAsyncPreparedInPlaceBatch(pendingWrites);
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                throw new RuntimeException(
+                        "Asynchronous prepared ValueState write-behind failed", priorFailure);
+            }
+            asyncPreparedWriteQueue.addLast(batch);
             asyncPreparedWritesOutstanding++;
             asyncPreparedWriteMaxOutstanding.accumulateAndGet(
                     asyncPreparedWritesOutstanding, Math::max);
+            if (!asyncPreparedWriteDrainScheduled) {
+                asyncPreparedWriteDrainScheduled = true;
+                scheduleDrain = true;
+            }
         }
         asyncPreparedWriteBatchesSubmitted.incrementAndGet();
         asyncPreparedWriteEntriesSubmitted.addAndGet(pendingWrites.size());
-        try {
-            ASYNC_PREPARED_EVICTION_WRITE_EXECUTOR.execute(
-                    () -> {
-                        try {
-                            lifecycleLock.readLock().lock();
-                            try {
-                                batchReader.writePreparedValues(preparedKeys, serializedValues);
-                                recordCompletedPreparedWriteBatch(pendingWrites, true);
-                            } finally {
-                                lifecycleLock.readLock().unlock();
-                            }
-                        } catch (Throwable failure) {
-                            abortAsyncPreparedInPlaceBatch(pendingWrites);
-                            asyncPreparedWriteFailures.incrementAndGet();
-                            asyncPreparedWriteFailure.compareAndSet(null, failure);
-                        } finally {
-                            synchronized (asyncPreparedWriteMonitor) {
-                                asyncPreparedWritesOutstanding--;
-                                asyncPreparedWriteMonitor.notifyAll();
-                            }
-                        }
-                    });
-        } catch (Throwable submissionFailure) {
-            abortAsyncPreparedInPlaceBatch(pendingWrites);
-            asyncPreparedWriteFailures.incrementAndGet();
-            asyncPreparedWriteFailure.compareAndSet(null, submissionFailure);
-            synchronized (asyncPreparedWriteMonitor) {
-                asyncPreparedWritesOutstanding--;
-                asyncPreparedWriteMonitor.notifyAll();
+        if (scheduleDrain) {
+            try {
+                ASYNC_PREPARED_EVICTION_WRITE_EXECUTOR.execute(
+                        this::drainAsyncPreparedWriteQueue);
+            } catch (Throwable submissionFailure) {
+                failAsyncPreparedWriteQueue(
+                        java.util.Collections.emptyList(), submissionFailure);
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                throw new RuntimeException(
+                        "Failed to submit prepared ValueState write-behind drain",
+                        submissionFailure);
             }
-            throw new RuntimeException(
-                    "Failed to submit prepared ValueState write-behind batch",
-                    submissionFailure);
         }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void drainAsyncPreparedWriteQueue() {
+        java.util.List<AsyncPreparedWriteBatch<K, N, V>> logicalBatches =
+                new java.util.ArrayList<>();
+        int physicalEntries = 0;
+        synchronized (asyncPreparedWriteMonitor) {
+            AsyncPreparedWriteBatch<K, N, V> first = asyncPreparedWriteQueue.pollFirst();
+            if (first == null) {
+                asyncPreparedWriteDrainScheduled = false;
+                asyncPreparedWriteMonitor.notifyAll();
+                return;
+            }
+            logicalBatches.add(first);
+            physicalEntries = first.size();
+            while (logicalBatches.size()
+                            < ASYNC_PREPARED_EVICTION_WRITE_BEHIND_COALESCE_MAX_BATCHES
+                    && !asyncPreparedWriteQueue.isEmpty()) {
+                AsyncPreparedWriteBatch<K, N, V> next = asyncPreparedWriteQueue.peekFirst();
+                if (physicalEntries + next.size()
+                        > ASYNC_PREPARED_EVICTION_WRITE_BEHIND_COALESCE_MAX_ENTRIES) {
+                    break;
+                }
+                logicalBatches.add(asyncPreparedWriteQueue.removeFirst());
+                physicalEntries += next.size();
+            }
+            // Producers blocked by the per-state capacity may now append more logical batches.
+            asyncPreparedWriteMonitor.notifyAll();
+        }
+
+        AsyncPreparedWriteBatch<K, N, V> first = logicalBatches.get(0);
+        java.util.List<byte[]> preparedKeys = new java.util.ArrayList<>(physicalEntries);
+        java.util.List<byte[]> serializedValues = new java.util.ArrayList<>(physicalEntries);
+        java.util.List<PendingPreparedWrite<K, N, V>> pendingWrites =
+                new java.util.ArrayList<>(physicalEntries);
+        for (AsyncPreparedWriteBatch<K, N, V> logicalBatch : logicalBatches) {
+            if (logicalBatch.batchReader != first.batchReader) {
+                failAsyncPreparedWriteQueue(
+                        logicalBatches,
+                        new IllegalStateException(
+                                "Prepared ValueState write-behind mixed delegate readers"));
+                return;
+            }
+            preparedKeys.addAll(logicalBatch.preparedKeys);
+            serializedValues.addAll(logicalBatch.serializedValues);
+            pendingWrites.addAll(logicalBatch.pendingWrites);
+        }
+
+        try {
+            lifecycleLock.readLock().lock();
+            try {
+                first.batchReader.writePreparedValues(preparedKeys, serializedValues);
+                recordCompletedPreparedWriteBatch(
+                        pendingWrites, true, logicalBatches.size());
+            } finally {
+                lifecycleLock.readLock().unlock();
+            }
+        } catch (Throwable failure) {
+            failAsyncPreparedWriteQueue(logicalBatches, failure);
+            return;
+        }
+
+        boolean reschedule;
+        synchronized (asyncPreparedWriteMonitor) {
+            asyncPreparedWritesOutstanding -= logicalBatches.size();
+            reschedule = !asyncPreparedWriteQueue.isEmpty();
+            if (!reschedule) {
+                asyncPreparedWriteDrainScheduled = false;
+            }
+            asyncPreparedWriteMonitor.notifyAll();
+        }
+        if (reschedule) {
+            try {
+                // Requeue at the global executor tail so other ValueState instances get a turn.
+                ASYNC_PREPARED_EVICTION_WRITE_EXECUTOR.execute(
+                        this::drainAsyncPreparedWriteQueue);
+            } catch (Throwable submissionFailure) {
+                failAsyncPreparedWriteQueue(
+                        java.util.Collections.emptyList(), submissionFailure);
+            }
+        }
+    }
+
+    private void failAsyncPreparedWriteQueue(
+            java.util.List<AsyncPreparedWriteBatch<K, N, V>> activeBatches,
+            Throwable failure) {
+        java.util.List<AsyncPreparedWriteBatch<K, N, V>> failedBatches =
+                new java.util.ArrayList<>(activeBatches);
+        synchronized (asyncPreparedWriteMonitor) {
+            while (!asyncPreparedWriteQueue.isEmpty()) {
+                failedBatches.add(asyncPreparedWriteQueue.removeFirst());
+            }
+            asyncPreparedWriteDrainScheduled = false;
+            asyncPreparedWritesOutstanding -= failedBatches.size();
+            asyncPreparedWriteFailure.compareAndSet(null, failure);
+            asyncPreparedWriteMonitor.notifyAll();
+        }
+        for (AsyncPreparedWriteBatch<K, N, V> failedBatch : failedBatches) {
+            abortAsyncPreparedInPlaceBatch(failedBatch.pendingWrites);
+        }
+        asyncPreparedWriteFailures.addAndGet(failedBatches.size());
     }
 
     @SuppressWarnings("unchecked")
     private void recordCompletedPreparedWriteBatch(
             java.util.List<PendingPreparedWrite<K, N, V>> pendingWrites,
             boolean invalidateAfterCommit) {
+        recordCompletedPreparedWriteBatch(pendingWrites, invalidateAfterCommit, 1);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void recordCompletedPreparedWriteBatch(
+            java.util.List<PendingPreparedWrite<K, N, V>> pendingWrites,
+            boolean invalidateAfterCommit,
+            int logicalBatchCount) {
         nativePreparedEvictionBatches++;
         nativePreparedEvictionBatchEntries += pendingWrites.size();
         java.util.List<PendingPreparedWrite<K, N, V>>
@@ -7339,7 +7512,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
         }
         if (invalidateAfterCommit) {
-            asyncPreparedWriteBatchesCompleted.incrementAndGet();
+            asyncPreparedWritePhysicalBatches.incrementAndGet();
+            asyncPreparedWriteLogicalBatchesCoalesced.addAndGet(
+                    Math.max(0, logicalBatchCount - 1));
+            asyncPreparedWriteMaxPhysicalEntries.accumulateAndGet(
+                    pendingWrites.size(), Math::max);
+            asyncPreparedWriteMaxLogicalBatchesPerPhysical.accumulateAndGet(
+                    logicalBatchCount, Math::max);
+            asyncPreparedWriteBatchesCompleted.addAndGet(logicalBatchCount);
             asyncPreparedWriteEntriesCompleted.addAndGet(pendingWrites.size());
         }
     }
@@ -7369,6 +7549,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             Thread.currentThread().interrupt();
         }
         checkAsyncPreparedWriteFailure();
+    }
+
+    private int getAsyncPreparedWriteQueueSizeForAudit() {
+        synchronized (asyncPreparedWriteMonitor) {
+            return asyncPreparedWriteQueue.size();
+        }
     }
 
     private void checkAsyncPreparedWriteFailure() {
@@ -7952,6 +8138,29 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             this.preparedKey = preparedKey;
             this.value = value;
             this.tombstone = tombstone;
+        }
+    }
+
+    /** Immutable delegate bytes plus the newest mailbox-visible value for one queued write. */
+    private static final class AsyncPreparedWriteBatch<K, N, V> {
+        private final RocksDBBatchValueReader<K, N, V> batchReader;
+        private final java.util.List<byte[]> preparedKeys;
+        private final java.util.List<byte[]> serializedValues;
+        private final java.util.List<PendingPreparedWrite<K, N, V>> pendingWrites;
+
+        private AsyncPreparedWriteBatch(
+                RocksDBBatchValueReader<K, N, V> batchReader,
+                java.util.List<byte[]> preparedKeys,
+                java.util.List<byte[]> serializedValues,
+                java.util.List<PendingPreparedWrite<K, N, V>> pendingWrites) {
+            this.batchReader = batchReader;
+            this.preparedKeys = preparedKeys;
+            this.serializedValues = serializedValues;
+            this.pendingWrites = pendingWrites;
+        }
+
+        private int size() {
+            return pendingWrites.size();
         }
     }
 

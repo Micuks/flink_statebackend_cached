@@ -455,6 +455,107 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testAsyncPreparedEvictionCoalescesQueuedLogicalBatches() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k0");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.supportsPreparedValueMutation()).thenReturn(true);
+        when(reader.supportsPreparedValueMutationBatch()).thenReturn(true);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                serializedKey(
+                                        invocation.getArgument(0), invocation.getArgument(1)));
+        when(reader.serializeBatchValue(any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeValue(
+                                        invocation.getArgument(0), IntSerializer.INSTANCE));
+
+        CountDownLatch firstWriteEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirstWrite = new CountDownLatch(1);
+        AtomicInteger physicalCalls = new AtomicInteger();
+        java.util.List<Integer> physicalBatchSizes =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        doAnswer(
+                        invocation -> {
+                            java.util.List<byte[]> keys = invocation.getArgument(0);
+                            physicalBatchSizes.add(keys.size());
+                            if (physicalCalls.getAndIncrement() == 0) {
+                                firstWriteEntered.countDown();
+                                assertTrue(releaseFirstWrite.await(5, TimeUnit.SECONDS));
+                            }
+                            return null;
+                        })
+                .when(reader)
+                .writePreparedValues(any(), any());
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        preparedEvictionGenerationOnlyOptions(), new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        128,
+                        CachePolicyType.LRU,
+                        2,
+                        false,
+                        0.05,
+                        1000,
+                        false,
+                        false,
+                        false,
+                        false,
+                        coordinator,
+                        80);
+        state.setPreparedEvictionBatchEnabledForTesting(true);
+        state.setAsyncPreparedEvictionWriteBehindEnabledForTesting(true);
+        state.setAsyncPreparedEvictionInPlaceEnabledForTesting(true);
+        state.setCurrentNamespace("coalesce-ns");
+
+        for (int i = 0; i < 131; i++) {
+            currentKey.set("k" + i);
+            state.update(i);
+        }
+        assertTrue(firstWriteEntered.await(5, TimeUnit.SECONDS));
+        for (int i = 131; i < 141; i++) {
+            currentKey.set("k" + i);
+            state.update(i);
+        }
+        long logicalBatches = state.getAsyncPreparedWriteBatchesSubmittedForTesting();
+        assertTrue(logicalBatches > 2);
+        assertEquals(0, state.getAsyncPreparedWriteBatchesCompletedForTesting());
+
+        releaseFirstWrite.countDown();
+        state.awaitAsyncPreparedWritesForTesting();
+        long physicalBatches = state.getAsyncPreparedWritePhysicalBatchesForTesting();
+        assertEquals(logicalBatches, state.getAsyncPreparedWriteBatchesCompletedForTesting());
+        assertTrue(physicalBatches < logicalBatches);
+        assertEquals(
+                logicalBatches - physicalBatches,
+                state.getAsyncPreparedWriteLogicalBatchesCoalescedForTesting());
+        assertTrue(state.getAsyncPreparedWriteMaxLogicalBatchesPerPhysicalForTesting() > 1);
+        assertTrue(state.getAsyncPreparedWriteMaxPhysicalEntriesForTesting() > 3);
+        assertEquals(physicalBatches, state.getNativePreparedEvictionBatchesForTesting());
+        assertEquals(physicalBatches, physicalBatchSizes.size());
+        assertEquals(0, state.getAsyncPreparedWriteFailuresForTesting());
+        assertEquals(0, state.getAsyncPreparedInPlacePendingEntriesForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testAsyncPreparedEvictionFailurePropagates() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k0");
         InternalValueState<String, String, Integer> delegate =
