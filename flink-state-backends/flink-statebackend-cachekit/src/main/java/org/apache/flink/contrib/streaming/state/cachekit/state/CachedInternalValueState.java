@@ -143,6 +143,28 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     1024,
                     1,
                     1_000_000);
+    private static final boolean EXACT_NAMESPACE_USEFUL_HIT_ADMISSION_ENABLED =
+            loadBooleanConfig(
+                    "state.backend.cachekit.native.prefetch.exact-namespace-sidecar.adaptive-admission.enabled",
+                    false);
+    private static final int EXACT_NAMESPACE_USEFUL_HIT_MIN_SAMPLES =
+            loadIntConfig(
+                    "state.backend.cachekit.native.prefetch.exact-namespace-sidecar.adaptive-admission.min-samples",
+                    64,
+                    1,
+                    1_000_000);
+    private static final double EXACT_NAMESPACE_USEFUL_HIT_MIN_RATE =
+            loadDoubleConfig(
+                    "state.backend.cachekit.native.prefetch.exact-namespace-sidecar.adaptive-admission.min-useful-rate",
+                    0.01,
+                    0.0,
+                    1.0);
+    private static final int EXACT_NAMESPACE_USEFUL_HIT_PROBE_EVERY_TASKS =
+            loadIntConfig(
+                    "state.backend.cachekit.native.prefetch.exact-namespace-sidecar.adaptive-admission.probe-every-tasks",
+                    4096,
+                    1,
+                    1_000_000);
     private static final int PREPARED_EVICTION_GENERATION_ONLY_MIN_VALUE_BYTES =
             loadIntConfig(
                     "state.backend.cachekit.native.value-cache.prepared-eviction-generation-only.min-value-bytes",
@@ -586,6 +608,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private AdaptiveNativeMailboxDensityController adaptiveNativeMailboxDensityController;
     private boolean adaptiveNativeMailboxDropSpeculativePrefetchEnabled;
     private final PromotionYieldAdmissionController promotionYieldAdmissionController;
+    private final UsefulHitAdmissionController exactNamespaceUsefulHitAdmissionController;
 
     // Worker-only serializers and scratch inputs. PrefetchExecutor serializes all tasks on its
     // single shared worker; mailbox paths use separate fields below.
@@ -1244,6 +1267,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 PROMOTION_YIELD_MIN_STAGED_VALUES,
                                 PROMOTION_YIELD_MIN_PROMOTION_RATE,
                                 PROMOTION_YIELD_PROBE_EVERY_TASKS)
+                        : null;
+        this.exactNamespaceUsefulHitAdmissionController =
+                EXACT_NAMESPACE_USEFUL_HIT_ADMISSION_ENABLED
+                        ? new UsefulHitAdmissionController(
+                                EXACT_NAMESPACE_USEFUL_HIT_MIN_SAMPLES,
+                                EXACT_NAMESPACE_USEFUL_HIT_MIN_RATE,
+                                EXACT_NAMESPACE_USEFUL_HIT_PROBE_EVERY_TASKS)
                         : null;
         // The narrow invalidation proof relies on the prepared-key reservation identity checked
         // before and after RocksDB I/O. Native direct-read-only uses that exact same reservation
@@ -2018,6 +2048,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "recordKeyPrefetch={} lastObservedNamespaceEnabled={} "
                             + "lastObservedNamespaceTasks={} lastObservedNamespaceKeys={} "
                             + "exactNamespaceTasks={} exactNamespaceKeys={} "
+                            + "exactUsefulHitAdmissionActive={} exactObservedValues={} "
+                            + "exactUsefulValues={} exactUsefulHitAdmissionSkips={} "
+                            + "exactUsefulHitProbeTasks={} "
                             + "multiGet={} chunkSize={} minBatchSize={} "
                             + "keyScopedInvalidation={} accessObserved={} accessGuidedSkips={} "
                             + "tasksBuilt={} tasksExecuted={} tasksDropped={} keysPrepared={} "
@@ -2108,6 +2141,19 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     lastObservedNamespacePrefetchKeysPrepared,
                     exactNamespacePrefetchTasksBuilt,
                     exactNamespacePrefetchKeysPrepared,
+                    exactNamespaceUsefulHitAdmissionController != null,
+                    exactNamespaceUsefulHitAdmissionController == null
+                            ? 0L
+                            : exactNamespaceUsefulHitAdmissionController.observedValues(),
+                    exactNamespaceUsefulHitAdmissionController == null
+                            ? 0L
+                            : exactNamespaceUsefulHitAdmissionController.usefulValues(),
+                    exactNamespaceUsefulHitAdmissionController == null
+                            ? 0L
+                            : exactNamespaceUsefulHitAdmissionController.skippedTasks(),
+                    exactNamespaceUsefulHitAdmissionController == null
+                            ? 0L
+                            : exactNamespaceUsefulHitAdmissionController.probeTasks(),
                     multiGetPrefetchEnabled,
                     multiGetChunkSize,
                     multiGetMinBatchSize,
@@ -3200,7 +3246,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 || keys.isEmpty()
                 || keys.size() != namespaces.size()
                 || !supportsExactNamespacePrefetch()
-                || !admitAsyncPrefetchWorkerTask()) {
+                || !admitAsyncPrefetchWorkerTask()
+                || (exactNamespaceUsefulHitAdmissionController != null
+                        && !exactNamespaceUsefulHitAdmissionController.shouldAdmit())) {
             return null;
         }
         return buildPreparedMultiGetTask(keys, null, namespaces);
@@ -3482,7 +3530,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 gen,
                                 reservation,
                                 preparedNativeBatchSlot,
-                                taskCompactSelectedPrepared),
+                                taskCompactSelectedPrepared,
+                                exactNamespacePairs),
                 preparedNativeBatchSlot == null ? null : preparedNativeBatchSlot::close);
     }
 
@@ -4642,10 +4691,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             long gen,
             PrefetchReservation reservation,
             NativeRequestPlaneCoordinator.BatchSlot nativeBatchSlot,
-            boolean compactSelectedPrepared) {
+            boolean compactSelectedPrepared,
+            boolean exactNamespacePairs) {
         prefetchTasksExecuted++;
+        final long exactObservedBefore = exactNamespacePairs ? prefetchAsyncValuesRead : 0L;
+        final long exactUsefulBefore = exactNamespacePairs ? prefetchAsyncUsefulValues : 0L;
         try {
-            if (!admitAsyncPrefetchWorkerTask()) {
+            // Exact admission already selected this task on the mailbox thread. Repeating the
+            // low-yield decision here would reject the recovery probe that was just admitted.
+            if (!exactNamespacePairs && !admitAsyncPrefetchWorkerTask()) {
                 return;
             }
             boolean shouldProbeNative = nativeBatchSlot != null;
@@ -4705,6 +4759,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         } catch (Throwable ignored) {
             prefetchWorkerFailures++;
             // Best-effort cache warmup; the authoritative read path is untouched.
+        } finally {
+            if (exactNamespacePairs && exactNamespaceUsefulHitAdmissionController != null) {
+                long observed = Math.max(0L, prefetchAsyncValuesRead - exactObservedBefore);
+                long useful = Math.max(0L, prefetchAsyncUsefulValues - exactUsefulBefore);
+                exactNamespaceUsefulHitAdmissionController.recordOutcomes(
+                        observed, Math.min(observed, useful));
+            }
         }
     }
 

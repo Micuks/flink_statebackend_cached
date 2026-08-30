@@ -596,6 +596,43 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Use an operator-provided, side-effect-free mailbox lookahead projection to prefetch exact key/namespace pairs. "
                                                                         + "Unsupported operators, merging windows, projection errors, and empty projections fail closed to the authoritative state-read path.");
 
+        public static final ConfigOption<Boolean>
+                        NATIVE_PREFETCH_EXACT_NAMESPACE_ADAPTIVE_ADMISSION_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.exact-namespace-sidecar.adaptive-admission.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Suppress exact-namespace speculative reads after their backing-store useful-hit rate is proven low. "
+                                                                        + "Periodic probes preserve phase-change recovery; authoritative mailbox reads are unchanged.");
+
+        public static final ConfigOption<Integer>
+                        NATIVE_PREFETCH_EXACT_NAMESPACE_ADAPTIVE_ADMISSION_MIN_SAMPLES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.exact-namespace-sidecar.adaptive-admission.min-samples")
+                                        .intType()
+                                        .defaultValue(64)
+                                        .withDescription(
+                                                        "Observed exact-namespace backing-store results required before useful-hit admission can suppress a state.");
+
+        public static final ConfigOption<Double>
+                        NATIVE_PREFETCH_EXACT_NAMESPACE_ADAPTIVE_ADMISSION_MIN_USEFUL_RATE =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.exact-namespace-sidecar.adaptive-admission.min-useful-rate")
+                                        .doubleType()
+                                        .defaultValue(0.01)
+                                        .withDescription(
+                                                        "Minimum cumulative found/result ratio for continuously admitting exact-namespace speculative reads.");
+
+        public static final ConfigOption<Integer>
+                        NATIVE_PREFETCH_EXACT_NAMESPACE_ADAPTIVE_ADMISSION_PROBE_EVERY_TASKS =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.exact-namespace-sidecar.adaptive-admission.probe-every-tasks")
+                                        .intType()
+                                        .defaultValue(4096)
+                                        .withDescription(
+                                                        "Low-yield exact-namespace admission decisions between recovery probes.");
+
     public static final ConfigOption<Boolean> NATIVE_PREFETCH_PROMOTION_YIELD_ADMISSION_ENABLED =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.prefetch.promotion-yield-admission.enabled")
