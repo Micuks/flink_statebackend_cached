@@ -141,6 +141,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     1024,
                     1,
                     1_000_000);
+    private static final int PREPARED_EVICTION_GENERATION_ONLY_MIN_VALUE_BYTES =
+            loadIntConfig(
+                    "state.backend.cachekit.native.value-cache.prepared-eviction-generation-only.min-value-bytes",
+                    0,
+                    0,
+                    1 << 20);
     private static final boolean PROMOTION_YIELD_ADMISSION_ENABLED =
             loadBooleanConfig(
                     "state.backend.cachekit.native.prefetch.promotion-yield-admission.enabled",
@@ -6469,7 +6475,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 nativePreparedEvictionValueBytes += serializedValue.length;
             }
             nativePreparedEvictionKeyBytes += preparedKey.length;
-            if (nativeRequestPlaneCoordinator.options().writeThroughMutations()) {
+            if (shouldPublishPreparedNativeMutation(
+                    nativeRequestPlaneCoordinator.options().writeThroughMutations(),
+                    PREPARED_EVICTION_GENERATION_ONLY_MIN_VALUE_BYTES,
+                    serializedValue)) {
                 publishPreparedNativeMutation(preparedKey, serializedValue, nativeEpoch);
             }
         } catch (Exception failure) {
@@ -6490,6 +6499,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return nativeWriteEpoch.incrementAndGet();
         }
         return 0L;
+    }
+
+    static boolean shouldPublishPreparedNativeMutation(
+            boolean writeThroughMutations,
+            int generationOnlyMinValueBytes,
+            byte[] serializedValue) {
+        return writeThroughMutations
+                || (generationOnlyMinValueBytes > 0
+                        && (serializedValue == null
+                                || serializedValue.length < generationOnlyMinValueBytes));
     }
 
     /** Prepare a delegate-visible write using the mailbox-thread lookup scratch key. */

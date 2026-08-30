@@ -313,6 +313,16 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "When native mutation write-through is enabled, the same bytes also refresh a resident native entry; otherwise the advanced generation fence makes older native entries miss and the next read refills them. "
                                                                         + "Disabled by default; the path is used only when the backend explicitly advertises prepared mutation support.");
 
+        public static final ConfigOption<Integer>
+                        NATIVE_VALUE_CACHE_PREPARED_EVICTION_GENERATION_ONLY_MIN_VALUE_BYTES =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.value-cache.prepared-eviction-generation-only.min-value-bytes")
+                                        .intType()
+                                        .defaultValue(0)
+                                        .withDescription(
+                                                        "When mutation write-through is disabled, prepared eviction values smaller than this threshold are still published to the native exact-key cache, while values at or above it use generation-only invalidation. "
+                                                                        + "Zero preserves generation-only behavior for every prepared value. Deletes are treated as zero-byte values. The authoritative RocksDB mutation and exact-generation fence are unchanged.");
+
     public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH_ADAPTIVE =
                                         ConfigOptions.key(
                                                                         "state.backend.cachekit.native.value-cache.resident-mutation-batch.adaptive.enabled")

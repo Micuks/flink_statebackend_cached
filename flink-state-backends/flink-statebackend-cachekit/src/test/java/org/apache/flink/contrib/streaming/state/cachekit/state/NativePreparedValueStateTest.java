@@ -70,6 +70,28 @@ import org.junit.jupiter.api.Test;
 class NativePreparedValueStateTest {
 
     @Test
+    void testPreparedEvictionGenerationOnlyThresholdKeepsSmallValuesWriteThrough() {
+        assertTrue(
+                CachedInternalValueState.shouldPublishPreparedNativeMutation(
+                        true, 0, new byte[4096]));
+        assertFalse(
+                CachedInternalValueState.shouldPublishPreparedNativeMutation(
+                        false, 0, new byte[1]));
+        assertTrue(
+                CachedInternalValueState.shouldPublishPreparedNativeMutation(
+                        false, 128, null));
+        assertTrue(
+                CachedInternalValueState.shouldPublishPreparedNativeMutation(
+                        false, 128, new byte[127]));
+        assertFalse(
+                CachedInternalValueState.shouldPublishPreparedNativeMutation(
+                        false, 128, new byte[128]));
+        assertFalse(
+                CachedInternalValueState.shouldPublishPreparedNativeMutation(
+                        false, 128, new byte[1024]));
+    }
+
+    @Test
     void testResidentReuseScreeningAllowsGenerationOnlyNativeCoherence() throws Exception {
         NativeRequestPlaneOptions options = generationOnlyResidentScreeningOptions();
         assertFalse(options.writeThroughMutations());
