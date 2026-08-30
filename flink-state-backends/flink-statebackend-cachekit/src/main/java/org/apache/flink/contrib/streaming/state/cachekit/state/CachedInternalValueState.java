@@ -3246,13 +3246,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         && nativeRequestPlaneCoordinator.isActive()
                         && nativeRequestPlaneCoordinator.options().prefetchEnabled();
         final boolean deferReservationMaterialization =
-                !exactNamespacePairs
-                        && nativeMailboxBatch
+                nativeMailboxBatch
                         && nativeRequestPlaneCoordinator
                                 .options()
                                 .deferredReservationMaterializationEnabled();
         final java.util.ArrayList<K> deferredKeys =
                 deferReservationMaterialization ? new java.util.ArrayList<>() : null;
+        final java.util.ArrayList<N> deferredNamespaces =
+                deferReservationMaterialization && exactNamespacePairs
+                        ? new java.util.ArrayList<>()
+                        : null;
         RocksDBBatchValueReader<K, N, V> batchReader =
                 (RocksDBBatchValueReader<K, N, V>) delegate;
         try {
@@ -3270,6 +3273,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 }
                 if (deferReservationMaterialization) {
                     deferredKeys.add(key);
+                    if (deferredNamespaces != null) {
+                        deferredNamespaces.add(pairNamespace);
+                    }
                     continue;
                 }
                 KeyNamespaceKey<K, N> storageKey =
@@ -3331,7 +3337,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeBatchSlot =
                     deferReservationMaterialization
                             ? compactNativeMailboxBatchDeferred(
-                                    batchReader, rocksDBKeys, deferredKeys, namespace)
+                                    batchReader,
+                                    rocksDBKeys,
+                                    deferredKeys,
+                                    namespace,
+                                    deferredNamespaces)
                             : compactNativeMailboxBatch(batchReader, rocksDBKeys, storageKeys);
             final int postCompactCandidateCount =
                     deferReservationMaterialization ? deferredKeys.size() : storageKeys.size();
@@ -3349,7 +3359,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 return null;
             }
             if (deferReservationMaterialization) {
-                if (!materializeDeferredReservationKeys(deferredKeys, namespace, storageKeys)) {
+                if (!materializeDeferredReservationKeys(
+                        deferredKeys, namespace, deferredNamespaces, storageKeys)) {
                     if (nativeBatchSlot != null) {
                         nativeBatchSlot.close();
                     }
@@ -3751,13 +3762,21 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             RocksDBBatchValueReader<K, N, V> batchReader,
             java.util.ArrayList<byte[]> rocksDBKeys,
             java.util.ArrayList<K> keys,
-            N namespace) {
+            N namespace,
+            java.util.ArrayList<N> exactNamespaces) {
+        if (exactNamespaces != null && exactNamespaces.size() != keys.size()) {
+            prefetchBuildFailures++;
+            keys.clear();
+            exactNamespaces.clear();
+            return null;
+        }
         nativeMailboxCompactInputKeys += keys.size();
         if (keys.size() < nativeRequestPlaneCoordinator.options().minBatchSize()) {
             nativeFallbackBatches++;
             nativeMailboxCompactFallbacks++;
             nativeMailboxCompactThresholdFallbacks++;
-            materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
+            materializeDeferredMailboxFallbackKeys(
+                    batchReader, keys, namespace, exactNamespaces, rocksDBKeys);
             return null;
         }
         if (keys.size() > nativeRequestPlaneCoordinator.options().batchEntries()
@@ -3767,7 +3786,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeFallbackBatches++;
             nativeMailboxCompactFallbacks++;
             nativeMailboxCompactCapacityFallbacks++;
-            materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
+            materializeDeferredMailboxFallbackKeys(
+                    batchReader, keys, namespace, exactNamespaces, rocksDBKeys);
             return null;
         }
         NativeRequestPlaneCoordinator.BatchSlot slot =
@@ -3776,7 +3796,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeFallbackBatches++;
             nativeMailboxCompactFallbacks++;
             nativeMailboxCompactSlotMissFallbacks++;
-            materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
+            materializeDeferredMailboxFallbackKeys(
+                    batchReader, keys, namespace, exactNamespaces, rocksDBKeys);
             return null;
         }
         try {
@@ -3793,7 +3814,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             try {
                                 batchReader.serializeBatchKeyAndNamespace(
                                         keys.get(index),
-                                        namespace,
+                                        exactNamespaces == null
+                                                ? namespace
+                                                : exactNamespaces.get(index),
                                         keySerializer,
                                         namespaceSerializer,
                                         output);
@@ -3807,11 +3830,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         });
             } catch (IOException directFailure) {
                 rocksDBKeys.clear();
-                for (K key : keys) {
+                for (int index = 0; index < keys.size(); index++) {
                     rocksDBKeys.add(
                             batchReader.serializeBatchKeyAndNamespace(
-                                    key,
-                                    namespace,
+                                    keys.get(index),
+                                    exactNamespaces == null
+                                            ? namespace
+                                            : exactNamespaces.get(index),
                                     keySerializer,
                                     namespaceSerializer));
                 }
@@ -3832,6 +3857,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             for (int target = 0; target < uniqueCount; target++) {
                 int source = slot.compactedSourceIndex(target);
                 keys.set(target, keys.get(source));
+                if (exactNamespaces != null) {
+                    exactNamespaces.set(target, exactNamespaces.get(source));
+                }
                 if (!retainPreparedArena) {
                     rocksDBKeys.add(slot.copyPreparedKey(source));
                 }
@@ -3840,6 +3868,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (duplicates > 0) {
                 prefetchKeysDeduplicated += duplicates;
                 keys.subList(uniqueCount, keys.size()).clear();
+                if (exactNamespaces != null) {
+                    exactNamespaces.subList(uniqueCount, exactNamespaces.size()).clear();
+                }
             }
             if (slot.isCompactionScratch()) {
                 nativeMailboxCompactScratchBatches++;
@@ -3852,21 +3883,24 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeMailboxCompactFallbacks++;
             nativeMailboxCompactCapacityFallbacks++;
             slot.close();
-            materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
+            materializeDeferredMailboxFallbackKeys(
+                    batchReader, keys, namespace, exactNamespaces, rocksDBKeys);
             return null;
         } catch (Exception failure) {
             nativeFallbackBatches++;
             nativeMailboxCompactFallbacks++;
             nativeMailboxCompactOperationFallbacks++;
             slot.close();
-            materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
+            materializeDeferredMailboxFallbackKeys(
+                    batchReader, keys, namespace, exactNamespaces, rocksDBKeys);
             return null;
         } catch (LinkageError failure) {
             nativeFallbackBatches++;
             nativeMailboxCompactFallbacks++;
             nativeMailboxCompactOperationFallbacks++;
             slot.close();
-            materializeDeferredMailboxFallbackKeys(batchReader, keys, namespace, rocksDBKeys);
+            materializeDeferredMailboxFallbackKeys(
+                    batchReader, keys, namespace, exactNamespaces, rocksDBKeys);
             return null;
         }
     }
@@ -3888,20 +3922,26 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             RocksDBBatchValueReader<K, N, V> batchReader,
             java.util.ArrayList<K> keys,
             N namespace,
+            java.util.ArrayList<N> exactNamespaces,
             java.util.ArrayList<byte[]> rocksDBKeys) {
         rocksDBKeys.clear();
         try {
-            for (K key : keys) {
+            for (int index = 0; index < keys.size(); index++) {
                 rocksDBKeys.add(
                         batchReader.serializeBatchKeyAndNamespace(
-                                key,
-                                namespace,
+                                keys.get(index),
+                                exactNamespaces == null
+                                        ? namespace
+                                        : exactNamespaces.get(index),
                                 keySerializer,
                                 namespaceSerializer));
             }
         } catch (Throwable failure) {
             rocksDBKeys.clear();
             keys.clear();
+            if (exactNamespaces != null) {
+                exactNamespaces.clear();
+            }
             prefetchBuildFailures++;
         }
     }
@@ -3909,13 +3949,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private boolean materializeDeferredReservationKeys(
             java.util.ArrayList<K> keys,
             N namespace,
+            java.util.ArrayList<N> exactNamespaces,
             java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys) {
         storageKeys.clear();
         try {
-            for (K key : keys) {
+            if (exactNamespaces != null && exactNamespaces.size() != keys.size()) {
+                throw new IllegalArgumentException("Unbalanced deferred exact namespace pairs.");
+            }
+            for (int index = 0; index < keys.size(); index++) {
                 storageKeys.add(
                         new KeyNamespaceKey<>(
-                                key, namespace, keySerializer, namespaceSerializer));
+                                keys.get(index),
+                                exactNamespaces == null
+                                        ? namespace
+                                        : exactNamespaces.get(index),
+                                keySerializer,
+                                namespaceSerializer));
             }
             return true;
         } catch (Throwable failure) {

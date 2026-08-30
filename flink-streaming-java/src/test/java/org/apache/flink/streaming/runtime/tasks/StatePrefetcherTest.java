@@ -105,7 +105,12 @@ class StatePrefetcherTest {
 
         assertEquals(Arrays.asList(1, 2), capturedKeys.get());
         assertEquals(Arrays.asList("window-11", "window-22"), capturedNamespaces.get());
-        verify((ExactNamespacePrefetchHook) backend)
+
+        StreamRecord<?>[] second = {new StreamRecord<>(33), new StreamRecord<>(44)};
+        StatePrefetcher.prefetch((Input<?>) operator, second, second.length);
+        assertEquals(Arrays.asList(3, 4), capturedKeys.get());
+        assertEquals(Arrays.asList("window-33", "window-44"), capturedNamespaces.get());
+        verify((ExactNamespacePrefetchHook) backend, org.mockito.Mockito.times(2))
                 .prefetchKeyNamespaces(
                         org.mockito.ArgumentMatchers.anyCollection(),
                         org.mockito.ArgumentMatchers.anyCollection());

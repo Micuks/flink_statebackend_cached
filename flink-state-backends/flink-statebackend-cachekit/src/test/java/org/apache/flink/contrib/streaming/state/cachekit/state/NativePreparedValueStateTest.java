@@ -912,6 +912,71 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testDeferredExactNamespacePairsCompactByCompositeIdentity() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(null);
+        stubDirectPreparedSerialization(reader);
+        byte[] value23 = KvStateSerializer.serializeValue(23, IntSerializer.INSTANCE);
+        when(reader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
+                .thenAnswer(
+                        invocation -> {
+                            int start = invocation.getArgument(1);
+                            int end = invocation.getArgument(2);
+                            java.util.ArrayList<byte[]> values = new java.util.ArrayList<>();
+                            for (int index = start; index < end; index++) {
+                                values.add(value23);
+                            }
+                            return values;
+                        });
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        deferredReservationOptions(), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 30, 8, 2);
+
+        Runnable task =
+                state.buildAsyncPrefetchTaskWithNamespaces(
+                        Arrays.asList("k1", "k1", "k1", "k2"),
+                        Arrays.asList("window-a", "window-b", "window-a", "window-a"));
+        assertNotNull(task);
+        task.run();
+
+        assertEquals(4, state.getNativeDeferredReservationInputKeysForTesting());
+        assertEquals(3, state.getNativeDeferredReservationObjectsMaterializedForTesting());
+        assertEquals(1, state.getNativeDeferredReservationObjectsAvoidedForTesting());
+        assertEquals(3, state.getNativeMailboxCompactUniqueKeysForTesting());
+        assertEquals(1, state.getPrefetchKeysDeduplicatedForTesting());
+        assertEquals(1, state.getExactNamespacePrefetchTasksBuiltForTesting());
+        assertEquals(3, state.getExactNamespacePrefetchKeysPreparedForTesting());
+
+        currentKey.set("k1");
+        state.setCurrentNamespace("window-a");
+        assertEquals(23, state.value());
+        state.setCurrentNamespace("window-b");
+        assertEquals(23, state.value());
+        currentKey.set("k2");
+        state.setCurrentNamespace("window-a");
+        assertEquals(23, state.value());
+
+        state.close();
+        coordinator.close();
+        assertEquals(1, fakePlane.closeCalls);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testDirectArenaMultiGetPreservesOrderAndAvoidsHeapKeys() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =

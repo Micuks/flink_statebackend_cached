@@ -65,6 +65,8 @@ public final class StatePrefetcher {
 
     private static final ThreadLocal<PrefetchGroupingWorkspace> PREFETCH_GROUPING_WORKSPACE =
             ThreadLocal.withInitial(PrefetchGroupingWorkspace::new);
+    private static final ThreadLocal<ExactNamespaceWorkspace> EXACT_NAMESPACE_WORKSPACE =
+            ThreadLocal.withInitial(ExactNamespaceWorkspace::new);
     private static final java.util.concurrent.atomic.AtomicLong PREFETCH_KEY_DEDUP_WINDOWS =
             new java.util.concurrent.atomic.AtomicLong();
     private static final java.util.concurrent.atomic.AtomicLong PREFETCH_KEY_DEDUP_SOURCES =
@@ -299,10 +301,10 @@ public final class StatePrefetcher {
             int fromIndex,
             int toIndex,
             MailboxStableKeySidecar stableKeySidecar) {
-        java.util.ArrayList<Object> keys =
-                new java.util.ArrayList<>(Math.max(2, toIndex - fromIndex));
-        java.util.ArrayList<Object> namespaces =
-                new java.util.ArrayList<>(Math.max(2, toIndex - fromIndex));
+        ExactNamespaceWorkspace workspace = EXACT_NAMESPACE_WORKSPACE.get();
+        workspace.prepare(Math.max(2, toIndex - fromIndex));
+        java.util.ArrayList<Object> keys = workspace.keys;
+        java.util.ArrayList<Object> namespaces = workspace.namespaces;
         try {
             Method method =
                     EXACT_NAMESPACE_PREFETCH_METHOD_CACHE.computeIfAbsent(
@@ -365,6 +367,10 @@ public final class StatePrefetcher {
             if (stableKeySidecar != null) {
                 stableKeySidecar.clearRange(fromIndex, toIndex);
             }
+        } finally {
+            // CacheKit deep-copies every accepted pair into reservation identity before the
+            // reflective call returns, so the mailbox thread can safely reuse these arrays.
+            workspace.clear();
         }
     }
 
@@ -1228,6 +1234,23 @@ public final class StatePrefetcher {
                 grown = Math.multiplyExact(grown, 2);
             }
             return grown;
+        }
+    }
+
+    /** Reusable mailbox-confined reference vectors for exact namespace projection. */
+    private static final class ExactNamespaceWorkspace {
+        private final java.util.ArrayList<Object> keys = new java.util.ArrayList<>();
+        private final java.util.ArrayList<Object> namespaces = new java.util.ArrayList<>();
+
+        private void prepare(int capacity) {
+            clear();
+            keys.ensureCapacity(capacity);
+            namespaces.ensureCapacity(capacity);
+        }
+
+        private void clear() {
+            keys.clear();
+            namespaces.clear();
         }
     }
 
