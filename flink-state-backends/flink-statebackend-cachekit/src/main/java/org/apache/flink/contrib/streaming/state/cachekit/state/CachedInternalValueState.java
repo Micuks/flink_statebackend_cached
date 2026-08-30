@@ -6507,6 +6507,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (!keyScopedPrefetchInvalidationEnabled) {
             return advanceWriteGeneration();
         }
+        // Key-scoped invalidation deliberately leaves writeGen unchanged so unrelated Java
+        // staging work survives this mutation. Generation-only native coherence has a separate
+        // requirement: once write-through publication is disabled, every delegate-visible write
+        // must still move the native epoch so an older exact-key entry cannot be observed. Keep
+        // that fence independent from writeGen and carry it to the prepared RocksDB path.
+        long nativeEpoch = advanceGenerationOnlyNativeEpoch();
         prefetchKeyScopedInvalidations++;
         // The mailbox thread installs every reservation before submitting its worker. Therefore a
         // write that observes neither a reservation nor a staged value precedes any future read of
@@ -6531,7 +6537,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     }
                 }
             }
-            return 0L;
+            return nativeEpoch;
         }
         // A worker releases its reservation only after publishing. Therefore, when the mailbox
         // thread sees no reservation, an absent staged value is a true negative; a future task was
@@ -6539,7 +6545,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         Object staged = staging.get(key);
         if (staged == null) {
             prefetchKeyScopedFastNegativeSkips++;
-            return 0L;
+            return nativeEpoch;
         }
         if (removeStagedEntry(key, staged)) {
             prefetchKeyScopedStagedRemoved++;
@@ -6547,7 +6553,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 nativeDirectArenaNegativeHandoffInvalidated++;
             }
         }
-        return 0L;
+        return nativeEpoch;
+    }
+
+    private long advanceGenerationOnlyNativeEpoch() {
+        if (nativeRequestPlaneCoordinator == null
+                || !nativeRequestPlaneCoordinator.isActive()
+                || !nativeRequestPlaneCoordinator.options().valueCacheEnabled()
+                || nativeRequestPlaneCoordinator.options().writeThroughMutations()) {
+            return 0L;
+        }
+        nativeGenerationAdvances++;
+        return nativeWriteEpoch.incrementAndGet();
     }
 
     @SuppressWarnings("unchecked")

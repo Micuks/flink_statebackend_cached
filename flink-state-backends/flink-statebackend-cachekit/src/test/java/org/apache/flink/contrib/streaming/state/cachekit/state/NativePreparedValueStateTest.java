@@ -4010,7 +4010,7 @@ class NativePreparedValueStateTest {
                         KvStateSerializer.serializeValue(7, IntSerializer.INSTANCE)));
 
         CachedInternalValueState<String, String, Integer> state =
-                newPreparedEvictionValueState(delegate, currentKey, coordinator, 75);
+                newPreparedEvictionValueState(delegate, currentKey, coordinator, 75, true);
         state.setCurrentNamespace("lazy-ns");
         state.update(42);
         state.flush();
@@ -4235,6 +4235,16 @@ class NativePreparedValueStateTest {
                     AtomicReference<String> currentKey,
                     NativeRequestPlaneCoordinator coordinator,
                     int stateId) {
+        return newPreparedEvictionValueState(delegate, currentKey, coordinator, stateId, false);
+    }
+
+    private static CachedInternalValueState<String, String, Integer>
+            newPreparedEvictionValueState(
+                    InternalValueState<String, String, Integer> delegate,
+                    AtomicReference<String> currentKey,
+                    NativeRequestPlaneCoordinator coordinator,
+                    int stateId,
+                    boolean keyScopedPrefetchInvalidationEnabled) {
         return new CachedInternalValueState<>(
                 delegate,
                 currentKey::get,
@@ -4248,6 +4258,7 @@ class NativePreparedValueStateTest {
                 false,
                 false,
                 false,
+                keyScopedPrefetchInvalidationEnabled,
                 coordinator,
                 stateId);
     }
