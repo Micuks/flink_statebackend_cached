@@ -38,6 +38,16 @@ public interface BatchEvictionListener<K, V> extends BiConsumer<K, V> {
         return false;
     }
 
+    /**
+     * Minimum number of selectable candidates required before invoking this listener.
+     *
+     * <p>The default preserves ordinary immediate eviction. An asynchronous batch listener may
+     * defer a singleton overflow until the next cache mutation makes a useful batch available.
+     */
+    default int minimumBatchSize() {
+        return 1;
+    }
+
     @Override
     default void accept(K key, V value) {
         acceptAll(

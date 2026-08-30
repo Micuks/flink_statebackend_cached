@@ -30,6 +30,48 @@ import org.junit.jupiter.api.Test;
 class LruCachePolicyTest {
 
     @Test
+    void testAsyncBatchDefersSingletonUntilMinimumBatchIsAvailable() {
+        List<List<Map.Entry<String, Integer>>> batches = new ArrayList<>();
+        Set<String> pending = new HashSet<>();
+        BatchEvictionListener<String, Integer> listener =
+                new BatchEvictionListener<String, Integer>() {
+                    @Override
+                    public void acceptAll(List<Map.Entry<String, Integer>> entries) {
+                        batches.add(new ArrayList<>(entries));
+                        for (Map.Entry<String, Integer> entry : entries) {
+                            pending.add(entry.getKey());
+                        }
+                    }
+
+                    @Override
+                    public boolean retainAfterAccept(String key, Integer value) {
+                        return pending.contains(key);
+                    }
+
+                    @Override
+                    public int minimumBatchSize() {
+                        return 2;
+                    }
+                };
+        LruCachePolicy<String, Integer> cache = new LruCachePolicy<>(2, 0, listener);
+
+        cache.put("a", 1);
+        cache.put("b", 2);
+        cache.put("c", 3);
+
+        assertTrue(batches.isEmpty(), "a singleton overflow must be deferred");
+        assertEquals(3, cache.size());
+
+        cache.put("d", 4);
+
+        assertEquals(1, batches.size());
+        assertEquals(2, batches.get(0).size());
+        assertEquals("a", batches.get(0).get(0).getKey());
+        assertEquals("b", batches.get(0).get(1).getKey());
+        assertEquals(4, cache.size(), "accepted async entries remain authoritative");
+    }
+
+    @Test
     void testBatchListenerDoesNotHoldCacheMonitorNeededByAsyncCompletion() {
         java.util.concurrent.atomic.AtomicReference<LruCachePolicy<String, Integer>> cacheRef =
                 new java.util.concurrent.atomic.AtomicReference<>();

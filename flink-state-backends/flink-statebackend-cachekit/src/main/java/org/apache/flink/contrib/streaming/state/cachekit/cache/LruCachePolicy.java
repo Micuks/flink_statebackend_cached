@@ -182,6 +182,10 @@ public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
                     new java.util.AbstractMap.SimpleImmutableEntry<>(
                             entry.getKey(), entry.getValue()));
         }
+        if (batchListener != null
+                && candidates.size() < Math.max(1, batchListener.minimumBatchSize())) {
+            return Collections.emptyList();
+        }
         return candidates;
     }
 }

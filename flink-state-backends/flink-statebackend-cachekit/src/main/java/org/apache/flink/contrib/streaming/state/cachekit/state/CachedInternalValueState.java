@@ -1395,6 +1395,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 return asyncPreparedEvictionInPlaceEnabled
                                         && value.isAsyncPreparedWritePending();
                             }
+
+                            @Override
+                            public int minimumBatchSize() {
+                                return asyncPreparedEvictionInPlaceEnabled ? 2 : 1;
+                            }
                         });
 
         // L2 Cache: Remaining size (or full maxEntries)
@@ -6971,7 +6976,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     @SuppressWarnings("unchecked")
     private void onL1Evictions(
             java.util.List<java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>>> entries) {
-        if (entries.size() < 2 || !canUsePreparedEvictionBatchWrite()) {
+        boolean asyncWriteBehind = canUseAsyncPreparedEvictionWriteBehind();
+        if (!canUsePreparedEvictionBatchWrite()
+                || (entries.size() < 2 && !asyncWriteBehind)) {
             for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : entries) {
                 onL1Eviction(entry.getKey(), entry.getValue());
             }
@@ -6988,7 +6995,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.List<byte[]> serializedValues = new java.util.ArrayList<>();
             java.util.List<PendingPreparedWrite<K, N, V>> pendingWrites =
                     new java.util.ArrayList<>();
-            boolean asyncWriteBehind = canUseAsyncPreparedEvictionWriteBehind();
             boolean inPlaceWriteBehind =
                     asyncWriteBehind && asyncPreparedEvictionInPlaceEnabled;
             for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : entries) {
