@@ -670,6 +670,120 @@ class CachedInternalValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testInlineReservationSlotPublishesPromotesAndInvalidatesExactKeys() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
+        stubPreparedKeySerialization(batchReader);
+        when(batchReader.getBatchDefaultValue()).thenReturn(99);
+        byte[] first = KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE);
+        byte[] stale = KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE);
+        when(batchReader.getSerializedValuesByRocksDBKeys(any(), eq(0), eq(3)))
+                .thenReturn(Arrays.asList(first, null, stale));
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true,
+                        100,
+                        1 << 20,
+                        true);
+        state.setInlineReservationSlotHandoffEnabledForTesting(true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Runnable task = state.buildAsyncPrefetchTask(Arrays.asList("first", "missing", "stale"));
+        task.run();
+
+        // Worker completion must retain ready slots, while the legacy staging directory remains
+        // completely unused.
+        assertEquals(3, state.getInlineReservationReadyCountForTesting());
+        assertEquals(first.length + stale.length, state.getInlineReservationRetainedBytesForTesting());
+        assertEquals(0, state.getStagingSizeForTesting());
+
+        currentKey.set("first");
+        assertEquals(11, state.value());
+        currentKey.set("missing");
+        assertEquals(99, state.value());
+        assertEquals(1, state.getInlineReservationReadyCountForTesting());
+        assertEquals(stale.length, state.getInlineReservationRetainedBytesForTesting());
+
+        // A delegate-visible write revokes exactly the remaining slot before it can publish a
+        // stale cache hit.
+        currentKey.set("stale");
+        state.update(33);
+        state.flush();
+        assertEquals(0, state.getInlineReservationReadyCountForTesting());
+        assertEquals(0, state.getInlineReservationRetainedBytesForTesting());
+        assertEquals(33, state.value());
+        assertEquals(2, state.getInlineReservationSlotsPromotedForTesting());
+        verify(delegate, never()).value();
+        state.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testInlineReservationSlotLiveReadCancelsBeforeWorkerRead() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(17);
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
+        stubPreparedKeySerialization(batchReader);
+
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8);
+        state.setInlineReservationSlotHandoffEnabledForTesting(true);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Runnable task = state.buildAsyncPrefetchTask(Arrays.asList("k1", "k2"));
+        assertEquals(17, state.value());
+        task.run();
+
+        assertEquals(1, state.getInlineReservationSlotsCancelledForTesting());
+        assertEquals(1, state.getPrefetchWorkerCancelledBeforeReadForTesting());
+        assertEquals(0, state.getInlineReservationReadyCountForTesting());
+        verify(batchReader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+        state.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testLazyAsyncStagingMaterializesOnlyUsedNamespacedValuesAndCopiesDefault()
             throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");

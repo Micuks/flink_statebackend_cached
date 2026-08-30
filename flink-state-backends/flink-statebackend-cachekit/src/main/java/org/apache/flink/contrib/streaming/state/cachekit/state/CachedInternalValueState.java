@@ -153,6 +153,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             loadBooleanConfig(
                     "state.backend.cachekit.native.value-cache.prepared-eviction-batch.enabled",
                     false);
+    private static final boolean INLINE_RESERVATION_SLOT_HANDOFF_ENABLED =
+            loadBooleanConfig(
+                    "state.backend.cachekit.native.prefetch.inline-reservation-slot.enabled",
+                    false);
+    private boolean inlineReservationSlotHandoffEnabled =
+            INLINE_RESERVATION_SLOT_HANDOFF_ENABLED;
     private static final boolean PROMOTION_YIELD_ADMISSION_ENABLED =
             loadBooleanConfig(
                     "state.backend.cachekit.native.prefetch.promotion-yield-admission.enabled",
@@ -337,12 +343,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     /**
      * Keys reserved by submitted-but-not-yet-finished prefetch tasks. Without this set, adjacent
      * early-lookahead chunks can enqueue the same key repeatedly while the first task is still
-     * waiting behind the shared worker. Values are write generations so stale reservations can be
-     * reclaimed without waiting for their old task.
+     * waiting behind the shared worker. Values are task reservations, or optional per-key inline
+     * result slots that retain the same reservation identity, so stale work can be reclaimed
+     * without waiting for an older task.
      */
-    private final java.util.concurrent.ConcurrentHashMap<
-                    KeyNamespaceKey<K, N>, PrefetchReservation>
+    private final java.util.concurrent.ConcurrentHashMap<KeyNamespaceKey<K, N>, Object>
             inFlight = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Number of ready inline slots retained after their worker task has completed. */
+    private final java.util.concurrent.atomic.AtomicInteger inlineReservationReadyCount =
+            new java.util.concurrent.atomic.AtomicInteger();
+    /** Serialized value bytes owned by ready inline slots. */
+    private final java.util.concurrent.atomic.AtomicLong inlineReservationRetainedBytes =
+            new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong prefetchReservationSequence =
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.ArrayBlockingQueue<CompletedPrefetchBatch<K, N, V>>
@@ -397,6 +409,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchDispatchNoReservation;
     private volatile long prefetchWorkerCancelledBeforeRead;
     private volatile long prefetchWorkerDiscardedAfterRead;
+    private volatile long inlineReservationSlotsReserved;
+    private volatile long inlineReservationSlotsPublished;
+    private volatile long inlineReservationSlotsPromoted;
+    private volatile long inlineReservationSlotsCancelled;
+    private volatile long inlineReservationSlotsInvalidated;
+    private volatile long inlineReservationLegacyPublicationsAvoided;
     /** Queue delay from mailbox reservation to worker start, for overlap sizing diagnostics. */
     private volatile long prefetchWorkerQueueNanos;
     private volatile long prefetchWorkerQueueNanosMax;
@@ -1349,10 +1367,19 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return handedOff.valueOrNull();
         }
 
+        if (inlineReservationSlotHandoffEnabled) {
+            CachedValue<V> inlinePromoted = promoteInlineReservationSlot(lookupKey);
+            if (inlinePromoted != null) {
+                updateSticky(inlinePromoted.storageKey(), inlinePromoted);
+                recordAccess(true);
+                return inlinePromoted.valueOrNull();
+            }
+        }
+
         // 4b. Check async-prefetch staging. Sound only when no write/dirty-flush happened on
         // this state since the fetch was submitted (writeGen match); otherwise fall through to
         // the authoritative delegate read.
-        PrefetchReservation reservation = inFlight.get(lookupKey);
+        PrefetchReservation reservation = inFlightReservation(lookupKey);
         if (reservation != null && reservation.generation == writeGen) {
             // The mailbox reached this key before the worker published its speculative result.
             // The authoritative read below remains correct, but this is duplicate I/O and direct
@@ -1364,7 +1391,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     Math.max(prefetchLiveReadRaceNanosMax, raceNanos);
             boolean cancelled;
             synchronized (staging) {
-                cancelled = inFlight.remove(lookupKey, reservation);
+                cancelled = removeReservation(lookupKey, reservation, false);
             }
             if (cancelled) {
                 // The mailbox is now the authoritative consumer for this key. Revoking the
@@ -1788,9 +1815,28 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
             prefetchDispatchKeysExamined++;
             setLookupKey(key, namespace);
-            PrefetchReservation reservation = inFlight.get(lookupKey);
+            Object inFlightEntry = inFlight.get(lookupKey);
+            PrefetchReservation reservation = reservationOf(inFlightEntry);
             if (reservation == null) {
                 prefetchDispatchNoReservation++;
+                continue;
+            }
+            if (inFlightEntry instanceof InlineReservationSlot<?>) {
+                @SuppressWarnings("unchecked")
+                InlineReservationSlot<V> slot = (InlineReservationSlot<V>) inFlightEntry;
+                synchronized (slot) {
+                    if (inFlight.get(lookupKey) != slot) {
+                        prefetchDispatchNoReservation++;
+                    } else if (slot.stagedEntry != null) {
+                        prefetchDispatchAlreadyStaged++;
+                    } else if (inFlight.remove(lookupKey, slot)) {
+                        prefetchDispatchCancellations++;
+                        inlineReservationSlotsCancelled++;
+                        cancelled++;
+                    } else {
+                        prefetchDispatchNoReservation++;
+                    }
+                }
                 continue;
             }
             synchronized (staging) {
@@ -1800,7 +1846,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     prefetchDispatchAlreadyStaged++;
                     continue;
                 }
-                if (inFlight.remove(lookupKey, reservation)) {
+                if (removeReservation(lookupKey, reservation, false)) {
                     prefetchDispatchCancellations++;
                     cancelled++;
                 } else {
@@ -1906,9 +1952,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         lifecycleLock.writeLock().lock();
         try {
             discardCompletedPrefetchBatches();
-            prefetchUnusedStagedOnClose += staging.size();
+            prefetchUnusedStagedOnClose += staging.size() + inlineReservationReadyCount.get();
             clearStaging();
             inFlight.clear();
+            inlineReservationReadyCount.set(0);
+            inlineReservationRetainedBytes.set(0L);
         } finally {
             lifecycleLock.writeLock().unlock();
         }
@@ -2251,6 +2299,21 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     adaptiveNativeProbeController.bypassedBatches(),
                     adaptiveNativeProbeController.bypassedKeys());
         }
+        if (inlineReservationSlotHandoffEnabled || inlineReservationSlotsReserved > 0) {
+            LOG.info(
+                    "[CACHEKIT NATIVE PREFETCH INLINE SLOT] enabled={} reserved={} published={} "
+                            + "promoted={} cancelled={} invalidated={} "
+                            + "legacyPublicationsAvoided={} ready={} retainedBytes={}",
+                    inlineReservationSlotHandoffEnabled,
+                    inlineReservationSlotsReserved,
+                    inlineReservationSlotsPublished,
+                    inlineReservationSlotsPromoted,
+                    inlineReservationSlotsCancelled,
+                    inlineReservationSlotsInvalidated,
+                    inlineReservationLegacyPublicationsAvoided,
+                    inlineReservationReadyCount.get(),
+                    inlineReservationRetainedBytes.get());
+        }
         if (adaptiveNativeMailboxDensityController != null) {
             LOG.info(
                     "[CACHEKIT NATIVE MAILBOX DENSITY] mode={} transitions={} windows={} "
@@ -2541,9 +2604,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     void reReserveForTesting(K key, N namespace) {
-        inFlight.put(
-                new KeyNamespaceKey<>(key, namespace, keySerializer, namespaceSerializer),
-                newPrefetchReservation(writeGen));
+        KeyNamespaceKey<K, N> storageKey =
+                new KeyNamespaceKey<>(key, namespace, keySerializer, namespaceSerializer);
+        inFlight.remove(storageKey);
+        reservePrefetchKey(storageKey, newPrefetchReservation(writeGen));
     }
 
     boolean hasInFlightReservationForTesting(K key, N namespace) {
@@ -2894,6 +2958,26 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         preparedEvictionBatchEnabled = enabled;
     }
 
+    void setInlineReservationSlotHandoffEnabledForTesting(boolean enabled) {
+        inlineReservationSlotHandoffEnabled = enabled;
+    }
+
+    int getInlineReservationReadyCountForTesting() {
+        return inlineReservationReadyCount.get();
+    }
+
+    long getInlineReservationRetainedBytesForTesting() {
+        return inlineReservationRetainedBytes.get();
+    }
+
+    long getInlineReservationSlotsPromotedForTesting() {
+        return inlineReservationSlotsPromoted;
+    }
+
+    long getInlineReservationSlotsCancelledForTesting() {
+        return inlineReservationSlotsCancelled;
+    }
+
     long getNativePreparedEvictionKeyBytesForTesting() {
         return nativePreparedEvictionKeyBytes;
     }
@@ -2991,7 +3075,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 }
                 KeyNamespaceKey<K, N> storageKey =
                         new KeyNamespaceKey<>(key, namespace, keySerializer, namespaceSerializer);
-                if (inFlight.putIfAbsent(storageKey, reservation) != null) {
+                if (!reservePrefetchKey(storageKey, reservation)) {
                     prefetchKeysDeduplicated++;
                     continue;
                 }
@@ -3087,7 +3171,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 KeyNamespaceKey<K, N> storageKey =
                         new KeyNamespaceKey<>(key, namespace, keySerializer, namespaceSerializer);
                 if (!nativeMailboxBatch) {
-                    if (inFlight.putIfAbsent(storageKey, reservation) != null) {
+                    if (!reservePrefetchKey(storageKey, reservation)) {
                         prefetchKeysDeduplicated++;
                         continue;
                     }
@@ -3745,7 +3829,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         int writeIndex = 0;
         for (int readIndex = 0; readIndex < storageKeys.size(); readIndex++) {
             KeyNamespaceKey<K, N> storageKey = storageKeys.get(readIndex);
-            if (inFlight.putIfAbsent(storageKey, reservation) != null) {
+            if (!reservePrefetchKey(storageKey, reservation)) {
                 prefetchKeysDeduplicated++;
                 continue;
             }
@@ -3769,7 +3853,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         int originalSize = storageKeys.size();
         for (int readIndex = 0; readIndex < originalSize; readIndex++) {
             KeyNamespaceKey<K, N> storageKey = storageKeys.get(readIndex);
-            if (inFlight.putIfAbsent(storageKey, reservation) != null) {
+            if (!reservePrefetchKey(storageKey, reservation)) {
                 prefetchKeysDeduplicated++;
                 continue;
             }
@@ -3976,9 +4060,38 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
             removeStagedEntry(lookupKey, stagedEntry);
         }
-        PrefetchReservation reservation = inFlight.get(lookupKey);
+        Object inFlightEntry = inFlight.get(lookupKey);
+        PrefetchReservation reservation = reservationOf(inFlightEntry);
         if (reservation != null) {
             if (reservation.generation == gen) {
+                if (inFlightEntry instanceof InlineReservationSlot<?>) {
+                    @SuppressWarnings("unchecked")
+                    InlineReservationSlot<V> slot = (InlineReservationSlot<V>) inFlightEntry;
+                    synchronized (slot) {
+                        if (inFlight.get(lookupKey) != slot) {
+                            if (cancelInFlight) {
+                                prefetchDispatchNoReservation++;
+                            }
+                            return false;
+                        }
+                        if (cancelInFlight) {
+                            if (slot.stagedEntry != null) {
+                                prefetchDispatchAlreadyStaged++;
+                                prefetchKeysDeduplicated++;
+                                return true;
+                            }
+                            if (inFlight.remove(lookupKey, slot)) {
+                                prefetchDispatchCancellations++;
+                                inlineReservationSlotsCancelled++;
+                                return false;
+                            }
+                            prefetchDispatchNoReservation++;
+                            return false;
+                        }
+                        prefetchKeysDeduplicated++;
+                        return true;
+                    }
+                }
                 if (cancelInFlight) {
                     synchronized (staging) {
                         stagedEntry = staging.get(lookupKey);
@@ -3990,7 +4103,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             prefetchKeysDeduplicated++;
                             return true;
                         }
-                        if (inFlight.remove(lookupKey, reservation)) {
+                        if (removeReservation(lookupKey, reservation, false)) {
                             prefetchDispatchCancellations++;
                             return false;
                         }
@@ -4001,7 +4114,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 prefetchKeysDeduplicated++;
                 return true;
             }
-            inFlight.remove(lookupKey, reservation);
+            removeReservation(lookupKey, reservation, false);
         }
         if (cancelInFlight) {
             prefetchDispatchNoReservation++;
@@ -4127,7 +4240,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.List<KeyNamespaceKey<K, N>> reservations,
             PrefetchReservation reservation) {
         for (KeyNamespaceKey<K, N> key : reservations) {
-            inFlight.remove(key, reservation);
+            // A ready inline slot is the completed handoff itself; keep it until the mailbox,
+            // mutation path, or close resolves the exact key. Empty/failed slots are released.
+            removeReservation(key, reservation, true);
         }
     }
 
@@ -4193,8 +4308,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
             KeyNamespaceKey<K, N> storageKey = completed.storageKeys.get(index);
             CachedValue<V> promotedValue = null;
-            if (!inFlight.remove(storageKey, completed.reservation)) {
-                inFlight.remove(storageKey, completed.reservation);
+            if (!removeReservation(storageKey, completed.reservation, false)) {
+                removeReservation(storageKey, completed.reservation, false);
                 nativeMailboxBatchHandoffInvalidatedKeys++;
             } else {
                 byte[] serializedValue = completed.serializedValues.get(index);
@@ -5947,7 +6062,247 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private boolean isPrefetchReservationActive(
             KeyNamespaceKey<K, N> storageKey, PrefetchReservation reservation) {
-        return inFlight.get(storageKey) == reservation;
+        return reservationOf(inFlight.get(storageKey)) == reservation;
+    }
+
+    private static PrefetchReservation reservationOf(Object entry) {
+        if (entry instanceof PrefetchReservation) {
+            return (PrefetchReservation) entry;
+        }
+        if (entry instanceof InlineReservationSlot<?>) {
+            return ((InlineReservationSlot<?>) entry).reservation;
+        }
+        return null;
+    }
+
+    private PrefetchReservation inFlightReservation(Object key) {
+        return reservationOf(inFlight.get(key));
+    }
+
+    private boolean reservePrefetchKey(
+            KeyNamespaceKey<K, N> storageKey, PrefetchReservation reservation) {
+        Object entry =
+                inlineReservationSlotHandoffEnabled
+                        ? new InlineReservationSlot<V>(reservation)
+                        : reservation;
+        if (inFlight.putIfAbsent(storageKey, entry) != null) {
+            return false;
+        }
+        if (inlineReservationSlotHandoffEnabled) {
+            inlineReservationSlotsReserved++;
+        }
+        return true;
+    }
+
+    private boolean tryReserveInlineReadyEntry() {
+        for (; ; ) {
+            int current = inlineReservationReadyCount.get();
+            if (current + staging.size() >= asyncStagingMaxEntries) {
+                return false;
+            }
+            if (inlineReservationReadyCount.compareAndSet(current, current + 1)) {
+                return true;
+            }
+        }
+    }
+
+    private void releaseInlineReadyAccounting(Object stagedEntry) {
+        inlineReservationReadyCount.decrementAndGet();
+        inlineReservationRetainedBytes.addAndGet(-stagedEntryRetainedBytes(stagedEntry));
+    }
+
+    private boolean removeReservation(
+            KeyNamespaceKey<K, N> storageKey,
+            PrefetchReservation reservation,
+            boolean keepReadyInlineSlot) {
+        Object entry = inFlight.get(storageKey);
+        if (reservationOf(entry) != reservation) {
+            return false;
+        }
+        if (entry instanceof InlineReservationSlot<?>) {
+            @SuppressWarnings("unchecked")
+            InlineReservationSlot<V> slot = (InlineReservationSlot<V>) entry;
+            synchronized (slot) {
+                if (inFlight.get(storageKey) != slot || slot.reservation != reservation) {
+                    return false;
+                }
+                Object stagedEntry = slot.stagedEntry;
+                if (keepReadyInlineSlot && stagedEntry != null) {
+                    return false;
+                }
+                if (!inFlight.remove(storageKey, slot)) {
+                    return false;
+                }
+                if (stagedEntry != null) {
+                    slot.stagedEntry = null;
+                    releaseInlineReadyAccounting(stagedEntry);
+                }
+                return true;
+            }
+        }
+        return inFlight.remove(storageKey, reservation);
+    }
+
+    private CachedValue<V> promoteInlineReservationSlot(KeyNamespaceKey<K, N> lookup) {
+        Object entry = inFlight.get(lookup);
+        if (!(entry instanceof InlineReservationSlot<?>)) {
+            return null;
+        }
+        @SuppressWarnings("unchecked")
+        InlineReservationSlot<V> slot = (InlineReservationSlot<V>) entry;
+        Object stagedEntry;
+        synchronized (slot) {
+            if (inFlight.get(lookup) != slot) {
+                return null;
+            }
+            if (slot.reservation.generation != writeGen) {
+                if (inFlight.remove(lookup, slot)) {
+                    stagedEntry = slot.stagedEntry;
+                    slot.stagedEntry = null;
+                    if (stagedEntry != null) {
+                        releaseInlineReadyAccounting(stagedEntry);
+                    }
+                    inlineReservationSlotsInvalidated++;
+                    prefetchStaleAborts++;
+                }
+                return null;
+            }
+            stagedEntry = slot.stagedEntry;
+            if (stagedEntry == null) {
+                prefetchLiveReadRacedInFlight++;
+                long raceNanos =
+                        Math.max(0L, System.nanoTime() - slot.reservation.submittedNanos);
+                prefetchLiveReadRaceNanos += raceNanos;
+                prefetchLiveReadRaceNanosMax =
+                        Math.max(prefetchLiveReadRaceNanosMax, raceNanos);
+                if (inFlight.remove(lookup, slot)) {
+                    prefetchLiveReadCancellations++;
+                    inlineReservationSlotsCancelled++;
+                }
+                return null;
+            }
+            if (!inFlight.remove(lookup, slot)) {
+                return null;
+            }
+            slot.stagedEntry = null;
+            releaseInlineReadyAccounting(stagedEntry);
+        }
+
+        KeyNamespaceKey<K, N> storageKey;
+        V value;
+        if (isNativeNegativeStagedEntry(stagedEntry)) {
+            storageKey = nativeNegativeStorageKey(stagedEntry);
+            try {
+                value = copyBatchDefaultValueForMailbox();
+            } catch (RuntimeException failure) {
+                prefetchLazyMaterializationFailures++;
+                return null;
+            }
+            nativeDirectArenaNegativeHandoffPromoted++;
+        } else if (stagedEntry instanceof StagedValue<?>) {
+            @SuppressWarnings("unchecked")
+            StagedValue<V> staged = (StagedValue<V>) stagedEntry;
+            if (staged.gen != writeGen) {
+                prefetchStaleAborts++;
+                return null;
+            }
+            storageKey = staged.storageKey();
+            try {
+                value = materializeStagedValue(staged);
+            } catch (IOException | RuntimeException failure) {
+                prefetchLazyMaterializationFailures++;
+                return null;
+            }
+            if (staged instanceof SerializedStagedValue<?>) {
+                prefetchLazyValuesMaterialized++;
+            }
+        } else {
+            return null;
+        }
+        CachedValue<V> promoted = CachedValue.of(storageKey, value, false);
+        l1Cache.put(storageKey, promoted);
+        prefetchValuesPromoted++;
+        inlineReservationSlotsPromoted++;
+        return promoted;
+    }
+
+    private boolean publishInlineReservationSlot(
+            StagedValue<V> staged,
+            boolean missing,
+            PrefetchReservation requiredReservation) {
+        Object entry = inFlight.get(staged.storageKey());
+        if (!(entry instanceof InlineReservationSlot<?>)) {
+            prefetchWorkerDiscardedAfterRead++;
+            return true;
+        }
+        @SuppressWarnings("unchecked")
+        InlineReservationSlot<V> slot = (InlineReservationSlot<V>) entry;
+        synchronized (slot) {
+            if (inFlight.get(staged.storageKey()) != slot
+                    || slot.reservation != requiredReservation) {
+                prefetchWorkerDiscardedAfterRead++;
+                return true;
+            }
+            if (slot.stagedEntry != null) {
+                return true;
+            }
+            if (!tryReserveInlineReadyEntry()) {
+                prefetchStagingAdmissionDrops++;
+                return false;
+            }
+            long retainedBytes = staged.retainedBytes();
+            long totalRetainedBytes = inlineReservationRetainedBytes.addAndGet(retainedBytes);
+            if (totalRetainedBytes + stagingRetainedBytes.get()
+                    > asyncStagingMaxRetainedBytes) {
+                inlineReservationRetainedBytes.addAndGet(-retainedBytes);
+                inlineReservationReadyCount.decrementAndGet();
+                prefetchStagingAdmissionDrops++;
+                return false;
+            }
+            slot.stagedEntry = staged;
+        }
+        prefetchValuesStaged++;
+        if (missing) {
+            prefetchMissingValuesStaged++;
+        }
+        if (staged instanceof SerializedStagedValue<?>) {
+            prefetchLazyValuesStaged++;
+        }
+        inlineReservationSlotsPublished++;
+        inlineReservationLegacyPublicationsAvoided++;
+        return true;
+    }
+
+    private boolean publishInlineNegativeReservationSlot(
+            KeyNamespaceKey<K, N> storageKey,
+            PrefetchReservation requiredReservation) {
+        Object entry = inFlight.get(storageKey);
+        if (!(entry instanceof InlineReservationSlot<?>)) {
+            prefetchWorkerDiscardedAfterRead++;
+            return true;
+        }
+        @SuppressWarnings("unchecked")
+        InlineReservationSlot<V> slot = (InlineReservationSlot<V>) entry;
+        synchronized (slot) {
+            if (inFlight.get(storageKey) != slot || slot.reservation != requiredReservation) {
+                prefetchWorkerDiscardedAfterRead++;
+                return true;
+            }
+            if (slot.stagedEntry != null) {
+                return true;
+            }
+            if (!tryReserveInlineReadyEntry()) {
+                prefetchStagingAdmissionDrops++;
+                return false;
+            }
+            slot.stagedEntry = storageKey;
+        }
+        prefetchValuesStaged++;
+        prefetchMissingValuesStaged++;
+        nativeDirectArenaNegativeHandoffStaged++;
+        inlineReservationSlotsPublished++;
+        inlineReservationLegacyPublicationsAvoided++;
+        return true;
     }
 
     private boolean stagePreparedValue(
@@ -5986,6 +6341,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (closed || staged.gen != writeGen) {
                 prefetchStaleAborts++;
                 return false;
+            }
+            if (inlineReservationSlotHandoffEnabled
+                    && requiredReservation != null) {
+                return publishInlineReservationSlot(staged, missing, requiredReservation);
             }
             synchronized (staging) {
                 if (requiredReservation != null
@@ -6042,6 +6401,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             if (closed || gen != writeGen || !keyScopedPrefetchInvalidationEnabled) {
                 prefetchStaleAborts++;
                 return false;
+            }
+            if (inlineReservationSlotHandoffEnabled
+                    && requiredReservation != null) {
+                return publishInlineNegativeReservationSlot(storageKey, requiredReservation);
             }
             synchronized (staging) {
                 if (!isPrefetchReservationActive(storageKey, requiredReservation)) {
@@ -6644,9 +7007,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     /**
      * Revoke speculative ownership for exactly the written key before RocksDB is mutated.
      *
-     * <p>The worker publishes under the same {@code staging} monitor and must still own the exact
-     * reservation object. Therefore both race orders are safe: a pre-write publish is removed
-     * here; a post-write publish observes that its reservation was revoked and is discarded.
+     * <p>The worker must still own the exact reservation object. Legacy publication serializes on
+     * {@code staging}; inline-slot publication serializes on the exact key's slot. Therefore both
+     * race orders are safe: a pre-write publish is removed here; a post-write publish observes
+     * that its reservation was revoked and is discarded.
      */
     private long prepareDelegateWrite(KeyNamespaceKey<K, N> key) {
         if (!keyScopedPrefetchInvalidationEnabled) {
@@ -6663,14 +7027,35 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // write that observes neither a reservation nor a staged value precedes any future read of
         // this key and can safely avoid mutating either ConcurrentHashMap or taking staging's
         // accounting monitor. This is the overwhelmingly common path on q9.
-        PrefetchReservation reservation = inFlight.get(key);
+        Object inFlightEntry = inFlight.get(key);
+        PrefetchReservation reservation = reservationOf(inFlightEntry);
         if (reservation != null) {
+            if (inFlightEntry instanceof InlineReservationSlot<?>) {
+                @SuppressWarnings("unchecked")
+                InlineReservationSlot<V> slot = (InlineReservationSlot<V>) inFlightEntry;
+                synchronized (slot) {
+                    if (inFlight.remove(key, slot)) {
+                        Object staged = slot.stagedEntry;
+                        slot.stagedEntry = null;
+                        prefetchKeyScopedInFlightCancelled++;
+                        inlineReservationSlotsInvalidated++;
+                        if (staged != null) {
+                            releaseInlineReadyAccounting(staged);
+                            prefetchKeyScopedStagedRemoved++;
+                            if (isNativeNegativeStagedEntry(staged)) {
+                                nativeDirectArenaNegativeHandoffInvalidated++;
+                            }
+                        }
+                    }
+                }
+                return nativeEpoch;
+            }
             // A worker may already be inside publishStagedValue after validating reservation
             // identity. Serialize cancellation with that validation+put sequence: either the
             // worker publishes first and we delete its stale value, or we revoke first and its
             // identity check fails.
             synchronized (staging) {
-                if (inFlight.remove(key, reservation)) {
+                if (removeReservation(key, reservation, false)) {
                     prefetchKeyScopedInFlightCancelled++;
                 }
                 Object staged = staging.get(key);
@@ -7174,6 +7559,24 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return workerFinished
                     && retainedHandoffBatches.get() == 0
                     && reservationsReleased.compareAndSet(false, true);
+        }
+    }
+
+    /**
+     * Per-key ownership and result slot for the exact prepared-prefetch path.
+     *
+     * <p>The key's entry in {@code inFlight} is the single directory lookup used by both worker
+     * and mailbox. Publication is serialized only on this key-local object. A ready slot remains
+     * in the map after its worker finishes and is removed by exactly one mailbox promotion,
+     * cancellation, mutation, or close. The task-level reservation still supplies generation and
+     * ABA identity for batched RocksDB I/O.
+     */
+    private static final class InlineReservationSlot<V> {
+        private final PrefetchReservation reservation;
+        private volatile Object stagedEntry;
+
+        private InlineReservationSlot(PrefetchReservation reservation) {
+            this.reservation = reservation;
         }
     }
 

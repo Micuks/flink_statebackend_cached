@@ -518,6 +518,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Publish one completed direct-read-only batch to the mailbox instead of one staging-map entry per key. "
                                                                         + "The mailbox validates the original exact-key reservations before clean L1 insertion; queue pressure falls back to the legacy staging path.");
 
+        public static final ConfigOption<Boolean> NATIVE_PREFETCH_INLINE_RESERVATION_SLOT_ENABLED =
+            ConfigOptions.key(
+                                            "state.backend.cachekit.native.prefetch.inline-reservation-slot.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Publish each exact prepared-prefetch result into its existing per-key reservation entry. "
+                                                                        + "This removes the second staging ConcurrentHashMap lookup and global staging monitor while preserving exact cancellation, generation and authoritative fallback semantics.");
+
         public static final ConfigOption<Integer> NATIVE_PREFETCH_MAILBOX_BATCH_HANDOFF_CAPACITY =
             ConfigOptions.key(
                                             "state.backend.cachekit.native.prefetch.mailbox-batch-handoff.capacity")
