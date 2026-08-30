@@ -1147,16 +1147,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 + "handoff and worker-side eager materialization.");
             }
         }
-        if (nativeResidentReuseScreeningEnabled
-                && (nativeRequestPlaneCoordinator == null
-                        || !nativeRequestPlaneCoordinator.options().valueCacheEnabled()
-                        || !nativeRequestPlaneCoordinator.options().writeThroughMutations()
-                        || !nativeRequestPlaneCoordinator.options().directArenaMultiGetEnabled()
-                        || !nativeRequestPlaneCoordinator.options().directArenaReadOnlyEnabled())) {
-            throw new IllegalArgumentException(
-                    "Native resident reuse screening requires ValueState cache, mutation "
-                            + "write-through, direct-arena MultiGet, and direct-read-only mode.");
-        }
+        validateNativeResidentReuseScreening(
+                nativeResidentReuseScreeningEnabled, nativeRequestPlaneCoordinator);
         if (nativeResidentReuseFusedFilterEnabled
                 && !nativeResidentReuseScreeningEnabled) {
             throw new IllegalArgumentException(
@@ -1246,6 +1238,19 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
         // L2 Cache: Remaining size (or full maxEntries)
         this.l2Cache = createCachePolicy(maxEntries, this::onL2Eviction);
+    }
+
+    static void validateNativeResidentReuseScreening(
+            boolean enabled, NativeRequestPlaneCoordinator coordinator) {
+        if (enabled
+                && (coordinator == null
+                        || !coordinator.options().valueCacheEnabled()
+                        || !coordinator.options().directArenaMultiGetEnabled()
+                        || !coordinator.options().directArenaReadOnlyEnabled())) {
+            throw new IllegalArgumentException(
+                    "Native resident reuse screening requires ValueState cache, direct-arena "
+                            + "MultiGet, and direct-read-only mode.");
+        }
     }
 
     private void setLookupKey(K key, N namespace) {

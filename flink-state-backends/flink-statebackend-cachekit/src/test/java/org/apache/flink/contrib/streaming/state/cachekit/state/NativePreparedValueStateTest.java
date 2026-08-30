@@ -70,6 +70,22 @@ import org.junit.jupiter.api.Test;
 class NativePreparedValueStateTest {
 
     @Test
+    void testResidentReuseScreeningAllowsGenerationOnlyNativeCoherence() throws Exception {
+        NativeRequestPlaneOptions options = generationOnlyResidentScreeningOptions();
+        assertFalse(options.writeThroughMutations());
+        assertTrue(options.valueCacheEnabled());
+        assertTrue(options.directArenaMultiGetEnabled());
+        assertTrue(options.directArenaReadOnlyEnabled());
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options, new FakeNativeRequestPlane());
+        try {
+            CachedInternalValueState.validateNativeResidentReuseScreening(true, coordinator);
+        } finally {
+            coordinator.close();
+        }
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void testCloseWaitsForCompleteNativeTaskAndSlotRelease() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
@@ -4610,6 +4626,46 @@ class NativePreparedValueStateTest {
 
     private static NativeRequestPlaneOptions directArenaReadOnlyOptions() {
         return directArenaReadOnlyOptions(16);
+    }
+
+    private static NativeRequestPlaneOptions generationOnlyResidentScreeningOptions() {
+        return new NativeRequestPlaneOptions(
+                        true,
+                        "",
+                        "auto",
+                        128,
+                        1 << 20,
+                        1 << 20,
+                        16,
+                        1 << 20,
+                        1 << 20,
+                        1,
+                        2,
+                        false,
+                        false,
+                        true,
+                        false,
+                        false,
+                        true,
+                        true,
+                        false,
+                        true,
+                        true,
+                        false,
+                        8192,
+                        0.02,
+                        262144,
+                        false,
+                        false,
+                        false,
+                        true,
+                        false,
+                        false,
+                        false,
+                        16,
+                        1 << 20,
+                        false)
+                .withPreparedEvictionWriteEnabled(true);
     }
 
     private static NativeRequestPlaneOptions residentHandoffOptions() {
