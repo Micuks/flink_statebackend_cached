@@ -577,6 +577,16 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Submit record-lookahead prefetch only to ValueState wrappers that have already served a real mailbox read. "
                                                                         + "The first access and every skipped state retain the authoritative point-read path.");
 
+        public static final ConfigOption<Boolean>
+                        NATIVE_PREFETCH_LAST_OBSERVED_NAMESPACE_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.last-observed-namespace.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Allow an accessed non-Void ValueState wrapper to predict the next mailbox lookahead with its last observed namespace. "
+                                                                        + "Prepared entries remain keyed by the copied (key, namespace) pair, so a prediction miss cannot be promoted by an authoritative access in another namespace.");
+
     public static final ConfigOption<Boolean> NATIVE_PREFETCH_PROMOTION_YIELD_ADMISSION_ENABLED =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.prefetch.promotion-yield-admission.enabled")

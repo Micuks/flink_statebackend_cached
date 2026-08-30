@@ -1746,6 +1746,70 @@ class CachedInternalValueStateTest {
     }
 
     @Test
+    void testLastObservedNamespaceCapabilityIsExplicitAndVoidNamespaceRemainsDefault() {
+        assertTrue(
+                CachedInternalValueState.supportsRecordKeyPrefetch(
+                        VoidNamespaceSerializer.INSTANCE, false));
+        assertFalse(
+                CachedInternalValueState.supportsRecordKeyPrefetch(
+                        StringSerializer.INSTANCE, false));
+        assertTrue(
+                CachedInternalValueState.supportsRecordKeyPrefetch(
+                        StringSerializer.INSTANCE, true));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testNamespacedPredictionCannotPromoteIntoAnotherNamespace() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(99);
+
+        RocksDBBatchValueReader<String, String, Integer> batchReader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(batchReader.serializeBatchKeyAndNamespace(any(), eq("window-7"), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+        when(batchReader.getSerializedValuesByRocksDBKeys(any(), eq(0), eq(1)))
+                .thenReturn(
+                        Collections.singletonList(
+                                KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE)));
+
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8);
+        state.setCurrentNamespace("window-7");
+        state.buildAsyncPrefetchTask(Collections.singletonList("k1")).run();
+
+        currentKey.set("k1");
+        state.setCurrentNamespace("window-8");
+        assertEquals(99, state.value());
+        verify(delegate, times(1)).value();
+        assertEquals(0, state.getPrefetchValuesPromotedForTesting());
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void testChunkedMultiGetPublishesCompletedChunkBeforeNextChunkReturns() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");

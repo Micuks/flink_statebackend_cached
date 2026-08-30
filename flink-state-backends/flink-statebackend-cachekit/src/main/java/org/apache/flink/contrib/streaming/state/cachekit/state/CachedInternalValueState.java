@@ -157,6 +157,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             loadBooleanConfig(
                     "state.backend.cachekit.native.prefetch.inline-reservation-slot.enabled",
                     false);
+    private static final boolean LAST_OBSERVED_NAMESPACE_PREFETCH_ENABLED =
+            loadBooleanConfig(
+                    "state.backend.cachekit.native.prefetch.last-observed-namespace.enabled",
+                    false);
     private boolean inlineReservationSlotHandoffEnabled =
             INLINE_RESERVATION_SLOT_HANDOFF_ENABLED;
     private static final boolean PROMOTION_YIELD_ADMISSION_ENABLED =
@@ -381,6 +385,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchTasksExecuted;
     private volatile long prefetchTasksDropped;
     private volatile long prefetchKeysPrepared;
+    private volatile long lastObservedNamespacePrefetchTasksBuilt;
+    private volatile long lastObservedNamespacePrefetchKeysPrepared;
     private volatile long prefetchKeysDeduplicated;
     private volatile long prefetchMultiGetCalls;
     private volatile long prefetchMultiGetKeys;
@@ -1741,13 +1747,19 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      * entries.
      *
      * <p>The generic record-lookahead hook knows future keys but not their future window/session
-     * namespaces. Reusing this wrapper's current non-void namespace therefore warms unrelated
-     * entries (and can issue millions of negative reads). Direct callers that know a stable
-     * namespace may still use {@link #buildAsyncPrefetchTask}; this gate applies only to the
-     * backend's record-key broadcast.
+     * namespaces. The default therefore remains VoidNamespace-only. The experimental opt-in uses
+     * an already-accessed wrapper's last observed namespace as a predictor. Every reservation and
+     * staging entry still owns a deep-copied exact (key, namespace) pair, so a prediction miss can
+     * only waste a read; it cannot match or replace authoritative state from another namespace.
      */
     public boolean supportsRecordKeyPrefetch() {
-        return namespaceSerializer instanceof VoidNamespaceSerializer;
+        return supportsRecordKeyPrefetch(
+                namespaceSerializer, LAST_OBSERVED_NAMESPACE_PREFETCH_ENABLED);
+    }
+
+    static boolean supportsRecordKeyPrefetch(
+            TypeSerializer<?> serializer, boolean lastObservedNamespaceEnabled) {
+        return serializer instanceof VoidNamespaceSerializer || lastObservedNamespaceEnabled;
     }
 
     /**
@@ -1772,7 +1784,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     /** Non-counting capability probe used before the streaming runtime extracts a key batch. */
     public boolean isRecordKeyPrefetchEligible(boolean accessGuided) {
-        return supportsRecordKeyPrefetch() && (!accessGuided || recordPrefetchAccessObserved);
+        if (!supportsRecordKeyPrefetch() || currentNamespace == null) {
+            return false;
+        }
+        // A non-Void prediction is meaningful only after a real mailbox read established the
+        // namespace. Enforce that even when generic access guidance is disabled.
+        return (namespaceSerializer instanceof VoidNamespaceSerializer
+                        || recordPrefetchAccessObserved)
+                && (!accessGuided || recordPrefetchAccessObserved);
     }
 
     /**
@@ -1783,7 +1802,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
      * future record key alone cannot identify an entry.
      */
     public boolean supportsDispatchPrefetchCancellation() {
-        return supportsRecordKeyPrefetch()
+        // Dispatch-time record keys do not identify the future namespace. Keep eager cancellation
+        // VoidNamespace-only; non-Void predictions are fenced by the exact live-read path instead.
+        return namespaceSerializer instanceof VoidNamespaceSerializer
                 && multiGetPrefetchEnabled
                 && delegate instanceof RocksDBBatchValueReader<?, ?, ?>;
     }
@@ -1965,7 +1986,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 || nativeRequestPlaneCoordinator != null) {
             LOG.info(
                     "[CACHEKIT VALUE PREFETCH] delegate={} namespaceSerializer={} "
-                            + "recordKeyPrefetch={} multiGet={} chunkSize={} minBatchSize={} "
+                            + "recordKeyPrefetch={} lastObservedNamespaceEnabled={} "
+                            + "lastObservedNamespaceTasks={} lastObservedNamespaceKeys={} "
+                            + "multiGet={} chunkSize={} minBatchSize={} "
                             + "keyScopedInvalidation={} accessObserved={} accessGuidedSkips={} "
                             + "tasksBuilt={} tasksExecuted={} tasksDropped={} keysPrepared={} "
                             + "keysDeduplicated={} multiGetCalls={} "
@@ -2050,6 +2073,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     delegate.getClass().getSimpleName(),
                     namespaceSerializer.getClass().getSimpleName(),
                     supportsRecordKeyPrefetch(),
+                    LAST_OBSERVED_NAMESPACE_PREFETCH_ENABLED,
+                    lastObservedNamespacePrefetchTasksBuilt,
+                    lastObservedNamespacePrefetchKeysPrepared,
                     multiGetPrefetchEnabled,
                     multiGetChunkSize,
                     multiGetMinBatchSize,
@@ -3038,6 +3064,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return prefetchTasksDropped;
     }
 
+    long getLastObservedNamespacePrefetchTasksBuiltForTesting() {
+        return lastObservedNamespacePrefetchTasksBuilt;
+    }
+
+    long getLastObservedNamespacePrefetchKeysPreparedForTesting() {
+        return lastObservedNamespacePrefetchKeysPrepared;
+    }
+
     /**
      * Mailbox-side half of the async prefetch: serialize (key, namespace) for every key that is
      * not already cached or staged, then hand the byte[] batch to the shared worker thread. The
@@ -3104,6 +3138,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         prefetchTasksBuilt++;
         prefetchKeysPrepared += serialized.size();
+        recordLastObservedNamespaceTask(serialized.size());
         return trackedTask(
                 reservations,
                 reservation,
@@ -3344,6 +3379,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         prefetchTasksBuilt++;
         prefetchKeysPrepared += preparedRocksDBKeys.size();
+        recordLastObservedNamespaceTask(preparedRocksDBKeys.size());
         if (nativeBatchSlot == null && !nativeMailboxDensityBypassed) {
             nativeBatchSlot = prepareNativeBatchSlot(preparedRocksDBKeys);
         }
@@ -3363,6 +3399,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 preparedNativeBatchSlot,
                                 taskCompactSelectedPrepared),
                 preparedNativeBatchSlot == null ? null : preparedNativeBatchSlot::close);
+    }
+
+    private void recordLastObservedNamespaceTask(long preparedKeys) {
+        if (!LAST_OBSERVED_NAMESPACE_PREFETCH_ENABLED
+                || namespaceSerializer instanceof VoidNamespaceSerializer) {
+            return;
+        }
+        lastObservedNamespacePrefetchTasksBuilt++;
+        lastObservedNamespacePrefetchKeysPrepared += Math.max(0L, preparedKeys);
     }
 
     private boolean admitAsyncPrefetchWorkerTask() {
