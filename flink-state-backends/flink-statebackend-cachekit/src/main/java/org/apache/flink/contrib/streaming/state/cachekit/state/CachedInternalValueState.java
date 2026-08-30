@@ -387,6 +387,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchKeysPrepared;
     private volatile long lastObservedNamespacePrefetchTasksBuilt;
     private volatile long lastObservedNamespacePrefetchKeysPrepared;
+    private volatile long exactNamespacePrefetchTasksBuilt;
+    private volatile long exactNamespacePrefetchKeysPrepared;
     private volatile long prefetchKeysDeduplicated;
     private volatile long prefetchMultiGetCalls;
     private volatile long prefetchMultiGetKeys;
@@ -1757,6 +1759,33 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 namespaceSerializer, LAST_OBSERVED_NAMESPACE_PREFETCH_ENABLED);
     }
 
+    /** Whether operator-projected exact key/namespace pairs can use prepared RocksDB MultiGet. */
+    public boolean supportsExactNamespacePrefetch() {
+        return !(namespaceSerializer instanceof VoidNamespaceSerializer)
+                && multiGetPrefetchEnabled
+                && delegate instanceof RocksDBBatchValueReader<?, ?, ?>;
+    }
+
+    /**
+     * Returns whether this wrapper should receive exact namespace lookahead.
+     *
+     * <p>Access guidance remains mandatory when configured: the operator projection identifies an
+     * exact state entry, but it does not identify which one of several ValueState wrappers owns
+     * that entry. The first authoritative read activates only the relevant wrapper(s).
+     */
+    public boolean shouldReceiveExactNamespacePrefetch(boolean accessGuided) {
+        if (!supportsExactNamespacePrefetch()) {
+            return false;
+        }
+        if (accessGuided && !recordPrefetchAccessObserved) {
+            recordPrefetchAccessGuidedSkips++;
+            return false;
+        }
+        return promotionYieldAdmissionController == null
+                || promotionYieldAdmissionController.shouldAdmit(
+                        prefetchValuesStaged, prefetchValuesPromoted);
+    }
+
     static boolean supportsRecordKeyPrefetch(
             TypeSerializer<?> serializer, boolean lastObservedNamespaceEnabled) {
         return serializer instanceof VoidNamespaceSerializer || lastObservedNamespaceEnabled;
@@ -1988,6 +2017,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     "[CACHEKIT VALUE PREFETCH] delegate={} namespaceSerializer={} "
                             + "recordKeyPrefetch={} lastObservedNamespaceEnabled={} "
                             + "lastObservedNamespaceTasks={} lastObservedNamespaceKeys={} "
+                            + "exactNamespaceTasks={} exactNamespaceKeys={} "
                             + "multiGet={} chunkSize={} minBatchSize={} "
                             + "keyScopedInvalidation={} accessObserved={} accessGuidedSkips={} "
                             + "tasksBuilt={} tasksExecuted={} tasksDropped={} keysPrepared={} "
@@ -2076,6 +2106,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     LAST_OBSERVED_NAMESPACE_PREFETCH_ENABLED,
                     lastObservedNamespacePrefetchTasksBuilt,
                     lastObservedNamespacePrefetchKeysPrepared,
+                    exactNamespacePrefetchTasksBuilt,
+                    exactNamespacePrefetchKeysPrepared,
                     multiGetPrefetchEnabled,
                     multiGetChunkSize,
                     multiGetMinBatchSize,
@@ -3072,6 +3104,14 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return lastObservedNamespacePrefetchKeysPrepared;
     }
 
+    long getExactNamespacePrefetchTasksBuiltForTesting() {
+        return exactNamespacePrefetchTasksBuilt;
+    }
+
+    long getExactNamespacePrefetchKeysPreparedForTesting() {
+        return exactNamespacePrefetchKeysPrepared;
+    }
+
     /**
      * Mailbox-side half of the async prefetch: serialize (key, namespace) for every key that is
      * not already cached or staged, then hand the byte[] batch to the shared worker thread. The
@@ -3089,7 +3129,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return null;
         }
         if (multiGetPrefetchEnabled && delegate instanceof RocksDBBatchValueReader<?, ?, ?>) {
-            return buildPreparedMultiGetTask(keys, currentNamespace);
+            return buildPreparedMultiGetTask(keys, currentNamespace, null);
         }
         java.util.ArrayList<byte[]> serialized = new java.util.ArrayList<>();
         java.util.ArrayList<KeyNamespaceKey<K, N>> reservations = new java.util.ArrayList<>();
@@ -3146,13 +3186,36 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     /**
+     * Builds one speculative read over positional, operator-projected key/namespace pairs.
+     *
+     * <p>Every pair is copied into {@link KeyNamespaceKey} before the worker is returned. The
+     * authoritative mailbox read still validates the same pair and wins every race.
+     */
+    @SuppressWarnings("unchecked")
+    public Runnable buildAsyncPrefetchTaskWithNamespaces(
+            java.util.List<? extends K> keys, java.util.List<?> namespaces) {
+        if (closed
+                || keys == null
+                || namespaces == null
+                || keys.isEmpty()
+                || keys.size() != namespaces.size()
+                || !supportsExactNamespacePrefetch()
+                || !admitAsyncPrefetchWorkerTask()) {
+            return null;
+        }
+        return buildPreparedMultiGetTask(keys, null, namespaces);
+    }
+
+    /**
      * Mailbox-side half of the RocksDB MultiGet path. It prepares the exact composite RocksDB key
      * once and keeps the corresponding immutable cache key beside it. The worker can therefore
      * issue each chunk directly, without deserializing query-wire keys and serializing them again
      * inside RocksDBValueState.
      */
     @SuppressWarnings("unchecked")
-    private Runnable buildPreparedMultiGetTask(Iterable<? extends K> keys, N namespace) {
+    private Runnable buildPreparedMultiGetTask(
+            Iterable<? extends K> keys, N namespace, java.util.List<?> exactNamespaces) {
+        final boolean exactNamespacePairs = exactNamespaces != null;
         final boolean nativeMailboxConfigured =
                 nativeRequestPlaneCoordinator != null
                         && nativeRequestPlaneCoordinator.isActive()
@@ -3183,7 +3246,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         && nativeRequestPlaneCoordinator.isActive()
                         && nativeRequestPlaneCoordinator.options().prefetchEnabled();
         final boolean deferReservationMaterialization =
-                nativeMailboxBatch
+                !exactNamespacePairs
+                        && nativeMailboxBatch
                         && nativeRequestPlaneCoordinator
                                 .options()
                                 .deferredReservationMaterializationEnabled();
@@ -3192,11 +3256,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         RocksDBBatchValueReader<K, N, V> batchReader =
                 (RocksDBBatchValueReader<K, N, V>) delegate;
         try {
+            int pairIndex = 0;
             for (K key : keys) {
-                if (key == null || findCachedValueFor(key, namespace) != null) {
+                final N pairNamespace =
+                        exactNamespacePairs ? (N) exactNamespaces.get(pairIndex++) : namespace;
+                if (key == null
+                        || pairNamespace == null
+                        || findCachedValueFor(key, pairNamespace) != null) {
                     continue;
                 }
-                if (hasStagedOrInFlightValue(key, namespace, gen)) {
+                if (hasStagedOrInFlightValue(key, pairNamespace, gen)) {
                     continue;
                 }
                 if (deferReservationMaterialization) {
@@ -3204,7 +3273,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     continue;
                 }
                 KeyNamespaceKey<K, N> storageKey =
-                        new KeyNamespaceKey<>(key, namespace, keySerializer, namespaceSerializer);
+                        new KeyNamespaceKey<>(
+                                key, pairNamespace, keySerializer, namespaceSerializer);
                 if (!nativeMailboxBatch) {
                     if (!reservePrefetchKey(storageKey, reservation)) {
                         prefetchKeysDeduplicated++;
@@ -3379,7 +3449,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         prefetchTasksBuilt++;
         prefetchKeysPrepared += preparedRocksDBKeys.size();
-        recordLastObservedNamespaceTask(preparedRocksDBKeys.size());
+        if (exactNamespacePairs) {
+            recordExactNamespaceTask(preparedRocksDBKeys.size());
+        } else {
+            recordLastObservedNamespaceTask(preparedRocksDBKeys.size());
+        }
         if (nativeBatchSlot == null && !nativeMailboxDensityBypassed) {
             nativeBatchSlot = prepareNativeBatchSlot(preparedRocksDBKeys);
         }
@@ -3408,6 +3482,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
         lastObservedNamespacePrefetchTasksBuilt++;
         lastObservedNamespacePrefetchKeysPrepared += Math.max(0L, preparedKeys);
+    }
+
+    private void recordExactNamespaceTask(long preparedKeys) {
+        exactNamespacePrefetchTasksBuilt++;
+        exactNamespacePrefetchKeysPrepared += Math.max(0L, preparedKeys);
     }
 
     private boolean admitAsyncPrefetchWorkerTask() {

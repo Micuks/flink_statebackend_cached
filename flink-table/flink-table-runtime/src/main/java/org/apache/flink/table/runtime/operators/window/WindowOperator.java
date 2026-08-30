@@ -39,6 +39,7 @@ import org.apache.flink.streaming.api.operators.InternalTimerService;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.operators.TimestampedCollector;
 import org.apache.flink.streaming.api.operators.Triggerable;
+import org.apache.flink.streaming.runtime.tasks.StateNamespaceLookahead;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.util.RowDataUtil;
@@ -95,7 +96,9 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  * @param <W> The type of {@code Window} that the {@code WindowAssigner} assigns.
  */
 public abstract class WindowOperator<K, W extends Window> extends AbstractStreamOperator<RowData>
-        implements OneInputStreamOperator<RowData, RowData>, Triggerable<K, W> {
+        implements OneInputStreamOperator<RowData, RowData>,
+                Triggerable<K, W>,
+                StateNamespaceLookahead {
 
     private static final long serialVersionUID = 1L;
 
@@ -377,6 +380,41 @@ public abstract class WindowOperator<K, W extends Window> extends AbstractStream
         if (isElementDropped) {
             // markEvent will increase numLateRecordsDropped
             lateRecordsDroppedRate.markEvent();
+        }
+    }
+
+    @Override
+    public void appendStatePrefetchKeyNamespaces(
+            StreamRecord<?> record,
+            Object stableKey,
+            java.util.List<Object> keys,
+            java.util.List<Object> namespaces)
+            throws Exception {
+        if (record == null
+                || !(record.getValue() instanceof RowData)
+                || stableKey == null
+                || windowFunction == null
+                || windowAssigner instanceof MergingWindowAssigner) {
+            // Session-window namespace assignment mutates the merging-window set and keyed
+            // mapping state. It is never legal on the speculative lookahead path.
+            return;
+        }
+        RowData inputRow = (RowData) record.getValue();
+        long timestamp =
+                windowAssigner.isEventTime()
+                        ? inputRow.getLong(rowtimeIndex)
+                        : internalTimerService.currentProcessingTime();
+        timestamp = TimeWindowUtil.toUtcTimestampMills(timestamp, shiftTimeZone);
+        Collection<W> affectedWindows =
+                windowFunction.assignStateNamespace(inputRow, timestamp);
+        if (affectedWindows == null) {
+            return;
+        }
+        for (W namespace : affectedWindows) {
+            if (namespace != null) {
+                keys.add(stableKey);
+                namespaces.add(namespace);
+            }
         }
     }
 

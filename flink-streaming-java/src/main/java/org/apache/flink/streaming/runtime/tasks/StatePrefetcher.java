@@ -82,6 +82,23 @@ public final class StatePrefetcher {
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Cache of optional exact key/namespace prefetch hooks per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            EXACT_NAMESPACE_PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Cache of optional exact namespace capability probes per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            EXACT_NAMESPACE_ENABLED_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static final java.util.concurrent.atomic.AtomicLong EXACT_NAMESPACE_WINDOWS =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong EXACT_NAMESPACE_RECORDS =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong EXACT_NAMESPACE_PAIRS =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong EXACT_NAMESPACE_FAILURES =
+            new java.util.concurrent.atomic.AtomicLong();
+
     /** Cache of optional synchronous local-preagg bulk-prefetch methods per backend class. */
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             IMMEDIATE_PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
@@ -202,6 +219,20 @@ public final class StatePrefetcher {
             } catch (Throwable t) {
                 return;
             }
+            if (exactNamespacePrefetchEnabled(ksb)
+                    && headOperator instanceof StateNamespaceLookahead) {
+                prefetchExactKeyNamespaces(
+                        (StateNamespaceLookahead) headOperator,
+                        op,
+                        ksb,
+                        buf,
+                        fromIndex,
+                        toIndex,
+                        stableKeySidecar);
+                // Exact mode is fail-closed. A projection failure must fall back to the later
+                // authoritative operator read, not to the ambiguous key-only predictor.
+                return;
+            }
             Method prefetchMethod = findPrefetchMethod(ksb);
             if (prefetchMethod == null) {
                 return;
@@ -256,6 +287,84 @@ public final class StatePrefetcher {
             }
         } catch (Throwable t) {
             // best-effort: prefetch must never affect the authoritative dispatch path.
+        }
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static void prefetchExactKeyNamespaces(
+            StateNamespaceLookahead lookahead,
+            AbstractStreamOperator<?> operator,
+            KeyedStateBackend<?> backend,
+            StreamRecord<?>[] buf,
+            int fromIndex,
+            int toIndex,
+            MailboxStableKeySidecar stableKeySidecar) {
+        java.util.ArrayList<Object> keys =
+                new java.util.ArrayList<>(Math.max(2, toIndex - fromIndex));
+        java.util.ArrayList<Object> namespaces =
+                new java.util.ArrayList<>(Math.max(2, toIndex - fromIndex));
+        try {
+            Method method =
+                    EXACT_NAMESPACE_PREFETCH_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(), StatePrefetcher::lookupExactNamespacePrefetchMethod);
+            if (method == NO_METHOD) {
+                EXACT_NAMESPACE_FAILURES.incrementAndGet();
+                return;
+            }
+            KeySelector selector = extractStateKeySelector1(operator);
+            if (selector == null) {
+                EXACT_NAMESPACE_FAILURES.incrementAndGet();
+                return;
+            }
+            int records = 0;
+            for (int index = fromIndex; index < toIndex; index++) {
+                StreamRecord<?> record = buf[index];
+                if (record == null) {
+                    continue;
+                }
+                Object key;
+                if (stableKeySidecar != null && stableKeySidecar.isReady(index, selector)) {
+                    key = stableKeySidecar.keyAt(index);
+                } else {
+                    key = selector.getKey(record.getValue());
+                    if (stableKeySidecar != null) {
+                        stableKeySidecar.capture(index, key, selector);
+                    }
+                }
+                if (key == null) {
+                    continue;
+                }
+                int beforeKeys = keys.size();
+                int beforeNamespaces = namespaces.size();
+                lookahead.appendStatePrefetchKeyNamespaces(record, key, keys, namespaces);
+                if (keys.size() != namespaces.size()
+                        || keys.size() < beforeKeys
+                        || namespaces.size() < beforeNamespaces) {
+                    throw new IllegalStateException("Unbalanced state namespace lookahead output.");
+                }
+                records++;
+            }
+            if (keys.isEmpty()) {
+                return;
+            }
+            method.invoke(backend, keys, namespaces);
+            long windows = EXACT_NAMESPACE_WINDOWS.incrementAndGet();
+            long totalRecords = EXACT_NAMESPACE_RECORDS.addAndGet(records);
+            long totalPairs = EXACT_NAMESPACE_PAIRS.addAndGet(keys.size());
+            if (windows % 5000L == 1L) {
+                System.err.println(
+                        String.format(
+                                "[CACHEKIT EXACT NAMESPACE SIDECAR] windows=%d records=%d pairs=%d failures=%d",
+                                windows,
+                                totalRecords,
+                                totalPairs,
+                                EXACT_NAMESPACE_FAILURES.get()));
+            }
+        } catch (Throwable failure) {
+            EXACT_NAMESPACE_FAILURES.incrementAndGet();
+            if (stableKeySidecar != null) {
+                stableKeySidecar.clearRange(fromIndex, toIndex);
+            }
         }
     }
 
@@ -984,6 +1093,48 @@ public final class StatePrefetcher {
     private static Method lookupNativeMailboxMethod(Class<?> backendClass) {
         try {
             Method method = backendClass.getMethod("nativeMailboxBatchEnabled");
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
+    }
+
+    private static boolean exactNamespacePrefetchEnabled(KeyedStateBackend<?> backend) {
+        if (backend == null) {
+            return false;
+        }
+        try {
+            Method method =
+                    EXACT_NAMESPACE_ENABLED_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(), StatePrefetcher::lookupExactNamespaceEnabledMethod);
+            if (method == NO_METHOD) {
+                return false;
+            }
+            Object result = method.invoke(backend);
+            return result instanceof Boolean && (Boolean) result;
+        } catch (Throwable failure) {
+            return false;
+        }
+    }
+
+    private static Method lookupExactNamespaceEnabledMethod(Class<?> backendClass) {
+        try {
+            Method method = backendClass.getMethod("exactNamespacePrefetchEnabled");
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
+    }
+
+    private static Method lookupExactNamespacePrefetchMethod(Class<?> backendClass) {
+        try {
+            Method method =
+                    backendClass.getMethod(
+                            "prefetchKeyNamespaces",
+                            java.util.Collection.class,
+                            java.util.Collection.class);
             method.setAccessible(true);
             return method;
         } catch (NoSuchMethodException ignored) {

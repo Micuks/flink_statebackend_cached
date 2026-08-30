@@ -587,6 +587,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Allow an accessed non-Void ValueState wrapper to predict the next mailbox lookahead with its last observed namespace. "
                                                                         + "Prepared entries remain keyed by the copied (key, namespace) pair, so a prediction miss cannot be promoted by an authoritative access in another namespace.");
 
+        public static final ConfigOption<Boolean> NATIVE_PREFETCH_EXACT_NAMESPACE_SIDECAR_ENABLED =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.prefetch.exact-namespace-sidecar.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Use an operator-provided, side-effect-free mailbox lookahead projection to prefetch exact key/namespace pairs. "
+                                                                        + "Unsupported operators, merging windows, projection errors, and empty projections fail closed to the authoritative state-read path.");
+
     public static final ConfigOption<Boolean> NATIVE_PREFETCH_PROMOTION_YIELD_ADMISSION_ENABLED =
                         ConfigOptions.key(
                                                         "state.backend.cachekit.native.prefetch.promotion-yield-admission.enabled")

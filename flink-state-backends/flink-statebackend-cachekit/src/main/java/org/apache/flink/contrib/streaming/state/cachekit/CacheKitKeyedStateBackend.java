@@ -1229,6 +1229,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
     /** Uses ordered, incrementally published RocksDB MultiGet chunks for async ValueState reads. */
     private static final boolean BP_PREFETCH_MULTIGET =
             loadBooleanFlag("state.backend.cachekit.bp-prefetch.multiget.enabled", false);
+
+    private static final boolean EXACT_NAMESPACE_SIDECAR_PREFETCH =
+            loadBooleanFlag(
+                    "state.backend.cachekit.native.prefetch.exact-namespace-sidecar.enabled",
+                    false);
     /**
      * Reuses the L1-owned sticky ValueState wrapper for repeated updates to the same key/namespace.
      * Disabled by default until Nexmark validates that the allocation reduction exceeds its extra
@@ -1283,6 +1288,11 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
         return nativeRequestPlaneCoordinator != null
                 && nativeRequestPlaneCoordinator.isActive()
                 && nativeRequestPlaneCoordinator.options().mailboxBatchEnabled();
+    }
+
+    /** Reflection capability probe used by the streaming mailbox. */
+    public boolean exactNamespacePrefetchEnabled() {
+        return EXACT_NAMESPACE_SIDECAR_PREFETCH && BP_PREFETCH_ASYNC && BP_PREFETCH_MULTIGET;
     }
 
     /** Reflection seam that avoids dispatch-key extraction when mutation batching is disabled. */
@@ -1519,6 +1529,55 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
                 // Best-effort cache warmup. Authoritative state access remains unchanged.
             } finally {
                 setCurrentKey(previousKey);
+            }
+        }
+    }
+
+    /**
+     * Submits exact operator-projected key/namespace pairs to namespaced ValueState wrappers.
+     *
+     * <p>The two collections are positional and mailbox-owned. Every wrapper deep-copies the
+     * selected pairs into its reservation identity before the worker can observe them. A malformed
+     * pair vector, unsupported namespace serializer, or worker rejection is a best-effort no-op;
+     * later operator reads remain authoritative.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public void prefetchKeyNamespaces(
+            Collection<? extends K> keys, Collection<?> namespaces) {
+        synchronized (lifecycleLock) {
+            if (closed
+                    || disposed
+                    || !exactNamespacePrefetchEnabled()
+                    || keys == null
+                    || namespaces == null
+                    || keys.isEmpty()
+                    || keys.size() != namespaces.size()
+                    || wrappersByDelegateIdentity.isEmpty()) {
+                return;
+            }
+            java.util.List<? extends K> keyList =
+                    keys instanceof java.util.List
+                            ? (java.util.List<? extends K>) keys
+                            : new java.util.ArrayList<>(keys);
+            java.util.List<?> namespaceList =
+                    namespaces instanceof java.util.List
+                            ? (java.util.List<?>) namespaces
+                            : new java.util.ArrayList<>(namespaces);
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                if (!(wrapper instanceof CachedInternalValueState)) {
+                    continue;
+                }
+                CachedInternalValueState valueState = (CachedInternalValueState) wrapper;
+                if (!valueState.shouldReceiveExactNamespacePrefetch(
+                        nativePrefetchAccessGuidedStateEnabled)) {
+                    continue;
+                }
+                Runnable task =
+                        valueState.buildAsyncPrefetchTaskWithNamespaces(
+                                (java.util.List) keyList, namespaceList);
+                if (task != null) {
+                    PrefetchExecutor.trySubmit(task);
+                }
             }
         }
     }

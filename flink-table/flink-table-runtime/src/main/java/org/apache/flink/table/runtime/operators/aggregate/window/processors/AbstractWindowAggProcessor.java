@@ -171,6 +171,19 @@ public abstract class AbstractWindowAggProcessor implements SlicingWindowProcess
         }
     }
 
+    @Override
+    public Long assignStateNamespaceForLookahead(RowData element) throws Exception {
+        long sliceEnd = sliceAssigner.assignSliceEnd(element, clockService);
+        if (isEventTime && isWindowFired(sliceEnd, currentProgress, shiftTimeZone)) {
+            long lastWindowEnd = sliceAssigner.getLastWindowEnd(sliceEnd);
+            if (isWindowFired(lastWindowEnd, currentProgress, shiftTimeZone)) {
+                return null;
+            }
+            return sliceStateMergeTarget(sliceEnd);
+        }
+        return sliceEnd;
+    }
+
     /**
      * Returns the slice state target to merge the given slice into when firing windows. For
      * unshared windows, there should no merging happens, so the merge target should be just the

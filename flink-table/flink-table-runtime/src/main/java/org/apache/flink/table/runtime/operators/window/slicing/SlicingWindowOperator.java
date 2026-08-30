@@ -41,6 +41,7 @@ import org.apache.flink.streaming.api.operators.Output;
 import org.apache.flink.streaming.api.operators.TimestampedCollector;
 import org.apache.flink.streaming.api.operators.Triggerable;
 import org.apache.flink.streaming.api.watermark.Watermark;
+import org.apache.flink.streaming.runtime.tasks.StateNamespaceLookahead;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.operators.TableStreamOperator;
@@ -99,7 +100,10 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  */
 @Internal
 public final class SlicingWindowOperator<K, W> extends TableStreamOperator<RowData>
-        implements OneInputStreamOperator<RowData, RowData>, Triggerable<K, W>, KeyContext {
+        implements OneInputStreamOperator<RowData, RowData>,
+                Triggerable<K, W>,
+                KeyContext,
+                StateNamespaceLookahead {
 
     private static final long serialVersionUID = 1L;
 
@@ -222,6 +226,24 @@ public final class SlicingWindowOperator<K, W> extends TableStreamOperator<RowDa
         if (isElementDropped) {
             // markEvent will increase numLateRecordsDropped
             lateRecordsDroppedRate.markEvent();
+        }
+    }
+
+    @Override
+    public void appendStatePrefetchKeyNamespaces(
+            StreamRecord<?> record,
+            Object stableKey,
+            java.util.List<Object> keys,
+            java.util.List<Object> namespaces)
+            throws Exception {
+        if (record == null || !(record.getValue() instanceof RowData) || stableKey == null) {
+            return;
+        }
+        W namespace =
+                windowProcessor.assignStateNamespaceForLookahead((RowData) record.getValue());
+        if (namespace != null) {
+            keys.add(stableKey);
+            namespaces.add(namespace);
         }
     }
 

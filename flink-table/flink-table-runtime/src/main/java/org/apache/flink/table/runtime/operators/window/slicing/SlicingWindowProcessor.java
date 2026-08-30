@@ -53,6 +53,16 @@ public interface SlicingWindowProcessor<W> extends Serializable {
     boolean processElement(RowData key, RowData element) throws Exception;
 
     /**
+     * Pure mailbox-lookahead projection of the state namespace used by {@link #processElement}.
+     *
+     * <p>A null result means that the element is late, unsupported, or otherwise has no safe
+     * speculative namespace. Implementations must not mutate state or register timers here.
+     */
+    default W assignStateNamespaceForLookahead(RowData element) throws Exception {
+        return null;
+    }
+
+    /**
      * Advances the progress time, the progress time is watermark if working in event-time mode, or
      * current processing time if working in processing-time mode.
      *

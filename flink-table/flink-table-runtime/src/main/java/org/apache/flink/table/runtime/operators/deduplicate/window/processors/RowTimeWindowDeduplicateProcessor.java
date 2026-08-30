@@ -110,6 +110,12 @@ public final class RowTimeWindowDeduplicateProcessor implements SlicingWindowPro
     }
 
     @Override
+    public Long assignStateNamespaceForLookahead(RowData element) {
+        long sliceEnd = element.getLong(windowEndIndex);
+        return isWindowFired(sliceEnd, currentProgress, shiftTimeZone) ? null : sliceEnd;
+    }
+
+    @Override
     public void advanceProgress(long progress) throws Exception {
         if (progress > currentProgress) {
             currentProgress = progress;

@@ -33,6 +33,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,6 +44,72 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.withSettings;
 
 class StatePrefetcherTest {
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void testExactNamespaceLookaheadSubmitsAlignedPairs() throws Exception {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings()
+                                .extraInterfaces(
+                                        ExactNamespaceCapability.class,
+                                        ExactNamespacePrefetchHook.class));
+        org.mockito.Mockito.when(
+                        ((ExactNamespaceCapability) backend).exactNamespacePrefetchEnabled())
+                .thenReturn(true);
+
+        AbstractStreamOperator operator =
+                mock(
+                        AbstractStreamOperator.class,
+                        withSettings()
+                                .extraInterfaces(Input.class, StateNamespaceLookahead.class));
+        org.mockito.Mockito.when(operator.getKeyedStateBackend()).thenReturn(backend);
+        java.lang.reflect.Field selectorField =
+                AbstractStreamOperator.class.getDeclaredField("stateKeySelector1");
+        selectorField.setAccessible(true);
+        selectorField.set(operator, (KeySelector<Integer, Integer>) value -> value % 10);
+        org.mockito.Mockito.doAnswer(
+                        invocation -> {
+                            StreamRecord<?> record = invocation.getArgument(0);
+                            Object stableKey = invocation.getArgument(1);
+                            List<Object> keys = invocation.getArgument(2);
+                            List<Object> namespaces = invocation.getArgument(3);
+                            keys.add(stableKey);
+                            namespaces.add("window-" + record.getValue());
+                            return null;
+                        })
+                .when((StateNamespaceLookahead) operator)
+                .appendStatePrefetchKeyNamespaces(
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.anyList(),
+                        org.mockito.ArgumentMatchers.anyList());
+
+        AtomicReference<List<?>> capturedKeys = new AtomicReference<>();
+        AtomicReference<List<?>> capturedNamespaces = new AtomicReference<>();
+        org.mockito.Mockito.doAnswer(
+                        invocation -> {
+                            capturedKeys.set(new ArrayList<>((Collection<?>) invocation.getArgument(0)));
+                            capturedNamespaces.set(
+                                    new ArrayList<>((Collection<?>) invocation.getArgument(1)));
+                            return null;
+                        })
+                .when((ExactNamespacePrefetchHook) backend)
+                .prefetchKeyNamespaces(
+                        org.mockito.ArgumentMatchers.anyCollection(),
+                        org.mockito.ArgumentMatchers.anyCollection());
+
+        StreamRecord<?>[] records = {new StreamRecord<>(11), new StreamRecord<>(22)};
+        StatePrefetcher.prefetch((Input<?>) operator, records, records.length);
+
+        assertEquals(Arrays.asList(1, 2), capturedKeys.get());
+        assertEquals(Arrays.asList("window-11", "window-22"), capturedNamespaces.get());
+        verify((ExactNamespacePrefetchHook) backend)
+                .prefetchKeyNamespaces(
+                        org.mockito.ArgumentMatchers.anyCollection(),
+                        org.mockito.ArgumentMatchers.anyCollection());
+    }
 
     @Test
     void testExtractKeysReadsOnlyRequestedRangeAndPreservesOrder() {
@@ -493,5 +560,13 @@ class StatePrefetcherTest {
         int beginNativeResidentMutationBatch(Collection<?> keys);
 
         int endNativeResidentMutationBatch();
+    }
+
+    public interface ExactNamespaceCapability {
+        boolean exactNamespacePrefetchEnabled();
+    }
+
+    public interface ExactNamespacePrefetchHook {
+        void prefetchKeyNamespaces(Collection<?> keys, Collection<?> namespaces);
     }
 }

@@ -41,6 +41,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -925,6 +926,87 @@ class CachedInternalValueStateTest {
         assertNull(state.value());
         assertEquals(1, state.getPrefetchLazyValuesMaterializedForTesting());
         verify(delegate, never()).value();
+        state.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testExactNamespacePrefetchKeepsSameKeyWindowsIsolated() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("same-key");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(99);
+
+        RocksDBBatchValueReader<String, String, Integer> batchReader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(batchReader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeKeyAndNamespace(
+                                        invocation.getArgument(0),
+                                        StringSerializer.INSTANCE,
+                                        invocation.getArgument(1),
+                                        StringSerializer.INSTANCE));
+        when(batchReader.getBatchDefaultValue()).thenReturn(0);
+        when(batchReader.getSerializedValuesByRocksDBKeys(any(), eq(0), eq(2)))
+                .thenReturn(
+                        Arrays.asList(
+                                KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE),
+                                KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE)));
+
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2,
+                        false,
+                        true);
+
+        assertTrue(state.supportsExactNamespacePrefetch());
+        Runnable task =
+                state.buildAsyncPrefetchTaskWithNamespaces(
+                        Arrays.asList("same-key", "same-key"),
+                        Arrays.asList("window-a", "window-b"));
+        assertNotNull(task);
+        task.run();
+
+        state.setCurrentNamespace("window-a");
+        assertEquals(11, state.value());
+        state.setCurrentNamespace("window-b");
+        assertEquals(22, state.value());
+        state.setCurrentNamespace("window-c");
+        assertEquals(99, state.value());
+
+        verify(batchReader, times(1))
+                .serializeBatchKeyAndNamespace(
+                        eq("same-key"),
+                        eq("window-a"),
+                        eq(StringSerializer.INSTANCE),
+                        eq(StringSerializer.INSTANCE));
+        verify(batchReader, times(1))
+                .serializeBatchKeyAndNamespace(
+                        eq("same-key"),
+                        eq("window-b"),
+                        eq(StringSerializer.INSTANCE),
+                        eq(StringSerializer.INSTANCE));
+        verify(delegate, times(1)).value();
+        assertEquals(1, state.getExactNamespacePrefetchTasksBuiltForTesting());
+        assertEquals(2, state.getExactNamespacePrefetchKeysPreparedForTesting());
+        assertEquals(2, state.getPrefetchValuesPromotedForTesting());
         state.close();
     }
 
