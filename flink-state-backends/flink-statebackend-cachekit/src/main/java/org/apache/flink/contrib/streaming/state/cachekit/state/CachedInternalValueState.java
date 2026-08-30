@@ -753,20 +753,39 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 throw new java.util.concurrent.RejectedExecutionException(
                                         "CacheKit prepared write-behind executor is shut down");
                             }
-                            try {
-                                // Backpressure the mailbox only when the bounded queue is full.
-                                // Running the rejected task inline would overtake older FIFO work
-                                // and can write an older value after a newer one.
-                                rejectedExecutor.getQueue().put(task);
-                            } catch (InterruptedException interruption) {
-                                Thread.currentThread().interrupt();
-                                throw new java.util.concurrent.RejectedExecutionException(
-                                        "Interrupted while enqueueing prepared write-behind",
-                                        interruption);
-                            }
+                            enqueuePreparedWriteTaskPreservingFifo(rejectedExecutor, task);
                         });
         executor.allowCoreThreadTimeOut(true);
         return executor;
+    }
+
+    /**
+     * Backpressure a producer without dropping the already accepted eviction when task
+     * cancellation interrupts the mailbox thread.
+     *
+     * <p>Executing the rejected task inline would overtake older work in the executor queue and
+     * could persist an older value after a newer value for the same key. Throwing on interruption
+     * is also unsafe: the LRU eviction has already transferred ownership to this write-behind
+     * path, so abandoning the task loses the dirty value and turns normal Nexmark cancellation
+     * into a false write failure. We therefore finish the FIFO enqueue and restore the interrupt
+     * bit afterwards. The task cancellation remains observable by its caller, while every
+     * accepted dirty eviction is durably ordered and drained by {@link
+     * #awaitAsyncPreparedWrites()}.
+     */
+    static void enqueuePreparedWriteTaskPreservingFifo(
+            java.util.concurrent.ThreadPoolExecutor executor, Runnable task) {
+        boolean interrupted = false;
+        while (true) {
+            try {
+                executor.getQueue().put(task);
+                break;
+            } catch (InterruptedException interruption) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static boolean loadBooleanConfig(String key, boolean defaultValue) {

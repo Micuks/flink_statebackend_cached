@@ -71,6 +71,71 @@ import org.junit.jupiter.api.Test;
 class NativePreparedValueStateTest {
 
     @Test
+    void testPreparedWriteQueuePreservesFifoAcrossProducerInterrupt() throws Exception {
+        CountDownLatch workerEntered = new CountDownLatch(1);
+        CountDownLatch releaseWorker = new CountDownLatch(1);
+        CountDownLatch producerReturned = new CountDownLatch(1);
+        java.util.List<Integer> executionOrder =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        java.util.concurrent.ThreadPoolExecutor executor =
+                new java.util.concurrent.ThreadPoolExecutor(
+                        1,
+                        1,
+                        0L,
+                        TimeUnit.MILLISECONDS,
+                        new java.util.concurrent.ArrayBlockingQueue<>(1));
+        try {
+            executor.execute(
+                    () -> {
+                        executionOrder.add(0);
+                        workerEntered.countDown();
+                        try {
+                            assertTrue(releaseWorker.await(5, TimeUnit.SECONDS));
+                        } catch (InterruptedException interruption) {
+                            Thread.currentThread().interrupt();
+                            throw new AssertionError(interruption);
+                        }
+                    });
+            assertTrue(workerEntered.await(5, TimeUnit.SECONDS));
+            executor.execute(() -> executionOrder.add(1));
+
+            AtomicReference<Throwable> producerFailure = new AtomicReference<>();
+            java.util.concurrent.atomic.AtomicBoolean interruptRestored =
+                    new java.util.concurrent.atomic.AtomicBoolean();
+            Thread producer =
+                    new Thread(
+                            () -> {
+                                Thread.currentThread().interrupt();
+                                try {
+                                    CachedInternalValueState.enqueuePreparedWriteTaskPreservingFifo(
+                                            executor, () -> executionOrder.add(2));
+                                    interruptRestored.set(Thread.currentThread().isInterrupted());
+                                } catch (Throwable failure) {
+                                    producerFailure.set(failure);
+                                } finally {
+                                    producerReturned.countDown();
+                                }
+                            },
+                            "interrupted-prepared-write-producer");
+            producer.start();
+
+            assertFalse(producerReturned.await(200, TimeUnit.MILLISECONDS));
+            releaseWorker.countDown();
+            assertTrue(producerReturned.await(5, TimeUnit.SECONDS));
+            producer.join(5000);
+            assertNull(producerFailure.get());
+            assertTrue(interruptRestored.get());
+
+            executor.shutdown();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+            assertEquals(Arrays.asList(0, 1, 2), executionOrder);
+        } finally {
+            releaseWorker.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void testPreparedEvictionGenerationOnlyThresholdKeepsSmallValuesWriteThrough() {
         assertTrue(
                 CachedInternalValueState.shouldPublishPreparedNativeMutation(
