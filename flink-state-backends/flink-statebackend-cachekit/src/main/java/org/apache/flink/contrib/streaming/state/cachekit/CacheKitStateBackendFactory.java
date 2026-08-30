@@ -332,6 +332,17 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Commit one LRU overflow of prepared dirty ValueState entries with one ordered RocksDB WriteBatch before removing any cache entry. "
                                                                         + "The option preserves authoritative RocksDB semantics, generation fencing, and per-entry native coherence publication. It is disabled by default and applies only to the LRU policy and batch-capable RocksDB ValueState.");
 
+        public static final ConfigOption<Boolean>
+                        NATIVE_VALUE_CACHE_ASYNC_PREPARED_EVICTION_WRITE_BEHIND =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.value-cache.async-prepared-eviction-write-behind.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Move an already-serialized LRU overflow WriteBatch from the task mailbox to a bounded shared writer. "
+                                                                        + "A per-key pending overlay remains authoritative until commit, failures are propagated, and snapshot/close drain every accepted batch. "
+                                                                        + "Requires prepared eviction batching and exact-key speculative invalidation; disabled by default.");
+
     public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH_ADAPTIVE =
                                         ConfigOptions.key(
                                                                         "state.backend.cachekit.native.value-cache.resident-mutation-batch.adaptive.enabled")

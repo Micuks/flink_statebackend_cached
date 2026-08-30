@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -167,6 +168,179 @@ class NativePreparedValueStateTest {
         assertEquals(3, state.getNativeGenerationAdvancesForTesting());
 
         state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAsyncPreparedEvictionProvidesOverlayAndFlushDrain() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k0");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.supportsPreparedValueMutation()).thenReturn(true);
+        when(reader.supportsPreparedValueMutationBatch()).thenReturn(true);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                serializedKey(
+                                        invocation.getArgument(0), invocation.getArgument(1)));
+        when(reader.serializeBatchValue(any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeValue(
+                                        invocation.getArgument(0), IntSerializer.INSTANCE));
+
+        CountDownLatch writeEntered = new CountDownLatch(1);
+        CountDownLatch releaseWrite = new CountDownLatch(1);
+        doAnswer(
+                        invocation -> {
+                            writeEntered.countDown();
+                            assertTrue(releaseWrite.await(5, TimeUnit.SECONDS));
+                            return null;
+                        })
+                .when(reader)
+                .writePreparedValues(any(), any());
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        preparedEvictionGenerationOnlyOptions(), new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        128,
+                        CachePolicyType.LRU,
+                        2,
+                        false,
+                        0.05,
+                        1000,
+                        false,
+                        false,
+                        false,
+                        false,
+                        coordinator,
+                        77);
+        state.setPreparedEvictionBatchEnabledForTesting(true);
+        state.setAsyncPreparedEvictionWriteBehindEnabledForTesting(true);
+        state.setCurrentNamespace("async-ns");
+
+        for (int i = 0; i < 131; i++) {
+            currentKey.set("k" + i);
+            state.update(i);
+        }
+        assertTrue(writeEntered.await(5, TimeUnit.SECONDS));
+        assertEquals(1, state.getAsyncPreparedWriteBatchesSubmittedForTesting());
+        assertEquals(0, state.getAsyncPreparedWriteBatchesCompletedForTesting());
+        assertEquals(3, state.getPendingPreparedWritesForTesting());
+
+        // Force the oldest pending key to miss both ordinary caches. The overlay, not the still
+        // stale delegate, must remain authoritative while the worker is blocked.
+        state.dropCachedEntryForTesting("k0", "async-ns");
+        currentKey.set("k0");
+        assertEquals(0, state.value());
+        verify(delegate, never()).value();
+        assertEquals(1, state.getAsyncPreparedWriteOverlayHitsForTesting());
+
+        CountDownLatch flushReturned = new CountDownLatch(1);
+        AtomicReference<Throwable> flushFailure = new AtomicReference<>();
+        Thread flusher =
+                new Thread(
+                        () -> {
+                            try {
+                                state.flush();
+                            } catch (Throwable failure) {
+                                flushFailure.set(failure);
+                            } finally {
+                                flushReturned.countDown();
+                            }
+                        },
+                        "async-prepared-flush-test");
+        flusher.start();
+        assertFalse(flushReturned.await(200, TimeUnit.MILLISECONDS));
+        releaseWrite.countDown();
+        assertTrue(flushReturned.await(5, TimeUnit.SECONDS));
+        flusher.join(5000);
+        assertNull(flushFailure.get());
+        assertEquals(1, state.getAsyncPreparedWriteBatchesCompletedForTesting());
+        assertEquals(0, state.getPendingPreparedWritesForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAsyncPreparedEvictionFailurePropagates() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k0");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.supportsPreparedValueMutation()).thenReturn(true);
+        when(reader.supportsPreparedValueMutationBatch()).thenReturn(true);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                serializedKey(
+                                        invocation.getArgument(0), invocation.getArgument(1)));
+        when(reader.serializeBatchValue(any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeValue(
+                                        invocation.getArgument(0), IntSerializer.INSTANCE));
+        doAnswer(
+                        invocation -> {
+                            throw new RuntimeException("injected async write failure");
+                        })
+                .when(reader)
+                .writePreparedValues(any(), any());
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        preparedEvictionGenerationOnlyOptions(), new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        128,
+                        CachePolicyType.LRU,
+                        2,
+                        false,
+                        0.05,
+                        1000,
+                        false,
+                        false,
+                        false,
+                        false,
+                        coordinator,
+                        78);
+        state.setPreparedEvictionBatchEnabledForTesting(true);
+        state.setAsyncPreparedEvictionWriteBehindEnabledForTesting(true);
+        state.setCurrentNamespace("failure-ns");
+        for (int i = 0; i < 131; i++) {
+            currentKey.set("k" + i);
+            state.update(i);
+        }
+
+        assertThrows(RuntimeException.class, state::awaitAsyncPreparedWritesForTesting);
+        assertEquals(1, state.getAsyncPreparedWriteFailuresForTesting());
+        currentKey.set("k0");
+        assertThrows(RuntimeException.class, state::value);
+        assertThrows(RuntimeException.class, state::close);
         coordinator.close();
     }
 
