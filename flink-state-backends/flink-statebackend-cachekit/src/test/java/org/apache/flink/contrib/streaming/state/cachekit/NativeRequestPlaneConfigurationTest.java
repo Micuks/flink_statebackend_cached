@@ -31,13 +31,29 @@ import org.junit.jupiter.api.Test;
 class NativeRequestPlaneConfigurationTest {
 
     @Test
-    void testPreparedEvictionWriteRequiresNativeValueCacheAndWriteThrough() {
+    void testPreparedEvictionWriteRequiresNativeValueCache() {
         Configuration invalid = new Configuration();
         invalid.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_PREPARED_EVICTION_WRITE, true);
 
         assertThrows(
                 IllegalArgumentException.class,
                 () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalid));
+    }
+
+    @Test
+    void testPreparedEvictionWriteAllowsGenerationOnlyNativeCoherence() {
+        Configuration config = new Configuration();
+        config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_AARCH64_ONLY, false);
+        config.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ENABLED, true);
+        config.set(
+                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_PREPARED_EVICTION_WRITE, true);
+
+        NativeRequestPlaneOptions options =
+                CacheKitStateBackendFactory.nativeRequestPlaneOptions(config);
+
+        assertTrue(options.preparedEvictionWriteEnabled());
+        assertFalse(options.writeThroughMutations());
     }
 
     @Test

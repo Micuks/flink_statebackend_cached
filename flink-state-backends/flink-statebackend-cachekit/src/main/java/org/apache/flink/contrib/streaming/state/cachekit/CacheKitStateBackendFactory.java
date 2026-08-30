@@ -309,8 +309,9 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         .booleanType()
                                         .defaultValue(false)
                                         .withDescription(
-                                                        "Serialize a dirty ValueState eviction once and reuse the exact prepared key/value bytes for the authoritative RocksDB mutation and native resident-cache coherence update. "
-                                                                        + "Disabled by default; RocksDB remains authoritative and the path is used only when the backend explicitly advertises prepared mutation support.");
+                                                        "Serialize a dirty ValueState eviction once and commit the exact prepared key/value bytes directly to authoritative RocksDB. "
+                                                                        + "When native mutation write-through is enabled, the same bytes also refresh a resident native entry; otherwise the advanced generation fence makes older native entries miss and the next read refills them. "
+                                                                        + "Disabled by default; the path is used only when the backend explicitly advertises prepared mutation support.");
 
     public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH_ADAPTIVE =
                                         ConfigOptions.key(

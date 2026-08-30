@@ -3978,6 +3978,63 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testPreparedEvictionGenerationOnlyCoherenceRejectsOlderNativeValue()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("lazy-key");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        byte[] preparedKey = serializedKey("lazy-key", "lazy-ns");
+        byte[] newValue = KvStateSerializer.serializeValue(42, IntSerializer.INSTANCE);
+        when(reader.supportsPreparedValueMutation()).thenReturn(true);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenReturn(preparedKey);
+        when(reader.serializeBatchValue(any(), any())).thenReturn(newValue);
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        preparedEvictionGenerationOnlyOptions(), new FakeNativeRequestPlane());
+        assertEquals(
+                NativeRequestPlaneBridge.FILL_INSERTED,
+                coordinator.updateExactKey(
+                        75,
+                        0,
+                        preparedKey,
+                        KvStateSerializer.serializeValue(7, IntSerializer.INSTANCE)));
+
+        CachedInternalValueState<String, String, Integer> state =
+                newPreparedEvictionValueState(delegate, currentKey, coordinator, 75);
+        state.setCurrentNamespace("lazy-ns");
+        state.update(42);
+        state.flush();
+
+        verify(reader).putPreparedValue(eq(preparedKey), eq(newValue));
+        verify(delegate, never()).update(any());
+        assertEquals(1, state.getNativeWriteEpochForTesting());
+        assertEquals(1, state.getNativePreparedEvictionWritesForTesting());
+        assertEquals(0, state.getNativeMutationAttemptsForTesting());
+
+        try (NativeRequestPlaneCoordinator.BatchSlot probe =
+                coordinator.tryAcquireBatchSlot()) {
+            assertNotNull(probe);
+            probe.prepareLatest(75, 1, java.util.Collections.singletonList(preparedKey));
+            assertEquals(1, coordinator.probe(probe));
+            assertEquals(NativeRequestPlaneBridge.PROBE_MISS, probe.probeStatus(0));
+        }
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testPreparedEvictionWriteFallsBackWhenRocksDBCapabilityIsUnavailable()
             throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("fallback-key");
@@ -4254,6 +4311,30 @@ class NativePreparedValueStateTest {
                 2,
                 false,
                 true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false)
+                .withPreparedEvictionWriteEnabled(true);
+    }
+
+    private static NativeRequestPlaneOptions preparedEvictionGenerationOnlyOptions() {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                128,
+                4096,
+                4096,
+                16,
+                4096,
+                4096,
+                1,
+                2,
+                false,
+                false,
                 true,
                 false,
                 false,

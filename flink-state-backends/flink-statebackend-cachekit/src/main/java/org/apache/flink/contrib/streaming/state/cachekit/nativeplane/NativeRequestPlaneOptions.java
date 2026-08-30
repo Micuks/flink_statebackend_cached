@@ -1434,9 +1434,9 @@ public final class NativeRequestPlaneOptions implements Serializable {
 
     /** Returns an otherwise identical immutable option set with prepared eviction reuse toggled. */
     public NativeRequestPlaneOptions withPreparedEvictionWriteEnabled(boolean enabled) {
-        if (enabled && (!this.enabled || !writeThroughMutations || !valueCacheEnabled)) {
+        if (enabled && (!this.enabled || !valueCacheEnabled)) {
             throw new IllegalArgumentException(
-                    "Prepared eviction writes require native request plane, write-through mutations, and native ValueState cache.");
+                    "Prepared eviction writes require native request plane and native ValueState cache.");
         }
         return enabled == preparedEvictionWriteEnabled
                 ? this

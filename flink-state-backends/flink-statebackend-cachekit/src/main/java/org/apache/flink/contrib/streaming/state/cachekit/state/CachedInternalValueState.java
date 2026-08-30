@@ -6427,7 +6427,6 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 || !nativeRequestPlaneCoordinator.isActive()
                 || !nativeRequestPlaneCoordinator.options().preparedEvictionWriteEnabled()
                 || !nativeRequestPlaneCoordinator.options().valueCacheEnabled()
-                || !nativeRequestPlaneCoordinator.options().writeThroughMutations()
                 || !(delegate instanceof RocksDBBatchValueReader<?, ?, ?>)) {
             return false;
         }
@@ -6465,7 +6464,9 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 nativePreparedEvictionValueBytes += serializedValue.length;
             }
             nativePreparedEvictionKeyBytes += preparedKey.length;
-            publishPreparedNativeMutation(preparedKey, serializedValue, nativeEpoch);
+            if (nativeRequestPlaneCoordinator.options().writeThroughMutations()) {
+                publishPreparedNativeMutation(preparedKey, serializedValue, nativeEpoch);
+            }
         } catch (Exception failure) {
             throw new RuntimeException("Failed to flush prepared state mutation", failure);
         }
