@@ -92,6 +92,85 @@ class NativePreparedValueStateTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void testPreparedEvictionOverflowUsesOneAuthoritativeBatch() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k0");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.supportsPreparedValueMutation()).thenReturn(true);
+        when(reader.supportsPreparedValueMutationBatch()).thenReturn(true);
+        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                serializedKey(
+                                        invocation.getArgument(0), invocation.getArgument(1)));
+        when(reader.serializeBatchValue(any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                KvStateSerializer.serializeValue(
+                                        invocation.getArgument(0), IntSerializer.INSTANCE));
+        doAnswer(
+                        invocation -> {
+                            java.util.List<byte[]> keys = invocation.getArgument(0);
+                            java.util.List<byte[]> values = invocation.getArgument(1);
+                            assertEquals(3, keys.size());
+                            assertEquals(3, values.size());
+                            assertArrayEquals(serializedKey("k0", "batch-ns"), keys.get(0));
+                            assertArrayEquals(serializedKey("k1", "batch-ns"), keys.get(1));
+                            assertArrayEquals(serializedKey("k2", "batch-ns"), keys.get(2));
+                            return null;
+                        })
+                .when(reader)
+                .writePreparedValues(any(), any());
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        preparedEvictionGenerationOnlyOptions(), new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        128,
+                        CachePolicyType.LRU,
+                        2,
+                        false,
+                        0.05,
+                        1000,
+                        false,
+                        false,
+                        false,
+                        false,
+                        coordinator,
+                        76);
+        state.setPreparedEvictionBatchEnabledForTesting(true);
+        state.setCurrentNamespace("batch-ns");
+
+        for (int i = 0; i < 131; i++) {
+            currentKey.set("k" + i);
+            state.update(i);
+        }
+
+        verify(reader, times(1)).writePreparedValues(any(), any());
+        verify(reader, never()).putPreparedValue(any(), any());
+        verify(reader, never()).deletePreparedValue(any());
+        assertEquals(1, state.getNativePreparedEvictionBatchesForTesting());
+        assertEquals(3, state.getNativePreparedEvictionBatchEntriesForTesting());
+        assertEquals(3, state.getNativePreparedEvictionWritesForTesting());
+        assertEquals(3, state.getNativeGenerationAdvancesForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
     void testResidentReuseScreeningAllowsGenerationOnlyNativeCoherence() throws Exception {
         NativeRequestPlaneOptions options = generationOnlyResidentScreeningOptions();
         assertFalse(options.writeThroughMutations());

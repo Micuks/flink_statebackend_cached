@@ -138,6 +138,23 @@ public interface RocksDBBatchValueReader<K, N, V> {
         throw new UnsupportedOperationException("Prepared ValueState mutation is unavailable.");
     }
 
+    /** Whether prepared ValueState mutations can be committed in one ordered RocksDB batch. */
+    default boolean supportsPreparedValueMutationBatch() {
+        return false;
+    }
+
+    /**
+     * Atomically commits prepared ValueState mutations in list order.
+     *
+     * <p>A {@code null} value denotes delete. Implementations must reject mismatched list sizes and
+     * must not retain or mutate caller-owned arrays after return.
+     */
+    default void writePreparedValues(
+            List<byte[]> preparedRocksDBKeys, List<byte[]> serializedValues) throws Exception {
+        throw new UnsupportedOperationException(
+                "Prepared ValueState mutation batching is unavailable.");
+    }
+
     /**
      * Executes one ordered RocksDB MultiGet using the 32-byte native-order descriptor ABI.
      *

@@ -137,6 +137,67 @@ public class RocksDBBatchValueReaderTest {
         }
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testPreparedMutationBatchCommitsPutsAndDeletes() throws Exception {
+        try (RocksDBKeyedStateBackendTestFactory factory =
+                new RocksDBKeyedStateBackendTestFactory()) {
+            RocksDBKeyedStateBackend<Integer> backend =
+                    factory.create(tmp, IntSerializer.INSTANCE, 128);
+            InternalValueState<Integer, VoidNamespace, String> state =
+                    (InternalValueState<Integer, VoidNamespace, String>)
+                            backend.getPartitionedState(
+                                    VoidNamespace.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE,
+                                    new ValueStateDescriptor<>(
+                                            "batch-write", StringSerializer.INSTANCE, "fallback"));
+            backend.setCurrentKey(2);
+            state.update("old");
+
+            RocksDBBatchValueReader<Integer, VoidNamespace, String> reader =
+                    (RocksDBBatchValueReader<Integer, VoidNamespace, String>) state;
+            assertTrue(reader.supportsPreparedValueMutationBatch());
+            List<byte[]> keys =
+                    Arrays.asList(
+                            reader.serializeBatchKeyAndNamespace(
+                                    1,
+                                    VoidNamespace.INSTANCE,
+                                    IntSerializer.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE),
+                            reader.serializeBatchKeyAndNamespace(
+                                    2,
+                                    VoidNamespace.INSTANCE,
+                                    IntSerializer.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE),
+                            reader.serializeBatchKeyAndNamespace(
+                                    3,
+                                    VoidNamespace.INSTANCE,
+                                    IntSerializer.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE));
+            reader.writePreparedValues(
+                    keys,
+                    Arrays.asList(
+                            reader.serializeBatchValue("one", StringSerializer.INSTANCE),
+                            null,
+                            reader.serializeBatchValue("three", StringSerializer.INSTANCE)));
+
+            backend.setCurrentKey(1);
+            assertEquals("one", state.value());
+            backend.setCurrentKey(2);
+            assertEquals("fallback", state.value());
+            backend.setCurrentKey(3);
+            assertEquals("three", state.value());
+
+            try {
+                reader.writePreparedValues(
+                        keys, java.util.Collections.singletonList(new byte[] {1}));
+                org.junit.Assert.fail("mismatched batch sizes must be rejected");
+            } catch (IllegalArgumentException expected) {
+                // expected
+            }
+        }
+    }
+
     private static byte[] serializeKey(int key) throws Exception {
         return KvStateSerializer.serializeKeyAndNamespace(
                 key,

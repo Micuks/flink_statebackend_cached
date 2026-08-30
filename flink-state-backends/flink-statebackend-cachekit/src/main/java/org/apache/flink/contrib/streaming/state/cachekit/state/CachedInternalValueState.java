@@ -17,6 +17,7 @@ package org.apache.flink.contrib.streaming.state.cachekit.state;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 import org.apache.flink.contrib.streaming.state.cachekit.PrefetchExecutor;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.BatchEvictionListener;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePolicy;
@@ -64,6 +65,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator;
     private final int nativeStateId;
     private final NativeRequestPlaneCoordinator.ValueReadActivation nativeValueReadActivation;
+    private boolean preparedEvictionBatchEnabled = PREPARED_EVICTION_BATCH_ENABLED;
 
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
@@ -147,6 +149,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     0,
                     0,
                     1 << 20);
+    private static final boolean PREPARED_EVICTION_BATCH_ENABLED =
+            loadBooleanConfig(
+                    "state.backend.cachekit.native.value-cache.prepared-eviction-batch.enabled",
+                    false);
     private static final boolean PROMOTION_YIELD_ADMISSION_ENABLED =
             loadBooleanConfig(
                     "state.backend.cachekit.native.prefetch.promotion-yield-admission.enabled",
@@ -538,6 +544,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativePreparedEvictionDeletes;
     private volatile long nativePreparedEvictionKeyBytes;
     private volatile long nativePreparedEvictionValueBytes;
+    private volatile long nativePreparedEvictionBatches;
+    private volatile long nativePreparedEvictionBatchEntries;
     private long nativeMutationAdaptiveBatchStartAttempts;
     private boolean nativeResidentMutationBatchActive;
     private long nativeResidentMutationBatchEpoch;
@@ -1240,7 +1248,19 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // capacity is used by cacheless native mailbox experiments and must not silently
         // instantiate a 128-entry Java cache.
         int l1Size = maxEntries > 0 ? Math.max(128, maxEntries / 5) : 0;
-        this.l1Cache = createCachePolicy(l1Size, this::onL1Eviction);
+        this.l1Cache =
+                createCachePolicy(
+                        l1Size,
+                        new BatchEvictionListener<KeyNamespaceKey<K, N>, CachedValue<V>>() {
+                            @Override
+                            public void acceptAll(
+                                    java.util.List<
+                                                    java.util.Map.Entry<
+                                                            KeyNamespaceKey<K, N>, CachedValue<V>>>
+                                            entries) {
+                                onL1Evictions(entries);
+                            }
+                        });
 
         // L2 Cache: Remaining size (or full maxEntries)
         this.l2Cache = createCachePolicy(maxEntries, this::onL2Eviction);
@@ -1973,6 +1993,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                             + "nativePreparedEvictionDeletes={} "
                             + "nativePreparedEvictionKeyBytes={} "
                             + "nativePreparedEvictionValueBytes={} "
+                            + "nativePreparedEvictionBatches={} "
+                            + "nativePreparedEvictionBatchEntries={} "
                             + "nativeMutationAdaptiveBatchEnabled={} nativeActive={} "
                             + "nativeKernel={} nativeFeatureBits={} nativeFeatures={} "
                             + "nativeDisableCause={} coordinatorProbeCalls={} "
@@ -2107,6 +2129,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativePreparedEvictionDeletes,
                     nativePreparedEvictionKeyBytes,
                     nativePreparedEvictionValueBytes,
+                    nativePreparedEvictionBatches,
+                    nativePreparedEvictionBatchEntries,
                     NATIVE_RESIDENT_MUTATION_ADAPTIVE_ENABLED,
                     nativeRequestPlaneCoordinator != null
                             && nativeRequestPlaneCoordinator.isActive(),
@@ -2856,6 +2880,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getNativePreparedEvictionDeletesForTesting() {
         return nativePreparedEvictionDeletes;
+    }
+
+    long getNativePreparedEvictionBatchesForTesting() {
+        return nativePreparedEvictionBatches;
+    }
+
+    long getNativePreparedEvictionBatchEntriesForTesting() {
+        return nativePreparedEvictionBatchEntries;
+    }
+
+    void setPreparedEvictionBatchEnabledForTesting(boolean enabled) {
+        preparedEvictionBatchEnabled = enabled;
     }
 
     long getNativePreparedEvictionKeyBytesForTesting() {
@@ -6332,6 +6368,82 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
     }
 
+    /** Commits one LRU overflow before removing any candidate from the write-back cache. */
+    @SuppressWarnings("unchecked")
+    private void onL1Evictions(
+            java.util.List<java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>>> entries) {
+        if (entries.size() < 2 || !canUsePreparedEvictionBatchWrite()) {
+            for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : entries) {
+                onL1Eviction(entry.getKey(), entry.getValue());
+            }
+            return;
+        }
+        lifecycleLock.readLock().lock();
+        try {
+            if (closed) {
+                return;
+            }
+            RocksDBBatchValueReader<K, N, V> batchReader =
+                    (RocksDBBatchValueReader<K, N, V>) delegate;
+            java.util.List<byte[]> preparedKeys = new java.util.ArrayList<>();
+            java.util.List<byte[]> serializedValues = new java.util.ArrayList<>();
+            java.util.List<Long> nativeEpochs = new java.util.ArrayList<>();
+            for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : entries) {
+                CachedValue<V> value = entry.getValue();
+                if (!value.dirty) {
+                    continue;
+                }
+                KeyNamespaceKey<K, N> key = entry.getKey();
+                nativeEpochs.add(prepareDelegateWrite(key));
+                preparedKeys.add(
+                        batchReader.serializeBatchKeyAndNamespace(
+                                key.key,
+                                key.namespace,
+                                nativeMutationKeySerializer,
+                                nativeMutationNamespaceSerializer));
+                serializedValues.add(
+                        value.isNull
+                                ? null
+                                : batchReader.serializeBatchValue(
+                                        value.value, nativeMutationValueSerializer));
+            }
+            if (!preparedKeys.isEmpty()) {
+                batchReader.writePreparedValues(preparedKeys, serializedValues);
+                nativePreparedEvictionBatches++;
+                nativePreparedEvictionBatchEntries += preparedKeys.size();
+                for (int i = 0; i < preparedKeys.size(); i++) {
+                    byte[] serializedValue = serializedValues.get(i);
+                    nativePreparedEvictionKeyBytes += preparedKeys.get(i).length;
+                    if (serializedValue == null) {
+                        nativePreparedEvictionDeletes++;
+                    } else {
+                        nativePreparedEvictionWrites++;
+                        nativePreparedEvictionValueBytes += serializedValue.length;
+                    }
+                    if (shouldPublishPreparedNativeMutation(
+                            nativeRequestPlaneCoordinator.options().writeThroughMutations(),
+                            PREPARED_EVICTION_GENERATION_ONLY_MIN_VALUE_BYTES,
+                            serializedValue)) {
+                        publishPreparedNativeMutation(
+                                preparedKeys.get(i), serializedValue, nativeEpochs.get(i));
+                    }
+                }
+            }
+            for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : entries) {
+                CachedValue<V> value = entry.getValue();
+                l2Cache.put(
+                        entry.getKey(),
+                        value.dirty
+                                ? CachedValue.of(entry.getKey(), value.valueOrNull(), false)
+                                : value);
+            }
+        } catch (Exception failure) {
+            throw new RuntimeException("Failed to flush prepared state mutation batch", failure);
+        } finally {
+            lifecycleLock.readLock().unlock();
+        }
+    }
+
     // L2 Eviction Listener
     private void onL2Eviction(KeyNamespaceKey<K, N> key, CachedValue<V> value) {
         // L2 is clean (backed by delegate). Just drop.
@@ -6447,6 +6559,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return false;
         }
         return ((RocksDBBatchValueReader<K, N, V>) delegate).supportsPreparedValueMutation();
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean canUsePreparedEvictionBatchWrite() {
+        return preparedEvictionBatchEnabled
+                && cachePolicyType == CachePolicyType.LRU
+                && canUsePreparedEvictionWrite()
+                && ((RocksDBBatchValueReader<K, N, V>) delegate)
+                        .supportsPreparedValueMutationBatch();
     }
 
     @SuppressWarnings("unchecked")

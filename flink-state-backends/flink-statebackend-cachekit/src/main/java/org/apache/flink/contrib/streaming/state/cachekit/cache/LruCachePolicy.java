@@ -84,16 +84,31 @@ public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
         if (maxEntries <= 0 || map.size() <= maxEntriesWithOverflow) {
             return;
         }
+        java.util.List<Map.Entry<K, V>> candidates = new java.util.ArrayList<>();
         java.util.Iterator<Map.Entry<K, V>> iterator = map.entrySet().iterator();
-        while (map.size() > maxEntries && iterator.hasNext()) {
+        int remaining = map.size();
+        while (remaining > maxEntries && iterator.hasNext()) {
             Map.Entry<K, V> entry = iterator.next();
-            if (evictionListener != null) {
+            candidates.add(
+                    new java.util.AbstractMap.SimpleImmutableEntry<>(
+                            entry.getKey(), entry.getValue()));
+            remaining--;
+        }
+        if (evictionListener instanceof BatchEvictionListener<?, ?>) {
+            @SuppressWarnings("unchecked")
+            BatchEvictionListener<K, V> batchListener =
+                    (BatchEvictionListener<K, V>) evictionListener;
+            batchListener.acceptAll(Collections.unmodifiableList(candidates));
+        } else if (evictionListener != null) {
+            for (Map.Entry<K, V> entry : candidates) {
                 evictionListener.accept(entry.getKey(), entry.getValue());
             }
-            // Listener completion is the eviction commit point. A write-back listener may throw;
-            // retaining the entry makes the payload available for retry instead of silently
-            // discarding dirty state.
-            iterator.remove();
+        }
+        // Listener completion is the eviction commit point. A write-back listener may throw;
+        // retaining every candidate makes the complete batch available for retry instead of
+        // silently discarding dirty state.
+        for (Map.Entry<K, V> entry : candidates) {
+            map.remove(entry.getKey());
         }
     }
 }

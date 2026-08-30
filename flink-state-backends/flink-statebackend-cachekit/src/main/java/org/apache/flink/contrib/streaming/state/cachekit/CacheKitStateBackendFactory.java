@@ -323,6 +323,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "When mutation write-through is disabled, prepared eviction values smaller than this threshold are still published to the native exact-key cache, while values at or above it use generation-only invalidation. "
                                                                         + "Zero preserves generation-only behavior for every prepared value. Deletes are treated as zero-byte values. The authoritative RocksDB mutation and exact-generation fence are unchanged.");
 
+        public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_PREPARED_EVICTION_BATCH =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.value-cache.prepared-eviction-batch.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Commit one LRU overflow of prepared dirty ValueState entries with one ordered RocksDB WriteBatch before removing any cache entry. "
+                                                                        + "The option preserves authoritative RocksDB semantics, generation fencing, and per-entry native coherence publication. It is disabled by default and applies only to the LRU policy and batch-capable RocksDB ValueState.");
+
     public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH_ADAPTIVE =
                                         ConfigOptions.key(
                                                                         "state.backend.cachekit.native.value-cache.resident-mutation-batch.adaptive.enabled")

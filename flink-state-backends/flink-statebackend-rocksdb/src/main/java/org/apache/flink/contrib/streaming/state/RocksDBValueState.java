@@ -31,6 +31,7 @@ import org.apache.flink.util.FlinkRuntimeException;
 
 import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.RocksDBException;
+import org.rocksdb.WriteBatch;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -223,6 +224,37 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
         } catch (RocksDBException failure) {
             throw new FlinkRuntimeException(
                     "Error while removing prepared entry from RocksDB", failure);
+        }
+    }
+
+    @Override
+    public boolean supportsPreparedValueMutationBatch() {
+        return true;
+    }
+
+    @Override
+    public void writePreparedValues(
+            List<byte[]> preparedRocksDBKeys, List<byte[]> serializedValues) {
+        if (preparedRocksDBKeys.size() != serializedValues.size()) {
+            throw new IllegalArgumentException("Prepared key/value batch sizes do not match.");
+        }
+        if (preparedRocksDBKeys.isEmpty()) {
+            return;
+        }
+        try (WriteBatch batch = new WriteBatch()) {
+            for (int i = 0; i < preparedRocksDBKeys.size(); i++) {
+                byte[] key = preparedRocksDBKeys.get(i);
+                byte[] value = serializedValues.get(i);
+                if (value == null) {
+                    batch.remove(columnFamily, key);
+                } else {
+                    batch.put(columnFamily, key, value);
+                }
+            }
+            backend.db.write(writeOptions, batch);
+        } catch (RocksDBException failure) {
+            throw new FlinkRuntimeException(
+                    "Error while writing prepared ValueState batch to RocksDB", failure);
         }
     }
 
