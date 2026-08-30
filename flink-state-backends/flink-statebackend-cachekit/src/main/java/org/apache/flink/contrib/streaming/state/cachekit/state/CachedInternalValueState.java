@@ -157,6 +157,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             loadBooleanConfig(
                     "state.backend.cachekit.native.value-cache.async-prepared-eviction-write-behind.enabled",
                     false);
+    private static final boolean ASYNC_PREPARED_EVICTION_IN_PLACE_ENABLED =
+            loadBooleanConfig(
+                    "state.backend.cachekit.native.value-cache.async-prepared-eviction-in-place.enabled",
+                    false);
     private static final int ASYNC_PREPARED_EVICTION_WRITE_BEHIND_QUEUE_CAPACITY =
             loadIntConfig(
                     "state.backend.cachekit.native.value-cache.async-prepared-eviction-write-behind.queue-capacity",
@@ -173,6 +177,8 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             INLINE_RESERVATION_SLOT_HANDOFF_ENABLED;
     private boolean asyncPreparedEvictionWriteBehindEnabled =
             ASYNC_PREPARED_EVICTION_WRITE_BEHIND_ENABLED;
+    private boolean asyncPreparedEvictionInPlaceEnabled =
+            ASYNC_PREPARED_EVICTION_IN_PLACE_ENABLED;
     private final java.util.concurrent.ConcurrentHashMap<
                     KeyNamespaceKey<K, N>, PendingPreparedWrite<K, N, V>>
             pendingPreparedWrites = new java.util.concurrent.ConcurrentHashMap<>();
@@ -193,6 +199,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final java.util.concurrent.atomic.AtomicLong asyncPreparedWriteFailures =
             new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong asyncPreparedWriteMaxOutstanding =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncPreparedInPlacePendingEntries =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncPreparedInPlaceEntriesRemoved =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncPreparedInPlaceEntriesSuperseded =
             new java.util.concurrent.atomic.AtomicLong();
     private static final boolean PROMOTION_YIELD_ADMISSION_ENABLED =
             loadBooleanConfig(
@@ -1357,6 +1369,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                             entries) {
                                 onL1Evictions(entries);
                             }
+
+                            @Override
+                            public boolean retainAfterAccept(
+                                    KeyNamespaceKey<K, N> key, CachedValue<V> value) {
+                                return asyncPreparedEvictionInPlaceEnabled
+                                        && value.isAsyncPreparedWritePending();
+                            }
                         });
 
         // L2 Cache: Remaining size (or full maxEntries)
@@ -1733,6 +1752,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             CachedValue<V> reusableValue =
                     stickyUpdateInPlaceEnabled
                                     && l1Cache.get(lastAccessKey) == lastAccessValue
+                                    && !lastAccessValue.isAsyncPreparedWritePending()
                             ? lastAccessValue
                             : null;
             CachedValue<V> newValue;
@@ -2494,11 +2514,13 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         if (asyncPreparedEvictionWriteBehindEnabled
                 || asyncPreparedWriteBatchesSubmitted.get() > 0) {
             LOG.info(
-                    "[CACHEKIT NATIVE ASYNC PREPARED WRITEBEHIND] enabled={} "
+                    "[CACHEKIT NATIVE ASYNC PREPARED WRITEBEHIND] enabled={} inPlace={} "
                             + "submittedBatches={} submittedEntries={} completedBatches={} "
                             + "completedEntries={} overlayHits={} failures={} maxOutstanding={} "
-                            + "pendingEntries={}",
+                            + "overlayPendingEntries={} inPlacePendingEntries={} "
+                            + "inPlaceRemoved={} inPlaceSuperseded={}",
                     asyncPreparedEvictionWriteBehindEnabled,
+                    asyncPreparedEvictionInPlaceEnabled,
                     asyncPreparedWriteBatchesSubmitted.get(),
                     asyncPreparedWriteEntriesSubmitted.get(),
                     asyncPreparedWriteBatchesCompleted.get(),
@@ -2506,7 +2528,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     asyncPreparedWriteOverlayHits.get(),
                     asyncPreparedWriteFailures.get(),
                     asyncPreparedWriteMaxOutstanding.get(),
-                    pendingPreparedWrites.size());
+                    pendingPreparedWrites.size(),
+                    asyncPreparedInPlacePendingEntries.get(),
+                    asyncPreparedInPlaceEntriesRemoved.get(),
+                    asyncPreparedInPlaceEntriesSuperseded.get());
         }
         if (asyncWriteFailureOnClose != null) {
             throw asyncWriteFailureOnClose;
@@ -3096,6 +3121,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         asyncPreparedEvictionWriteBehindEnabled = enabled;
     }
 
+    void setAsyncPreparedEvictionInPlaceEnabledForTesting(boolean enabled) {
+        asyncPreparedEvictionInPlaceEnabled = enabled;
+    }
+
     void awaitAsyncPreparedWritesForTesting() {
         awaitAsyncPreparedWrites();
     }
@@ -3118,6 +3147,22 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getAsyncPreparedWriteFailuresForTesting() {
         return asyncPreparedWriteFailures.get();
+    }
+
+    long getAsyncPreparedInPlacePendingEntriesForTesting() {
+        return asyncPreparedInPlacePendingEntries.get();
+    }
+
+    long getAsyncPreparedInPlaceEntriesRemovedForTesting() {
+        return asyncPreparedInPlaceEntriesRemoved.get();
+    }
+
+    long getAsyncPreparedInPlaceEntriesSupersededForTesting() {
+        return asyncPreparedInPlaceEntriesSuperseded.get();
+    }
+
+    int getL1CacheSizeForTesting() {
+        return l1Cache.size();
     }
 
     void dropCachedEntryForTesting(K key, N namespace) {
@@ -6924,9 +6969,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             java.util.List<byte[]> serializedValues = new java.util.ArrayList<>();
             java.util.List<PendingPreparedWrite<K, N, V>> pendingWrites =
                     new java.util.ArrayList<>();
+            boolean asyncWriteBehind = canUseAsyncPreparedEvictionWriteBehind();
+            boolean inPlaceWriteBehind =
+                    asyncWriteBehind && asyncPreparedEvictionInPlaceEnabled;
             for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : entries) {
                 CachedValue<V> value = entry.getValue();
                 if (!value.dirty) {
+                    continue;
+                }
+                if (inPlaceWriteBehind && value.isAsyncPreparedWritePending()) {
                     continue;
                 }
                 KeyNamespaceKey<K, N> key = entry.getKey();
@@ -6951,12 +7002,18 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 value.isNull,
                                 preparedKey,
                                 serializedValue,
-                                nativeEpoch));
+                                nativeEpoch,
+                                inPlaceWriteBehind ? value : null,
+                                inPlaceWriteBehind ? value.version() : -1L));
             }
             if (!preparedKeys.isEmpty()) {
-                if (canUseAsyncPreparedEvictionWriteBehind()) {
-                    for (PendingPreparedWrite<K, N, V> pending : pendingWrites) {
-                        pendingPreparedWrites.put(pending.storageKey, pending);
+                if (asyncWriteBehind) {
+                    if (inPlaceWriteBehind) {
+                        markAsyncPreparedInPlaceBatch(pendingWrites);
+                    } else {
+                        for (PendingPreparedWrite<K, N, V> pending : pendingWrites) {
+                            pendingPreparedWrites.put(pending.storageKey, pending);
+                        }
                     }
                     submitAsyncPreparedWriteBatch(
                             batchReader, preparedKeys, serializedValues, pendingWrites);
@@ -6967,6 +7024,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             }
             for (java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> entry : entries) {
                 CachedValue<V> value = entry.getValue();
+                if (inPlaceWriteBehind && value.isAsyncPreparedWritePending()) {
+                    // The retained L1 object is authoritative until its immutable prepared write
+                    // commits. The worker removes that exact object after commit; a replacement
+                    // installed by a newer mailbox mutation is preserved by identity.
+                    continue;
+                }
                 l2Cache.put(
                         entry.getKey(),
                         value.dirty
@@ -6977,6 +7040,31 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             throw new RuntimeException("Failed to flush prepared state mutation batch", failure);
         } finally {
             lifecycleLock.readLock().unlock();
+        }
+    }
+
+    private void markAsyncPreparedInPlaceBatch(
+            java.util.List<PendingPreparedWrite<K, N, V>> pendingWrites) {
+        int marked = 0;
+        try {
+            for (PendingPreparedWrite<K, N, V> pending : pendingWrites) {
+                if (pending.sourceValue == null
+                        || !pending.sourceValue.beginAsyncPreparedWrite(
+                                pending.sourceVersion)) {
+                    throw new IllegalStateException(
+                            "Prepared ValueState eviction source changed before submission");
+                }
+                marked++;
+                asyncPreparedInPlacePendingEntries.incrementAndGet();
+            }
+        } catch (Throwable failure) {
+            for (int i = 0; i < marked; i++) {
+                PendingPreparedWrite<K, N, V> pending = pendingWrites.get(i);
+                if (pending.sourceValue.abortAsyncPreparedWrite()) {
+                    asyncPreparedInPlacePendingEntries.decrementAndGet();
+                }
+            }
+            throw failure;
         }
     }
 
@@ -7140,6 +7228,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                 lifecycleLock.readLock().unlock();
                             }
                         } catch (Throwable failure) {
+                            abortAsyncPreparedInPlaceBatch(pendingWrites);
                             asyncPreparedWriteFailures.incrementAndGet();
                             asyncPreparedWriteFailure.compareAndSet(null, failure);
                         } finally {
@@ -7150,6 +7239,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         }
                     });
         } catch (Throwable submissionFailure) {
+            abortAsyncPreparedInPlaceBatch(pendingWrites);
             asyncPreparedWriteFailures.incrementAndGet();
             asyncPreparedWriteFailure.compareAndSet(null, submissionFailure);
             synchronized (asyncPreparedWriteMonitor) {
@@ -7162,11 +7252,15 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
     }
 
+    @SuppressWarnings("unchecked")
     private void recordCompletedPreparedWriteBatch(
             java.util.List<PendingPreparedWrite<K, N, V>> pendingWrites,
             boolean invalidateAfterCommit) {
         nativePreparedEvictionBatches++;
         nativePreparedEvictionBatchEntries += pendingWrites.size();
+        java.util.List<PendingPreparedWrite<K, N, V>>
+                committedInPlaceSources = new java.util.ArrayList<>();
+        long inPlaceSuperseded = 0L;
         for (PendingPreparedWrite<K, N, V> pending : pendingWrites) {
             nativePreparedEvictionKeyBytes += pending.preparedKey.length;
             if (pending.serializedValue == null) {
@@ -7189,12 +7283,49 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 // RocksDB value. Exact cancellation serializes with publication: a reservation
                 // installed after this fence necessarily reads the committed value.
                 invalidateSpeculativeOwnership(pending.storageKey);
-                pendingPreparedWrites.remove(pending.storageKey, pending);
+                if (pending.sourceValue != null) {
+                    boolean sourceStillCurrent =
+                            pending.sourceValue.prepareAsyncPreparedWriteCommit(
+                                    pending.sourceVersion);
+                    if (sourceStillCurrent) {
+                        committedInPlaceSources.add(pending);
+                    } else {
+                        inPlaceSuperseded++;
+                    }
+                } else {
+                    pendingPreparedWrites.remove(pending.storageKey, pending);
+                }
+            }
+        }
+        if (!committedInPlaceSources.isEmpty()) {
+            int removed =
+                    ((LruCachePolicy<KeyNamespaceKey<K, N>, CachedValue<V>>) l1Cache)
+                            .removeAllIfSame(committedInPlaceSources);
+            asyncPreparedInPlaceEntriesRemoved.addAndGet(removed);
+            inPlaceSuperseded += committedInPlaceSources.size() - removed;
+        }
+        if (invalidateAfterCommit) {
+            asyncPreparedInPlaceEntriesSuperseded.addAndGet(inPlaceSuperseded);
+            for (PendingPreparedWrite<K, N, V> pending : pendingWrites) {
+                if (pending.sourceValue != null
+                        && pending.sourceValue.finishAsyncPreparedWrite()) {
+                    asyncPreparedInPlacePendingEntries.decrementAndGet();
+                }
             }
         }
         if (invalidateAfterCommit) {
             asyncPreparedWriteBatchesCompleted.incrementAndGet();
             asyncPreparedWriteEntriesCompleted.addAndGet(pendingWrites.size());
+        }
+    }
+
+    private void abortAsyncPreparedInPlaceBatch(
+            java.util.List<PendingPreparedWrite<K, N, V>> pendingWrites) {
+        for (PendingPreparedWrite<K, N, V> pending : pendingWrites) {
+            if (pending.sourceValue != null
+                    && pending.sourceValue.abortAsyncPreparedWrite()) {
+                asyncPreparedInPlacePendingEntries.decrementAndGet();
+            }
         }
     }
 
@@ -7800,13 +7931,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     }
 
     /** Immutable delegate bytes plus the newest mailbox-visible value for one queued write. */
-    private static final class PendingPreparedWrite<K, N, V> {
+    private static final class PendingPreparedWrite<K, N, V>
+            implements java.util.Map.Entry<KeyNamespaceKey<K, N>, CachedValue<V>> {
         private final KeyNamespaceKey<K, N> storageKey;
         private final V value;
         private final boolean tombstone;
         private final byte[] preparedKey;
         private final byte[] serializedValue;
         private final long nativeEpoch;
+        private final CachedValue<V> sourceValue;
+        private final long sourceVersion;
 
         private PendingPreparedWrite(
                 KeyNamespaceKey<K, N> storageKey,
@@ -7814,17 +7948,36 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 boolean tombstone,
                 byte[] preparedKey,
                 byte[] serializedValue,
-                long nativeEpoch) {
+                long nativeEpoch,
+                CachedValue<V> sourceValue,
+                long sourceVersion) {
             this.storageKey = storageKey;
             this.value = value;
             this.tombstone = tombstone;
             this.preparedKey = preparedKey;
             this.serializedValue = serializedValue;
             this.nativeEpoch = nativeEpoch;
+            this.sourceValue = sourceValue;
+            this.sourceVersion = sourceVersion;
         }
 
         private V valueOrNull() {
             return tombstone ? null : value;
+        }
+
+        @Override
+        public KeyNamespaceKey<K, N> getKey() {
+            return storageKey;
+        }
+
+        @Override
+        public CachedValue<V> getValue() {
+            return sourceValue;
+        }
+
+        @Override
+        public CachedValue<V> setValue(CachedValue<V> value) {
+            throw new UnsupportedOperationException("immutable pending prepared write");
         }
     }
 
@@ -8108,9 +8261,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     private static final class CachedValue<V> {
         private final KeyNamespaceKey<?, ?> storageKey;
-        private V value;
-        private boolean isNull;
-        private boolean dirty;
+        private volatile V value;
+        private volatile boolean isNull;
+        private volatile boolean dirty;
+        private volatile boolean asyncPreparedWritePending;
+        private long version;
 
         private CachedValue(
                 KeyNamespaceKey<?, ?> storageKey, V value, boolean isNull, boolean dirty) {
@@ -8130,10 +8285,52 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             return (KeyNamespaceKey<K, N>) storageKey;
         }
 
-        private void replace(V value, boolean dirty) {
+        private synchronized void replace(V value, boolean dirty) {
             this.value = value;
             this.isNull = value == null;
             this.dirty = dirty;
+            version++;
+        }
+
+        private synchronized long version() {
+            return version;
+        }
+
+        private synchronized boolean beginAsyncPreparedWrite(long expectedVersion) {
+            if (asyncPreparedWritePending || !dirty || version != expectedVersion) {
+                return false;
+            }
+            asyncPreparedWritePending = true;
+            return true;
+        }
+
+        private boolean isAsyncPreparedWritePending() {
+            return asyncPreparedWritePending;
+        }
+
+        /** Marks the submitted version clean but keeps the pending fence through cache removal. */
+        private synchronized boolean prepareAsyncPreparedWriteCommit(long expectedVersion) {
+            if (!asyncPreparedWritePending || version != expectedVersion) {
+                return false;
+            }
+            dirty = false;
+            return true;
+        }
+
+        private synchronized boolean finishAsyncPreparedWrite() {
+            if (!asyncPreparedWritePending) {
+                return false;
+            }
+            asyncPreparedWritePending = false;
+            return true;
+        }
+
+        private synchronized boolean abortAsyncPreparedWrite() {
+            if (!asyncPreparedWritePending) {
+                return false;
+            }
+            asyncPreparedWritePending = false;
+            return true;
         }
 
         V valueOrNull() {

@@ -16,11 +16,15 @@
 package org.apache.flink.contrib.streaming.state.cachekit.cache;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class LruCachePolicyTest {
@@ -65,5 +69,37 @@ class LruCachePolicyTest {
         assertEquals(1, cache.get("a"));
         assertEquals(2, cache.get("b"));
         assertEquals(3, cache.get("c"));
+    }
+
+    @Test
+    void testAsyncBatchCanRetainThenRemoveExactAcceptedObjects() {
+        Set<String> pending = new HashSet<>();
+        BatchEvictionListener<String, Integer> listener =
+                new BatchEvictionListener<String, Integer>() {
+                    @Override
+                    public void acceptAll(List<Map.Entry<String, Integer>> entries) {
+                        for (Map.Entry<String, Integer> entry : entries) {
+                            pending.add(entry.getKey());
+                        }
+                    }
+
+                    @Override
+                    public boolean retainAfterAccept(String key, Integer value) {
+                        return pending.contains(key);
+                    }
+                };
+        LruCachePolicy<String, Integer> cache = new LruCachePolicy<>(2, 2, listener);
+
+        cache.put("a", 1);
+        cache.put("b", 2);
+        cache.put("c", 3);
+        cache.put("d", 4);
+        cache.put("e", 5);
+
+        assertEquals(5, cache.size());
+        assertEquals(new HashSet<>(java.util.Arrays.asList("a", "b", "c")), pending);
+        assertTrue(cache.removeIfSame("a", 1));
+        assertFalse(cache.removeIfSame("b", 99));
+        assertEquals(2, cache.get("b"));
     }
 }

@@ -343,6 +343,17 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                                         + "A per-key pending overlay remains authoritative until commit, failures are propagated, and snapshot/close drain every accepted batch. "
                                                                         + "Requires prepared eviction batching and exact-key speculative invalidation; disabled by default.");
 
+        public static final ConfigOption<Boolean>
+                        NATIVE_VALUE_CACHE_ASYNC_PREPARED_EVICTION_IN_PLACE =
+                        ConfigOptions.key(
+                                                        "state.backend.cachekit.native.value-cache.async-prepared-eviction-in-place.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Keep an asynchronously written dirty LRU entry in its existing authoritative L1 object instead of copying every entry into a ConcurrentHashMap overlay. "
+                                                                        + "The worker removes only the exact submitted object after RocksDB commit; a newer same-key mailbox mutation replaces that object and remains dirty. "
+                                                                        + "Requires asynchronous prepared eviction write-behind and the LRU policy; disabled by default.");
+
     public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_RESIDENT_MUTATION_BATCH_ADAPTIVE =
                                         ConfigOptions.key(
                                                                         "state.backend.cachekit.native.value-cache.resident-mutation-batch.adaptive.enabled")

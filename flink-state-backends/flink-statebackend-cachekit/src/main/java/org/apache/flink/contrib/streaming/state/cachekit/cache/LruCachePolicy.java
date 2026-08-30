@@ -48,12 +48,12 @@ public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
     }
 
     @Override
-    public V get(K key) {
+    public synchronized V get(K key) {
         return map.get(key);
     }
 
     @Override
-    public V put(K key, V value) {
+    public synchronized V put(K key, V value) {
         Objects.requireNonNull(key, "key");
         V previous = map.put(key, value);
         evictIfNeeded();
@@ -61,43 +61,83 @@ public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
     }
 
     @Override
-    public V remove(K key) {
+    public synchronized V remove(K key) {
         return map.remove(key);
     }
 
+    /** Removes {@code key} only when it still maps to the exact object accepted by a listener. */
+    public synchronized boolean removeIfSame(K key, V expectedValue) {
+        V current = map.get(key);
+        if (current != expectedValue) {
+            return false;
+        }
+        map.remove(key);
+        return true;
+    }
+
+    /** Batch form of {@link #removeIfSame(Object, Object)} with one cache lock acquisition. */
+    public synchronized int removeAllIfSame(
+            java.util.List<? extends Map.Entry<K, V>> expectedEntries) {
+        int removed = 0;
+        for (Map.Entry<K, V> entry : expectedEntries) {
+            V current = map.get(entry.getKey());
+            if (current == entry.getValue()) {
+                map.remove(entry.getKey());
+                removed++;
+            }
+        }
+        return removed;
+    }
+
     @Override
-    public void clear() {
+    public synchronized void clear() {
         map.clear();
     }
 
     @Override
-    public int size() {
+    public synchronized int size() {
         return map.size();
     }
 
     @Override
-    public Iterable<Map.Entry<K, V>> entries() {
-        return Collections.unmodifiableSet(map.entrySet());
+    public synchronized Iterable<Map.Entry<K, V>> entries() {
+        java.util.List<Map.Entry<K, V>> snapshot = new java.util.ArrayList<>(map.size());
+        for (Map.Entry<K, V> entry : map.entrySet()) {
+            snapshot.add(
+                    new java.util.AbstractMap.SimpleImmutableEntry<>(
+                            entry.getKey(), entry.getValue()));
+        }
+        return Collections.unmodifiableList(snapshot);
     }
 
     private void evictIfNeeded() {
         if (maxEntries <= 0 || map.size() <= maxEntriesWithOverflow) {
             return;
         }
+        BatchEvictionListener<K, V> batchListener = null;
+        if (evictionListener instanceof BatchEvictionListener<?, ?>) {
+            @SuppressWarnings("unchecked")
+            BatchEvictionListener<K, V> castListener =
+                    (BatchEvictionListener<K, V>) evictionListener;
+            batchListener = castListener;
+        }
         java.util.List<Map.Entry<K, V>> candidates = new java.util.ArrayList<>();
         java.util.Iterator<Map.Entry<K, V>> iterator = map.entrySet().iterator();
-        int remaining = map.size();
-        while (remaining > maxEntries && iterator.hasNext()) {
+        int removalsNeeded = map.size() - maxEntries;
+        while (candidates.size() < removalsNeeded && iterator.hasNext()) {
             Map.Entry<K, V> entry = iterator.next();
+            if (batchListener != null
+                    && batchListener.retainAfterAccept(entry.getKey(), entry.getValue())) {
+                continue;
+            }
             candidates.add(
                     new java.util.AbstractMap.SimpleImmutableEntry<>(
                             entry.getKey(), entry.getValue()));
-            remaining--;
         }
-        if (evictionListener instanceof BatchEvictionListener<?, ?>) {
-            @SuppressWarnings("unchecked")
-            BatchEvictionListener<K, V> batchListener =
-                    (BatchEvictionListener<K, V>) evictionListener;
+        if (candidates.isEmpty()) {
+            return;
+        }
+        if (batchListener != null) {
             batchListener.acceptAll(Collections.unmodifiableList(candidates));
         } else if (evictionListener != null) {
             for (Map.Entry<K, V> entry : candidates) {
@@ -108,7 +148,10 @@ public final class LruCachePolicy<K, V> implements CachePolicy<K, V> {
         // retaining every candidate makes the complete batch available for retry instead of
         // silently discarding dirty state.
         for (Map.Entry<K, V> entry : candidates) {
-            map.remove(entry.getKey());
+            if (batchListener == null
+                    || !batchListener.retainAfterAccept(entry.getKey(), entry.getValue())) {
+                map.remove(entry.getKey());
+            }
         }
     }
 }
