@@ -84,7 +84,6 @@ class CachedInternalMapStateTest {
                         100,
                         metrics,
                         true,
-                        "SCALAR",
                         library);
         try {
             state.setCurrentNamespace(VoidNamespace.INSTANCE);

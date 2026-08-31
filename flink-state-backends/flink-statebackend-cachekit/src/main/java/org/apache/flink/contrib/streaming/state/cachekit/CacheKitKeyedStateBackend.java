@@ -103,7 +103,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final boolean mapSnapshotCacheNativeEnabled;
     private final boolean mapSnapshotCacheNativeClassifierEnabled;
     private final boolean mapSnapshotCacheNativeRemoveHintEnabled;
-    private final String mapSnapshotCacheNativeKernel;
     private final String mapSnapshotCacheNativeLibraryPath;
     private final boolean listStateCowEnabled;
     private final boolean listStateRywEnabled;
@@ -194,7 +193,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 mapSnapshotCacheMaxEntries,
                 false,
                 false,
-                "AUTO",
                 "",
                 listStateCowEnabled,
                 listStateRywEnabled,
@@ -231,7 +229,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean mapIterationCacheFillEnabled,
             int mapSnapshotCacheMaxEntries,
             boolean mapSnapshotCacheNativeEnabled,
-            String mapSnapshotCacheNativeKernel,
             String mapSnapshotCacheNativeLibraryPath,
             boolean listStateCowEnabled,
             boolean listStateRywEnabled,
@@ -267,7 +264,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 mapSnapshotCacheMaxEntries,
                 mapSnapshotCacheNativeEnabled,
                 false,
-                mapSnapshotCacheNativeKernel,
                 mapSnapshotCacheNativeLibraryPath,
                 listStateCowEnabled,
                 listStateRywEnabled,
@@ -305,7 +301,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             int mapSnapshotCacheMaxEntries,
             boolean mapSnapshotCacheNativeEnabled,
             boolean mapSnapshotCacheNativeClassifierEnabled,
-            String mapSnapshotCacheNativeKernel,
             String mapSnapshotCacheNativeLibraryPath,
             boolean listStateCowEnabled,
             boolean listStateRywEnabled,
@@ -342,7 +337,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 mapSnapshotCacheNativeEnabled,
                 mapSnapshotCacheNativeClassifierEnabled,
                 false,
-                mapSnapshotCacheNativeKernel,
                 mapSnapshotCacheNativeLibraryPath,
                 listStateCowEnabled,
                 listStateRywEnabled,
@@ -381,7 +375,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean mapSnapshotCacheNativeEnabled,
             boolean mapSnapshotCacheNativeClassifierEnabled,
             boolean mapSnapshotCacheNativeRemoveHintEnabled,
-            String mapSnapshotCacheNativeKernel,
             String mapSnapshotCacheNativeLibraryPath,
             boolean listStateCowEnabled,
             boolean listStateRywEnabled,
@@ -421,7 +414,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.mapSnapshotCacheNativeEnabled = mapSnapshotCacheNativeEnabled;
         this.mapSnapshotCacheNativeClassifierEnabled = mapSnapshotCacheNativeClassifierEnabled;
         this.mapSnapshotCacheNativeRemoveHintEnabled = mapSnapshotCacheNativeRemoveHintEnabled;
-        this.mapSnapshotCacheNativeKernel = mapSnapshotCacheNativeKernel;
         this.mapSnapshotCacheNativeLibraryPath = mapSnapshotCacheNativeLibraryPath;
         this.listStateCowEnabled = listStateCowEnabled;
         this.listStateRywEnabled = listStateRywEnabled;
@@ -533,7 +525,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapSnapshotCacheNativeEnabled,
                     mapSnapshotCacheNativeClassifierEnabled,
                     mapSnapshotCacheNativeRemoveHintEnabled,
-                    mapSnapshotCacheNativeKernel,
                     mapSnapshotCacheNativeLibraryPath);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (S) wrapped;
@@ -669,7 +660,6 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     mapSnapshotCacheNativeEnabled,
                     mapSnapshotCacheNativeClassifierEnabled,
                     mapSnapshotCacheNativeRemoveHintEnabled,
-                    mapSnapshotCacheNativeKernel,
                     mapSnapshotCacheNativeLibraryPath);
             wrappersByDelegateIdentity.put(internal, wrapped);
             return (IS) wrapped;
