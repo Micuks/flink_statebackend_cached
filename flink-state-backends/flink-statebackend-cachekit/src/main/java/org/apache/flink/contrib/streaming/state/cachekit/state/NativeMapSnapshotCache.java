@@ -93,14 +93,12 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
 
     NativeMapSnapshotCache(
             int maxEntries,
-            String kernel,
             String libraryPath,
             TypeSerializer<K> keySerializer,
             TypeSerializer<N> namespaceSerializer,
             TypeSerializer<UK> userKeySerializer) {
         this(
                 maxEntries,
-                kernel,
                 libraryPath,
                 false,
                 false,
@@ -112,7 +110,6 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
 
     NativeMapSnapshotCache(
             int maxEntries,
-            String kernel,
             String libraryPath,
             boolean classifierEnabled,
             TypeSerializer<K> keySerializer,
@@ -120,7 +117,6 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
             TypeSerializer<UK> userKeySerializer) {
         this(
                 maxEntries,
-                kernel,
                 libraryPath,
                 classifierEnabled,
                 false,
@@ -132,7 +128,6 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
 
     NativeMapSnapshotCache(
             int maxEntries,
-            String kernel,
             String libraryPath,
             boolean classifierEnabled,
             MapSnapshotCacheMetrics metrics,
@@ -141,7 +136,6 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
             TypeSerializer<UK> userKeySerializer) {
         this(
                 maxEntries,
-                kernel,
                 libraryPath,
                 classifierEnabled,
                 false,
@@ -153,7 +147,6 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
 
     NativeMapSnapshotCache(
             int maxEntries,
-            String kernel,
             String libraryPath,
             boolean classifierEnabled,
             boolean removeHintEnabled,
@@ -172,8 +165,7 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
         this.removeHintEnabled = removeHintEnabled;
         this.membershipCounts = removeHintEnabled ? new Long2IntOpenHashMap() : null;
         loadLibrary(libraryPath);
-        this.handle =
-                nativeCreate(maxEntries, kernelId(kernel), NATIVE_MISS, NATIVE_EMPTY);
+        this.handle = nativeCreate(maxEntries, NATIVE_MISS, NATIVE_EMPTY);
         if (handle == 0) {
             throw new IllegalStateException("Native snapshot cache creation returned a null handle");
         }
@@ -484,24 +476,6 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
         }
     }
 
-    private static int kernelId(String configuredKernel) {
-        String kernel = configuredKernel == null
-                ? "AUTO"
-                : configuredKernel.trim().toUpperCase(Locale.ROOT);
-        switch (kernel) {
-            case "SCALAR":
-                return 0;
-            case "NEON":
-                return 1;
-            case "SVE":
-                return 2;
-            case "AUTO":
-                return 3;
-            default:
-                throw new IllegalArgumentException("Unknown Native snapshot kernel: " + configuredKernel);
-        }
-    }
-
     static final class Lookup<T> {
         private final T userKey;
 
@@ -566,7 +540,6 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
 
     private static native long nativeCreate(
             int maxEntries,
-            int kernel,
             Object missSentinel,
             Object emptySentinel);
 

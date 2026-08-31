@@ -422,7 +422,6 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
         JNIEnv* env,
         jclass,
         jint max_entries,
-        jint kernel,
         jobject miss_sentinel,
         jobject empty_sentinel) {
     try {
@@ -435,7 +434,7 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
         return ByteHandle(new JniByteSnapshotCache(
                 env,
                 static_cast<std::size_t>(max_entries),
-                Kernel(kernel),
+                ProbeKernel::kAuto,
                 miss_sentinel,
                 empty_sentinel));
     } catch (const std::exception& error) {

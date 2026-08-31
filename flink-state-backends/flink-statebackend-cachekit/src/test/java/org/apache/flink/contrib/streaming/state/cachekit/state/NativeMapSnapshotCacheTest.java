@@ -71,7 +71,6 @@ class NativeMapSnapshotCacheTest {
                         () ->
                                 new NativeMapSnapshotCache<>(
                                         8,
-                                        "SCALAR",
                                         "",
                                         true,
                                         IntSerializer.INSTANCE,
@@ -88,7 +87,6 @@ class NativeMapSnapshotCacheTest {
         NativeMapSnapshotCache<RowData, VoidNamespace, RowData> cache =
                 new NativeMapSnapshotCache<>(
                         8,
-                        "SCALAR",
                         library,
                         serializer,
                         VoidNamespaceSerializer.INSTANCE,
@@ -121,7 +119,6 @@ class NativeMapSnapshotCacheTest {
         try (NativeMapSnapshotCache<RowData, VoidNamespace, String> cache =
                 new NativeMapSnapshotCache<>(
                         8,
-                        "SCALAR",
                         nativeLibrary(),
                         serializer,
                         VoidNamespaceSerializer.INSTANCE,
@@ -144,7 +141,6 @@ class NativeMapSnapshotCacheTest {
         NativeMapSnapshotCache<Integer, Integer, String> cache =
                 new NativeMapSnapshotCache<>(
                         2,
-                        "SCALAR",
                         library,
                         IntSerializer.INSTANCE,
                         IntSerializer.INSTANCE,
@@ -178,7 +174,6 @@ class NativeMapSnapshotCacheTest {
         try (NativeMapSnapshotCache<Integer, Integer, String> cache =
                 new NativeMapSnapshotCache<>(
                         2,
-                        "SCALAR",
                         nativeLibrary(),
                         false,
                         true,
@@ -211,7 +206,6 @@ class NativeMapSnapshotCacheTest {
         try (NativeMapSnapshotCache<Integer, Integer, String> ignored =
                 new NativeMapSnapshotCache<>(
                         2,
-                        "SCALAR",
                         nativeLibrary(),
                         IntSerializer.INSTANCE,
                         IntSerializer.INSTANCE,
@@ -240,7 +234,6 @@ class NativeMapSnapshotCacheTest {
         try (NativeMapSnapshotCache<Integer, Integer, String> cache =
                 new NativeMapSnapshotCache<>(
                         2,
-                        "AUTO",
                         nativeLibrary(),
                         IntSerializer.INSTANCE,
                         IntSerializer.INSTANCE,
@@ -256,7 +249,6 @@ class NativeMapSnapshotCacheTest {
         try (NativeMapSnapshotCache<Integer, Integer, String> cache =
                 new NativeMapSnapshotCache<>(
                         2,
-                        "SCALAR",
                         nativeLibrary(),
                         false,
                         metrics,
@@ -288,7 +280,6 @@ class NativeMapSnapshotCacheTest {
         try (NativeMapSnapshotCache<RowData, VoidNamespace, String> cache =
                 new NativeMapSnapshotCache<>(
                         8,
-                        "SCALAR",
                         nativeLibrary(),
                         false,
                         metrics,
