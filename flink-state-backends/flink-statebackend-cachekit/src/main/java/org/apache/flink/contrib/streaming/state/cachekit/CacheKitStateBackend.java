@@ -86,7 +86,6 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final boolean mapSnapshotCacheNativeEnabled;
     private final boolean mapSnapshotCacheNativeClassifierEnabled;
     private final boolean mapSnapshotCacheNativeRemoveHintEnabled;
-    private final String mapSnapshotCacheNativeKernel;
     private final String mapSnapshotCacheNativeLibraryPath;
     private final boolean listStateCowEnabled;
     private final boolean listStateRywEnabled;
@@ -141,7 +140,6 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapSnapshotCacheMaxEntries,
                 false,
                 false,
-                "AUTO",
                 "",
                 listStateCowEnabled,
                 listStateRywEnabled,
@@ -171,7 +169,6 @@ public class CacheKitStateBackend extends AbstractStateBackend
             boolean mapIterationCacheFillEnabled,
             int mapSnapshotCacheMaxEntries,
             boolean mapSnapshotCacheNativeEnabled,
-            String mapSnapshotCacheNativeKernel,
             String mapSnapshotCacheNativeLibraryPath,
             boolean listStateCowEnabled,
             boolean listStateRywEnabled,
@@ -200,7 +197,6 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapSnapshotCacheMaxEntries,
                 mapSnapshotCacheNativeEnabled,
                 false,
-                mapSnapshotCacheNativeKernel,
                 mapSnapshotCacheNativeLibraryPath,
                 listStateCowEnabled,
                 listStateRywEnabled,
@@ -231,7 +227,6 @@ public class CacheKitStateBackend extends AbstractStateBackend
             int mapSnapshotCacheMaxEntries,
             boolean mapSnapshotCacheNativeEnabled,
             boolean mapSnapshotCacheNativeClassifierEnabled,
-            String mapSnapshotCacheNativeKernel,
             String mapSnapshotCacheNativeLibraryPath,
             boolean listStateCowEnabled,
             boolean listStateRywEnabled,
@@ -261,7 +256,6 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapSnapshotCacheNativeEnabled,
                 mapSnapshotCacheNativeClassifierEnabled,
                 false,
-                mapSnapshotCacheNativeKernel,
                 mapSnapshotCacheNativeLibraryPath,
                 listStateCowEnabled,
                 listStateRywEnabled,
@@ -293,7 +287,6 @@ public class CacheKitStateBackend extends AbstractStateBackend
             boolean mapSnapshotCacheNativeEnabled,
             boolean mapSnapshotCacheNativeClassifierEnabled,
             boolean mapSnapshotCacheNativeRemoveHintEnabled,
-            String mapSnapshotCacheNativeKernel,
             String mapSnapshotCacheNativeLibraryPath,
             boolean listStateCowEnabled,
             boolean listStateRywEnabled,
@@ -322,7 +315,6 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.mapSnapshotCacheNativeEnabled = mapSnapshotCacheNativeEnabled;
         this.mapSnapshotCacheNativeClassifierEnabled = mapSnapshotCacheNativeClassifierEnabled;
         this.mapSnapshotCacheNativeRemoveHintEnabled = mapSnapshotCacheNativeRemoveHintEnabled;
-        this.mapSnapshotCacheNativeKernel = mapSnapshotCacheNativeKernel;
         this.mapSnapshotCacheNativeLibraryPath = mapSnapshotCacheNativeLibraryPath;
         this.listStateCowEnabled = listStateCowEnabled;
         this.listStateRywEnabled = listStateRywEnabled;
@@ -413,7 +405,6 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapSnapshotCacheNativeEnabled,
                 mapSnapshotCacheNativeClassifierEnabled,
                 mapSnapshotCacheNativeRemoveHintEnabled,
-                mapSnapshotCacheNativeKernel,
                 mapSnapshotCacheNativeLibraryPath,
                 listStateCowEnabled,
                 listStateRywEnabled,
@@ -494,8 +485,6 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_ENABLED);
         final boolean mapSnapshotNativeClassifierEnabled =
                 config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_CLASSIFIER_ENABLED);
-        final String mapSnapshotNativeKernel =
-                config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_KERNEL);
         final boolean mapSnapshotNativeRemoveHintEnabled =
                 config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_REMOVE_HINT_ENABLED);
         final String mapSnapshotNativeLibraryPath =
@@ -534,7 +523,6 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapSnapshotNativeEnabled,
                 mapSnapshotNativeClassifierEnabled,
                 mapSnapshotNativeRemoveHintEnabled,
-                mapSnapshotNativeKernel,
                 mapSnapshotNativeLibraryPath,
                 listStateCowEnabled,
                 listStateRywEnabled,

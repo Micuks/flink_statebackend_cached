@@ -170,12 +170,6 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         + "prefix-classifier experiment. Must remain false because CacheKit "
                                                         + "does not modify the RocksDB state backend.");
 
-        public static final ConfigOption<String> MAP_SNAPSHOT_CACHE_NATIVE_KERNEL = ConfigOptions
-                        .key("state.backend.cachekit.map.snapshot.cache.native.kernel")
-                        .stringType()
-                        .defaultValue("AUTO")
-                        .withDescription("Native snapshot probe kernel: AUTO, SCALAR, NEON, or SVE.");
-
         public static final ConfigOption<Boolean> MAP_SNAPSHOT_CACHE_NATIVE_REMOVE_HINT_ENABLED =
                         ConfigOptions
                                         .key("state.backend.cachekit.map.snapshot.cache.native.remove-hint.enabled")
@@ -267,7 +261,6 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 		final boolean mapSnapshotNativeEnabled = config.get(MAP_SNAPSHOT_CACHE_NATIVE_ENABLED);
 		final boolean mapSnapshotNativeClassifierEnabled =
 				config.get(MAP_SNAPSHOT_CACHE_NATIVE_CLASSIFIER_ENABLED);
-		final String mapSnapshotNativeKernel = config.get(MAP_SNAPSHOT_CACHE_NATIVE_KERNEL);
 		final boolean mapSnapshotNativeRemoveHintEnabled =
 				config.get(MAP_SNAPSHOT_CACHE_NATIVE_REMOVE_HINT_ENABLED);
 		final String mapSnapshotNativeLibraryPath = config.get(MAP_SNAPSHOT_CACHE_NATIVE_LIBRARY_PATH);
@@ -280,7 +273,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 			final boolean priorityQueueOptEnabled = config.get(PRIORITY_QUEUE_OPT_ENABLED);
 
 			System.out.printf(
-				"CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, mapSnapshotNative=%s, mapSnapshotClassifier=%s, mapSnapshotKernel=%s, mapSnapshotRemoveHint=%s, diagnostics=%s, delegate=%s, listStateCow=%s, listStateRyw=%s, clearedKeysCap=%d, priorityQueueOpt=%s%n",
+				"CacheKit Factory: maxEntries=%d, policy=%s, lruOverflow=%d, bypass=%s, threshold=%.2f, window=%d, mapPresenceMax=%d, mapPresencePolicy=%s, mapPresenceOverflow=%d, mapPresenceImpl=%s, mapCacheMax=%d, mapCachePolicy=%s, mapCacheOverflow=%d, mapBypass=%s, mapHitThreshold=%.2f, mapHitWindow=%d, mapIterFill=%s, mapSnapshotMax=%d, mapSnapshotNative=%s, mapSnapshotClassifier=%s, mapSnapshotRemoveHint=%s, diagnostics=%s, delegate=%s, listStateCow=%s, listStateRyw=%s, clearedKeysCap=%d, priorityQueueOpt=%s%n",
                                 maxEntries,
                                 policyType,
                                 lruOverflow,
@@ -301,7 +294,6 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 							mapSnapshotMaxEntries,
 							mapSnapshotNativeEnabled,
 							mapSnapshotNativeClassifierEnabled,
-							mapSnapshotNativeKernel,
 							mapSnapshotNativeRemoveHintEnabled,
 							diagnosticsEnabled,
 							delegateClass,
@@ -351,7 +343,6 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 								mapSnapshotNativeEnabled,
 								mapSnapshotNativeClassifierEnabled,
 								mapSnapshotNativeRemoveHintEnabled,
-								mapSnapshotNativeKernel,
 								mapSnapshotNativeLibraryPath,
 								listStateCowEnabled,
 								listStateRywEnabled,

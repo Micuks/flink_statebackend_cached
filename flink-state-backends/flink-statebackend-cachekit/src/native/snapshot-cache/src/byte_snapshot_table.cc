@@ -1,7 +1,5 @@
 #include "cachekit_byte_snapshot_table.h"
 
-#include "byte_probe.h"
-
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -23,8 +21,7 @@ namespace {
 
 constexpr std::uint8_t kSlotEmpty = 0;
 constexpr std::uint8_t kSlotDeleted = 1;
-constexpr std::size_t kNeonBytes = 16;
-constexpr std::size_t kMaximumVectorBytes = 256;
+constexpr std::size_t kMinimumTableCapacity = 256;
 constexpr std::uint64_t kMidrImplementerMask = UINT64_C(0xff000000);
 constexpr std::uint64_t kMidrPartMask = UINT64_C(0x0000fff0);
 constexpr std::uint64_t kHiSiliconImplementer = UINT64_C(0x48000000);
@@ -137,7 +134,7 @@ std::size_t TableCapacity(std::size_t max_entries) {
             || max_entries > static_cast<std::size_t>(std::numeric_limits<int>::max() / 2)) {
         throw std::invalid_argument("max_entries must be in [1, INT_MAX/2]");
     }
-    const std::size_t target = std::max(kMaximumVectorBytes, max_entries * 2);
+    const std::size_t target = std::max(kMinimumTableCapacity, max_entries * 2);
     std::size_t capacity = 1;
     while (capacity < target) {
         capacity <<= 1;
@@ -145,94 +142,16 @@ std::size_t TableCapacity(std::size_t max_entries) {
     return capacity;
 }
 
-ProbeKernel SelectKernel(ProbeKernel requested) {
-    if (requested == ProbeKernel::kAuto) {
-        if (IsKunpengSnapshotTarget()) {
-            return ProbeKernel::kScalar;
-        }
-        if (SveAvailable() && SveVectorBytes() != 0) {
-            return ProbeKernel::kSve;
-        }
-        return NeonAvailable() ? ProbeKernel::kNeon : ProbeKernel::kScalar;
-    }
-    if (requested == ProbeKernel::kSve && (!SveAvailable() || SveVectorBytes() == 0)) {
-        throw std::invalid_argument("SVE was requested but is unavailable");
-    }
-    if (requested == ProbeKernel::kNeon && !NeonAvailable()) {
-        throw std::invalid_argument("NEON was requested but is unavailable");
-    }
-    return requested;
-}
-
-std::size_t VectorBytes(ProbeKernel kernel) {
-    if (kernel == ProbeKernel::kSve) {
-        return SveVectorBytes();
-    }
-    return kernel == ProbeKernel::kNeon ? kNeonBytes : 1;
-}
-
-ByteFindSlotFunction FindFunction(ProbeKernel kernel) {
-    if (kernel == ProbeKernel::kSve) {
-        return FindByteSlotSve;
-    }
-    return kernel == ProbeKernel::kNeon ? FindByteSlotNeon : FindByteSlotScalar;
-}
-
-const char* KernelName(ProbeKernel kernel) {
-    switch (kernel) {
-        case ProbeKernel::kScalar:
-            return "scalar";
-        case ProbeKernel::kNeon:
-            return "neon";
-        case ProbeKernel::kSve:
-            return "sve";
-        case ProbeKernel::kAuto:
-            break;
-    }
-    return "invalid";
-}
-
 }  // namespace
-
-#if !defined(CACHEKIT_HAS_NEON_OBJECT)
-int FindByteSlotNeon(
-        const std::uint8_t*,
-        const std::uint64_t*,
-        const std::vector<std::uint8_t>*,
-        std::size_t,
-        std::uint64_t,
-        std::uint8_t,
-        const std::uint8_t*,
-        std::size_t) {
-    return -1;
-}
-#endif
-
-#if !defined(CACHEKIT_HAS_SVE_OBJECT)
-int FindByteSlotSve(
-        const std::uint8_t*,
-        const std::uint64_t*,
-        const std::vector<std::uint8_t>*,
-        std::size_t,
-        std::uint64_t,
-        std::uint8_t,
-        const std::uint8_t*,
-        std::size_t) {
-    return -1;
-}
-#endif
 
 class ByteSnapshotTable::Impl {
 public:
-    Impl(std::size_t max_entries, ProbeKernel requested_kernel)
+    explicit Impl(std::size_t max_entries)
             : max_entries_(max_entries),
               capacity_(TableCapacity(max_entries)),
               mask_(capacity_ - 1),
-              kernel_(SelectKernel(requested_kernel)),
-              vector_bytes_(VectorBytes(kernel_)),
-              find_slot_(FindFunction(kernel_)),
               use_kunpeng_crc32_(KunpengCrc32Available()),
-              control_(capacity_ + vector_bytes_, kSlotEmpty),
+              control_(capacity_, kSlotEmpty),
               hashes_(capacity_),
               keys_(capacity_),
               kinds_(capacity_),
@@ -286,7 +205,7 @@ public:
         if (control_[index] == kSlotDeleted) {
             --deleted_;
         }
-        SetControl(index, Fingerprint(hash));
+        control_[index] = Fingerprint(hash);
         hashes_[index] = hash;
         keys_[index].assign(key, key + key_size);
         kinds_[index] = static_cast<std::uint8_t>(kind);
@@ -356,9 +275,6 @@ public:
     }
 
     std::size_t size() const { return size_; }
-    ProbeKernel active_kernel() const { return kernel_; }
-    std::size_t vector_bytes() const { return vector_bytes_; }
-    const char* active_kernel_name() const { return KernelName(kernel_); }
     const char* hash_name() const { return use_kunpeng_crc32_ ? "crc32c-16" : "fnv64"; }
 
 private:
@@ -381,15 +297,23 @@ private:
             const std::uint8_t* key,
             std::size_t key_size,
             std::uint64_t hash) const {
-        return find_slot_(
-                control_.data(),
-                hashes_.data(),
-                keys_.data(),
-                capacity_,
-                hash,
-                Fingerprint(hash),
-                key,
-                key_size);
+        const std::uint8_t fingerprint = Fingerprint(hash);
+        std::size_t slot = hash & mask_;
+        for (std::size_t probes = 0; probes < capacity_; ++probes) {
+            const std::uint8_t marker = control_[slot];
+            if (marker == kSlotEmpty) {
+                return -1;
+            }
+            const std::vector<std::uint8_t>& stored = keys_[slot];
+            if (marker == fingerprint && hashes_[slot] == hash
+                    && stored.size() == key_size
+                    && (key_size == 0
+                        || std::memcmp(stored.data(), key, key_size) == 0)) {
+                return static_cast<int>(slot);
+            }
+            slot = (slot + 1) & mask_;
+        }
+        return -1;
     }
 
     int FindInsertionSlot(std::uint64_t hash) const {
@@ -406,13 +330,6 @@ private:
             slot = (slot + 1) & mask_;
         }
         return first_deleted;
-    }
-
-    void SetControl(std::size_t slot, std::uint8_t value) {
-        control_[slot] = value;
-        if (slot < vector_bytes_) {
-            control_[capacity_ + slot] = value;
-        }
     }
 
     void Append(int slot) {
@@ -460,7 +377,7 @@ private:
     }
 
     void RemoveSlot(int slot, std::vector<std::uint8_t>* removed_payload) {
-        SetControl(static_cast<std::size_t>(slot), kSlotDeleted);
+        control_[static_cast<std::size_t>(slot)] = kSlotDeleted;
         Unlink(slot);
         keys_[slot].clear();
         MovePayload(slot, removed_payload);
@@ -474,8 +391,7 @@ private:
             return;
         }
 
-        std::vector<std::uint8_t> new_control(
-                capacity_ + vector_bytes_, kSlotEmpty);
+        std::vector<std::uint8_t> new_control(capacity_, kSlotEmpty);
         std::vector<std::uint64_t> new_hashes(capacity_);
         std::vector<std::vector<std::uint8_t>> new_keys(capacity_);
         std::vector<std::uint8_t> new_kinds(capacity_);
@@ -493,9 +409,6 @@ private:
             }
             const std::uint8_t fingerprint = Fingerprint(hash);
             new_control[new_slot] = fingerprint;
-            if (new_slot < vector_bytes_) {
-                new_control[capacity_ + new_slot] = fingerprint;
-            }
             new_hashes[new_slot] = hash;
             new_keys[new_slot] = std::move(keys_[old_slot]);
             new_kinds[new_slot] = kinds_[old_slot];
@@ -524,9 +437,6 @@ private:
     const std::size_t max_entries_;
     const std::size_t capacity_;
     const std::size_t mask_;
-    const ProbeKernel kernel_;
-    const std::size_t vector_bytes_;
-    const ByteFindSlotFunction find_slot_;
     const bool use_kunpeng_crc32_;
     std::vector<std::uint8_t> control_;
     std::vector<std::uint64_t> hashes_;
@@ -541,10 +451,8 @@ private:
     std::size_t deleted_ = 0;
 };
 
-ByteSnapshotTable::ByteSnapshotTable(
-        std::size_t max_entries,
-        ProbeKernel requested_kernel)
-        : impl_(new Impl(max_entries, requested_kernel)) {}
+ByteSnapshotTable::ByteSnapshotTable(std::size_t max_entries)
+        : impl_(new Impl(max_entries)) {}
 
 ByteSnapshotTable::~ByteSnapshotTable() = default;
 
@@ -578,18 +486,6 @@ void ByteSnapshotTable::Clear(
 
 std::size_t ByteSnapshotTable::size() const {
     return impl_->size();
-}
-
-ProbeKernel ByteSnapshotTable::active_kernel() const {
-    return impl_->active_kernel();
-}
-
-std::size_t ByteSnapshotTable::vector_bytes() const {
-    return impl_->vector_bytes();
-}
-
-const char* ByteSnapshotTable::active_kernel_name() const {
-    return impl_->active_kernel_name();
 }
 
 const char* ByteSnapshotTable::hash_name() const {

@@ -180,7 +180,6 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 mapSnapshotCacheMetrics,
                 false,
                 false,
-                "AUTO",
                 "");
     }
 
@@ -202,7 +201,6 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             int mapSnapshotCacheMaxEntries,
             MapSnapshotCacheMetrics mapSnapshotCacheMetrics,
             boolean nativeMapSnapshotCacheEnabled,
-            String nativeMapSnapshotKernel,
             String nativeMapSnapshotLibraryPath) {
         this(
                 delegate,
@@ -223,7 +221,6 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 mapSnapshotCacheMetrics,
                 nativeMapSnapshotCacheEnabled,
                 false,
-                nativeMapSnapshotKernel,
                 nativeMapSnapshotLibraryPath);
     }
 
@@ -246,7 +243,6 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             MapSnapshotCacheMetrics mapSnapshotCacheMetrics,
             boolean nativeMapSnapshotCacheEnabled,
             boolean nativeSnapshotClassifierEnabled,
-            String nativeMapSnapshotKernel,
             String nativeMapSnapshotLibraryPath) {
         this(
                 delegate,
@@ -268,7 +264,6 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 nativeMapSnapshotCacheEnabled,
                 nativeSnapshotClassifierEnabled,
                 false,
-                nativeMapSnapshotKernel,
                 nativeMapSnapshotLibraryPath);
     }
 
@@ -292,7 +287,6 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             boolean nativeMapSnapshotCacheEnabled,
             boolean nativeSnapshotClassifierEnabled,
             boolean nativeRemoveHintEnabled,
-            String nativeMapSnapshotKernel,
             String nativeMapSnapshotLibraryPath) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
@@ -392,7 +386,6 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                     this.nativeMapSnapshotCacheEnabled
                             ? new NativeMapSnapshotCache<>(
                                     mapSnapshotCacheMaxEntries,
-                                    nativeMapSnapshotKernel,
                                     nativeMapSnapshotLibraryPath,
                                     false,
                                     nativeRemoveHintEnabled,

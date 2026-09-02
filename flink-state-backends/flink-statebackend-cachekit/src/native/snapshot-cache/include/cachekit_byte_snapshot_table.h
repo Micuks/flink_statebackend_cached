@@ -1,14 +1,17 @@
 #ifndef CACHEKIT_BYTE_SNAPSHOT_TABLE_H
 #define CACHEKIT_BYTE_SNAPSHOT_TABLE_H
 
-#include "cachekit_snapshot_table.h"
-
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
 
 namespace cachekit {
+
+enum class SnapshotKind : std::uint8_t {
+    kEmpty = 1,
+    kSingle = 2,
+};
 
 enum class PutResult : std::uint8_t {
     kRejected = 0,
@@ -29,7 +32,7 @@ struct ByteLookupResult {
 
 class ByteSnapshotTable {
 public:
-    ByteSnapshotTable(std::size_t max_entries, ProbeKernel requested_kernel);
+    explicit ByteSnapshotTable(std::size_t max_entries);
     ~ByteSnapshotTable();
 
     ByteSnapshotTable(const ByteSnapshotTable&) = delete;
@@ -51,9 +54,6 @@ public:
     void Clear(std::vector<std::vector<std::uint8_t>>* removed_payloads = nullptr);
 
     std::size_t size() const;
-    ProbeKernel active_kernel() const;
-    std::size_t vector_bytes() const;
-    const char* active_kernel_name() const;
     const char* hash_name() const;
 
 private:
