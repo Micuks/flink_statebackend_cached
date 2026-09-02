@@ -15,6 +15,7 @@
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.contrib.streaming.state.PositionedDataOutputView;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 import org.apache.flink.contrib.streaming.state.cachekit.PrefetchExecutor;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
@@ -1351,16 +1352,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         try (NativeRequestPlaneCoordinator.BatchSlot ignored = slot) {
             RocksDBBatchValueReader<K, N, V> batchReader =
                     (RocksDBBatchValueReader<K, N, V>) delegate;
-            byte[] preparedKey =
-                    batchReader.serializeBatchKeyAndNamespace(
-                            key,
-                            namespace,
-                            nativeMutationKeySerializer,
-                            nativeMutationNamespaceSerializer);
             slot.prepareLatest(
                     nativeStateId,
                     nativeWriteEpoch.get(),
-                    java.util.Collections.singletonList(preparedKey));
+                    output -> serializeNativeKey(batchReader, key, namespace, output));
             int processed = nativeRequestPlaneCoordinator.probe(slot);
             if (processed != 1 || slot.probeError(0) != NativeRequestPlaneBridge.ERROR_OK) {
                 throw new IllegalStateException(
@@ -1411,23 +1406,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         try {
             RocksDBBatchValueReader<K, N, V> batchReader =
                     (RocksDBBatchValueReader<K, N, V>) delegate;
-            byte[] preparedKey =
-                    batchReader.serializeBatchKeyAndNamespace(
-                            key,
-                            namespace,
-                            nativeMutationKeySerializer,
-                            nativeMutationNamespaceSerializer);
-            byte[] serializedValue =
-                    loaded == null
-                            ? null
-                            : KvStateSerializer.serializeValue(
-                                    loaded, nativeMutationValueSerializer);
             int status =
                     nativeRequestPlaneCoordinator.updateExactKey(
                             nativeStateId,
                             nativeWriteEpoch.get(),
-                            preparedKey,
-                            serializedValue);
+                            output -> serializeNativeKey(batchReader, key, namespace, output),
+                            loaded == null
+                                    ? null
+                                    : output ->
+                                            nativeMutationValueSerializer.serialize(
+                                                    loaded, output));
             if (status == NativeRequestPlaneBridge.FILL_INSERTED
                     || status == NativeRequestPlaneBridge.FILL_UPDATED) {
                 nativeFillBatches++;
@@ -5655,40 +5643,23 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         nativeRequestPlaneCoordinator.updateExactKeyIfPresent(
                                 nativeStateId,
                                 nativeEpoch,
-                                output -> {
-                                    try {
-                                        batchReader.serializeBatchKeyAndNamespace(
-                                                key,
-                                                namespace,
-                                                nativeMutationKeySerializer,
-                                                nativeMutationNamespaceSerializer,
-                                                output);
-                                    } catch (IOException failure) {
-                                        throw failure;
-                                    } catch (Exception failure) {
-                                        throw new IOException(
-                                                "Failed to serialize a native mutation key.",
-                                                failure);
-                                    }
-                                },
+                                output -> serializeNativeKey(batchReader, key, namespace, output),
                                 value == null
                                         ? null
                                         : output ->
                                                 nativeMutationValueSerializer.serialize(
                                                         value, output));
             } else {
-                byte[] preparedKey =
-                        batchReader.serializeBatchKeyAndNamespace(
-                                key,
-                                namespace,
-                                nativeMutationKeySerializer,
-                                nativeMutationNamespaceSerializer);
-                byte[] serializedValue =
-                        KvStateSerializer.serializeValue(
-                                value, nativeMutationValueSerializer);
                 status =
                         nativeRequestPlaneCoordinator.updateExactKey(
-                                nativeStateId, nativeEpoch, preparedKey, serializedValue);
+                                nativeStateId,
+                                nativeEpoch,
+                                output -> serializeNativeKey(batchReader, key, namespace, output),
+                                value == null
+                                        ? null
+                                        : output ->
+                                                nativeMutationValueSerializer.serialize(
+                                                        value, output));
             }
             if (status == NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION) {
                 nativeMutationSuperseded++;
@@ -5704,6 +5675,26 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeRequestPlaneCoordinator.disable(failure);
             nativeMutationFailures++;
             nativeRuntimeFailures++;
+        }
+    }
+
+    private void serializeNativeKey(
+            RocksDBBatchValueReader<K, N, V> batchReader,
+            K key,
+            N namespace,
+            PositionedDataOutputView output)
+            throws IOException {
+        try {
+            batchReader.serializeBatchKeyAndNamespace(
+                    key,
+                    namespace,
+                    nativeMutationKeySerializer,
+                    nativeMutationNamespaceSerializer,
+                    output);
+        } catch (IOException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw new IOException("Failed to serialize a native ValueState key.", failure);
         }
     }
 

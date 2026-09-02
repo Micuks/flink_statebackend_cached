@@ -18,9 +18,9 @@
 
 - [x] **P0-1 按功能开关维护 resident hint。** 当前 FullOpt 未启用 `resident-mutation-batch`，但每次 fill 仍执行 seqlock、逐项 status/error 读取、key hash 与 CAS。仅在该功能实际启用时分配和更新 hint；关闭时查询接口保守返回“可能存在”，避免假阴性。
   - 测试：disabled 模式不更新 hint 且保持保守语义；enabled 模式继续拒绝从未 resident 的 key，并在成功 fill 后接受该 key。
-- [ ] **P0-2 ValueState 单点 probe 改为 direct key serialization。** 删除 `byte[] preparedKey + Collections.singletonList` 热路径，直接写入租用槽。
+- [x] **P0-2 ValueState 单点 probe 改为 direct key serialization。** 删除 `byte[] preparedKey + Collections.singletonList` 热路径，直接写入租用槽。
   - 测试：单点 native probe 调用五参数 direct serializer，且不调用四参数 heap serializer；hit/miss/negative/fallback 语义不变。
-- [ ] **P0-3 FullOpt 非 resident-only write-through 改为 direct key/value serialization。** 删除每次 authoritative mutation 后额外的 key/value 堆数组；仍保持 RocksDB 先写、native 后发布和 generation fence 顺序。
+- [x] **P0-3 FullOpt 非 resident-only write-through 改为 direct key/value serialization。** 删除每次 authoritative mutation 后额外的 key/value 堆数组；仍保持 RocksDB 先写、native 后发布和 generation fence 顺序。
   - 测试：update/tombstone 走 direct writers；序列化/JNI 失败仍 fail closed，RocksDB 保持 authoritative。
 - [ ] **P0-4 去掉 probe/fill 状态读取的逐项 ByteBuffer duplicate。** 结果缓冲区构造时已固定 native byte order，absolute `getInt` 可直接读取。
   - 测试：所有状态/error/offset 读取结果不变；运行 bridge/coordinator 全套单测。

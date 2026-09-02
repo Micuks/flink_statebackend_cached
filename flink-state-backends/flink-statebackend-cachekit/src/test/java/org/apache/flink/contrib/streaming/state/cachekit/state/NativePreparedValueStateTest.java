@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -167,14 +168,7 @@ class NativePreparedValueStateTest {
         RocksDBBatchValueReader<String, String, Integer> reader =
                 (RocksDBBatchValueReader<String, String, Integer>) delegate;
         when(reader.getBatchDefaultValue()).thenReturn(99);
-        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
-                .thenAnswer(
-                        invocation ->
-                                KvStateSerializer.serializeKeyAndNamespace(
-                                        invocation.getArgument(0),
-                                        StringSerializer.INSTANCE,
-                                        invocation.getArgument(1),
-                                        StringSerializer.INSTANCE));
+        stubDirectPreparedSerialization(reader);
         FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
         byte[] preparedKey =
                 KvStateSerializer.serializeKeyAndNamespace(
@@ -213,6 +207,9 @@ class NativePreparedValueStateTest {
         verify(delegate, never()).value();
         assertEquals(1, state.getNativeProbeKeysForTesting());
         assertEquals(1, state.getNativeHitsForTesting());
+        verify(reader, times(1))
+                .serializeBatchKeyAndNamespace(any(), any(), any(), any(), any());
+        verify(reader, never()).serializeBatchKeyAndNamespace(any(), any(), any(), any());
 
         state.close();
         coordinator.close();
@@ -393,14 +390,7 @@ class NativePreparedValueStateTest {
         RocksDBBatchValueReader<String, String, Integer> reader =
                 (RocksDBBatchValueReader<String, String, Integer>) delegate;
         when(reader.getBatchDefaultValue()).thenReturn(null);
-        when(reader.serializeBatchKeyAndNamespace(any(), any(), any(), any()))
-                .thenAnswer(
-                        invocation ->
-                                KvStateSerializer.serializeKeyAndNamespace(
-                                        invocation.getArgument(0),
-                                        StringSerializer.INSTANCE,
-                                        invocation.getArgument(1),
-                                        StringSerializer.INSTANCE));
+        stubDirectPreparedSerialization(reader);
         when(reader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
                 .thenAnswer(
                         invocation -> {
@@ -490,6 +480,7 @@ class NativePreparedValueStateTest {
                                         StringSerializer.INSTANCE,
                                         invocation.getArgument(1),
                                         StringSerializer.INSTANCE));
+        stubDirectPreparedSerialization(reader);
         when(reader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
                 .thenReturn(
                         Arrays.asList(
@@ -2542,6 +2533,7 @@ class NativePreparedValueStateTest {
                                         StringSerializer.INSTANCE,
                                         invocation.getArgument(1),
                                         StringSerializer.INSTANCE));
+        stubDirectPreparedSerialization(reader);
         when(reader.getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt()))
                 .thenReturn(
                         Arrays.asList(
@@ -2584,6 +2576,9 @@ class NativePreparedValueStateTest {
         assertEquals(32, writer.getNativeMutationAttemptsForTesting());
         assertEquals(32, writer.getNativeMutationAppliedForTesting());
         assertEquals(0, writer.getNativeMutationFailuresForTesting());
+        verify(reader, never()).serializeBatchKeyAndNamespace(any(), any(), any(), any());
+        verify(reader, atLeast(34))
+                .serializeBatchKeyAndNamespace(any(), any(), any(), any(), any());
         verify(mutationKeySerializer, times(1)).duplicate();
         verify(mutationNamespaceSerializer, times(1)).duplicate();
         verify(mutationValueSerializer, times(1)).duplicate();
@@ -2594,6 +2589,7 @@ class NativePreparedValueStateTest {
                         StringSerializer.INSTANCE,
                         "window-write-heavy",
                         StringSerializer.INSTANCE);
+        assertArrayEquals(preparedA, fakePlane.lastValueFillKey);
         NativeRequestPlaneCoordinator.BatchSlot oldFill = coordinator.tryAcquireBatchSlot();
         assertNotNull(oldFill);
         oldFill.prepareFill(
@@ -2645,6 +2641,8 @@ class NativePreparedValueStateTest {
         assertEquals(33, writer.getNativeMutationAttemptsForTesting());
         assertEquals(33, writer.getNativeMutationAppliedForTesting());
         assertEquals(1, writer.getNativeMutationTombstonesAppliedForTesting());
+        verify(reader, atLeast(35))
+                .serializeBatchKeyAndNamespace(any(), any(), any(), any(), any());
 
         CachedInternalValueState<String, String, Integer> afterClear =
                 new CachedInternalValueState<>(
@@ -4036,6 +4034,7 @@ class NativePreparedValueStateTest {
         private CountDownLatch releaseProbe;
         private int compactCalls;
         private int closeCalls;
+        private byte[] lastValueFillKey;
 
         private FakeNativeRequestPlane() {
             this(Integer.MAX_VALUE);
@@ -4114,6 +4113,7 @@ class NativePreparedValueStateTest {
                         } else if (updateOnly && existing == null) {
                             status = NativeRequestPlaneBridge.FILL_NOT_PRESENT;
                         } else {
+                            lastValueFillKey = Arrays.copyOf(key.bytes, key.bytes.length);
                             if (existing == null && values.size() >= maxEntries) {
                                 NativeKey oldest = values.keySet().iterator().next();
                                 values.remove(oldest);
