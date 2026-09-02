@@ -173,8 +173,8 @@ request-plane Debug + ASan/UBSan 与 Release + JNI 均为 2/2 CTest PASS；Stage
 历史鲲鹏 Nexmark 原始 K/s/core、逐 query 提升和证据审计见
 [`docs/benchmarks/cachekit-kunpeng-results-20260805/`](../../docs/benchmarks/cachekit-kunpeng-results-20260805/)。
 这些报告来自更早的源码快照，其中部分 `FullOpt` 定义包含 Chen 组件，因此不能直接当作当前
-`Stage1+Stage2+Stage3` 合并提交的性能证明。当前提交若要发布性能数字，需要按相同口径重新
-跑 exact-binary 实验，并保留每个 query 两位小数的原始 K/s/core。
+`Stage1+Stage2+Stage3` 合并提交的性能证明。当前分支的 exact-binary 实验结果单独列在下文，
+并保留每个 query 两位小数的原始 K/s/core、CPU 和有效性证据。
 
 ## 合并来源
 
