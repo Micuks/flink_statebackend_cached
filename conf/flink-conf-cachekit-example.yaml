@@ -83,6 +83,27 @@ state.backend.cachekit.bp-prefetch.async-chunks.enabled: false
 state.backend.cachekit.bp-prefetch.map-snapshots.enabled: false
 # state.backend.cachekit.bp-prefetch.staging.max-entries: 8192
 
+# Candidate ValueState hot-path switches. Keep disabled for the baseline leg.
+state.backend.cachekit.value.sticky-update-in-place.enabled: false
+state.backend.cachekit.value.lazy-staging.enabled: false
+# state.backend.cachekit.value.lazy-staging.max-retained-bytes: 67108864
+
+# --- Experimental prepared-key native request plane ---------------------------
+# Off by default. Enable only with the matching JNI library deployed on every
+# TaskManager. auto selects SVE-256 on a host that reports SVE VL=256, otherwise
+# NEON+CRC32 on AArch64, otherwise scalar. This is SVE, not an SVE2 requirement.
+state.backend.cachekit.native.request-plane.enabled: false
+# state.backend.cachekit.native.request-plane.library: /absolute/path/libcachekit_native_request_plane_jni.so
+# state.backend.cachekit.native.request-plane.kernel: auto
+# state.backend.cachekit.native.request-plane.min-batch-size: 64
+# state.backend.cachekit.native.request-plane.capacity-entries: 16384
+# state.backend.cachekit.native.request-plane.key-arena-bytes: 4194304
+# state.backend.cachekit.native.request-plane.value-arena-bytes: 16777216
+# state.backend.cachekit.native.request-plane.batch-entries: 1024
+# state.backend.cachekit.native.request-plane.batch-key-arena-bytes: 262144
+# state.backend.cachekit.native.request-plane.batch-value-arena-bytes: 4194304
+# state.backend.cachekit.native.request-plane.batch-slots: 2
+
 # --- Mailbox batch / lookahead buffer -----------------------------------------
 # Required plumbing for prefetch + local-preagg. Size 4096 matched final runs.
 state.backend.cachekit.mailbox-batch.enabled: true
