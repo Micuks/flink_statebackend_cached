@@ -39,8 +39,8 @@
 
 ## 完整验证门
 
-- [ ] Java 格式/编译与 CacheKit 定向单测通过。
-- [ ] native Debug/Release 构建和 native tests 通过。
+- [x] Java 格式/编译与 CacheKit 定向单测通过。
+- [x] native Debug/Release 构建和 native tests 通过。
 - [ ] `.jar` 与 `.so` 产物身份、SHA-256、架构、动态依赖记录完整。
 - [ ] Kunpeng preflight：机器身份、空闲、Flink 停止、配置有效、native library 可加载。
 - [ ] 同一 canonical FullOpt 配置下完成可比 control/candidate 100M、no-checkpoint 长跑；除代码身份外参数一致。

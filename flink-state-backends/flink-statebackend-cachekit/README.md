@@ -147,9 +147,9 @@ flink-statebackend-cachekit-1.16-SNAPSHOT.jar \
   | grep -E 'CacheKitStateBackendFactory|META-INF/native/libcachekit_snapshot_jni.so'
 ```
 
-## 本次合并的验证结果
+## 合并与性能修复的验证结果
 
-当前合并提交的验证覆盖如下；这些结果证明构建和相关测试通过，不是新的 Nexmark 性能结论：
+三阶段合并基线的验证覆盖如下；这些结果证明构建和相关测试通过，不是新的 Nexmark 性能结论：
 
 | 范围 | 结果 |
 |---|---:|
@@ -160,6 +160,12 @@ flink-statebackend-cachekit-1.16-SNAPSHOT.jar \
 | flink-streaming-java | 33/33 PASS |
 | flink-statebackend-rocksdb | 22/22 PASS |
 | flink-table-runtime | 24/24 PASS |
+
+本次 Stage 1/3 hot-path review 的逐项问题、风险门槛和完成状态见仓库根目录
+[`NATIVE_STAGE1_STAGE3_PERFORMANCE_TODO.md`](../../NATIVE_STAGE1_STAGE3_PERFORMANCE_TODO.md)。
+修复后新增回归结果为：CacheKit Java 287 个测试、0 failure/error、8 个按测试条件跳过；
+request-plane Debug + ASan/UBSan 与 Release + JNI 均为 2/2 CTest PASS；Stage 3
+`LocalPreaggTest` 和 `StatePrefetcherTest` 合计 28/28 PASS。
 
 `flink-table-planner` 在 Java 24 + Scala 2.12.7 环境中于源码 typecheck 前触发
 `bad constant pool index`，属于当前工具链边界，不能写成 planner 已通过。
