@@ -43,17 +43,21 @@
 - [ ] **P1-3 缓存 JNI 参数 view。** 当前每批仍会构造多个 `slice/duplicate/readOnlyBuffer` 对象；若 allocation profile 确认占比明显，再增加显式 used-length ABI 或安全复用 view。
 - [ ] **P1-4 评估 exact LRU 的 hit-write 成本。** native cache hit 会更新精确 LRU；只有 profile 显示链表写/缓存行争用显著时，才比较 sampling/clock 方案，并单独验证 eviction 质量。
 - [ ] **P1-5 评估 Stage3 Java 计数器与 collector cache。** 检查 indexed dispatch 的原子计数成本，以及 `identityHashCode` 静态 collector cache 的碰撞/生命周期问题；修复不得引入每批 collector 分配。
-- [ ] **P1-6 自适应旁路无收益的 native ValueState point cache。** 实现与单测已完成、性能门待验。开关默认关闭；显式启用后按每个 `CachedInternalValueState` 独立统计 positive/negative useful hits。连续两个 4096-probe 零命中窗口后进入 bypass，保留 mutation write-through 和 prepared prefetch；每 4096 次旁路机会只做一次 trial，trial miss 回填并记录到 64-slot primitive fingerprint 表，只有该 key 后续真正穿透 Java L1/L2 时才做 targeted recovery probe。
+- [x] **P1-6 自适应旁路无收益的 native ValueState point cache。** 开关默认关闭；显式启用后按每个 `CachedInternalValueState` 独立统计 positive/negative useful hits。连续两个 4096-probe 零命中窗口后进入 bypass，保留 mutation write-through 和 prepared prefetch；每 4096 次旁路机会只做一次 trial，trial miss 回填并记录到 64-slot primitive fingerprint 表，只有该 key 后续真正穿透 Java L1/L2 时才做 targeted recovery probe。
   - 正确性门：两窗口进入旁路、最后一次 miss 不回填、无预置数据的新只读工作集跨 Java eviction horizon 后可自然恢复、trial/targeted slot unavailable 不逐记录抢锁、positive/negative hit 均可恢复、read-activated mutation 不被抑制、不同 state 的控制器互不影响、哈希碰撞只增加一次安全 probe 而不改变返回值。
   - 性能门：先在 Kunpeng/x86 各跑 q5 100M canary；必须在日志中证明开关生效、进入旁路、probe/fill 大幅下降且 mutation 保留，并接近 value-cache-off q5。通过后才扩到 15Q；q4 单独保留为未解释回退。
+  - 双机 q5 均通过：Kunpeng `73.94 K/s/core`，相对 aligned `+42.91%`，达到 value-cache-off 的 `94.88%`；云 x86 `96.39 K/s/core`，相对 aligned `+35.74%`，达到 value-cache-off 的 `99.81%`。两机都保留全部 mutation write-through 且 runtime failure 为 0。
+  - 初始 operator gate 对 probe/fill 降幅设得过严，分别把仍减少 `98.66%` / `99.29%` 的 q5 判为 false。原始 false-gate JSON 和 incomplete profile 均保留；修订门槛及原因单独审计，runtime 输入未改变且 q5 未重跑，避免覆盖结果后改门槛的事实。
+  - 双机 15Q 均通过：Kunpeng adaptive/aligned 为前八 `+5.77%`、后七 `+0.17%`、全部 `+3.16%`；云 x86分别为 `+4.65%`、`+0.15%`、`+2.55%`。完整栈相对复用同机 RocksDB 为 Kunpeng `+28.91%`、云 x86 `+23.14%`，这不是自适应组件的隔离增量，不能与前述百分比相加。
+  - q4 边界仍保留：Kunpeng `+0.57%`、云 x86 `-2.03%`；本项只解决 q5 的零命中 ValueState point-cache 浪费，不宣称解决 q4 或普遍提高所有 query。
 
 ## 完整验证门
 
 - [x] Java 格式/编译与 CacheKit 定向单测通过。
 - [x] native Debug/Release 构建和 native tests 通过。
-- [ ] `.jar` 与 `.so` 产物身份、SHA-256、架构、动态依赖记录完整。
+- [x] `.jar` 与 `.so` 产物身份、SHA-256、架构、动态依赖记录完整。JAR 为 `53a0e793dc84855c7dec9c1e627fd2b8b685d48c4486326238222c7bbf91cedb`；x86 request-plane SO 为 `13778c057f4c75e72f7e4a554949de94084772e531adf6ebc77007daedecd776`，Kunpeng SO 为 `4453afc720be3a84593f6c859032b2cebd556c2bdb8cfc77878322a0e3662529`。两者分别为 ELF64 x86-64/AArch64，均依赖 `libstdc++.so.6`、`libgcc_s.so.1`、`libc.so.6`。
 - [x] Kunpeng preflight：机器身份、空闲、Flink 停止、配置有效、native library 可加载。
 - [x] P0 对齐版在双机完成 15Q 100M、no-checkpoint；保留 raw throughput、CPU process-tree coverage、配置/源码哈希与有效性门。
 - [x] q5 profiling 覆盖 JVM 与 native 请求路径，并用 value-cache-off 定向实验确认主要低效路径；q4 仍是未解释边界。
-- [ ] 自适应旁路 q5 双机 canary 与通过后的 15Q 扩展完成。
-- [x] 通过 loop 持续轮询到 P0 终态，并把开始、异常/恢复、最终结果发到飞书；自适应候选仍需继续轮询和汇报。
+- [x] 自适应旁路 q5 双机 canary 与通过后的 15Q 扩展完成；两边均为 15/15 有效腿、100M、no-checkpoint、8 TM/16 slots，evidence seal 复验通过且 owned containers 清零。
+- [x] 通过 loop 持续轮询到自适应双机终态，并把开始、异常/恢复、30 分钟进度和最终原生表格结果发到飞书。

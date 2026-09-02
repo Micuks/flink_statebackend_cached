@@ -163,7 +163,7 @@ flink-statebackend-cachekit-1.16-SNAPSHOT.jar \
 
 本次 Stage 1/3 hot-path review 的逐项问题、风险门槛和完成状态见仓库根目录
 [`NATIVE_STAGE1_STAGE3_PERFORMANCE_TODO.md`](../../NATIVE_STAGE1_STAGE3_PERFORMANCE_TODO.md)。
-修复后新增回归结果为：CacheKit Java 287 个测试、0 failure/error、8 个按测试条件跳过；
+修复后完整回归结果为：CacheKit Java 294 个测试、0 failure/error、17 个按测试条件跳过；
 request-plane Debug + ASan/UBSan 与 Release + JNI 均为 2/2 CTest PASS；Stage 3
 `LocalPreaggTest` 和 `StatePrefetcherTest` 合计 28/28 PASS。
 
@@ -184,3 +184,29 @@ request-plane Debug + ASan/UBSan 与 Release + JNI 均为 2/2 CTest PASS；Stage
 
 当前合并关系是代码和开关集合的 FullOpt 定义；它不替代 exact-binary 的 CDC、
 checkpoint/restore、Nexmark 15Q 和性能验收。
+
+## 2026-09-02 自适应 ValueState point-cache 验证
+
+Stage 1 的 native ValueState point cache 位于 Java L1/L2 之后。q5 的残余冷 miss 会进入
+native cache，但此前没有产生有效命中，反而承担 probe、fill 和 LRU 成本。本分支增加默认关闭的
+自适应旁路：连续零命中窗口后停止逐条 native probe/fill，同时保留 mutation write-through 和
+prepared prefetch；周期 trial 与定向 fingerprint probe 用于检测工作集变化并恢复 active 状态。
+
+双机使用同一提交 `694a257d37476668846e1e7e719163f4bddd899f`、同一 JAR、100M events、
+checkpoint 关闭、8 TM/16 slots。以下 `Adaptive / Aligned` 是本次单一开关的隔离增量；
+`Adaptive / reused RDB` 是完整栈相对复用同机 RocksDB 的比较，不是本组件的单独收益。
+
+| 平台 | q5 Adaptive K/s/core | q5 Aligned | q5 增量 | 达到 value-cache-off | 前八增量 | 后七增量 | 15Q 增量 | 15Q 完整栈 / reused RDB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Kunpeng | 73.94 | 51.74 | +42.91% | 94.88% | +5.77% | +0.17% | +3.16% | +28.91% |
+| 云 x86 | 96.39 | 71.01 | +35.74% | 99.81% | +4.65% | +0.15% | +2.55% | +23.14% |
+
+所有分组百分比均为逐 query 百分比的算术平均。两边均为 15/15 有效腿；所有腿
+`real_job_completed=true`、8 TM coverage、cores 不超过 16.05，且 owned containers 在结束后为
+0。Kunpeng 与 x86 的 q5 都证明 mutation attempted=applied、runtime failure=0。q4 在 Kunpeng 为
+`+0.57%`、在 x86 为 `-2.03%`，因此仍是独立的未解释边界，不能把 q5 结论外推到所有 query。
+
+历史 200M 表中的 `+40.52%` 是实测的 Java FullOpt treatment=Off 相对非同期 RocksDB R1；
+该实验的 native request-plane、native Value/Map cache、native LocalPreAgg/Mailbox/Prefetch 均为
+关闭。它不能标成 all-native，也不能与 Stage1native+FullOpt 或 Stage3native+FullOpt 的完整栈
+百分比相加。真正的组件增量必须在同一 FullOpt parent 上只改变目标 native 开关后计算。
