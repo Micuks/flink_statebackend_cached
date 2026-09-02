@@ -78,7 +78,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
     // --- MapSnapshot cache (entries() fast path) ---
     private final CachePolicy<KeyNamespace<K, N>, MapSnapshot<UK>> mapSnapshotCache;
+    private final NativeMapSnapshotCache<K, N, UK> nativeMapSnapshotCache;
     private final boolean mapSnapshotCacheEnabled;
+    private final boolean nativeMapSnapshotCacheEnabled;
     private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
     /** Reusable probe key for snapshot cache lookups (avoids allocation per lookup). */
     private final KeyNamespace<K, N> snapshotProbe = new KeyNamespace<>(null, null);
@@ -159,6 +161,133 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             boolean iterationCacheFillEnabled,
             int mapSnapshotCacheMaxEntries,
             MapSnapshotCacheMetrics mapSnapshotCacheMetrics) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                presenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicyType,
+                mapCacheLruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                iterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheMetrics,
+                false,
+                false,
+                "");
+    }
+
+    public CachedInternalMapState(
+            InternalMapState<K, N, UK, UV> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            PresenceCacheImplementation presenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicyType,
+            int mapCacheLruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean iterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            MapSnapshotCacheMetrics mapSnapshotCacheMetrics,
+            boolean nativeMapSnapshotCacheEnabled,
+            String nativeMapSnapshotLibraryPath) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                presenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicyType,
+                mapCacheLruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                iterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheMetrics,
+                nativeMapSnapshotCacheEnabled,
+                false,
+                nativeMapSnapshotLibraryPath);
+    }
+
+    public CachedInternalMapState(
+            InternalMapState<K, N, UK, UV> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            PresenceCacheImplementation presenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicyType,
+            int mapCacheLruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean iterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            MapSnapshotCacheMetrics mapSnapshotCacheMetrics,
+            boolean nativeMapSnapshotCacheEnabled,
+            boolean nativeSnapshotClassifierEnabled,
+            String nativeMapSnapshotLibraryPath) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                presenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicyType,
+                mapCacheLruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                iterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheMetrics,
+                nativeMapSnapshotCacheEnabled,
+                nativeSnapshotClassifierEnabled,
+                false,
+                nativeMapSnapshotLibraryPath);
+    }
+
+    public CachedInternalMapState(
+            InternalMapState<K, N, UK, UV> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            PresenceCacheImplementation presenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicyType,
+            int mapCacheLruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean iterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            MapSnapshotCacheMetrics mapSnapshotCacheMetrics,
+            boolean nativeMapSnapshotCacheEnabled,
+            boolean nativeSnapshotClassifierEnabled,
+            boolean nativeRemoveHintEnabled,
+            String nativeMapSnapshotLibraryPath) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
@@ -232,16 +361,48 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             this.l2ValueCache = new NoOpCachePolicy<>();
         }
 
+        if (nativeSnapshotClassifierEnabled) {
+            throw new IllegalArgumentException(
+                    "Native snapshot classifier is unavailable without RocksDB backend changes");
+        }
         // MapSnapshot cache initialization
-        this.mapSnapshotCacheEnabled = mapSnapshotCacheMaxEntries > 0;
+        this.mapSnapshotCacheEnabled =
+                mapSnapshotCacheMaxEntries > 0
+                        && NativeMapSnapshotCache.snapshotFeatureAvailable(
+                                nativeMapSnapshotLibraryPath, nativeMapSnapshotCacheEnabled);
+        this.nativeMapSnapshotCacheEnabled =
+                this.mapSnapshotCacheEnabled && nativeMapSnapshotCacheEnabled;
         if (mapSnapshotCacheEnabled) {
-            this.mapSnapshotCache =
-                    new LruCachePolicy<>(
-                            mapSnapshotCacheMaxEntries,
-                            64,
-                            (key, value) -> mapSnapshotCacheMetrics.recordEviction());
+            if (this.nativeMapSnapshotCacheEnabled) {
+                this.mapSnapshotCache = new NoOpCachePolicy<>();
+            } else {
+                this.mapSnapshotCache =
+                        new LruCachePolicy<>(
+                                mapSnapshotCacheMaxEntries,
+                                64,
+                                (key, value) -> mapSnapshotCacheMetrics.recordEviction());
+            }
+            this.nativeMapSnapshotCache =
+                    this.nativeMapSnapshotCacheEnabled
+                            ? new NativeMapSnapshotCache<>(
+                                    mapSnapshotCacheMaxEntries,
+                                    nativeMapSnapshotLibraryPath,
+                                    false,
+                                    nativeRemoveHintEnabled,
+                                    mapSnapshotCacheMetrics,
+                                    Objects.requireNonNull(
+                                            keySerializer,
+                                            "Native snapshot support requires a key serializer"),
+                                    Objects.requireNonNull(
+                                            namespaceSerializer,
+                                            "Native snapshot support requires a namespace serializer"),
+                                    Objects.requireNonNull(
+                                            userKeySerializer,
+                                            "Native snapshot support requires a user-key serializer"))
+                            : null;
         } else {
             this.mapSnapshotCache = new NoOpCachePolicy<>();
+            this.nativeMapSnapshotCache = null;
         }
     }
 
@@ -1094,6 +1255,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         lifecycleLock.writeLock().lock();
         try {
             closed = true;
+            if (nativeMapSnapshotCache != null) {
+                nativeMapSnapshotCache.close();
+            }
         } finally {
             lifecycleLock.writeLock().unlock();
         }
@@ -1229,7 +1393,20 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         snapshotProbe.key = currentKey;
         snapshotProbe.namespace = currentNamespace;
         mapSnapshotCacheMetrics.recordProbe();
-        MapSnapshot<UK> snapshot = mapSnapshotCache.get(snapshotProbe);
+        MapSnapshot<UK> snapshot;
+        if (nativeMapSnapshotCacheEnabled) {
+            try {
+                NativeMapSnapshotCache.Lookup<UK> nativeSnapshot =
+                        nativeMapSnapshotCache.get(currentKey, currentNamespace);
+                snapshot = nativeSnapshot == null
+                        ? null
+                        : new MapSnapshot<>(nativeSnapshot.userKey());
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException("Failed to decode Native MapSnapshot", e);
+            }
+        } else {
+            snapshot = mapSnapshotCache.get(snapshotProbe);
+        }
         if (snapshot == null) {
             mapSnapshotCacheMetrics.recordMiss();
         } else {
@@ -1239,7 +1416,21 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private void storeSnapshot(KeyNamespace<K, N> key, MapSnapshot<UK> snapshot) {
-        mapSnapshotCache.put(key, snapshot);
+        if (nativeMapSnapshotCacheEnabled) {
+            try {
+                boolean evicted = snapshot.isEmpty()
+                        ? nativeMapSnapshotCache.putEmpty(key.key, key.namespace)
+                        : nativeMapSnapshotCache.putSingle(
+                                key.key, key.namespace, snapshot.cachedUserKey);
+                if (evicted) {
+                    mapSnapshotCacheMetrics.recordEviction();
+                }
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException("Failed to encode Native MapSnapshot", e);
+            }
+        } else {
+            mapSnapshotCache.put(key, snapshot);
+        }
         if (snapshot.isEmpty()) {
             mapSnapshotCacheMetrics.recordStoreEmpty();
         } else {
@@ -1248,7 +1439,16 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private boolean removeSnapshot(KeyNamespace<K, N> key) {
-        boolean removed = mapSnapshotCache.remove(key) != null;
+        boolean removed;
+        if (nativeMapSnapshotCacheEnabled) {
+            try {
+                removed = nativeMapSnapshotCache.remove(key.key, key.namespace);
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException("Failed to encode Native MapSnapshot key", e);
+            }
+        } else {
+            removed = mapSnapshotCache.remove(key) != null;
+        }
         if (removed) {
             mapSnapshotCacheMetrics.recordInvalidation();
         }
@@ -1389,7 +1589,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         @Override
         public boolean hasNext() {
             boolean has = delegateIterator.hasNext();
-            if (!has && !backfilled && mapSnapshotCacheEnabled) {
+            if (!has
+                    && !backfilled
+                    && mapSnapshotCacheEnabled) {
                 backfilled = true;
                 backfillSnapshotCache();
             }

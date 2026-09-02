@@ -105,6 +105,13 @@ under the License.
 		</dependency>
 
 		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-table-runtime</artifactId>
+			<version>${project.version}</version>
+			<scope>test</scope>
+		</dependency>
+
+		<dependency>
 			<groupId>org.mockito</groupId>
 			<artifactId>mockito-junit-jupiter</artifactId>
 			<version>${mockito.version}</version>
@@ -280,5 +287,52 @@ under the License.
             </plugin>
         </plugins>
 	</build>
+
+	<profiles>
+		<profile>
+			<id>cachekit-native-linux</id>
+			<activation>
+				<os>
+					<name>Linux</name>
+				</os>
+			</activation>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-antrun-plugin</artifactId>
+						<executions>
+							<execution>
+								<id>build-cachekit-native-snapshot</id>
+								<phase>generate-resources</phase>
+								<goals>
+									<goal>run</goal>
+								</goals>
+								<configuration>
+									<target>
+										<exec executable="cmake" failonerror="true">
+											<arg value="-S"/>
+											<arg value="${project.basedir}/src/native/snapshot-cache"/>
+											<arg value="-B"/>
+											<arg value="${project.build.directory}/native-snapshot"/>
+											<arg value="-DCMAKE_BUILD_TYPE=Release"/>
+										</exec>
+										<exec executable="cmake" failonerror="true">
+											<arg value="--build"/>
+											<arg value="${project.build.directory}/native-snapshot"/>
+											<arg value="--parallel"/>
+										</exec>
+										<mkdir dir="${project.build.outputDirectory}/META-INF/native"/>
+										<copy file="${project.build.directory}/native-snapshot/libcachekit_snapshot_jni.so"
+											  tofile="${project.build.outputDirectory}/META-INF/native/libcachekit_snapshot_jni.so"/>
+									</target>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
 
 </project>

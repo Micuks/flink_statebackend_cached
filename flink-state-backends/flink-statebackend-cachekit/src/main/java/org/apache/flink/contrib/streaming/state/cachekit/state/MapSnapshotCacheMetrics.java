@@ -43,6 +43,22 @@ public final class MapSnapshotCacheMetrics {
     private final AtomicLong invalidations = new AtomicLong();
     private final AtomicLong staleInvalidations = new AtomicLong();
     private final AtomicLong evictions = new AtomicLong();
+    private final AtomicLong nativeCostOperations = new AtomicLong();
+    private final AtomicLong nativeLookupOperations = new AtomicLong();
+    private final AtomicLong nativePutOperations = new AtomicLong();
+    private final AtomicLong nativeRemoveOperations = new AtomicLong();
+    private final AtomicLong nativeCostRawKeySamples = new AtomicLong();
+    private final AtomicLong nativeCostSerializedKeySamples = new AtomicLong();
+    private final AtomicLong nativeCostInputBytes = new AtomicLong();
+    private final AtomicLong nativeCostKeyEncodeNs = new AtomicLong();
+    private final AtomicLong nativeRemoveRequests = new AtomicLong();
+    private final AtomicLong nativeRemoveHintSkips = new AtomicLong();
+    private final AtomicLong nativeRemoveJniCalls = new AtomicLong();
+    private final AtomicLong nativeRemoveHits = new AtomicLong();
+    private final AtomicLong nativeRemoveHintFalsePositives = new AtomicLong();
+    private final NativeOperationCost nativeLookupCost = new NativeOperationCost();
+    private final NativeOperationCost nativePutCost = new NativeOperationCost();
+    private final NativeOperationCost nativeRemoveCost = new NativeOperationCost();
 
     private MapSnapshotCacheMetrics(boolean enabled) {
         this.enabled = enabled;
@@ -75,6 +91,52 @@ public final class MapSnapshotCacheMetrics {
                 "map_snapshot_cache_stale_invalidations",
                 metrics.staleInvalidations);
         registerGauge(diagnostics, "map_snapshot_cache_evictions", metrics.evictions);
+        registerGauge(diagnostics, "native_snapshot_cost_operations", metrics.nativeCostOperations);
+        registerGauge(
+                diagnostics,
+                "native_snapshot_cost_lookup_operations",
+                metrics.nativeLookupOperations);
+        registerGauge(
+                diagnostics,
+                "native_snapshot_cost_put_operations",
+                metrics.nativePutOperations);
+        registerGauge(
+                diagnostics,
+                "native_snapshot_cost_remove_operations",
+                metrics.nativeRemoveOperations);
+        registerGauge(
+                diagnostics,
+                "native_snapshot_cost_raw_key_samples",
+                metrics.nativeCostRawKeySamples);
+        registerGauge(
+                diagnostics,
+                "native_snapshot_cost_serialized_key_samples",
+                metrics.nativeCostSerializedKeySamples);
+        registerGauge(
+                diagnostics,
+                "native_snapshot_cost_input_bytes",
+                metrics.nativeCostInputBytes);
+        registerGauge(
+                diagnostics,
+                "native_snapshot_cost_key_encode_ns",
+                metrics.nativeCostKeyEncodeNs);
+        registerGauge(diagnostics, "native_snapshot_remove_requests", metrics.nativeRemoveRequests);
+        registerGauge(
+                diagnostics,
+                "native_snapshot_remove_hint_skips",
+                metrics.nativeRemoveHintSkips);
+        registerGauge(
+                diagnostics,
+                "native_snapshot_remove_jni_calls",
+                metrics.nativeRemoveJniCalls);
+        registerGauge(diagnostics, "native_snapshot_remove_hits", metrics.nativeRemoveHits);
+        registerGauge(
+                diagnostics,
+                "native_snapshot_remove_hint_false_positives",
+                metrics.nativeRemoveHintFalsePositives);
+        registerNativeCostGauges(diagnostics, "lookup", metrics.nativeLookupCost);
+        registerNativeCostGauges(diagnostics, "put", metrics.nativePutCost);
+        registerNativeCostGauges(diagnostics, "remove", metrics.nativeRemoveCost);
         return metrics;
     }
 
@@ -130,6 +192,64 @@ public final class MapSnapshotCacheMetrics {
         increment(evictions);
     }
 
+    boolean shouldSampleNativeLookupCost() {
+        return shouldSampleNativeCost(nativeLookupOperations);
+    }
+
+    boolean shouldSampleNativePutCost() {
+        return shouldSampleNativeCost(nativePutOperations);
+    }
+
+    boolean shouldSampleNativeRemoveCost() {
+        return shouldSampleNativeCost(nativeRemoveOperations);
+    }
+
+    private boolean shouldSampleNativeCost(AtomicLong operationCounter) {
+        if (!enabled) {
+            return false;
+        }
+        nativeCostOperations.incrementAndGet();
+        return (operationCounter.incrementAndGet() & 1023L) == 0;
+    }
+
+    void recordNativeKeySample(boolean rawKey, int inputBytes, long keyEncodeNs) {
+        increment(rawKey ? nativeCostRawKeySamples : nativeCostSerializedKeySamples);
+        nativeCostInputBytes.addAndGet(inputBytes);
+        nativeCostKeyEncodeNs.addAndGet(keyEncodeNs);
+    }
+
+    void recordNativeLookupCost(long jniNs, long nativeCoreNs, long materializeNs) {
+        nativeLookupCost.record(jniNs, nativeCoreNs, materializeNs);
+    }
+
+    void recordNativePutCost(long jniNs, long nativeCoreNs) {
+        nativePutCost.record(jniNs, nativeCoreNs, 0);
+    }
+
+    void recordNativeRemoveCost(long jniNs, long nativeCoreNs) {
+        nativeRemoveCost.record(jniNs, nativeCoreNs, 0);
+    }
+
+    void recordNativeRemoveRequest() {
+        increment(nativeRemoveRequests);
+    }
+
+    void recordNativeRemoveHintSkip() {
+        increment(nativeRemoveHintSkips);
+    }
+
+    void recordNativeRemoveJniCall() {
+        increment(nativeRemoveJniCalls);
+    }
+
+    void recordNativeRemoveHit() {
+        increment(nativeRemoveHits);
+    }
+
+    void recordNativeRemoveHintFalsePositive() {
+        increment(nativeRemoveHintFalsePositives);
+    }
+
     long probes() {
         return probes.get();
     }
@@ -158,8 +278,52 @@ public final class MapSnapshotCacheMetrics {
         return storesSingle.get();
     }
 
+    long multiEntrySkips() {
+        return multiEntrySkips.get();
+    }
+
     long invalidations() {
         return invalidations.get();
+    }
+
+    long nativeCostRawKeySamples() {
+        return nativeCostRawKeySamples.get();
+    }
+
+    long nativeCostSerializedKeySamples() {
+        return nativeCostSerializedKeySamples.get();
+    }
+
+    long nativeLookupCostSamples() {
+        return nativeLookupCost.samples.get();
+    }
+
+    long nativePutCostSamples() {
+        return nativePutCost.samples.get();
+    }
+
+    long nativeRemoveCostSamples() {
+        return nativeRemoveCost.samples.get();
+    }
+
+    long nativeRemoveRequests() {
+        return nativeRemoveRequests.get();
+    }
+
+    long nativeRemoveHintSkips() {
+        return nativeRemoveHintSkips.get();
+    }
+
+    long nativeRemoveJniCalls() {
+        return nativeRemoveJniCalls.get();
+    }
+
+    long nativeRemoveHits() {
+        return nativeRemoveHits.get();
+    }
+
+    long nativeRemoveHintFalsePositives() {
+        return nativeRemoveHintFalsePositives.get();
     }
 
     private void increment(AtomicLong counter) {
@@ -170,5 +334,31 @@ public final class MapSnapshotCacheMetrics {
 
     private static void registerGauge(MetricGroup metricGroup, String name, AtomicLong value) {
         metricGroup.gauge(name, (Gauge<Long>) value::get);
+    }
+
+    private static void registerNativeCostGauges(
+            MetricGroup metricGroup, String operation, NativeOperationCost cost) {
+        String prefix = "native_snapshot_cost_" + operation + "_";
+        registerGauge(metricGroup, prefix + "samples", cost.samples);
+        registerGauge(metricGroup, prefix + "jni_ns", cost.jniNs);
+        registerGauge(metricGroup, prefix + "native_core_ns", cost.nativeCoreNs);
+        registerGauge(metricGroup, prefix + "jni_transport_ns", cost.jniTransportNs);
+        registerGauge(metricGroup, prefix + "materialize_ns", cost.materializeNs);
+    }
+
+    private static final class NativeOperationCost {
+        private final AtomicLong samples = new AtomicLong();
+        private final AtomicLong jniNs = new AtomicLong();
+        private final AtomicLong nativeCoreNs = new AtomicLong();
+        private final AtomicLong jniTransportNs = new AtomicLong();
+        private final AtomicLong materializeNs = new AtomicLong();
+
+        private void record(long jniDurationNs, long nativeCoreDurationNs, long materializeDurationNs) {
+            samples.incrementAndGet();
+            jniNs.addAndGet(jniDurationNs);
+            nativeCoreNs.addAndGet(nativeCoreDurationNs);
+            jniTransportNs.addAndGet(Math.max(0, jniDurationNs - nativeCoreDurationNs));
+            materializeNs.addAndGet(materializeDurationNs);
+        }
     }
 }

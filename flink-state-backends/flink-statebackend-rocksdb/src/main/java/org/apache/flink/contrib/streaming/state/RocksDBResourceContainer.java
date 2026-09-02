@@ -413,6 +413,7 @@ public final class RocksDBResourceContainer implements AutoCloseable {
         final boolean memtableBloomWholeKey =
                 internalGetOption(RocksDBConfigurableOptions.MEMTABLE_BLOOM_WHOLE_KEY);
         currentOptions.setMemtablePrefixBloomSizeRatio(memtableBloomRatio);
+        currentOptions.setMemtableWholeKeyFiltering(memtableBloomWholeKey);
         LOG.info(
                 "Configured RocksDB memtable Bloom filter: ratio={}, whole-key={}",
                 memtableBloomRatio,

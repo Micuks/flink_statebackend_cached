@@ -567,6 +567,7 @@ public class RocksDBStateBackendConfigTest {
                 assertEquals(2, columnOptions.minWriteBufferNumberToMerge());
                 assertEquals(64 * SizeUnit.MB, columnOptions.writeBufferSize());
                 assertEquals(0.1, columnOptions.memtablePrefixBloomSizeRatio(), 0.0);
+                assertTrue(columnOptions.memtableWholeKeyFiltering());
 
                 BlockBasedTableConfig tableConfig =
                         (BlockBasedTableConfig) columnOptions.tableFormatConfig();
