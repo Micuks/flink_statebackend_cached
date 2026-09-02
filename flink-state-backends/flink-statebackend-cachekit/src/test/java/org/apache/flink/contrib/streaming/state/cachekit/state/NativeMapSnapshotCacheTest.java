@@ -37,6 +37,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class NativeMapSnapshotCacheTest {
 
     @Test
+    void testJavaSnapshotFallbackDoesNotRequireNativePlatform() {
+        assertTrue(NativeMapSnapshotCache.snapshotFeatureAvailable("", false));
+    }
+
+    @Test
     void testOnlyLinuxArm64IsACandidatePlatform() {
         assertTrue(NativeMapSnapshotCache.isCandidatePlatform("Linux", "aarch64"));
         assertTrue(NativeMapSnapshotCache.isCandidatePlatform("linux", "arm64"));

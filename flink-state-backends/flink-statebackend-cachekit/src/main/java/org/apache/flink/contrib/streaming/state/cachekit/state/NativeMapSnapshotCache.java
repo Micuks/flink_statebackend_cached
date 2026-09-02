@@ -44,15 +44,15 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
     private static String loadedLibrary;
 
     static boolean snapshotFeatureAvailable(String libraryPath, boolean nativeRequested) {
+        if (!nativeRequested) {
+            return true;
+        }
         if (!isCandidatePlatform(
                 System.getProperty("os.name", ""), System.getProperty("os.arch", ""))) {
             return false;
         }
         if (!kunpengCrc32Available()) {
             return false;
-        }
-        if (!nativeRequested) {
-            return true;
         }
         loadLibrary(libraryPath, false);
         return nativeSnapshotFeatureAvailable();
