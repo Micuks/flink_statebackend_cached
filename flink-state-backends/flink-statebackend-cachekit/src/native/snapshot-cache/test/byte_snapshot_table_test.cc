@@ -35,8 +35,8 @@ cachekit::ByteLookupResult Lookup(
             reinterpret_cast<const std::uint8_t*>(key.data()), key.size());
 }
 
-void RunKernel(cachekit::ProbeKernel kernel) {
-    cachekit::ByteSnapshotTable table(3, kernel);
+void RunTableOperations() {
+    cachekit::ByteSnapshotTable table(3);
     Require(Put(table, "row-key-1", cachekit::SnapshotKind::kEmpty)
                     == cachekit::PutResult::kInserted,
             "empty snapshot put failed");
@@ -124,12 +124,11 @@ void RunKernel(cachekit::ProbeKernel kernel) {
     result = Lookup(table, "post-churn");
     Require(result.found && result.kind == cachekit::SnapshotKind::kSingle,
             "post-churn lookup failed");
-    std::cout << "PASS bytes kernel=" << table.active_kernel_name()
-              << " vector_bytes=" << table.vector_bytes() << '\n';
+    std::cout << "PASS byte snapshot table\n";
 }
 
-void RunRebuildPreservesLiveEntries(cachekit::ProbeKernel kernel) {
-    cachekit::ByteSnapshotTable table(70, kernel);
+void RunRebuildPreservesLiveEntries() {
+    cachekit::ByteSnapshotTable table(70);
     Require(Put(table, "keep-a", cachekit::SnapshotKind::kSingle, "payload-a")
                     == cachekit::PutResult::kInserted,
             "first retained put failed");
@@ -163,8 +162,8 @@ void RunRebuildPreservesLiveEntries(cachekit::ProbeKernel kernel) {
             "rebuild lost second live payload");
 }
 
-void RunSixteenByteHashPath(cachekit::ProbeKernel kernel) {
-    cachekit::ByteSnapshotTable table(2, kernel);
+void RunSixteenByteHashPath() {
+    cachekit::ByteSnapshotTable table(2);
     const std::string first = "0123456789abcdef";
     const std::string second = "1123456789abcdef";
     const std::string third = "2123456789abcdef";
@@ -205,18 +204,8 @@ void RunKunpengFeatureGate() {
 
 int main() {
     RunKunpengFeatureGate();
-    std::vector<cachekit::ProbeKernel> kernels = {
-            cachekit::ProbeKernel::kAuto, cachekit::ProbeKernel::kScalar};
-    if (cachekit::NeonAvailable()) {
-        kernels.push_back(cachekit::ProbeKernel::kNeon);
-    }
-    if (cachekit::SveAvailable() && cachekit::SveVectorBytes() != 0) {
-        kernels.push_back(cachekit::ProbeKernel::kSve);
-    }
-    for (cachekit::ProbeKernel kernel : kernels) {
-        RunKernel(kernel);
-        RunRebuildPreservesLiveEntries(kernel);
-        RunSixteenByteHashPath(kernel);
-    }
+    RunTableOperations();
+    RunRebuildPreservesLiveEntries();
+    RunSixteenByteHashPath();
     return 0;
 }

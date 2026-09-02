@@ -170,9 +170,8 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
             throw new IllegalStateException("Native snapshot cache creation returned a null handle");
         }
         LOG.info(
-                "CacheKit Native snapshot JNI initialized: maxEntries={}, kernel={}, hash={}, removeHint={}",
+                "CacheKit Native snapshot JNI initialized: maxEntries={}, hash={}, removeHint={}",
                 maxEntries,
-                kernelName(),
                 nativeHashName(liveHandle()),
                 removeHintEnabled);
     }
@@ -300,10 +299,6 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
 
     synchronized int size() {
         return nativeSize(liveHandle());
-    }
-
-    synchronized String kernelName() {
-        return nativeKernelName(liveHandle());
     }
 
     synchronized String hashName() {
@@ -589,8 +584,6 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
     private static native void nativeClear(long handle);
 
     private static native int nativeSize(long handle);
-
-    private static native String nativeKernelName(long handle);
 
     private static native String nativeHashName(long handle);
 

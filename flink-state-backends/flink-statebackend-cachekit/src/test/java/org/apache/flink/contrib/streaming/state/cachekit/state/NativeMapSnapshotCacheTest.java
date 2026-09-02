@@ -145,7 +145,6 @@ class NativeMapSnapshotCacheTest {
                         IntSerializer.INSTANCE,
                         IntSerializer.INSTANCE,
                         StringSerializer.INSTANCE);
-        assertEquals("scalar", cache.kernelName());
         assertFalse(cache.putEmpty(1, 0));
         String largeUserKey = "x".repeat(1024);
         assertFalse(cache.putSingle(2, 0, largeUserKey));
@@ -238,7 +237,6 @@ class NativeMapSnapshotCacheTest {
                         IntSerializer.INSTANCE,
                         IntSerializer.INSTANCE,
                         StringSerializer.INSTANCE)) {
-            assertEquals("scalar", cache.kernelName());
             assertEquals("crc32c-16", cache.hashName());
         }
     }

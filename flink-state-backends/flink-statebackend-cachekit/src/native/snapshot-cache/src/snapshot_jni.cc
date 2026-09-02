@@ -1,4 +1,3 @@
-#include "cachekit_snapshot_table.h"
 #include "cachekit_byte_snapshot_table.h"
 
 #include <jni.h>
@@ -11,41 +10,8 @@
 
 namespace {
 
-using cachekit::ProbeKernel;
 using cachekit::SnapshotKind;
-using cachekit::SnapshotTable;
 using cachekit::ByteSnapshotTable;
-
-SnapshotTable* Table(jlong handle) {
-    return reinterpret_cast<SnapshotTable*>(static_cast<std::uintptr_t>(handle));
-}
-
-jlong Handle(SnapshotTable* table) {
-    return static_cast<jlong>(reinterpret_cast<std::uintptr_t>(table));
-}
-
-ProbeKernel Kernel(jint value) {
-    switch (value) {
-        case 0:
-            return ProbeKernel::kScalar;
-        case 1:
-            return ProbeKernel::kNeon;
-        case 2:
-            return ProbeKernel::kSve;
-        case 3:
-            return ProbeKernel::kAuto;
-        default:
-            throw std::invalid_argument("invalid kernel id");
-    }
-}
-
-std::uint64_t Pack(const cachekit::LookupResult& result) {
-    if (!result.found) {
-        return 0;
-    }
-    return (static_cast<std::uint64_t>(result.entry_id) << 8)
-            | static_cast<std::uint8_t>(result.kind);
-}
 
 void ThrowIllegalArgument(JNIEnv* env, const char* message) {
     jclass type = env->FindClass("java/lang/IllegalArgumentException");
@@ -66,10 +32,9 @@ public:
     JniByteSnapshotCache(
             JNIEnv* env,
             std::size_t max_entries,
-            ProbeKernel kernel,
             jobject miss_sentinel,
             jobject empty_sentinel)
-            : table_(max_entries, kernel),
+            : table_(max_entries),
               miss_sentinel_(env->NewGlobalRef(miss_sentinel)),
               empty_sentinel_(env->NewGlobalRef(empty_sentinel)) {
         if (miss_sentinel_ == nullptr || empty_sentinel_ == nullptr) {
@@ -164,9 +129,7 @@ public:
     }
 
     std::size_t size() const { return table_.size(); }
-    const char* active_kernel_name() const { return table_.active_kernel_name(); }
     const char* hash_name() const { return table_.hash_name(); }
-    std::size_t vector_bytes() const { return table_.vector_bytes(); }
 
 private:
     static jobject DecodePayload(const std::uint8_t* payload, std::size_t payload_size) {
@@ -215,208 +178,6 @@ void RecordNativeCoreNanos(
 
 }  // namespace
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_kernelSupported(
-        JNIEnv*, jclass, jint kernel) {
-    if (kernel == 0) {
-        return JNI_TRUE;
-    }
-    if (kernel == 1) {
-        return cachekit::NeonAvailable() ? JNI_TRUE : JNI_FALSE;
-    }
-    if (kernel == 2) {
-        return cachekit::SveAvailable() && cachekit::SveVectorBytes() != 0 ? JNI_TRUE : JNI_FALSE;
-    }
-    return JNI_FALSE;
-}
-
-extern "C" JNIEXPORT jlong JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_create(
-        JNIEnv* env, jclass, jint capacity, jint kernel) {
-    try {
-        return Handle(new SnapshotTable(static_cast<std::size_t>(capacity), Kernel(kernel)));
-    } catch (const std::exception& error) {
-        ThrowIllegalArgument(env, error.what());
-        return 0;
-    }
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_destroy(
-        JNIEnv*, jclass, jlong handle) {
-    delete Table(handle);
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_put(
-        JNIEnv*,
-        jclass,
-        jlong handle,
-        jlong key,
-        jlong name_space,
-        jint kind,
-        jint entry_id) {
-    const SnapshotKind snapshot_kind =
-            kind == 1 ? SnapshotKind::kEmpty : SnapshotKind::kSingle;
-    return Table(handle)->Put(
-                   static_cast<std::uint64_t>(key),
-                   static_cast<std::uint64_t>(name_space),
-                   snapshot_kind,
-                   static_cast<std::uint32_t>(entry_id))
-            ? JNI_TRUE
-            : JNI_FALSE;
-}
-
-extern "C" JNIEXPORT jlong JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_lookup(
-        JNIEnv*, jclass, jlong handle, jlong key, jlong name_space) {
-    return static_cast<jlong>(Pack(Table(handle)->Lookup(
-            static_cast<std::uint64_t>(key), static_cast<std::uint64_t>(name_space))));
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_lookupBatch(
-        JNIEnv* env,
-        jclass,
-        jlong handle,
-        jobject input,
-        jobject output,
-        jint start,
-        jint count) {
-    auto* queries = static_cast<std::uint64_t*>(env->GetDirectBufferAddress(input));
-    auto* results = static_cast<std::uint64_t*>(env->GetDirectBufferAddress(output));
-    if (queries == nullptr || results == nullptr || start < 0 || count < 0) {
-        ThrowIllegalArgument(env, "batch buffers must be direct and ranges non-negative");
-        return;
-    }
-    SnapshotTable* table = Table(handle);
-    for (jint index = start; index < start + count; ++index) {
-        results[index] = Pack(table->Lookup(queries[index * 2], queries[index * 2 + 1]));
-    }
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_kernelName(
-        JNIEnv* env, jclass, jlong handle) {
-    return env->NewStringUTF(Table(handle)->active_kernel_name());
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_vectorBytes(
-        JNIEnv*, jclass, jlong handle) {
-    return static_cast<jint>(Table(handle)->vector_bytes());
-}
-
-extern "C" JNIEXPORT jlong JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_createBytes(
-        JNIEnv* env,
-        jclass,
-        jint capacity,
-        jint kernel,
-        jobject miss_sentinel,
-        jobject empty_sentinel) {
-    try {
-        return ByteHandle(new JniByteSnapshotCache(
-                env,
-                static_cast<std::size_t>(capacity),
-                Kernel(kernel),
-                miss_sentinel,
-                empty_sentinel));
-    } catch (const std::exception& error) {
-        ThrowIllegalArgument(env, error.what());
-        return 0;
-    }
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_destroyBytes(
-        JNIEnv* env, jclass, jlong handle) {
-    if (handle != 0) {
-        ByteCache(handle)->Destroy(env);
-        delete ByteCache(handle);
-    }
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_putBytes(
-        JNIEnv* env,
-        jclass,
-        jlong handle,
-        jbyteArray key,
-        jobject value) {
-    if (handle == 0 || key == nullptr || value == nullptr) {
-        return JNI_FALSE;
-    }
-    const jsize key_size = env->GetArrayLength(key);
-    jbyte* key_bytes = env->GetByteArrayElements(key, nullptr);
-    if (key_bytes == nullptr) {
-        return JNI_FALSE;
-    }
-    const cachekit::PutResult result = ByteCache(handle)->Put(
-            env,
-            reinterpret_cast<const std::uint8_t*>(key_bytes),
-            static_cast<std::size_t>(key_size),
-            SnapshotKind::kSingle,
-            value,
-            nullptr);
-    env->ReleaseByteArrayElements(key, key_bytes, JNI_ABORT);
-    return result == cachekit::PutResult::kRejected ? JNI_FALSE : JNI_TRUE;
-}
-
-extern "C" JNIEXPORT jobject JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_lookupBytes(
-        JNIEnv* env, jclass, jlong handle, jbyteArray key) {
-    if (handle == 0 || key == nullptr) {
-        return nullptr;
-    }
-    const jsize key_size = env->GetArrayLength(key);
-    jbyte* key_bytes = static_cast<jbyte*>(env->GetPrimitiveArrayCritical(key, nullptr));
-    if (key_bytes == nullptr) {
-        return nullptr;
-    }
-    jobject result = ByteCache(handle)->Lookup(
-            reinterpret_cast<const std::uint8_t*>(key_bytes),
-            static_cast<std::size_t>(key_size));
-    env->ReleasePrimitiveArrayCritical(key, key_bytes, JNI_ABORT);
-    return env->NewLocalRef(result);
-}
-
-extern "C" JNIEXPORT jobject JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_lookupWords(
-        JNIEnv* env, jclass, jlong handle, jlong first, jlong second) {
-    if (handle == 0) {
-        return nullptr;
-    }
-    const std::uint64_t words[] = {
-            static_cast<std::uint64_t>(first),
-            static_cast<std::uint64_t>(second)};
-    jobject result = ByteCache(handle)->Lookup(
-            reinterpret_cast<const std::uint8_t*>(words), sizeof(words));
-    return env->NewLocalRef(result);
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_echoBytes(
-        JNIEnv* env, jclass, jbyteArray key) {
-    if (key == nullptr || env->GetArrayLength(key) == 0) {
-        return 0;
-    }
-    jbyte* key_bytes = static_cast<jbyte*>(env->GetPrimitiveArrayCritical(key, nullptr));
-    if (key_bytes == nullptr) {
-        return 0;
-    }
-    const jint result = static_cast<jint>(
-            static_cast<unsigned char>(key_bytes[0]) + env->GetArrayLength(key));
-    env->ReleasePrimitiveArrayCritical(key, key_bytes, JNI_ABORT);
-    return result;
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativebench_NativeSnapshotBench_byteVectorBytes(
-        JNIEnv*, jclass, jlong handle) {
-    return static_cast<jint>(ByteCache(handle)->vector_bytes());
-}
-
 extern "C" JNIEXPORT jlong JNICALL
 Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeCreate(
         JNIEnv* env,
@@ -434,7 +195,6 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
         return ByteHandle(new JniByteSnapshotCache(
                 env,
                 static_cast<std::size_t>(max_entries),
-                ProbeKernel::kAuto,
                 miss_sentinel,
                 empty_sentinel));
     } catch (const std::exception& error) {
@@ -806,16 +566,6 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCa
         return 0;
     }
     return static_cast<jint>(ByteCache(handle)->size());
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_state_NativeMapSnapshotCache_nativeKernelName(
-        JNIEnv* env, jclass, jlong handle) {
-    if (handle == 0) {
-        ThrowIllegalState(env, "native snapshot cache is closed");
-        return nullptr;
-    }
-    return env->NewStringUTF(ByteCache(handle)->active_kernel_name());
 }
 
 extern "C" JNIEXPORT jstring JNICALL
