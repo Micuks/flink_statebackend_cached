@@ -147,7 +147,10 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         }
         this.mutationSlot = new BatchSlot(this, options, SlotKind.MUTATION);
         this.mutationSlot.markLeased();
-        this.residentKeyHint = new ResidentKeyHint(options.capacityEntries());
+        this.residentKeyHint =
+                options.residentMutationBatchEnabled()
+                        ? new ResidentKeyHint(options.capacityEntries())
+                        : null;
         // Capture audit metadata during construction. If either JNI query fails, open() closes the
         // bridge before ownership can escape. These getters are thereafter non-JNI and cannot make
         // CacheKitKeyedStateBackend construction leak an already-open plane.
@@ -272,17 +275,26 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             requireActive();
             try {
                 int processed;
-                residentKeyHint.beginUpdate();
-                try {
+                if (residentKeyHint == null) {
                     processed =
                             plane.fillBatch(
                                     slot.missKeys,
                                     slot.fillValueArena(),
                                     slot.fillValueMetadata(),
                                     slot.fillResults());
-                    recordAcceptedResidentHints(slot, processed);
-                } finally {
-                    residentKeyHint.endUpdate();
+                } else {
+                    residentKeyHint.beginUpdate();
+                    try {
+                        processed =
+                                plane.fillBatch(
+                                        slot.missKeys,
+                                        slot.fillValueArena(),
+                                        slot.fillValueMetadata(),
+                                        slot.fillResults());
+                        recordAcceptedResidentHints(slot, processed);
+                    } finally {
+                        residentKeyHint.endUpdate();
+                    }
                 }
                 fillCalls++;
                 return processed;
@@ -500,7 +512,12 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
      */
     public boolean mightContainResidentKey(int stateId, byte[] preparedRocksDBKey) {
         Objects.requireNonNull(preparedRocksDBKey, "preparedRocksDBKey");
-        return residentKeyHint.mightContain(stateId, preparedRocksDBKey);
+        ResidentKeyHint hint = residentKeyHint;
+        return hint == null || hint.mightContain(stateId, preparedRocksDBKey);
+    }
+
+    boolean residentKeyHintEnabledForTesting() {
+        return residentKeyHint != null;
     }
 
     /**
@@ -733,17 +750,26 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
 
     private int fillPreparedMutationRaw() {
         int processed;
-        residentKeyHint.beginUpdate();
-        try {
+        if (residentKeyHint == null) {
             processed =
                     plane.fillBatch(
                             mutationSlot.missKeys,
                             mutationSlot.fillValueArena(),
                             mutationSlot.fillValueMetadata(),
                             mutationSlot.fillResults());
-            recordAcceptedResidentHints(mutationSlot, processed);
-        } finally {
-            residentKeyHint.endUpdate();
+        } else {
+            residentKeyHint.beginUpdate();
+            try {
+                processed =
+                        plane.fillBatch(
+                                mutationSlot.missKeys,
+                                mutationSlot.fillValueArena(),
+                                mutationSlot.fillValueMetadata(),
+                                mutationSlot.fillResults());
+                recordAcceptedResidentHints(mutationSlot, processed);
+            } finally {
+                residentKeyHint.endUpdate();
+            }
         }
         fillCalls++;
         if (processed != 1) {
@@ -754,6 +780,9 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     }
 
     private void recordAcceptedResidentHints(BatchSlot slot, int processed) {
+        if (residentKeyHint == null) {
+            return;
+        }
         int count = Math.min(processed, slot.missKeys.entryCount());
         if (count <= 0) {
             return;
