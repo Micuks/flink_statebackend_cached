@@ -95,7 +95,8 @@ public final class StreamOneInputProcessor<IN> implements StreamInputProcessor {
         try {
             flushBatchOutput();
         } catch (Exception e) {
-            throw new IOException("Failed to flush batched output before closing input processor.", e);
+            throw new IOException(
+                    "Failed to flush batched output before closing input processor.", e);
         } finally {
             input.close();
         }

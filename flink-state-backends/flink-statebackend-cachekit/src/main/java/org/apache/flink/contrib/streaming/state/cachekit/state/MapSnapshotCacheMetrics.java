@@ -21,7 +21,7 @@ import org.apache.flink.metrics.MetricGroup;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Task-level diagnostics for the MapState EMPTY/SINGLE snapshot cache.
+ * Task-level diagnostics for the MapState EMPTY/SINGLE/SMALL snapshot cache.
  *
  * <p>One instance is shared by all MapState wrappers in a keyed backend so that the REST metrics
  * remain unique within the task metric group. Diagnostics are intentionally opt-in because the
@@ -37,8 +37,10 @@ public final class MapSnapshotCacheMetrics {
     private final AtomicLong misses = new AtomicLong();
     private final AtomicLong emptyShortCircuits = new AtomicLong();
     private final AtomicLong singleShortCircuits = new AtomicLong();
+    private final AtomicLong smallShortCircuits = new AtomicLong();
     private final AtomicLong storesEmpty = new AtomicLong();
     private final AtomicLong storesSingle = new AtomicLong();
+    private final AtomicLong storesSmall = new AtomicLong();
     private final AtomicLong multiEntrySkips = new AtomicLong();
     private final AtomicLong invalidations = new AtomicLong();
     private final AtomicLong staleInvalidations = new AtomicLong();
@@ -82,8 +84,13 @@ public final class MapSnapshotCacheMetrics {
                 diagnostics,
                 "map_snapshot_cache_single_short_circuits",
                 metrics.singleShortCircuits);
+        registerGauge(
+                diagnostics,
+                "map_snapshot_cache_small_short_circuits",
+                metrics.smallShortCircuits);
         registerGauge(diagnostics, "map_snapshot_cache_stores_empty", metrics.storesEmpty);
         registerGauge(diagnostics, "map_snapshot_cache_stores_single", metrics.storesSingle);
+        registerGauge(diagnostics, "map_snapshot_cache_stores_small", metrics.storesSmall);
         registerGauge(diagnostics, "map_snapshot_cache_multi_entry_skips", metrics.multiEntrySkips);
         registerGauge(diagnostics, "map_snapshot_cache_invalidations", metrics.invalidations);
         registerGauge(
@@ -97,9 +104,7 @@ public final class MapSnapshotCacheMetrics {
                 "native_snapshot_cost_lookup_operations",
                 metrics.nativeLookupOperations);
         registerGauge(
-                diagnostics,
-                "native_snapshot_cost_put_operations",
-                metrics.nativePutOperations);
+                diagnostics, "native_snapshot_cost_put_operations", metrics.nativePutOperations);
         registerGauge(
                 diagnostics,
                 "native_snapshot_cost_remove_operations",
@@ -113,9 +118,7 @@ public final class MapSnapshotCacheMetrics {
                 "native_snapshot_cost_serialized_key_samples",
                 metrics.nativeCostSerializedKeySamples);
         registerGauge(
-                diagnostics,
-                "native_snapshot_cost_input_bytes",
-                metrics.nativeCostInputBytes);
+                diagnostics, "native_snapshot_cost_input_bytes", metrics.nativeCostInputBytes);
         registerGauge(
                 diagnostics,
                 "native_snapshot_cost_key_encode_ns",
@@ -168,12 +171,20 @@ public final class MapSnapshotCacheMetrics {
         increment(singleShortCircuits);
     }
 
+    void recordSmallShortCircuit() {
+        increment(smallShortCircuits);
+    }
+
     void recordStoreEmpty() {
         increment(storesEmpty);
     }
 
     void recordStoreSingle() {
         increment(storesSingle);
+    }
+
+    void recordStoreSmall() {
+        increment(storesSmall);
     }
 
     void recordMultiEntrySkip() {
@@ -270,6 +281,10 @@ public final class MapSnapshotCacheMetrics {
         return singleShortCircuits.get();
     }
 
+    long smallShortCircuits() {
+        return smallShortCircuits.get();
+    }
+
     long storesEmpty() {
         return storesEmpty.get();
     }
@@ -278,8 +293,8 @@ public final class MapSnapshotCacheMetrics {
         return storesSingle.get();
     }
 
-    long multiEntrySkips() {
-        return multiEntrySkips.get();
+    long storesSmall() {
+        return storesSmall.get();
     }
 
     long invalidations() {
@@ -326,6 +341,29 @@ public final class MapSnapshotCacheMetrics {
         return nativeRemoveHintFalsePositives.get();
     }
 
+    /** Returns one stable, machine-readable snapshot for end-of-task audit logs. */
+    public String diagnosticSummary() {
+        return String.format(
+                "enabled=%s probes=%d hits=%d misses=%d emptyShortCircuits=%d "
+                        + "singleShortCircuits=%d smallShortCircuits=%d storesEmpty=%d "
+                        + "storesSingle=%d storesSmall=%d multiEntrySkips=%d invalidations=%d "
+                        + "staleInvalidations=%d evictions=%d",
+                enabled,
+                probes.get(),
+                hits.get(),
+                misses.get(),
+                emptyShortCircuits.get(),
+                singleShortCircuits.get(),
+                smallShortCircuits.get(),
+                storesEmpty.get(),
+                storesSingle.get(),
+                storesSmall.get(),
+                multiEntrySkips.get(),
+                invalidations.get(),
+                staleInvalidations.get(),
+                evictions.get());
+    }
+
     private void increment(AtomicLong counter) {
         if (enabled) {
             counter.incrementAndGet();
@@ -353,7 +391,8 @@ public final class MapSnapshotCacheMetrics {
         private final AtomicLong jniTransportNs = new AtomicLong();
         private final AtomicLong materializeNs = new AtomicLong();
 
-        private void record(long jniDurationNs, long nativeCoreDurationNs, long materializeDurationNs) {
+        private void record(
+                long jniDurationNs, long nativeCoreDurationNs, long materializeDurationNs) {
             samples.incrementAndGet();
             jniNs.addAndGet(jniDurationNs);
             nativeCoreNs.addAndGet(nativeCoreDurationNs);

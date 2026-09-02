@@ -18,6 +18,19 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import static org.apache.flink.util.Preconditions.checkArgument;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import javax.annotation.Nonnegative;
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
@@ -35,24 +48,13 @@ import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.StateMigrationException;
-
 import org.rocksdb.ColumnFamilyHandle;
+import org.rocksdb.ReadOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
+import org.rocksdb.Slice;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.annotation.Nonnegative;
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
-
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Iterator;
-import java.util.Map;
-
-import static org.apache.flink.util.Preconditions.checkArgument;
 
 /**
  * {@link MapState} implementation that stores state in RocksDB.
@@ -63,7 +65,7 @@ import static org.apache.flink.util.Preconditions.checkArgument;
  * @param <UV> The type of the values in the map state.
  */
 class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, UV>>
-        implements InternalMapState<K, N, UK, UV> {
+        implements InternalMapState<K, N, UK, UV>, RocksDBBatchMapReader<UK> {
 
     private static final Logger LOG = LoggerFactory.getLogger(RocksDBMapState.class);
 
@@ -126,6 +128,96 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
         return (rawValueBytes == null
                 ? null
                 : deserializeUserValue(dataInputView, rawValueBytes, userValueSerializer));
+    }
+
+    @Override
+    public java.util.List<byte[]> getSerializedValuesByUserKeys(java.util.List<UK> userKeys)
+            throws Exception {
+        if (userKeys.isEmpty()) {
+            return java.util.Collections.emptyList();
+        }
+        java.util.List<byte[]> rocksDBKeys = serializeRocksDBKeysByUserKeys(userKeys);
+        return getSerializedValuesByRocksDBKeys(rocksDBKeys, 0, rocksDBKeys.size());
+    }
+
+    @Override
+    public List<byte[]> serializeRocksDBKeysByUserKeys(List<UK> userKeys) throws Exception {
+        if (userKeys.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<byte[]> rocksDBKeys = new ArrayList<>(userKeys.size());
+        for (UK userKey : userKeys) {
+            rocksDBKeys.add(
+                    serializeCurrentKeyWithGroupAndNamespacePlusUserKey(
+                            userKey, userKeySerializer));
+        }
+        return rocksDBKeys;
+    }
+
+    @Override
+    public List<byte[]> getSerializedValuesByRocksDBKeys(
+            List<byte[]> rocksDBKeys, int fromIndex, int toIndex) throws Exception {
+        if (fromIndex < 0 || toIndex < fromIndex || toIndex > rocksDBKeys.size()) {
+            throw new IndexOutOfBoundsException(
+                    "Invalid RocksDB key range ["
+                            + fromIndex
+                            + ", "
+                            + toIndex
+                            + ") for size "
+                            + rocksDBKeys.size());
+        }
+        if (fromIndex == toIndex) {
+            return Collections.emptyList();
+        }
+        List<byte[]> keyRange = rocksDBKeys.subList(fromIndex, toIndex);
+        return backend.db.multiGetAsList(
+                Collections.nCopies(keyRange.size(), columnFamily), keyRange);
+    }
+
+    @Override
+    public boolean supportsDirectArenaMultiGet() {
+        return true;
+    }
+
+    @Override
+    public int directArenaMultiGetMaxBatch() {
+        try {
+            Object advertised =
+                    backend.db
+                            .getClass()
+                            .getMethod("directMultiGetMaxBatch")
+                            .invoke(backend.db);
+            if (!(advertised instanceof Number)) {
+                return RocksDBBatchValueReader.DIRECT_ARENA_DEFAULT_BATCH;
+            }
+            return Math.max(
+                    1,
+                    Math.min(
+                            RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
+                            ((Number) advertised).intValue()));
+        } catch (ReflectiveOperationException
+                | LinkageError
+                | SecurityException incompatibleWrapperOrNativeLibrary) {
+            return RocksDBBatchValueReader.DIRECT_ARENA_DEFAULT_BATCH;
+        }
+    }
+
+    @Override
+    public int getSerializedValuesByRocksDBKeyArena(
+            ByteBuffer keyArena,
+            ByteBuffer descriptors,
+            int count,
+            ByteBuffer valueArena,
+            int valueStride)
+            throws RocksDBException {
+        return backend.db.multiGetDirectArena(
+                columnFamily,
+                backend.getReadOptions(),
+                keyArena,
+                descriptors,
+                count,
+                valueArena,
+                valueStride);
     }
 
     @Override
@@ -402,6 +494,31 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
         return isNull ? null : valueSerializer.deserialize(dataInputView);
     }
 
+    private static <UK> UK deserializeUserKey(
+            DataInputDeserializer dataInputView,
+            int userKeyOffset,
+            byte[] packedPage,
+            int rawKeyOffset,
+            int rawKeyLength,
+            TypeSerializer<UK> keySerializer)
+            throws IOException {
+        dataInputView.setBuffer(
+                packedPage, rawKeyOffset + userKeyOffset, rawKeyLength - userKeyOffset);
+        return keySerializer.deserialize(dataInputView);
+    }
+
+    private static <UV> UV deserializeUserValue(
+            DataInputDeserializer dataInputView,
+            byte[] packedPage,
+            int rawValueOffset,
+            int rawValueLength,
+            TypeSerializer<UV> valueSerializer)
+            throws IOException {
+        dataInputView.setBuffer(packedPage, rawValueOffset, rawValueLength);
+        boolean isNull = dataInputView.readBoolean();
+        return isNull ? null : valueSerializer.deserialize(dataInputView);
+    }
+
     private boolean startWithKeyPrefix(byte[] keyPrefixBytes, byte[] rawKeyBytes) {
         if (rawKeyBytes.length < keyPrefixBytes.length) {
             return false;
@@ -428,10 +545,18 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
          * The raw bytes of the key stored in RocksDB. Each user key is stored in RocksDB with the
          * format #KeyGroup#Key#Namespace#UserKey.
          */
-        private final byte[] rawKeyBytes;
+        @Nullable private byte[] rawKeyBytes;
 
         /** The raw bytes of the value stored in RocksDB. */
-        private byte[] rawValueBytes;
+        @Nullable private byte[] rawValueBytes;
+
+        /** Immutable packed page shared by all entries from one complete tiny scan. */
+        @Nullable private final byte[] packedPage;
+
+        private final int packedRawKeyOffset;
+        private final int packedRawKeyLength;
+        private final int packedRawValueOffset;
+        private final int packedRawValueLength;
 
         /** True if the entry has been deleted. */
         private boolean deleted;
@@ -469,8 +594,51 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
 
             this.rawKeyBytes = rawKeyBytes;
             this.rawValueBytes = rawValueBytes;
+            this.packedPage = null;
+            this.packedRawKeyOffset = 0;
+            this.packedRawKeyLength = 0;
+            this.packedRawValueOffset = 0;
+            this.packedRawValueLength = 0;
             this.deleted = false;
             this.dataInputView = dataInputView;
+        }
+
+        RocksDBMapEntry(
+                @Nonnull final RocksDB db,
+                @Nonnegative final int userKeyOffset,
+                @Nonnull final byte[] packedPage,
+                @Nonnegative final int rawKeyOffset,
+                @Nonnegative final int rawKeyLength,
+                @Nonnegative final int rawValueOffset,
+                @Nonnegative final int rawValueLength,
+                @Nonnull final TypeSerializer<UK> keySerializer,
+                @Nonnull final TypeSerializer<UV> valueSerializer,
+                @Nonnull DataInputDeserializer dataInputView) {
+            this.db = db;
+            this.userKeyOffset = userKeyOffset;
+            this.keySerializer = keySerializer;
+            this.valueSerializer = valueSerializer;
+            this.rawKeyBytes = null;
+            this.rawValueBytes = null;
+            this.packedPage = packedPage;
+            this.packedRawKeyOffset = rawKeyOffset;
+            this.packedRawKeyLength = rawKeyLength;
+            this.packedRawValueOffset = rawValueOffset;
+            this.packedRawValueLength = rawValueLength;
+            this.deleted = false;
+            this.dataInputView = dataInputView;
+        }
+
+        private byte[] materializeRawKey() {
+            if (rawKeyBytes == null) {
+                rawKeyBytes =
+                        Arrays.copyOfRange(
+                                packedPage,
+                                packedRawKeyOffset,
+                                packedRawKeyOffset + packedRawKeyLength);
+                backend.recordMapIteratorPackedLazyKeyMaterialization();
+            }
+            return rawKeyBytes;
         }
 
         public void remove() {
@@ -478,7 +646,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             rawValueBytes = null;
 
             try {
-                db.delete(columnFamily, writeOptions, rawKeyBytes);
+                db.delete(columnFamily, writeOptions, materializeRawKey());
             } catch (RocksDBException e) {
                 throw new FlinkRuntimeException("Error while removing data from RocksDB.", e);
             }
@@ -489,8 +657,19 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             if (userKey == null) {
                 try {
                     userKey =
-                            deserializeUserKey(
-                                    dataInputView, userKeyOffset, rawKeyBytes, keySerializer);
+                            packedPage == null
+                                    ? deserializeUserKey(
+                                            dataInputView,
+                                            userKeyOffset,
+                                            rawKeyBytes,
+                                            keySerializer)
+                                    : deserializeUserKey(
+                                            dataInputView,
+                                            userKeyOffset,
+                                            packedPage,
+                                            packedRawKeyOffset,
+                                            packedRawKeyLength,
+                                            keySerializer);
                 } catch (IOException e) {
                     throw new FlinkRuntimeException("Error while deserializing the user key.", e);
                 }
@@ -507,7 +686,15 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                 if (userValue == null) {
                     try {
                         userValue =
-                                deserializeUserValue(dataInputView, rawValueBytes, valueSerializer);
+                                packedPage == null || rawValueBytes != null
+                                        ? deserializeUserValue(
+                                                dataInputView, rawValueBytes, valueSerializer)
+                                        : deserializeUserValue(
+                                                dataInputView,
+                                                packedPage,
+                                                packedRawValueOffset,
+                                                packedRawValueLength,
+                                                valueSerializer);
                     } catch (IOException e) {
                         throw new FlinkRuntimeException(
                                 "Error while deserializing the user value.", e);
@@ -530,7 +717,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                 userValue = value;
                 rawValueBytes = serializeValueNullSensitive(value, valueSerializer);
 
-                db.put(columnFamily, writeOptions, rawKeyBytes, rawValueBytes);
+                db.put(columnFamily, writeOptions, materializeRawKey(), rawValueBytes);
             } catch (IOException | RocksDBException e) {
                 throw new FlinkRuntimeException("Error while putting data into RocksDB.", e);
             }
@@ -632,25 +819,63 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                 return;
             }
 
+            // The packed native API is only safe to use for the initial, complete tiny-map scan.
+            // Any non-COMPLETE outcome falls through to the ordinary iterator below.
+            if (currentEntry == null
+                    && backend.isMapIteratorPackedTinyScanEnabled()
+                    && tryLoadPackedTinyMap()) {
+                return;
+            }
+
             // use try-with-resources to ensure RocksIterator can be release even some runtime
             // exception
             // occurred in the below code block.
-            try (RocksIteratorWrapper iterator =
+            long entriesLoaded = 0;
+            long keyJniCalls = 0;
+            long duplicateKeyFetchesAvoided = 0;
+            long valueJniCalls = 0;
+            long seeks = 0;
+            long nativeIterators = 0;
+            long boundedIterators = 0;
+            long upperBoundFallbacks = 0;
+            final byte[] prefixUpperBound =
+                    backend.isMapIteratorPrefixUpperBoundEnabled()
+                            ? unsignedBytewisePrefixSuccessor(keyPrefixBytes)
+                            : null;
+            if (backend.isMapIteratorPrefixUpperBoundEnabled() && prefixUpperBound == null) {
+                upperBoundFallbacks = 1;
+            }
+            final Slice upperBoundSlice =
+                    prefixUpperBound == null ? null : new Slice(prefixUpperBound);
+            final ReadOptions boundedReadOptions =
+                    upperBoundSlice == null
+                            ? null
+                            : new ReadOptions(backend.getReadOptions())
+                                    .setIterateUpperBound(upperBoundSlice);
+            try (Slice ignoredUpperBoundSlice = upperBoundSlice;
+                    ReadOptions ignoredBoundedReadOptions = boundedReadOptions;
+                    RocksIteratorWrapper iterator =
                     RocksDBOperationUtils.getRocksIterator(
-                            db, columnFamily, backend.getReadOptions())) {
-
+                            db,
+                            columnFamily,
+                            boundedReadOptions == null
+                                    ? backend.getReadOptions()
+                                    : boundedReadOptions)) {
+                nativeIterators = 1;
+                boundedIterators = boundedReadOptions == null ? 0 : 1;
                 /*
                  * The iteration starts from the prefix bytes at the first loading. After #nextEntry() is called,
                  * the currentEntry points to the last returned entry, and at that time, we will start
                  * the iterating from currentEntry if reloading cache is needed.
                  */
                 byte[] startBytes =
-                        (currentEntry == null ? keyPrefixBytes : currentEntry.rawKeyBytes);
+                        (currentEntry == null ? keyPrefixBytes : currentEntry.materializeRawKey());
 
                 cacheEntries.clear();
                 cacheIndex = 0;
 
                 iterator.seek(startBytes);
+                seeks = 1;
 
                 /*
                  * If the entry pointing to the current position is not removed, it will be the first entry in the
@@ -661,8 +886,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                 }
 
                 while (true) {
-                    if (!iterator.isValid()
-                            || !startWithKeyPrefix(keyPrefixBytes, iterator.key())) {
+                    if (!iterator.isValid()) {
                         expired = true;
                         break;
                     }
@@ -671,22 +895,164 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                         break;
                     }
 
+                    byte[] rawKeyBytes = iterator.key();
+                    keyJniCalls++;
+                    if (boundedReadOptions == null
+                            && !startWithKeyPrefix(keyPrefixBytes, rawKeyBytes)) {
+                        expired = true;
+                        break;
+                    }
+
+                    byte[] entryRawKeyBytes;
+                    if (backend.isMapIteratorSingleKeyFetchEnabled()) {
+                        entryRawKeyBytes = rawKeyBytes;
+                        duplicateKeyFetchesAvoided++;
+                    } else {
+                        entryRawKeyBytes = iterator.key();
+                        keyJniCalls++;
+                    }
+                    byte[] rawValueBytes = iterator.value();
+                    valueJniCalls++;
+
                     RocksDBMapEntry entry =
                             new RocksDBMapEntry(
                                     db,
                                     keyPrefixBytes.length,
-                                    iterator.key(),
-                                    iterator.value(),
+                                    entryRawKeyBytes,
+                                    rawValueBytes,
                                     keySerializer,
                                     valueSerializer,
                                     dataInputView);
 
                     cacheEntries.add(entry);
+                    entriesLoaded++;
 
                     iterator.next();
                 }
+            } finally {
+                backend.recordMapIteratorPageStats(
+                        entriesLoaded,
+                        keyJniCalls,
+                        duplicateKeyFetchesAvoided,
+                        valueJniCalls,
+                        seeks,
+                        nativeIterators,
+                        boundedIterators,
+                        upperBoundFallbacks);
             }
         }
+
+        private boolean tryLoadPackedTinyMap() {
+            final byte[] prefixUpperBound =
+                    backend.isMapIteratorPrefixUpperBoundEnabled()
+                            ? unsignedBytewisePrefixSuccessor(keyPrefixBytes)
+                            : null;
+            final Slice upperBoundSlice =
+                    prefixUpperBound == null ? null : new Slice(prefixUpperBound);
+            final ReadOptions boundedReadOptions =
+                    upperBoundSlice == null
+                            ? null
+                            : new ReadOptions(backend.getReadOptions())
+                                    .setIterateUpperBound(upperBoundSlice);
+            final long boundedIterator = boundedReadOptions == null ? 0 : 1;
+            final long upperBoundFallback =
+                    backend.isMapIteratorPrefixUpperBoundEnabled() && prefixUpperBound == null
+                            ? 1
+                            : 0;
+            final RocksDBPackedTinyMapScan.Result packedResult;
+            try (Slice ignoredUpperBoundSlice = upperBoundSlice;
+                    ReadOptions ignoredBoundedReadOptions = boundedReadOptions) {
+                try {
+                    packedResult =
+                            backend.tryScanPackedTinyMap(
+                                    columnFamily,
+                                    boundedReadOptions == null
+                                            ? backend.getReadOptions()
+                                            : boundedReadOptions,
+                                    keyPrefixBytes,
+                                    backend.getKeyGroupPrefixBytes(),
+                                    backend.getMapIteratorPackedTinyScanMaxEntries(),
+                                    backend.getMapIteratorPackedTinyScanMaxBytes());
+                } catch (RocksDBException e) {
+                    backend.recordMapIteratorPackedScan(
+                            RocksDBPackedTinyMapScan.Result.fallback(
+                                    RocksDBPackedTinyMapScan.Outcome.NATIVE_ERROR, 0));
+                    throw new FlinkRuntimeException(
+                            "Error while scanning a packed tiny MapState prefix.", e);
+                }
+            }
+            backend.recordMapIteratorPackedScan(packedResult);
+            if (packedResult.outcome == RocksDBPackedTinyMapScan.Outcome.NATIVE_ERROR) {
+                throw new FlinkRuntimeException(
+                        "FrocksDB reported an error while scanning a packed tiny MapState prefix.");
+            }
+            if (packedResult.outcome != RocksDBPackedTinyMapScan.Outcome.COMPLETE) {
+                backend.recordMapIteratorPackedScanIteratorFallback();
+                return false;
+            }
+
+            cacheEntries.clear();
+            cacheIndex = 0;
+            final byte[] packedPage = packedResult.encodedPage;
+            final int entryCount = packedResult.entryCount();
+            if (backend.isMapIteratorPackedTinyScanFlatPageEnabled()) {
+                for (int index = 0; index < entryCount; index++) {
+                    cacheEntries.add(
+                            new RocksDBMapEntry(
+                                    db,
+                                    keyPrefixBytes.length,
+                                    packedPage,
+                                    packedResult.keyOffset(index),
+                                    packedResult.keyLength(index),
+                                    packedResult.valueOffset(index),
+                                    packedResult.valueLength(index),
+                                    keySerializer,
+                                    valueSerializer,
+                                    dataInputView));
+                }
+                backend.recordMapIteratorPackedFlatPageEntries(entryCount);
+            } else {
+                long copiedBytes = 0L;
+                for (int index = 0; index < entryCount; index++) {
+                    final int keyOffset = packedResult.keyOffset(index);
+                    final int keyLength = packedResult.keyLength(index);
+                    final int valueOffset = packedResult.valueOffset(index);
+                    final int valueLength = packedResult.valueLength(index);
+                    cacheEntries.add(
+                            new RocksDBMapEntry(
+                                    db,
+                                    keyPrefixBytes.length,
+                                    Arrays.copyOfRange(
+                                            packedPage, keyOffset, keyOffset + keyLength),
+                                    Arrays.copyOfRange(
+                                            packedPage, valueOffset, valueOffset + valueLength),
+                                    keySerializer,
+                                    valueSerializer,
+                                    dataInputView));
+                    copiedBytes += (long) keyLength + valueLength;
+                }
+                backend.recordMapIteratorPackedCopiedEntries(entryCount, copiedBytes);
+            }
+            // COMPLETE is an explicit native proof that the entire prefix scan fit the limits.
+            expired = true;
+            backend.recordMapIteratorPageStats(
+                    cacheEntries.size(), 0, 0, 0, 1, 1, boundedIterator, upperBoundFallback);
+            return true;
+        }
+    }
+
+    /** Returns the shortest unsigned-byte lexicographic successor, or null for all-0xff. */
+    @Nullable
+    static byte[] unsignedBytewisePrefixSuccessor(byte[] prefix) {
+        byte[] successor = Arrays.copyOf(prefix, prefix.length);
+        for (int index = successor.length - 1; index >= 0; index--) {
+            int unsigned = successor[index] & 0xff;
+            if (unsigned != 0xff) {
+                successor[index] = (byte) (unsigned + 1);
+                return Arrays.copyOf(successor, index + 1);
+            }
+        }
+        return null;
     }
 
     @SuppressWarnings("unchecked")

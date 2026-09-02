@@ -26,9 +26,39 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneBridge;
 import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneOptions;
+import org.apache.flink.contrib.streaming.state.cachekit.state.NativeMapSnapshotOptions;
 import org.junit.jupiter.api.Test;
 
 class NativeRequestPlaneConfigurationTest {
+
+    @Test
+    void testStandaloneNativeSnapshotHasIndependentConfiguration() {
+        Configuration config = new Configuration();
+        config.set(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_ENABLED, true);
+        config.set(
+                CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_REMOVE_HINT_ENABLED, true);
+        config.set(
+                CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_LIBRARY_PATH,
+                "/tmp/libcachekit_snapshot_jni.so");
+
+        NativeMapSnapshotOptions options =
+                CacheKitStateBackendFactory.nativeMapSnapshotOptions(config);
+        assertTrue(options.enabled());
+        assertFalse(options.classifierEnabled());
+        assertTrue(options.removeHintEnabled());
+        assertEquals("/tmp/libcachekit_snapshot_jni.so", options.libraryPath());
+        assertFalse(CacheKitStateBackendFactory.nativeRequestPlaneOptions(config).enabled());
+    }
+
+    @Test
+    void testStandaloneNativeSnapshotRejectsWithdrawnClassifier() {
+        Configuration config = new Configuration();
+        config.set(
+                CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_NATIVE_CLASSIFIER_ENABLED, true);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeMapSnapshotOptions(config));
+    }
 
     @Test
     void testKeyScopedInvalidationIsCarriedByConfiguredBackendInstance() throws Exception {

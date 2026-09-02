@@ -21,6 +21,7 @@ package org.apache.flink.contrib.streaming.state;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.queryablestate.client.state.serialization.KvStateSerializer;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
@@ -110,6 +111,22 @@ public class RocksDBBatchValueReaderTest {
                                     VoidNamespace.INSTANCE,
                                     IntSerializer.INSTANCE,
                                     VoidNamespaceSerializer.INSTANCE));
+            for (int key : new int[] {99, 2, 1}) {
+                byte[] expected =
+                        reader.serializeBatchKeyAndNamespace(
+                                key,
+                                VoidNamespace.INSTANCE,
+                                IntSerializer.INSTANCE,
+                                VoidNamespaceSerializer.INSTANCE);
+                PositionedSerializer direct = new PositionedSerializer(32);
+                reader.serializeBatchKeyAndNamespace(
+                        key,
+                        VoidNamespace.INSTANCE,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        direct);
+                org.junit.Assert.assertArrayEquals(expected, direct.getCopyOfBuffer());
+            }
             List<byte[]> directValues = reader.getSerializedValuesByRocksDBKeys(rocksDBKeys, 1, 3);
             assertEquals(2, directValues.size());
             assertEquals("two", deserializeValue(directValues.get(0)));
@@ -126,6 +143,19 @@ public class RocksDBBatchValueReaderTest {
                 IntSerializer.INSTANCE,
                 VoidNamespace.INSTANCE,
                 VoidNamespaceSerializer.INSTANCE);
+    }
+
+    private static final class PositionedSerializer extends DataOutputSerializer
+            implements PositionedDataOutputView {
+
+        private PositionedSerializer(int startSize) {
+            super(startSize);
+        }
+
+        @Override
+        public int position() {
+            return length();
+        }
     }
 
     private static String deserializeValue(byte[] value) throws Exception {

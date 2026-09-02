@@ -1,0 +1,40 @@
+# CacheKit native Stage 3 treatment overrides.
+# Apply on top of the normal CacheKit/RocksDB cluster configuration.
+
+# Stage 1: native point caches OFF.
+state.backend.cachekit.value.cache.max-entries: 0
+state.backend.cachekit.map.cache.max-entries: 0
+state.backend.cachekit.map.presence.cache.max-entries: 0
+state.backend.cachekit.native.value-cache.enabled: false
+state.backend.cachekit.native.map-cache.enabled: false
+
+# Stage 2: EMPTY/SINGLE MapSnapshot semantics OFF.
+state.backend.cachekit.map.snapshot.cache.max-entries: 0
+state.backend.cachekit.map.snapshot.small.max-entries: 0
+state.backend.cachekit.map.snapshot.cache.native.enabled: false
+state.backend.cachekit.native.map-snapshot.enabled: false
+
+# Stage 3: bounded cross-record cooperation and its shared request plane.
+state.backend.cachekit.native.request-plane.enabled: true
+state.backend.cachekit.native.request-plane.kernel: auto
+state.backend.cachekit.mailbox-batch.enabled: true
+state.backend.cachekit.mailbox-batch.size: 4096
+state.backend.cachekit.mailbox-batch.timeout-us: 0
+state.backend.cachekit.mailbox-batch.commutative-key-sort: false
+state.backend.cachekit.local-preagg.enabled: true
+state.backend.cachekit.bp-prefetch.enabled: true
+state.backend.cachekit.bp-prefetch.distance: 64
+state.backend.cachekit.bp-prefetch.backpressure-gated: true
+state.backend.cachekit.bp-prefetch.async.enabled: true
+state.backend.cachekit.bp-prefetch.multiget.enabled: true
+state.backend.cachekit.native.mailbox-batch.enabled: true
+state.backend.cachekit.native.prefetch.enabled: true
+state.backend.cachekit.native.local-preagg.enabled: true
+state.backend.cachekit.native.local-preagg.indexed-fold.enabled: true
+state.backend.cachekit.native.map-distinct-batch-prefetch.enabled: true
+
+# Chen and system-level axes are not part of Stage 3.
+state.backend.cachekit.list-state.cow: false
+state.backend.cachekit.list-state.ryw: false
+state.backend.cachekit.priority-queue.opt: false
+table.exec.mini-batch.enabled: false

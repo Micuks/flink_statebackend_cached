@@ -1,0 +1,45 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.flink.streaming.api.operators;
+
+import org.apache.flink.util.Collector;
+
+import java.util.List;
+
+/**
+ * Explicit opt-in for preparing immutable state reads for a later same-key batch.
+ *
+ * <p>Preparation runs on the mailbox thread while {@code currentKey} is installed. Implementations
+ * may submit only immutable backend reads; accumulator mutation, state writes and output remain in
+ * {@link #processPreparedBatchForKey} on the mailbox thread.
+ */
+public interface PipelinedBatchableKeyedFunction<IN, OUT>
+        extends ReusableBatchableKeyedFunction<IN, OUT> {
+
+    /** Captures one batch and starts its best-effort read. The input list must not be retained. */
+    Object prepareBatchForKey(Object currentKey, List<IN> inputs) throws Exception;
+
+    /** Consumes one prepared token under the same current key. */
+    void processPreparedBatchForKey(
+            Object currentKey, List<IN> inputs, Object prepared, Collector<OUT> out)
+            throws Exception;
+
+    /** Releases a token that cannot be consumed after a later preparation or dispatch failure. */
+    void abortPreparedBatch(Object prepared);
+}

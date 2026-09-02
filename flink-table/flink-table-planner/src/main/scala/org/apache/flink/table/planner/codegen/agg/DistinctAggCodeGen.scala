@@ -28,6 +28,7 @@ import org.apache.flink.table.planner.codegen.GenerateUtils.{generateFieldAccess
 import org.apache.flink.table.planner.codegen.agg.AggsHandlerCodeGenerator._
 import org.apache.flink.table.planner.expressions.converter.ExpressionConverter
 import org.apache.flink.table.planner.plan.utils.DistinctInfo
+import org.apache.flink.table.runtime.dataview.DistinctBatchPrefetchSupport
 import org.apache.flink.table.types.DataType
 import org.apache.flink.table.types.logical.{LogicalType, RowType}
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks
@@ -91,6 +92,7 @@ class DistinctAggCodeGen(
   val MAP_VIEW: String = className[MapView[_, _]]
   val MAP_ENTRY: String = className[java.util.Map.Entry[_, _]]
   val ITERABLE: String = className[java.lang.Iterable[_]]
+  val DISTINCT_BATCH_PREFETCH_SUPPORT: String = className[DistinctBatchPrefetchSupport]
 
   val aggCount: Int = innerAggCodeGens.length
   val externalAccType: DataType = distinctInfo.accType
@@ -300,6 +302,76 @@ class DistinctAggCodeGen(
        """.stripMargin
     } else {
       body
+    }
+  }
+
+  def beginBatchPrefetch(expectedKeysTerm: String, sessionTerm: String): String = {
+    if (distinctInfo.dataViewSpec.isEmpty) {
+      ""
+    } else {
+      s"""
+         |$sessionTerm = $DISTINCT_BATCH_PREFETCH_SUPPORT.beginSession(
+         |  $distinctAccTerm, $expectedKeysTerm);
+       """.stripMargin
+    }
+  }
+
+  def addBatchPrefetchKey(generator: ExprCodeGenerator, sessionTerm: String): String = {
+    if (distinctInfo.dataViewSpec.isEmpty) {
+      ""
+    } else {
+      val keyExpr = generateKeyExpression(ctx, generator)
+      val filterResults = filterExpressions.map {
+        case None => None
+        case Some(f) => Some(generator.generateExpression(f.accept(rexNodeGen)).resultTerm)
+      }
+      val addKey =
+        s"""
+           |if ($sessionTerm != null) {
+           |  ${keyExpr.code}
+           |  if (!${keyExpr.nullTerm}) {
+           |    $DISTINCT_BATCH_PREFETCH_SUPPORT.addSession(
+           |      $sessionTerm, ${keyExpr.resultTerm});
+           |  }
+           |}
+         """.stripMargin
+
+      // Match accumulate()/retract() exactly: when every aggregate sharing this DISTINCT state
+      // has a FILTER, the state is not touched unless at least one filter accepts the record.
+      // Collecting filtered-out keys here wastes native MultiGet work and can evict useful staged
+      // values before the corresponding record is consumed.
+      if (filterResults.forall(_.isDefined)) {
+        val condition = filterResults.flatten.mkString(" || ")
+        s"""
+           |if ($condition) {
+           |  $addKey
+           |}
+         """.stripMargin
+      } else {
+        addKey
+      }
+    }
+  }
+
+  def finishBatchPrefetch(resultTerm: String, sessionTerm: String): String = {
+    if (distinctInfo.dataViewSpec.isEmpty) {
+      ""
+    } else {
+      s"""
+         |if ($sessionTerm != null) {
+         |  $resultTerm |= $DISTINCT_BATCH_PREFETCH_SUPPORT.finishSession($sessionTerm);
+         |}
+       """.stripMargin
+    }
+  }
+
+  def abortBatchPrefetch(sessionTerm: String): String = {
+    if (distinctInfo.dataViewSpec.isEmpty) {
+      ""
+    } else {
+      s"""
+         |$DISTINCT_BATCH_PREFETCH_SUPPORT.abortSession($sessionTerm);
+       """.stripMargin
     }
   }
 

@@ -204,16 +204,11 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                                     .booleanType()
                                     .defaultValue(false));
             org.apache.flink.metrics.MetricGroup runtimePrefetchMetrics =
-                    mainOperator
-                            .getMetricGroup()
-                            .addGroup("cachekit")
-                            .addGroup("runtimePrefetch");
+                    mainOperator.getMetricGroup().addGroup("cachekit").addGroup("runtimePrefetch");
             runtimePrefetchMetrics.gauge("configured", () -> bpPrefetchEnabled ? 1 : 0);
             if (bpPrefetchEnabled) {
-                runtimePrefetchMetrics.gauge(
-                        "attempts", StatePrefetcher::getPrefetchAttempts);
-                runtimePrefetchMetrics.gauge(
-                        "invalidInputs", StatePrefetcher::getInvalidInputs);
+                runtimePrefetchMetrics.gauge("attempts", StatePrefetcher::getPrefetchAttempts);
+                runtimePrefetchMetrics.gauge("invalidInputs", StatePrefetcher::getInvalidInputs);
                 runtimePrefetchMetrics.gauge(
                         "nonAbstractOperators", StatePrefetcher::getNonAbstractOperators);
                 runtimePrefetchMetrics.gauge(
@@ -231,8 +226,7 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                 runtimePrefetchMetrics.gauge(
                         "emptyKeyBatches", StatePrefetcher::getEmptyKeyBatches);
                 runtimePrefetchMetrics.gauge(
-                        "backendInvocationAttempts",
-                        StatePrefetcher::getBackendInvocationAttempts);
+                        "backendInvocationAttempts", StatePrefetcher::getBackendInvocationAttempts);
                 runtimePrefetchMetrics.gauge(
                         "backendInvocations", StatePrefetcher::getBackendInvocations);
                 runtimePrefetchMetrics.gauge("failures", StatePrefetcher::getFailures);
@@ -255,6 +249,47 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                                                 "state.backend.cachekit.bp-prefetch.commutative-key-sort")
                                         .booleanType()
                                         .defaultValue(false));
+                boolean asyncPrefetchChunks =
+                        cfg.getBoolean(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.async-chunks.enabled")
+                                        .booleanType()
+                                        .defaultValue(false));
+                int asyncPrefetchChunkSize =
+                        cfg.getInteger(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.async-chunks.size")
+                                        .intType()
+                                        .defaultValue(16));
+                int asyncPrefetchHeadGuardRecords =
+                        cfg.getInteger(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.head-guard-records")
+                                        .intType()
+                                        .defaultValue(0));
+                int asyncPrefetchSlidingDrainRecords =
+                        cfg.getInteger(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.sliding-drain-records")
+                                        .intType()
+                                        .defaultValue(0));
+                boolean cancelPrefetchOnDispatch =
+                        cfg.getBoolean(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.cancel-on-dispatch.enabled")
+                                        .booleanType()
+                                        .defaultValue(false));
+                boolean unalignedCheckpoints =
+                        cfg.getBoolean(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "execution.checkpointing.unaligned.enabled")
+                                        .booleanType()
+                                        .defaultValue(false));
+                // A retained lookahead tail is not part of unaligned channel state. Until it has
+                // an explicit snapshot serializer, fail closed to the original whole-batch flush.
+                if (unalignedCheckpoints) {
+                    asyncPrefetchSlidingDrainRecords = 0;
+                }
                 @SuppressWarnings("unchecked")
                 Input<IN> headInput = (Input<IN>) mainOperator;
                 java.util.function.BooleanSupplier bp =
@@ -269,7 +304,12 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                         numRecordsIn,
                         true,
                         bp,
-                        backpressureGated);
+                        backpressureGated,
+                        asyncPrefetchChunks,
+                        asyncPrefetchChunkSize,
+                        asyncPrefetchHeadGuardRecords,
+                        asyncPrefetchSlidingDrainRecords,
+                        cancelPrefetchOnDispatch);
             }
 
             boolean enabled =

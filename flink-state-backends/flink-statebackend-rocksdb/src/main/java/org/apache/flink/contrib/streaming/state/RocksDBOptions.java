@@ -35,6 +35,80 @@ import static org.apache.flink.contrib.streaming.state.PredefinedOptions.SPINNIN
 /** Configuration options for the RocksDB backend. */
 public class RocksDBOptions {
 
+    /**
+     * Fetches the raw key of each RocksDB MapState iterator position only once. This avoids a
+     * duplicate JNI byte-array copy between the prefix check and entry construction while keeping
+     * iterator ordering, paging, and mutation semantics unchanged.
+     */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Boolean> MAP_ITERATOR_SINGLE_KEY_FETCH_ENABLED =
+            ConfigOptions.key(
+                            "state.backend.cachekit.rocksdb.map-iterator.single-key-fetch.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether RocksDB MapState iterators reuse the raw key fetched for the prefix check when constructing the current entry. Disabled by default while the optimization is experimentally validated.");
+
+    /** Stops MapState prefix scans in RocksDB instead of fetching one terminal key through JNI. */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Boolean> MAP_ITERATOR_PREFIX_UPPER_BOUND_ENABLED =
+            ConfigOptions.key(
+                            "state.backend.cachekit.rocksdb.map-iterator.prefix-upper-bound.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether RocksDB MapState iterators use the unsigned bytewise successor of the key/namespace prefix as an exclusive iterate_upper_bound. Prefixes without a successor retain the Java prefix-check fallback. Disabled by default while experimentally validated.");
+
+    /** Fetches a complete tiny MapState prefix scan through one packed JNI result. */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Boolean> MAP_ITERATOR_PACKED_TINY_SCAN_ENABLED =
+            ConfigOptions.key(
+                            "state.backend.cachekit.rocksdb.map-iterator.packed-tiny-scan.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether a complete tiny MapState prefix is fetched as one self-describing packed JNI result. Overflow and malformed results fall back to the ordinary RocksIterator; RocksDB errors fail the operation. Disabled by default while experimentally validated.");
+
+    /** Reuses one idle native iterator per column family for packed tiny MapState scans. */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Boolean> MAP_ITERATOR_PACKED_TINY_SCAN_REUSE_ENABLED =
+            ConfigOptions.key(
+                            "state.backend.cachekit.rocksdb.map-iterator.packed-tiny-scan.iterator-reuse.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether packed tiny MapState scans reuse a refreshed RocksIterator from a single idle slot per column family. Reuse is disabled automatically for snapshot, bounded, tailing, pinned, or internal-key ReadOptions. Refresh NotSupported and missing-JNI compatibility failures fall back to the fresh-iterator V1 path; storage and scan errors fail the operation. Disabled by default while experimentally validated.");
+
+    /** Keeps packed entries as slices of one immutable result page instead of copying each pair. */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Boolean> MAP_ITERATOR_PACKED_TINY_SCAN_FLAT_PAGE_ENABLED =
+            ConfigOptions.key(
+                            "state.backend.cachekit.rocksdb.map-iterator.packed-tiny-scan.flat-page.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "Whether complete packed tiny MapState scans retain one immutable result page and deserialize entries from validated slices. Disabling this option eagerly copies each key and value into independent byte arrays for controlled performance comparison. Enabled by default to preserve the existing packed-scan behavior.");
+
+    /** Maximum number of entries accepted from one packed tiny MapState scan. */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Integer> MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES =
+            ConfigOptions.key(
+                            "state.backend.cachekit.rocksdb.map-iterator.packed-tiny-scan.max-entries")
+                    .intType()
+                    .defaultValue(8)
+                    .withDescription(
+                            "Maximum entry count for a complete packed tiny MapState scan. Values must be between 1 and 128.");
+
+    /** Maximum encoded byte size accepted from one packed tiny MapState scan. */
+    @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
+    public static final ConfigOption<Integer> MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES =
+            ConfigOptions.key(
+                            "state.backend.cachekit.rocksdb.map-iterator.packed-tiny-scan.max-bytes")
+                    .intType()
+                    .defaultValue(64 * 1024)
+                    .withDescription(
+                            "Maximum encoded byte size for a complete packed tiny MapState scan. Values must be between 16 and 65536 bytes.");
+
     /** The local directory (on the TaskManager) where RocksDB puts its files. */
     @Documentation.Section(Documentation.Sections.EXPERT_ROCKSDB)
     public static final ConfigOption<String> LOCAL_DIRECTORIES =

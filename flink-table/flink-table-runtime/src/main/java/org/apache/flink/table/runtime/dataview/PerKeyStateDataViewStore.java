@@ -28,6 +28,11 @@ import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.GlobalConfiguration;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Default implementation of {@link StateDataViewStore} that currently forwards state registration
@@ -37,17 +42,82 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 public final class PerKeyStateDataViewStore implements StateDataViewStore {
 
     private static final String NULL_STATE_POSTFIX = "_null_state";
+    private static final String DISTINCT_STATE_PREFIX = "distinctAcc_";
+    private static final String DISTINCT_BATCH_OVERLAY_KEY =
+            "state.backend.cachekit.local-preagg.distinct-overlay.enabled";
+    private static final String NATIVE_MAP_DISTINCT_BATCH_PREFETCH_KEY =
+            "state.backend.cachekit.native.map-distinct-batch-prefetch.enabled";
+    private static final String NATIVE_MAP_DISTINCT_BATCH_PREFETCH_MIN_UNIQUE_KEYS_KEY =
+            "state.backend.cachekit.native.map-distinct-batch-prefetch.min-unique-keys";
 
     private final RuntimeContext ctx;
     private final StateTtlConfig stateTtlConfig;
+    private final boolean distinctBatchOverlayEnabled;
+    private final boolean distinctBatchPrefetchEnabled;
+    private final int distinctBatchPrefetchMinUniqueKeys;
+    private final List<DistinctBatchStateMapView<?, ?, ?>> distinctBatchViews = new ArrayList<>();
 
     public PerKeyStateDataViewStore(RuntimeContext ctx) {
         this(ctx, StateTtlConfig.DISABLED);
     }
 
     public PerKeyStateDataViewStore(RuntimeContext ctx, StateTtlConfig stateTtlConfig) {
+        this(ctx, stateTtlConfig, GlobalConfiguration.loadConfiguration());
+    }
+
+    private PerKeyStateDataViewStore(
+            RuntimeContext ctx, StateTtlConfig stateTtlConfig, Configuration configuration) {
+        this(
+                ctx,
+                stateTtlConfig,
+                isDistinctBatchEnabled(configuration),
+                configuration.getBoolean(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_KEY, false),
+                Math.max(
+                        2,
+                        configuration.getInteger(
+                                NATIVE_MAP_DISTINCT_BATCH_PREFETCH_MIN_UNIQUE_KEYS_KEY, 2)));
+    }
+
+    static boolean isDistinctBatchEnabled(Configuration configuration) {
+        return configuration.getBoolean(DISTINCT_BATCH_OVERLAY_KEY, false)
+                || configuration.getBoolean(NATIVE_MAP_DISTINCT_BATCH_PREFETCH_KEY, false);
+    }
+
+    PerKeyStateDataViewStore(
+            RuntimeContext ctx,
+            StateTtlConfig stateTtlConfig,
+            boolean distinctBatchOverlayEnabled) {
+        this(ctx, stateTtlConfig, distinctBatchOverlayEnabled, false, 2);
+    }
+
+    PerKeyStateDataViewStore(
+            RuntimeContext ctx,
+            StateTtlConfig stateTtlConfig,
+            boolean distinctBatchOverlayEnabled,
+            int distinctBatchPrefetchMinUniqueKeys) {
+        this(
+                ctx,
+                stateTtlConfig,
+                distinctBatchOverlayEnabled,
+                false,
+                distinctBatchPrefetchMinUniqueKeys);
+    }
+
+    PerKeyStateDataViewStore(
+            RuntimeContext ctx,
+            StateTtlConfig stateTtlConfig,
+            boolean distinctBatchOverlayEnabled,
+            boolean distinctBatchPrefetchEnabled,
+            int distinctBatchPrefetchMinUniqueKeys) {
         this.ctx = ctx;
         this.stateTtlConfig = stateTtlConfig;
+        // Batching across TTL reads would change access-time refresh semantics. Keep the first
+        // implementation deliberately fail-closed until a TTL-specific contract is proven.
+        this.distinctBatchOverlayEnabled =
+                distinctBatchOverlayEnabled && !stateTtlConfig.isEnabled();
+        this.distinctBatchPrefetchEnabled =
+                distinctBatchPrefetchEnabled && this.distinctBatchOverlayEnabled;
+        this.distinctBatchPrefetchMinUniqueKeys = Math.max(2, distinctBatchPrefetchMinUniqueKeys);
     }
 
     @Override
@@ -64,6 +134,7 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
         }
         final MapState<EK, EV> mapState = ctx.getMapState(mapStateDescriptor);
 
+        final StateMapView<N, EK, EV> view;
         if (supportNullKey) {
             final ValueStateDescriptor<EV> nullStateDescriptor =
                     new ValueStateDescriptor<>(stateName + NULL_STATE_POSTFIX, valueSerializer);
@@ -71,10 +142,154 @@ public final class PerKeyStateDataViewStore implements StateDataViewStore {
                 nullStateDescriptor.enableTimeToLive(stateTtlConfig);
             }
             final ValueState<EV> nullState = ctx.getState(nullStateDescriptor);
-            return new StateMapView.KeyedStateMapViewWithKeysNullable<>(mapState, nullState);
+            view = new StateMapView.KeyedStateMapViewWithKeysNullable<>(mapState, nullState);
         } else {
-            return new StateMapView.KeyedStateMapViewWithKeysNotNull<>(mapState);
+            view = new StateMapView.KeyedStateMapViewWithKeysNotNull<>(mapState);
         }
+        if (!distinctBatchOverlayEnabled || !stateName.startsWith(DISTINCT_STATE_PREFIX)) {
+            return view;
+        }
+        DistinctBatchStateMapView<N, EK, EV> batchingView =
+                new DistinctBatchStateMapView<>(
+                        view,
+                        keySerializer,
+                        valueSerializer,
+                        distinctBatchPrefetchEnabled,
+                        distinctBatchPrefetchMinUniqueKeys);
+        distinctBatchViews.add(batchingView);
+        return batchingView;
+    }
+
+    /** Starts one outer-key batch on every exact-DISTINCT state view created by this store. */
+    public boolean beginDistinctBatch() {
+        if (distinctBatchViews.isEmpty()) {
+            return false;
+        }
+        try {
+            for (DistinctBatchStateMapView<?, ?, ?> view : distinctBatchViews) {
+                view.beginBatch();
+            }
+        } catch (RuntimeException failure) {
+            // A generated aggregate can own more than one DISTINCT view. Never leave the earlier
+            // views active when a later view rejects the batch.
+            for (DistinctBatchStateMapView<?, ?, ?> view : distinctBatchViews) {
+                view.abortBatch();
+            }
+            throw failure;
+        }
+        return true;
+    }
+
+    /** Commits final per-distinct-key values before accumulator state/output becomes visible. */
+    public void commitDistinctBatch() throws Exception {
+        Exception failure = null;
+        for (DistinctBatchStateMapView<?, ?, ?> view : distinctBatchViews) {
+            try {
+                view.commitBatch();
+            } catch (Exception current) {
+                if (failure == null) {
+                    failure = current;
+                } else {
+                    failure.addSuppressed(current);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    /** Drops an uncommitted batch after a generated aggregate failure. */
+    public void abortDistinctBatch() {
+        for (DistinctBatchStateMapView<?, ?, ?> view : distinctBatchViews) {
+            view.abortBatch();
+        }
+    }
+
+    /**
+     * Stable close-time counters used to prove that the optimization reached real DISTINCT state.
+     */
+    public String distinctBatchDiagnosticSummary() {
+        long logicalGets = 0;
+        long delegateGets = 0;
+        long overlayHits = 0;
+        long logicalPuts = 0;
+        long logicalRemoves = 0;
+        long committedEntries = 0;
+        long committedBatches = 0;
+        long abortedBatches = 0;
+        long forcedFlushes = 0;
+        long prefetchCollections = 0;
+        long prefetchKeysCollected = 0;
+        long prefetchRejectedBelowMinimum = 0;
+        long prefetchRejectedBeforeKeyScan = 0;
+        long directOverlayValues = 0;
+        long prefetchSize2 = 0;
+        long prefetchSize3 = 0;
+        long prefetchSize4To7 = 0;
+        long prefetchSize8To15 = 0;
+        long prefetchSize16Plus = 0;
+        for (DistinctBatchStateMapView<?, ?, ?> view : distinctBatchViews) {
+            logicalGets += view.logicalGets();
+            delegateGets += view.delegateGets();
+            overlayHits += view.overlayHits();
+            logicalPuts += view.logicalPuts();
+            logicalRemoves += view.logicalRemoves();
+            committedEntries += view.committedEntries();
+            committedBatches += view.committedBatches();
+            abortedBatches += view.abortedBatches();
+            forcedFlushes += view.forcedFlushes();
+            prefetchCollections += view.prefetchCollections();
+            prefetchKeysCollected += view.prefetchKeysCollected();
+            prefetchRejectedBelowMinimum += view.prefetchRejectedBelowMinimum();
+            prefetchRejectedBeforeKeyScan += view.prefetchRejectedBeforeKeyScan();
+            directOverlayValues += view.directOverlayValues();
+            prefetchSize2 += view.prefetchSize2();
+            prefetchSize3 += view.prefetchSize3();
+            prefetchSize4To7 += view.prefetchSize4To7();
+            prefetchSize8To15 += view.prefetchSize8To15();
+            prefetchSize16Plus += view.prefetchSize16Plus();
+        }
+        return "views="
+                + distinctBatchViews.size()
+                + " logicalGets="
+                + logicalGets
+                + " delegateGets="
+                + delegateGets
+                + " overlayHits="
+                + overlayHits
+                + " logicalPuts="
+                + logicalPuts
+                + " logicalRemoves="
+                + logicalRemoves
+                + " committedEntries="
+                + committedEntries
+                + " committedBatches="
+                + committedBatches
+                + " abortedBatches="
+                + abortedBatches
+                + " forcedFlushes="
+                + forcedFlushes
+                + " prefetchCollections="
+                + prefetchCollections
+                + " prefetchKeysCollected="
+                + prefetchKeysCollected
+                + " prefetchRejectedBelowMinimum="
+                + prefetchRejectedBelowMinimum
+                + " prefetchRejectedBeforeKeyScan="
+                + prefetchRejectedBeforeKeyScan
+                + " directOverlayValues="
+                + directOverlayValues
+                + " prefetchSize2="
+                + prefetchSize2
+                + " prefetchSize3="
+                + prefetchSize3
+                + " prefetchSize4To7="
+                + prefetchSize4To7
+                + " prefetchSize8To15="
+                + prefetchSize8To15
+                + " prefetchSize16Plus="
+                + prefetchSize16Plus;
     }
 
     @Override

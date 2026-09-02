@@ -1,0 +1,31 @@
+# CacheKit native Stage 2 treatment overrides.
+# Apply on top of the normal CacheKit/RocksDB cluster configuration.
+
+# Stage 1: native point caches OFF.
+state.backend.cachekit.native.request-plane.enabled: false
+state.backend.cachekit.native.value-cache.enabled: false
+state.backend.cachekit.native.map-cache.enabled: false
+
+# Stage 2: reduced standalone EMPTY/SINGLE native MapSnapshot cache.
+state.backend.cachekit.map.snapshot.cache.max-entries: 8000
+state.backend.cachekit.map.snapshot.small.max-entries: 1
+state.backend.cachekit.map.snapshot.cache.native.enabled: true
+state.backend.cachekit.map.snapshot.cache.native.classifier.enabled: false
+state.backend.cachekit.map.snapshot.cache.native.remove-hint.enabled: false
+state.backend.cachekit.map.snapshot.cache.native.library-path: ""
+state.backend.cachekit.native.map-snapshot.enabled: false
+
+# Stage 3: cross-record cooperation OFF.
+state.backend.cachekit.bp-prefetch.enabled: false
+state.backend.cachekit.bp-prefetch.async.enabled: false
+state.backend.cachekit.mailbox-batch.enabled: false
+state.backend.cachekit.local-preagg.enabled: false
+state.backend.cachekit.native.prefetch.enabled: false
+state.backend.cachekit.native.mailbox-batch.enabled: false
+state.backend.cachekit.native.local-preagg.enabled: false
+state.backend.cachekit.native.map-distinct-batch-prefetch.enabled: false
+
+# Chen and system-level axes are not part of Stage 2.
+state.backend.cachekit.list-state.cow: false
+state.backend.cachekit.list-state.ryw: false
+state.backend.cachekit.priority-queue.opt: false

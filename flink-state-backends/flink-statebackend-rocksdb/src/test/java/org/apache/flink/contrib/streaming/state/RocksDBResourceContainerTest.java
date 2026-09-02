@@ -18,8 +18,11 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import org.apache.flink.api.common.state.StateDescriptor;
+import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.memory.OpaqueMemoryResource;
+import org.apache.flink.runtime.state.RegisteredKeyValueStateBackendMetaInfo;
 import org.apache.flink.util.function.ThrowingRunnable;
 
 import org.junit.BeforeClass;
@@ -29,36 +32,29 @@ import org.junit.rules.TemporaryFolder;
 import org.rocksdb.BlockBasedTableConfig;
 import org.rocksdb.BloomFilter;
 import org.rocksdb.Cache;
-import org.rocksdb.ColumnFamilyDescriptor;
-import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.ColumnFamilyOptions;
 import org.rocksdb.DBOptions;
 import org.rocksdb.IndexType;
 import org.rocksdb.LRUCache;
 import org.rocksdb.NativeLibraryLoader;
 import org.rocksdb.ReadOptions;
-import org.rocksdb.RocksDB;
 import org.rocksdb.TableFormatConfig;
 import org.rocksdb.WriteBufferManager;
 import org.rocksdb.WriteOptions;
 
-import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashSet;
+import java.util.concurrent.atomic.AtomicReference;
 
-import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -255,44 +251,106 @@ public class RocksDBResourceContainerTest {
     }
 
     @Test
-    public void testMemtableBloomOptionsUseStockNativeParser() throws Exception {
+    public void testArmPointMemtableIsScopedToValueState() throws Exception {
         final Configuration configuration = new Configuration();
-        configuration.set(RocksDBConfigurableOptions.USE_BLOOM_FILTER, false);
-        configuration.set(RocksDBConfigurableOptions.MEMTABLE_BLOOM_RATIO, 0.1);
-        configuration.set(RocksDBConfigurableOptions.MEMTABLE_BLOOM_WHOLE_KEY, true);
+        configuration.set(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_ENABLED, true);
+        configuration.set(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_BUCKET_COUNT, 32768);
+        configuration.set(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_PROBE_MODE, "scalar");
 
-        final File dbDirectory = TMP_FOLDER.newFolder();
-        final ArrayList<ColumnFamilyHandle> handles = new ArrayList<>();
+        final RegisteredKeyValueStateBackendMetaInfo<Integer, Integer> valueMeta =
+                new RegisteredKeyValueStateBackendMetaInfo<>(
+                        StateDescriptor.Type.VALUE,
+                        "value-state",
+                        IntSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        final RegisteredKeyValueStateBackendMetaInfo<Integer, Integer> mapMeta =
+                new RegisteredKeyValueStateBackendMetaInfo<>(
+                        StateDescriptor.Type.MAP,
+                        "map-state",
+                        IntSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+
         try (RocksDBResourceContainer container =
-                new RocksDBResourceContainer(
-                        configuration, PredefinedOptions.DEFAULT, null, null, null, false)) {
-            final DBOptions dbOptions = container.getDbOptions();
-            final ColumnFamilyOptions columnOptions = container.getColumnOptions();
-            try (RocksDB db =
-                    RocksDB.open(
-                            dbOptions,
-                            dbDirectory.getAbsolutePath(),
-                            Collections.singletonList(
-                                    new ColumnFamilyDescriptor(
-                                            RocksDB.DEFAULT_COLUMN_FAMILY, columnOptions)),
-                            handles)) {
-                assertEquals(0.1, columnOptions.memtablePrefixBloomSizeRatio(), 0.0);
-                assertNull(
-                        ((BlockBasedTableConfig) columnOptions.tableFormatConfig()).filterPolicy());
-            }
-        } finally {
-            handles.forEach(ColumnFamilyHandle::close);
+                        new RocksDBResourceContainer(
+                                configuration, PredefinedOptions.DEFAULT, null, null, null, false);
+                ColumnFamilyOptions valueOptions = container.getColumnOptions(valueMeta);
+                ColumnFamilyOptions mapOptions = container.getColumnOptions(mapMeta);
+                ColumnFamilyOptions defaultOptions = container.getColumnOptions(null)) {
+            assertEquals("CacheKitArmPointMemTableRepFactory", valueOptions.memTableFactoryName());
+            assertEquals("SkipListFactory", mapOptions.memTableFactoryName());
+            assertEquals("SkipListFactory", defaultOptions.memTableFactoryName());
         }
+    }
 
-        final File[] optionsFiles =
-                dbDirectory.listFiles((ignored, name) -> name.startsWith("OPTIONS-"));
-        assertNotNull(optionsFiles);
-        assertTrue(optionsFiles.length > 0);
-        final String optionsText =
-                new String(
-                        java.nio.file.Files.readAllBytes(optionsFiles[0].toPath()),
-                        StandardCharsets.UTF_8);
-        assertThat(optionsText, containsString("memtable_whole_key_filtering=true"));
+    @Test
+    public void testArmPointExperimentSelectionCoversMapState() {
+        final ArmPointMemTableRuntime.Selection scalar =
+                ArmPointMemTableRuntime.selection("scalar", false, "auto");
+        final RegisteredKeyValueStateBackendMetaInfo<Integer, Integer> mapMeta =
+                new RegisteredKeyValueStateBackendMetaInfo<>(
+                        StateDescriptor.Type.MAP,
+                        "map-state",
+                        IntSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+
+        assertTrue(scalar.enabled);
+        assertTrue(scalar.allKeyValueStates);
+        assertEquals("scalar", scalar.probeMode);
+        assertTrue(scalar.appliesTo(mapMeta));
+
+        final ArmPointMemTableRuntime.Selection off =
+                ArmPointMemTableRuntime.selection("off", true, "sve");
+        assertFalse(off.enabled);
+        assertFalse(off.appliesTo(mapMeta));
+    }
+
+    @Test
+    public void testArmPointAuthorityIsStateAware() {
+        assertEquals(
+                "scalar-flat",
+                RocksDBResourceContainer.armPointFactoryProbeMode("scalar", true, false));
+        assertEquals(
+                "scalar",
+                RocksDBResourceContainer.armPointFactoryProbeMode("scalar", false, false));
+        assertEquals(
+                "scalar-keyhead",
+                RocksDBResourceContainer.armPointFactoryProbeMode("scalar", false, true));
+    }
+
+    @Test
+    public void testArmPointMapFlatAuthorityIsDefaultOffAndConfigurable() {
+        assertFalse(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_MAP_FLAT_AUTHORITY.defaultValue());
+        assertFalse(
+                RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_MAP_KEYHEAD_POINT_INDEX
+                        .defaultValue());
+        assertTrue(RocksDBResourceContainer.armPointFlatAuthority(true, false, false));
+        assertFalse(RocksDBResourceContainer.armPointFlatAuthority(false, true, false));
+        assertTrue(RocksDBResourceContainer.armPointFlatAuthority(false, true, true));
+        assertFalse(RocksDBResourceContainer.armPointFlatAuthority(false, false, true));
+    }
+
+    @Test
+    public void testStateMetadataSurvivesColumnFamilyOptionsRouting() {
+        final RegisteredKeyValueStateBackendMetaInfo<Integer, Integer> valueMeta =
+                new RegisteredKeyValueStateBackendMetaInfo<>(
+                        StateDescriptor.Type.VALUE,
+                        "value-state",
+                        IntSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        final AtomicReference<org.apache.flink.runtime.state.RegisteredStateMetaInfoBase> seen =
+                new AtomicReference<>();
+        final RocksDBColumnFamilyOptionsFactory factory =
+                (stateName, stateMetaInfo) -> {
+                    assertEquals("value-state", stateName);
+                    seen.set(stateMetaInfo);
+                    return new ColumnFamilyOptions();
+                };
+
+        try (ColumnFamilyOptions options =
+                RocksDBOperationUtils.createColumnFamilyOptions(factory, valueMeta)) {
+            assertEquals(valueMeta, seen.get());
+            assertNotNull(options);
+        }
     }
 
     @Test

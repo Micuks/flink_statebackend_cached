@@ -18,8 +18,10 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.Locale;
 import java.util.Objects;
@@ -67,7 +69,10 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
 
     private static boolean kunpengCrc32Available() {
         try {
-            return isKunpengCrc32CpuInfo(Files.readString(Path.of("/proc/cpuinfo")));
+            return isKunpengCrc32CpuInfo(
+                    new String(
+                            Files.readAllBytes(Paths.get("/proc/cpuinfo")),
+                            StandardCharsets.UTF_8));
         } catch (IOException error) {
             return false;
         }

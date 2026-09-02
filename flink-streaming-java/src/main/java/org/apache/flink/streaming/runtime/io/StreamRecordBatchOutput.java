@@ -18,8 +18,6 @@
 
 package org.apache.flink.streaming.runtime.io;
 
-import org.apache.flink.configuration.ConfigOptions;
-import org.apache.flink.configuration.GlobalConfiguration;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.operators.BatchProcessingOperator;
 import org.apache.flink.streaming.api.operators.Input;
@@ -48,26 +46,6 @@ import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
  */
 public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T> {
 
-    private static final boolean BP_PREFETCH_ASYNC_CHUNKS =
-            GlobalConfiguration.loadConfiguration()
-                    .get(
-                            ConfigOptions.key(
-                                            "state.backend.cachekit.bp-prefetch.async-chunks.enabled")
-                                    .booleanType()
-                                    .defaultValue(false));
-
-    private static final int BP_PREFETCH_ASYNC_CHUNK_SIZE =
-            Math.max(
-                    2,
-                    Math.min(
-                            1024,
-                            GlobalConfiguration.loadConfiguration()
-                                    .get(
-                                            ConfigOptions.key(
-                                                            "state.backend.cachekit.bp-prefetch.async-chunks.size")
-                                                    .intType()
-                                                    .defaultValue(16))));
-
     private final DataOutput<T> wrapped;
     private final Input<T> headOperator;
     private final BatchProcessingOperator<T, ?> batchOperator; // non-null iff head op opts in
@@ -89,8 +67,20 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
      * When true, prefetch only fires while backpressured; when false, prefetch fires every flush.
      */
     private final boolean backpressureGated;
-    /** Local-preagg may consume the whole batch, making any early state read dead work. */
-    private final boolean localPreaggCandidate;
+    /** Whether completed lookahead chunks are submitted before the mailbox batch flushes. */
+    private final boolean asyncPrefetchChunks;
+    /** Records per early prefetch submission. */
+    private final int asyncPrefetchChunkSize;
+    /** Consumer-facing records that are too close to execution to prefetch profitably. */
+    private final int asyncPrefetchHeadGuardRecords;
+    /**
+     * Records drained when the bounded lookahead reaches its high watermark. Zero preserves the
+     * original whole-batch flush. A positive value keeps the prefetched tail resident while the
+     * mailbox consumes only the head and then refills the window from the network input.
+     */
+    private final int asyncPrefetchSlidingDrainRecords;
+    /** Revoke still-speculative prepared-key ownership for records selected for dispatch. */
+    private final boolean cancelPrefetchOnDispatch;
 
     // Reusable record buffer. Sized at construction.
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -128,7 +118,11 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 numRecordsIn,
                 false,
                 null,
-                true);
+                true,
+                false,
+                16,
+                0,
+                0);
     }
 
     /**
@@ -148,6 +142,139 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
             boolean prefetchMode,
             java.util.function.BooleanSupplier backpressured,
             boolean backpressureGated) {
+        this(
+                wrapped,
+                headOperator,
+                enabled,
+                commutativeKeySort,
+                batchSize,
+                batchTimeoutNanos,
+                numRecordsIn,
+                prefetchMode,
+                backpressured,
+                backpressureGated,
+                false,
+                16,
+                0,
+                0);
+    }
+
+    /** Full constructor with task-configuration-derived asynchronous lookahead controls. */
+    public StreamRecordBatchOutput(
+            DataOutput<T> wrapped,
+            Input<T> headOperator,
+            boolean enabled,
+            boolean commutativeKeySort,
+            int batchSize,
+            long batchTimeoutNanos,
+            Counter numRecordsIn,
+            boolean prefetchMode,
+            java.util.function.BooleanSupplier backpressured,
+            boolean backpressureGated,
+            boolean asyncPrefetchChunks,
+            int asyncPrefetchChunkSize) {
+        this(
+                wrapped,
+                headOperator,
+                enabled,
+                commutativeKeySort,
+                batchSize,
+                batchTimeoutNanos,
+                numRecordsIn,
+                prefetchMode,
+                backpressured,
+                backpressureGated,
+                asyncPrefetchChunks,
+                asyncPrefetchChunkSize,
+                0,
+                0,
+                false);
+    }
+
+    /** Full constructor including a sliding consumer-head guard for speculative prefetch. */
+    public StreamRecordBatchOutput(
+            DataOutput<T> wrapped,
+            Input<T> headOperator,
+            boolean enabled,
+            boolean commutativeKeySort,
+            int batchSize,
+            long batchTimeoutNanos,
+            Counter numRecordsIn,
+            boolean prefetchMode,
+            java.util.function.BooleanSupplier backpressured,
+            boolean backpressureGated,
+            boolean asyncPrefetchChunks,
+            int asyncPrefetchChunkSize,
+            int asyncPrefetchHeadGuardRecords) {
+        this(
+                wrapped,
+                headOperator,
+                enabled,
+                commutativeKeySort,
+                batchSize,
+                batchTimeoutNanos,
+                numRecordsIn,
+                prefetchMode,
+                backpressured,
+                backpressureGated,
+                asyncPrefetchChunks,
+                asyncPrefetchChunkSize,
+                asyncPrefetchHeadGuardRecords,
+                0,
+                false);
+    }
+
+    /** Full constructor including bounded rolling-window consumption. */
+    public StreamRecordBatchOutput(
+            DataOutput<T> wrapped,
+            Input<T> headOperator,
+            boolean enabled,
+            boolean commutativeKeySort,
+            int batchSize,
+            long batchTimeoutNanos,
+            Counter numRecordsIn,
+            boolean prefetchMode,
+            java.util.function.BooleanSupplier backpressured,
+            boolean backpressureGated,
+            boolean asyncPrefetchChunks,
+            int asyncPrefetchChunkSize,
+            int asyncPrefetchHeadGuardRecords,
+            int asyncPrefetchSlidingDrainRecords) {
+        this(
+                wrapped,
+                headOperator,
+                enabled,
+                commutativeKeySort,
+                batchSize,
+                batchTimeoutNanos,
+                numRecordsIn,
+                prefetchMode,
+                backpressured,
+                backpressureGated,
+                asyncPrefetchChunks,
+                asyncPrefetchChunkSize,
+                asyncPrefetchHeadGuardRecords,
+                asyncPrefetchSlidingDrainRecords,
+                false);
+    }
+
+    /** Full constructor including exact dispatch-time prepared-prefetch cancellation. */
+    public StreamRecordBatchOutput(
+            DataOutput<T> wrapped,
+            Input<T> headOperator,
+            boolean enabled,
+            boolean commutativeKeySort,
+            int batchSize,
+            long batchTimeoutNanos,
+            Counter numRecordsIn,
+            boolean prefetchMode,
+            java.util.function.BooleanSupplier backpressured,
+            boolean backpressureGated,
+            boolean asyncPrefetchChunks,
+            int asyncPrefetchChunkSize,
+            int asyncPrefetchHeadGuardRecords,
+            int asyncPrefetchSlidingDrainRecords,
+            boolean cancelPrefetchOnDispatch) {
         this.wrapped = wrapped;
         this.headOperator = headOperator;
         this.enabled = enabled && batchSize > 1;
@@ -158,7 +285,16 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         this.prefetchMode = prefetchMode;
         this.backpressured = backpressured;
         this.backpressureGated = backpressureGated;
-        this.localPreaggCandidate = LocalPreagg.mayHandle(headOperator);
+        this.asyncPrefetchChunks = asyncPrefetchChunks;
+        this.asyncPrefetchChunkSize = Math.max(2, Math.min(1024, asyncPrefetchChunkSize));
+        this.asyncPrefetchHeadGuardRecords =
+                Math.max(0, Math.min(this.batchSize - 1, asyncPrefetchHeadGuardRecords));
+        this.asyncPrefetchSlidingDrainRecords =
+                !this.asyncPrefetchChunks
+                        ? 0
+                        : Math.max(
+                                0, Math.min(this.batchSize - 1, asyncPrefetchSlidingDrainRecords));
+        this.cancelPrefetchOnDispatch = cancelPrefetchOnDispatch && this.asyncPrefetchChunks;
         @SuppressWarnings({"unchecked", "rawtypes"})
         StreamRecord<T>[] tmp = new StreamRecord[this.batchSize];
         this.buf = tmp;
@@ -184,7 +320,11 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         }
         append(record);
         if (count >= batchSize) {
-            flushBatch();
+            if (asyncPrefetchSlidingDrainRecords > 0) {
+                drainSlidingHead();
+            } else {
+                flushBatch();
+            }
         }
     }
 
@@ -252,28 +392,63 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         // distinct keys per batch before dispatch; does not change correctness.
         CollapseProbe.observe(headOperator, buf, n);
         try {
-            if (prefetchMode && BP_PREFETCH_ASYNC_CHUNKS) {
+            if (prefetchMode && asyncPrefetchChunks) {
                 // Fire-and-forget: the backend-side prefetch is asynchronous (shared worker
                 // thread + staging cache), so there is nothing to join — blocking the mailbox
                 // here would defeat the purpose of prefetching.
                 scheduleAsyncPrefetchChunks(true);
             }
-            if (LocalPreagg.dispatch(headOperator, buf, n, numRecordsIn)) {
-                // Runtime local pre-aggregation handled the whole batch (key-grouped fold with
-                // collapsed emit). Falls through to the paths below when disabled or the head
-                // operator is not a BatchableKeyedFunction.
-                return;
-            } else if (prefetchMode) {
-                // Backpressure-driven prefetch: warm the keyed state for the whole lookahead
-                // window with a single prefetch. By default this emits each record in arrival
-                // order; when enabled, the existing conservative key-sort adapter may amortize
-                // same-key dispatch for known commutative operators and falls back otherwise.
-                if (!BP_PREFETCH_ASYNC_CHUNKS
-                        && (!backpressureGated
-                                || (backpressured != null && backpressured.getAsBoolean()))) {
-                    org.apache.flink.streaming.runtime.tasks.StatePrefetcher.prefetch(
-                            headOperator, buf, n);
-                }
+            dispatchPrefix(n);
+        } finally {
+            discardPrefix(n);
+        }
+    }
+
+    /**
+     * Consume only the mailbox-facing prefix and retain the already-prefetched tail. This is the
+     * actual sliding step: after return, network deserialization refills the freed slots while the
+     * tail remains far enough from consumption for its asynchronous MultiGet to complete.
+     */
+    private void drainSlidingHead() throws Exception {
+        final int n = Math.min(asyncPrefetchSlidingDrainRecords, count);
+        if (n <= 0) {
+            return;
+        }
+        CollapseProbe.observe(headOperator, buf, n);
+        try {
+            dispatchPrefix(n);
+        } finally {
+            discardPrefix(n);
+        }
+    }
+
+    /** Dispatch a prefix without changing buffer ownership or queue indices. */
+    private void dispatchPrefix(int n) throws Exception {
+        // Selection is the exact point where a lookahead key stops being speculative. Revoke only
+        // the matching prepared-MultiGet reservation before LocalPreagg or ordinary per-record
+        // execution can race the worker. Already-published staging remains usable; unsupported
+        // backends fail closed inside StatePrefetcher.
+        if (LocalPreagg.dispatch(headOperator, buf, n, numRecordsIn, cancelPrefetchOnDispatch)) {
+            return;
+        }
+        // LocalPreagg reuses its already-deduplicated group keys for cancellation. Only the
+        // ordinary replay path still needs to extract keys from the record prefix here.
+        if (cancelPrefetchOnDispatch) {
+            cancelPrefetchForDispatch(n);
+        }
+        if (prefetchMode) {
+            if (!asyncPrefetchChunks
+                    && (!backpressureGated
+                            || (backpressured != null && backpressured.getAsBoolean()))) {
+                org.apache.flink.streaming.runtime.tasks.StatePrefetcher.prefetch(
+                        headOperator, buf, n);
+            }
+        }
+        boolean nativeMutationBatchStarted =
+                org.apache.flink.streaming.runtime.tasks.StatePrefetcher
+                        .beginNativeResidentMutationBatch(headOperator, buf, 0, n);
+        try {
+            if (prefetchMode) {
                 if (commutativeKeySort) {
                     org.apache.flink.streaming.runtime.tasks.BatchedKeyedOperatorAdapter
                             .dispatchSorted(headOperator, buf, n, numRecordsIn);
@@ -283,57 +458,68 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                     }
                 }
             } else if (batchOperator != null) {
-                // Operator-aware fast path. The operator sees the whole array and decides
-                // when to setKeyContextElement (e.g., per-key run amortisation in v2).
-                // The operator implementation is responsible for counting records via the
-                // standard runtime context if it wants to bypass the wrapped DataOutput.
                 if (numRecordsIn != null) {
                     numRecordsIn.inc(n);
                 }
                 batchOperator.processElementBatch(buf, n);
             } else if (commutativeKeySort) {
-                // v2: same-key run amortization. The adapter classifies the operator and either
-                // sorts + dispatches with one setCurrentKey per run, or falls back to per-record
-                // arrival-order dispatch internally if the operator is not commutative or any
-                // reflection step fails. Either way, numRecordsIn is incremented per record.
                 org.apache.flink.streaming.runtime.tasks.BatchedKeyedOperatorAdapter.dispatchSorted(
                         headOperator, buf, n, numRecordsIn);
             } else {
-                // Fallback: replay through the wrapped DataOutput so setKeyContextElement
-                // and per-record metrics bookkeeping happens exactly as the unbatched path.
                 for (int i = 0; i < n; i++) {
                     wrapped.emitRecord(buf[i]);
                 }
             }
         } finally {
-            // Clear refs so records can be GC'd.
-            for (int i = 0; i < n; i++) {
-                buf[i] = null;
+            if (nativeMutationBatchStarted) {
+                org.apache.flink.streaming.runtime.tasks.StatePrefetcher
+                        .endNativeResidentMutationBatch(headOperator);
             }
-            count = 0;
+        }
+    }
+
+    /** Test seam for proving that revocation precedes any state-consuming dispatch path. */
+    int cancelPrefetchForDispatch(int n) {
+        return org.apache.flink.streaming.runtime.tasks.StatePrefetcher.cancelPrefetchForDispatch(
+                headOperator, buf, 0, n);
+    }
+
+    /** Remove a dispatched prefix while preserving arrival order and scheduled-tail ownership. */
+    private void discardPrefix(int n) {
+        final int remaining = count - n;
+        if (remaining > 0) {
+            System.arraycopy(buf, n, buf, 0, remaining);
+        }
+        for (int i = remaining; i < count; i++) {
+            buf[i] = null;
+        }
+        count = remaining;
+        if (remaining == 0) {
             firstAppendNanos = 0L;
             asyncPrefetchScheduledUntil = 0;
+        } else {
+            asyncPrefetchScheduledUntil = Math.max(0, asyncPrefetchScheduledUntil - n);
         }
     }
 
     private void scheduleAsyncPrefetchChunks(boolean includeRemainder) {
-        if (!enabled
-                || !prefetchMode
-                || !BP_PREFETCH_ASYNC_CHUNKS
-                || localPreaggCandidate
-                || count <= 1) {
+        if (!enabled || !prefetchMode || !asyncPrefetchChunks || count <= 1) {
             return;
         }
         if (backpressureGated && (backpressured == null || !backpressured.getAsBoolean())) {
             return;
         }
+        // Do not spend I/O on the records nearest to mailbox consumption. The eligible tail grows
+        // as append() advances the lookahead window; each consumed batch resets this boundary.
+        asyncPrefetchScheduledUntil =
+                Math.max(asyncPrefetchScheduledUntil, asyncPrefetchHeadGuardRecords);
         while (asyncPrefetchScheduledUntil < count) {
             int remaining = count - asyncPrefetchScheduledUntil;
-            if (remaining < BP_PREFETCH_ASYNC_CHUNK_SIZE && !includeRemainder) {
+            if (remaining < asyncPrefetchChunkSize && !includeRemainder) {
                 return;
             }
             int start = asyncPrefetchScheduledUntil;
-            int end = Math.min(count, start + BP_PREFETCH_ASYNC_CHUNK_SIZE);
+            int end = Math.min(count, start + asyncPrefetchChunkSize);
             if (end - start <= 1) {
                 asyncPrefetchScheduledUntil = end;
                 return;
@@ -341,6 +527,9 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
             // StatePrefetcher only extracts keys and invokes CacheKit's non-blocking submission
             // hook. Read the live range directly: copying a slice and chaining an already-complete
             // future added allocation without providing ordering or backpressure semantics.
+            // LocalPreagg candidates are intentionally included: early chunks can overlap their
+            // later grouping/fold work. At flush, immediate prefetch skips staged/in-flight keys,
+            // so the two paths do not issue the same batch read twice.
             org.apache.flink.streaming.runtime.tasks.StatePrefetcher.prefetch(
                     headOperator, buf, start, end);
             asyncPrefetchScheduledUntil = end;
@@ -361,5 +550,9 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
 
     public long batchTimeoutNanos() {
         return batchTimeoutNanos;
+    }
+
+    int asyncPrefetchScheduledUntilForTesting() {
+        return asyncPrefetchScheduledUntil;
     }
 }

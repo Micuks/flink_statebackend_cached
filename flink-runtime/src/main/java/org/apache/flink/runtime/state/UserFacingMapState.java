@@ -19,9 +19,11 @@
 package org.apache.flink.runtime.state;
 
 import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
 
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -30,7 +32,7 @@ import java.util.Map;
  * @param <K> The type of keys in the map state.
  * @param <V> The type of values in the map state.
  */
-class UserFacingMapState<K, V> implements MapState<K, V> {
+class UserFacingMapState<K, V> implements MapState<K, V>, BatchPrefetchableMapState<K> {
 
     private final MapState<K, V> originalState;
 
@@ -38,6 +40,36 @@ class UserFacingMapState<K, V> implements MapState<K, V> {
 
     UserFacingMapState(MapState<K, V> originalState) {
         this.originalState = originalState;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public boolean beginPrefetchCurrentKeys(Iterable<? extends K> keys) throws Exception {
+        return originalState instanceof BatchPrefetchableMapState
+                && ((BatchPrefetchableMapState<K>) originalState).beginPrefetchCurrentKeys(keys);
+    }
+
+    @Override
+    public boolean supportsDirectPrefetchedValues() {
+        return originalState instanceof BatchPrefetchableMapState
+                && ((BatchPrefetchableMapState<?>) originalState).supportsDirectPrefetchedValues();
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public List<?> prefetchCurrentUniqueKeyValues(List<? extends K> keys) throws Exception {
+        return originalState instanceof BatchPrefetchableMapState
+                ? ((BatchPrefetchableMapState<K>) originalState)
+                        .prefetchCurrentUniqueKeyValues(keys)
+                : null;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public void endPrefetchCurrentKeys() {
+        if (originalState instanceof BatchPrefetchableMapState) {
+            ((BatchPrefetchableMapState<K>) originalState).endPrefetchCurrentKeys();
+        }
     }
 
     // ------------------------------------------------------------------------

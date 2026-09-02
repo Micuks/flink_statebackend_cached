@@ -91,6 +91,7 @@ import java.util.Map;
 import java.util.Spliterator;
 import java.util.Spliterators;
 import java.util.concurrent.RunnableFuture;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -203,6 +204,38 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     /** The max memory size for one batch in {@link RocksDBWriteBatchWrapper}. */
     private final long writeBatchSize;
 
+    /** Whether MapState iterator entries reuse the raw key fetched for the prefix check. */
+    private final boolean mapIteratorSingleKeyFetchEnabled;
+    private final boolean mapIteratorPrefixUpperBoundEnabled;
+    private final boolean mapIteratorPackedTinyScanEnabled;
+    private final boolean mapIteratorPackedTinyScanReuseEnabled;
+    private final boolean mapIteratorPackedTinyScanFlatPageEnabled;
+    private final int mapIteratorPackedTinyScanMaxEntries;
+    private final int mapIteratorPackedTinyScanMaxBytes;
+    private final RocksDBPackedTinyMapIteratorPool mapIteratorPackedTinyScanIteratorPool;
+
+    private final LongAdder mapIteratorEntriesLoaded = new LongAdder();
+    private final LongAdder mapIteratorKeyJniCalls = new LongAdder();
+    private final LongAdder mapIteratorDuplicateKeyFetchesAvoided = new LongAdder();
+    private final LongAdder mapIteratorValueJniCalls = new LongAdder();
+    private final LongAdder mapIteratorPages = new LongAdder();
+    private final LongAdder mapIteratorSeeks = new LongAdder();
+    private final LongAdder mapIteratorNativeIterators = new LongAdder();
+    private final LongAdder mapIteratorBoundedIterators = new LongAdder();
+    private final LongAdder mapIteratorUpperBoundFallbacks = new LongAdder();
+    private final LongAdder mapIteratorPackedScanAttempts = new LongAdder();
+    private final LongAdder mapIteratorPackedScanCompletes = new LongAdder();
+    private final LongAdder mapIteratorPackedScanOverflows = new LongAdder();
+    private final LongAdder mapIteratorPackedScanErrors = new LongAdder();
+    private final LongAdder mapIteratorPackedScanMalformed = new LongAdder();
+    private final LongAdder mapIteratorPackedScanIteratorFallbacks = new LongAdder();
+    private final LongAdder mapIteratorPackedScanEntries = new LongAdder();
+    private final LongAdder mapIteratorPackedScanBytes = new LongAdder();
+    private final LongAdder mapIteratorPackedFlatPageEntries = new LongAdder();
+    private final LongAdder mapIteratorPackedCopiedEntries = new LongAdder();
+    private final LongAdder mapIteratorPackedCopiedBytes = new LongAdder();
+    private final LongAdder mapIteratorPackedLazyKeyMaterializations = new LongAdder();
+
     /** Map of created k/v states. */
     private final Map<String, State> createdKVStates;
 
@@ -284,7 +317,14 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             PriorityQueueSetFactory priorityQueueFactory,
             RocksDbTtlCompactFiltersManager ttlCompactFiltersManager,
             InternalKeyContext<K> keyContext,
-            @Nonnegative long writeBatchSize) {
+            @Nonnegative long writeBatchSize,
+            boolean mapIteratorSingleKeyFetchEnabled,
+            boolean mapIteratorPrefixUpperBoundEnabled,
+            boolean mapIteratorPackedTinyScanEnabled,
+            boolean mapIteratorPackedTinyScanReuseEnabled,
+            boolean mapIteratorPackedTinyScanFlatPageEnabled,
+            int mapIteratorPackedTinyScanMaxEntries,
+            int mapIteratorPackedTinyScanMaxBytes) {
 
         super(
                 kvStateRegistry,
@@ -313,7 +353,20 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.writeOptions = optionsContainer.getWriteOptions();
         this.readOptions = optionsContainer.getReadOptions();
         this.writeBatchSize = writeBatchSize;
+        this.mapIteratorSingleKeyFetchEnabled = mapIteratorSingleKeyFetchEnabled;
+        this.mapIteratorPrefixUpperBoundEnabled = mapIteratorPrefixUpperBoundEnabled;
+        this.mapIteratorPackedTinyScanEnabled = mapIteratorPackedTinyScanEnabled;
+        this.mapIteratorPackedTinyScanReuseEnabled = mapIteratorPackedTinyScanReuseEnabled;
+        this.mapIteratorPackedTinyScanFlatPageEnabled = mapIteratorPackedTinyScanFlatPageEnabled;
+        this.mapIteratorPackedTinyScanMaxEntries = mapIteratorPackedTinyScanMaxEntries;
+        this.mapIteratorPackedTinyScanMaxBytes = mapIteratorPackedTinyScanMaxBytes;
         this.db = db;
+        this.mapIteratorPackedTinyScanIteratorPool =
+                mapIteratorPackedTinyScanEnabled
+                                && mapIteratorPackedTinyScanReuseEnabled
+                                && !mapIteratorPrefixUpperBoundEnabled
+                        ? new RocksDBPackedTinyMapIteratorPool(db, readOptions)
+                        : null;
         this.rocksDBResourceGuard = rocksDBResourceGuard;
         this.checkpointSnapshotStrategy = checkpointSnapshotStrategy;
         this.writeBatchWrapper = writeBatchWrapper;
@@ -445,6 +498,59 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         // parallel.
         rocksDBResourceGuard.close();
 
+        if (mapIteratorNativeIterators.sum() > 0 || mapIteratorPackedScanAttempts.sum() > 0) {
+            LOG.info(
+                    "[CACHEKIT ROCKSDB MAP ITERATOR] singleKeyFetch={} prefixUpperBound={} entriesLoaded={} "
+                            + "keyJniCalls={} duplicateKeyFetchesAvoided={} valueJniCalls={} "
+                            + "pages={} seeks={} nativeIterators={} boundedIterators={} upperBoundFallbacks={} "
+                            + "packedTinyScan={} packedIteratorReuseConfigured={} "
+                            + "packedIteratorReuseEligible={} packedMaxEntries={} packedMaxBytes={} packedAttempts={} "
+                            + "packedCompletes={} packedOverflows={} packedErrors={} packedMalformed={} "
+                            + "packedIteratorFallbacks={} packedEntries={} packedBytes={} "
+                            + "packedFlatPageEnabled={} packedFlatPageEntries={} "
+                            + "packedCopiedEntries={} packedCopiedBytes={} packedLazyKeyMaterializations={} "
+                            + "packedReuseBorrows={} packedRefreshSuccesses={} packedFreshCreates={} "
+                            + "packedConcurrentCreates={} packedRefreshFallbacks={} packedScanFallbacks={} "
+                            + "packedReuseReturns={} packedReuseDiscards={}",
+                    mapIteratorSingleKeyFetchEnabled,
+                    mapIteratorPrefixUpperBoundEnabled,
+                    mapIteratorEntriesLoaded.sum(),
+                    mapIteratorKeyJniCalls.sum(),
+                    mapIteratorDuplicateKeyFetchesAvoided.sum(),
+                    mapIteratorValueJniCalls.sum(),
+                    mapIteratorPages.sum(),
+                    mapIteratorSeeks.sum(),
+                    mapIteratorNativeIterators.sum(),
+                    mapIteratorBoundedIterators.sum(),
+                    mapIteratorUpperBoundFallbacks.sum(),
+                    mapIteratorPackedTinyScanEnabled,
+                    mapIteratorPackedTinyScanReuseEnabled,
+                    isMapIteratorPackedTinyScanReuseEligible(),
+                    mapIteratorPackedTinyScanMaxEntries,
+                    mapIteratorPackedTinyScanMaxBytes,
+                    mapIteratorPackedScanAttempts.sum(),
+                    mapIteratorPackedScanCompletes.sum(),
+                    mapIteratorPackedScanOverflows.sum(),
+                    mapIteratorPackedScanErrors.sum(),
+                    mapIteratorPackedScanMalformed.sum(),
+                    mapIteratorPackedScanIteratorFallbacks.sum(),
+                    mapIteratorPackedScanEntries.sum(),
+                    mapIteratorPackedScanBytes.sum(),
+                    mapIteratorPackedTinyScanFlatPageEnabled,
+                    mapIteratorPackedFlatPageEntries.sum(),
+                    mapIteratorPackedCopiedEntries.sum(),
+                    mapIteratorPackedCopiedBytes.sum(),
+                    mapIteratorPackedLazyKeyMaterializations.sum(),
+                    packedIteratorPoolCounter(PoolCounter.BORROWS),
+                    packedIteratorPoolCounter(PoolCounter.REFRESH_SUCCESSES),
+                    packedIteratorPoolCounter(PoolCounter.FRESH_CREATES),
+                    packedIteratorPoolCounter(PoolCounter.CONCURRENT_CREATES),
+                    packedIteratorPoolCounter(PoolCounter.REFRESH_FALLBACKS),
+                    packedIteratorPoolCounter(PoolCounter.SCAN_FALLBACKS),
+                    packedIteratorPoolCounter(PoolCounter.RETURNS),
+                    packedIteratorPoolCounter(PoolCounter.DISCARDS));
+        }
+
         // IMPORTANT: null reference to signal potential async checkpoint workers that the db was
         // disposed, as
         // working on the disposed object results in SEGFAULTS.
@@ -457,6 +563,15 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             // and no more metric collection will be attempted against the database.
             if (nativeMetricMonitor != null) {
                 nativeMetricMonitor.close();
+            }
+
+            // A RocksIterator owns native state tied to its column family and DB. Close all idle
+            // pooled iterators before closing any column-family handle.
+            if (mapIteratorPackedTinyScanIteratorPool != null) {
+                mapIteratorPackedTinyScanIteratorPool.close();
+                // Never continue into CF/DB destruction if an unexpected state access is still
+                // holding a native iterator. Failing closed leaks resources but avoids UAF/SEGV.
+                mapIteratorPackedTinyScanIteratorPool.ensureDrained();
             }
 
             List<ColumnFamilyOptions> columnFamilyOptions =
@@ -479,7 +594,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             }
 
             // ... and finally close the DB instance ...
-            IOUtils.closeQuietly(db);
+            RocksDBDisposeGuard.closeQuietly(db);
 
             columnFamilyOptions.forEach(IOUtils::closeQuietly);
 
@@ -493,6 +608,282 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
         IOUtils.closeQuietly(checkpointSnapshotStrategy);
         this.disposed = true;
+    }
+
+    boolean isMapIteratorSingleKeyFetchEnabled() {
+        return mapIteratorSingleKeyFetchEnabled;
+    }
+
+    boolean isMapIteratorPrefixUpperBoundEnabled() {
+        return mapIteratorPrefixUpperBoundEnabled;
+    }
+
+    boolean isMapIteratorPackedTinyScanEnabled() {
+        return mapIteratorPackedTinyScanEnabled;
+    }
+
+    boolean isMapIteratorPackedTinyScanFlatPageEnabled() {
+        return mapIteratorPackedTinyScanFlatPageEnabled;
+    }
+
+    int getMapIteratorPackedTinyScanMaxEntries() {
+        return mapIteratorPackedTinyScanMaxEntries;
+    }
+
+    int getMapIteratorPackedTinyScanMaxBytes() {
+        return mapIteratorPackedTinyScanMaxBytes;
+    }
+
+    boolean isMapIteratorPackedTinyScanReuseEligible() {
+        return mapIteratorPackedTinyScanIteratorPool != null
+                && mapIteratorPackedTinyScanIteratorPool.isEligible();
+    }
+
+    RocksDBPackedTinyMapScan.Result tryScanPackedTinyMap(
+            ColumnFamilyHandle columnFamily,
+            ReadOptions scanReadOptions,
+            byte[] seekPrefix,
+            int prefixCompareOffset,
+            int maxEntries,
+            int maxBytes)
+            throws RocksDBException {
+        if (isMapIteratorPackedTinyScanReuseEligible()) {
+            return mapIteratorPackedTinyScanIteratorPool.tryScan(
+                    columnFamily,
+                    seekPrefix,
+                    prefixCompareOffset,
+                    maxEntries,
+                    maxBytes);
+        }
+        return RocksDBPackedTinyMapScan.tryScan(
+                db,
+                columnFamily,
+                scanReadOptions,
+                seekPrefix,
+                prefixCompareOffset,
+                maxEntries,
+                maxBytes);
+    }
+
+    private enum PoolCounter {
+        BORROWS,
+        REFRESH_SUCCESSES,
+        FRESH_CREATES,
+        CONCURRENT_CREATES,
+        REFRESH_FALLBACKS,
+        SCAN_FALLBACKS,
+        RETURNS,
+        DISCARDS
+    }
+
+    private long packedIteratorPoolCounter(PoolCounter counter) {
+        if (mapIteratorPackedTinyScanIteratorPool == null) {
+            return 0L;
+        }
+        switch (counter) {
+            case BORROWS:
+                return mapIteratorPackedTinyScanIteratorPool.borrows();
+            case REFRESH_SUCCESSES:
+                return mapIteratorPackedTinyScanIteratorPool.refreshSuccesses();
+            case FRESH_CREATES:
+                return mapIteratorPackedTinyScanIteratorPool.freshCreates();
+            case CONCURRENT_CREATES:
+                return mapIteratorPackedTinyScanIteratorPool.concurrentCreates();
+            case REFRESH_FALLBACKS:
+                return mapIteratorPackedTinyScanIteratorPool.refreshFallbacks();
+            case SCAN_FALLBACKS:
+                return mapIteratorPackedTinyScanIteratorPool.scanFallbacks();
+            case RETURNS:
+                return mapIteratorPackedTinyScanIteratorPool.returns();
+            case DISCARDS:
+                return mapIteratorPackedTinyScanIteratorPool.discards();
+            default:
+                throw new IllegalStateException("Unknown packed iterator pool counter: " + counter);
+        }
+    }
+
+    void recordMapIteratorPackedScan(RocksDBPackedTinyMapScan.Result result) {
+        mapIteratorPackedScanAttempts.increment();
+        mapIteratorPackedScanBytes.add(result.encodedBytes);
+        switch (result.outcome) {
+            case COMPLETE:
+                mapIteratorPackedScanCompletes.increment();
+                mapIteratorPackedScanEntries.add(result.entryCount());
+                break;
+            case OVERFLOW:
+                mapIteratorPackedScanOverflows.increment();
+                break;
+            case NATIVE_ERROR:
+                mapIteratorPackedScanErrors.increment();
+                break;
+            case MALFORMED:
+                mapIteratorPackedScanMalformed.increment();
+                break;
+            default:
+                throw new IllegalStateException("Unknown packed scan outcome: " + result.outcome);
+        }
+    }
+
+    void recordMapIteratorPackedScanIteratorFallback() {
+        mapIteratorPackedScanIteratorFallbacks.increment();
+    }
+
+    void recordMapIteratorPackedFlatPageEntries(long entries) {
+        mapIteratorPackedFlatPageEntries.add(entries);
+    }
+
+    void recordMapIteratorPackedCopiedEntries(long entries, long bytes) {
+        mapIteratorPackedCopiedEntries.add(entries);
+        mapIteratorPackedCopiedBytes.add(bytes);
+    }
+
+    void recordMapIteratorPackedLazyKeyMaterialization() {
+        mapIteratorPackedLazyKeyMaterializations.increment();
+    }
+
+    void recordMapIteratorPageStats(
+            long entriesLoaded,
+            long keyJniCalls,
+            long duplicateKeyFetchesAvoided,
+            long valueJniCalls,
+            long seeks,
+            long nativeIterators,
+            long boundedIterators,
+            long upperBoundFallbacks) {
+        mapIteratorEntriesLoaded.add(entriesLoaded);
+        mapIteratorKeyJniCalls.add(keyJniCalls);
+        mapIteratorDuplicateKeyFetchesAvoided.add(duplicateKeyFetchesAvoided);
+        mapIteratorValueJniCalls.add(valueJniCalls);
+        mapIteratorPages.increment();
+        mapIteratorSeeks.add(seeks);
+        mapIteratorNativeIterators.add(nativeIterators);
+        mapIteratorBoundedIterators.add(boundedIterators);
+        mapIteratorUpperBoundFallbacks.add(upperBoundFallbacks);
+    }
+
+    @VisibleForTesting
+    long getMapIteratorEntriesLoaded() {
+        return mapIteratorEntriesLoaded.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorKeyJniCalls() {
+        return mapIteratorKeyJniCalls.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorDuplicateKeyFetchesAvoided() {
+        return mapIteratorDuplicateKeyFetchesAvoided.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorValueJniCalls() {
+        return mapIteratorValueJniCalls.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPages() {
+        return mapIteratorPages.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorSeeks() {
+        return mapIteratorSeeks.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorNativeIterators() {
+        return mapIteratorNativeIterators.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorBoundedIterators() {
+        return mapIteratorBoundedIterators.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorUpperBoundFallbacks() {
+        return mapIteratorUpperBoundFallbacks.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanAttempts() {
+        return mapIteratorPackedScanAttempts.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanCompletes() {
+        return mapIteratorPackedScanCompletes.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanOverflows() {
+        return mapIteratorPackedScanOverflows.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanErrors() {
+        return mapIteratorPackedScanErrors.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanMalformed() {
+        return mapIteratorPackedScanMalformed.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanIteratorFallbacks() {
+        return mapIteratorPackedScanIteratorFallbacks.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanEntries() {
+        return mapIteratorPackedScanEntries.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedScanBytes() {
+        return mapIteratorPackedScanBytes.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedFlatPageEntries() {
+        return mapIteratorPackedFlatPageEntries.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedCopiedEntries() {
+        return mapIteratorPackedCopiedEntries.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedCopiedBytes() {
+        return mapIteratorPackedCopiedBytes.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedLazyKeyMaterializations() {
+        return mapIteratorPackedLazyKeyMaterializations.sum();
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedReuseBorrows() {
+        return packedIteratorPoolCounter(PoolCounter.BORROWS);
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedRefreshSuccesses() {
+        return packedIteratorPoolCounter(PoolCounter.REFRESH_SUCCESSES);
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedReuseFreshCreates() {
+        return packedIteratorPoolCounter(PoolCounter.FRESH_CREATES);
+    }
+
+    @VisibleForTesting
+    long getMapIteratorPackedReuseDiscards() {
+        return packedIteratorPoolCounter(PoolCounter.DISCARDS);
     }
 
     @Nonnull

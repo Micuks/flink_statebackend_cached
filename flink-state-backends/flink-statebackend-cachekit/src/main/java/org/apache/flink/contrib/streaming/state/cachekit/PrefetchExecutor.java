@@ -87,6 +87,23 @@ public final class PrefetchExecutor {
         }
     }
 
+    /**
+     * Removes one exact task from the shared queue and runs its drop callback.
+     *
+     * <p>This is deliberately identity based: {@link ThreadPoolExecutor#remove(Runnable)} uses the
+     * task object's {@code equals}, and CacheKit's tracked tasks retain object identity. A running
+     * task cannot be removed and must instead observe its state-local cancellation flag and drain
+     * normally. The method is used by ValueState close so an unrelated backend's queued work never
+     * delays native-plane teardown.
+     */
+    public static boolean cancelIfQueued(Runnable task) {
+        if (task == null || !EXECUTOR.remove(task)) {
+            return false;
+        }
+        notifyDropped(task);
+        return true;
+    }
+
     private static void notifyDropped(Runnable task) {
         if (task instanceof DropAwareTask) {
             try {

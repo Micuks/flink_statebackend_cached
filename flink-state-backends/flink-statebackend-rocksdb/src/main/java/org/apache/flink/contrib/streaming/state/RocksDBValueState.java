@@ -23,6 +23,8 @@ import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.runtime.state.CompositeKeySerializationUtils;
+import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.state.RegisteredKeyValueStateBackendMetaInfo;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.util.FlinkRuntimeException;
@@ -31,6 +33,7 @@ import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.RocksDBException;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -111,6 +114,35 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
     }
 
     @Override
+    public void serializeBatchKeyAndNamespace(
+            K key,
+            N namespace,
+            TypeSerializer<K> safeKeySerializer,
+            TypeSerializer<N> safeNamespaceSerializer,
+            PositionedDataOutputView output)
+            throws Exception {
+        int keyGroup =
+                KeyGroupRangeAssignment.assignToKeyGroup(key, backend.getNumberOfKeyGroups());
+        CompositeKeySerializationUtils.writeKeyGroup(
+                keyGroup, backend.getKeyGroupPrefixBytes(), output);
+        boolean ambiguous =
+                CompositeKeySerializationUtils.isAmbiguousKeyPossible(
+                        safeKeySerializer, safeNamespaceSerializer);
+        int keyStart = output.position();
+        safeKeySerializer.serialize(key, output);
+        if (ambiguous) {
+            CompositeKeySerializationUtils.writeVariableIntBytes(
+                    output.position() - keyStart, output);
+        }
+        int namespaceStart = output.position();
+        safeNamespaceSerializer.serialize(namespace, output);
+        if (ambiguous) {
+            CompositeKeySerializationUtils.writeVariableIntBytes(
+                    output.position() - namespaceStart, output);
+        }
+    }
+
+    @Override
     public byte[] getSerializedValueByRocksDBKey(byte[] rocksDBKey) throws Exception {
         return backend.db.get(columnFamily, rocksDBKey);
     }
@@ -133,6 +165,52 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
         List<byte[]> keyRange = rocksDBKeys.subList(fromIndex, toIndex);
         return backend.db.multiGetAsList(
                 Collections.nCopies(keyRange.size(), columnFamily), keyRange);
+    }
+
+    @Override
+    public boolean supportsDirectArenaMultiGet() {
+        return true;
+    }
+
+    @Override
+    public int directArenaMultiGetMaxBatch() {
+        try {
+            Object advertised =
+                    backend.db
+                            .getClass()
+                            .getMethod("directMultiGetMaxBatch")
+                            .invoke(backend.db);
+            if (!(advertised instanceof Number)) {
+                return RocksDBBatchValueReader.DIRECT_ARENA_DEFAULT_BATCH;
+            }
+            return Math.max(
+                    1,
+                    Math.min(
+                            RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
+                            ((Number) advertised).intValue()));
+        } catch (ReflectiveOperationException
+                | LinkageError
+                | SecurityException incompatibleWrapperOrNativeLibrary) {
+            return RocksDBBatchValueReader.DIRECT_ARENA_DEFAULT_BATCH;
+        }
+    }
+
+    @Override
+    public int getSerializedValuesByRocksDBKeyArena(
+            ByteBuffer keyArena,
+            ByteBuffer descriptors,
+            int count,
+            ByteBuffer valueArena,
+            int valueStride)
+            throws RocksDBException {
+        return backend.db.multiGetDirectArena(
+                columnFamily,
+                backend.getReadOptions(),
+                keyArena,
+                descriptors,
+                count,
+                valueArena,
+                valueStride);
     }
 
     @Override

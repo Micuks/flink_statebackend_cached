@@ -14,6 +14,7 @@ state.backend.cachekit.native.request-plane.write-through-mutations: true
 # Stage 2: EMPTY/SINGLE MapSnapshot semantics OFF.
 state.backend.cachekit.map.snapshot.cache.max-entries: 0
 state.backend.cachekit.map.snapshot.small.max-entries: 0
+state.backend.cachekit.map.snapshot.cache.native.enabled: false
 state.backend.cachekit.native.map-snapshot.enabled: false
 
 # Stage 3: cross-record cooperation OFF.
