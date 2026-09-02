@@ -217,6 +217,409 @@ class NativePreparedValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testAdaptiveFingerprintSampleTargetsNegativeHitAfterJavaEviction()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(7);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        stubDirectPreparedSerialization(reader);
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        adaptiveValueCacheOptions(false, 2, 2, 256, 64), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedStateWithCacheEntries(
+                        delegate, currentKey, coordinator, 71, 1, 8, 2);
+        state.setCurrentNamespace("adaptive-negative");
+
+        for (int i = 0; i < 2; i++) {
+            currentKey.set("initial-miss-" + i);
+            assertEquals(7, state.value());
+        }
+        assertFalse(state.isNativePointAdaptiveBypassingForTesting());
+        assertEquals(1, state.getNativePointAdaptiveEvaluatedWindowsForTesting());
+        for (int i = 2; i < 4; i++) {
+            currentKey.set("initial-miss-" + i);
+            assertEquals(7, state.value());
+        }
+        assertTrue(state.isNativePointAdaptiveBypassingForTesting());
+        assertEquals(2, state.getNativePointAdaptiveEvaluatedWindowsForTesting());
+        assertEquals(2, state.getNativePointAdaptiveZeroHitWindowsForTesting());
+        assertEquals(1, state.getNativePointAdaptiveActiveToBypassTransitionsForTesting());
+        assertEquals(4, state.getNativeProbeKeysForTesting());
+        assertEquals(3, state.getNativeFillKeysForTesting());
+
+        for (int i = 0; i < 255; i++) {
+            currentKey.set("bypass-skip-" + i);
+            assertEquals(7, state.value());
+        }
+        currentKey.set("trial-miss");
+        assertEquals(7, state.value());
+        assertTrue(state.isNativePointAdaptiveBypassingForTesting());
+        assertEquals(5, state.getNativeProbeKeysForTesting());
+        assertEquals(4, state.getNativeFillKeysForTesting());
+        assertEquals(255, state.getNativePointAdaptiveBypassedProbesForTesting());
+        assertEquals(1, state.getNativePointAdaptiveTrialProbesForTesting());
+        assertEquals(1, state.getNativePointAdaptiveTrialMissesForTesting());
+        assertEquals(1, state.getNativePointAdaptiveSamplesRecordedForTesting());
+
+        fakePlane.preloadNegative(71, 0, serializedKey("trial-miss", "adaptive-negative"));
+        // maxEntries=1 gives an actual Java horizon of L1(128) + L2(1). Churn exactly beyond
+        // that horizon so the sampled key reaches the native point path without another trial.
+        for (int i = 0; i < 129; i++) {
+            currentKey.set("java-churn-" + i);
+            assertEquals(7, state.value());
+        }
+        currentKey.set("trial-miss");
+        int trialNegativeValue = state.value();
+        assertEquals(6, state.getNativeProbeKeysForTesting());
+        assertEquals(1, state.getNativeNegativeHitsForTesting());
+        assertEquals(99, trialNegativeValue);
+        assertFalse(state.isNativePointAdaptiveBypassingForTesting());
+        assertEquals(1, state.getNativePointAdaptiveTargetedProbesForTesting());
+        assertEquals(1, state.getNativePointAdaptiveTargetedNegativeHitsForTesting());
+        assertEquals(1, state.getNativePointAdaptiveTargetedRecoveryTransitionsForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAdaptiveTargetedSampleLearnsReadOnlyWorkingSetAndKeepsMutationWriteThrough()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(7);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        stubDirectPreparedSerialization(reader);
+
+        FakeNativeRequestPlane fakePlane = new FakeNativeRequestPlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        adaptiveReadActivatedValueCacheOptions(2, 2, 256, 64), fakePlane);
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedStateWithCacheEntries(
+                        delegate, currentKey, coordinator, 72, 8, 8, 2);
+        state.setCurrentNamespace("adaptive-positive");
+        for (int i = 0; i < 4; i++) {
+            currentKey.set("initial-miss-" + i);
+            assertEquals(7, state.value());
+        }
+        assertTrue(state.isNativePointAdaptiveBypassingForTesting());
+
+        for (int i = 0; i < 255; i++) {
+            currentKey.set("bypass-skip-" + i);
+            assertEquals(7, state.value());
+        }
+        currentKey.set("switched-readonly-key");
+        assertEquals(7, state.value());
+        assertTrue(state.isNativePointAdaptiveBypassingForTesting());
+        assertEquals(4, state.getNativeFillKeysForTesting());
+        assertEquals(1, state.getNativePointAdaptiveSamplesRecordedForTesting());
+        // Production maxEntries=8000 has a Java horizon of L1(1600) + L2(8000), before optional
+        // overflow. This reduced fixture uses maxEntries=8, hence L1(128) + L2(8) = 136. Churn
+        // exactly beyond that actual two-level horizon without mutation, prefetch, or test preload.
+        for (int i = 0; i < 136; i++) {
+            currentKey.set("switched-readonly-churn-" + i);
+            assertEquals(7, state.value());
+        }
+        currentKey.set("switched-readonly-key");
+        assertEquals(7, state.value());
+        assertEquals(1, state.getNativeHitsForTesting());
+        assertFalse(state.isNativePointAdaptiveBypassingForTesting());
+        assertEquals(1, state.getNativePointAdaptiveTargetedRecoveryTransitionsForTesting());
+        assertEquals(1, state.getNativePointAdaptiveTargetedPositiveHitsForTesting());
+        assertEquals(1, state.getNativePointAdaptiveTrialMissesForTesting());
+        assertEquals(1, state.getNativeValueReadActivationsForTesting());
+
+        // Re-enter bypass, then prove the adaptive point gate does not gate mutation publication.
+        for (int i = 0; i < 4; i++) {
+            currentKey.set("second-round-miss-" + i);
+            assertEquals(7, state.value());
+        }
+        assertTrue(state.isNativePointAdaptiveBypassingForTesting());
+        long mutationsBefore = state.getNativeMutationAppliedForTesting();
+        currentKey.set("second-round-miss-0");
+        state.update(88);
+        state.flush();
+        assertEquals(mutationsBefore + 1, state.getNativeMutationAppliedForTesting());
+        assertTrue(state.isNativePointAdaptiveBypassingForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAdaptiveTrialSlotDeferralRestartsFullBackoffInterval() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(7);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        stubDirectPreparedSerialization(reader);
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        adaptiveValueCacheOptions(false, 2, 2, 3),
+                        new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 73, 8, 2);
+        state.setCurrentNamespace("adaptive-slot-backoff");
+        for (int i = 0; i < 4; i++) {
+            currentKey.set("initial-miss-" + i);
+            assertEquals(7, state.value());
+        }
+        assertTrue(state.isNativePointAdaptiveBypassingForTesting());
+
+        NativeRequestPlaneCoordinator.BatchSlot first = coordinator.tryAcquireBatchSlot();
+        NativeRequestPlaneCoordinator.BatchSlot second = coordinator.tryAcquireBatchSlot();
+        assertNotNull(first);
+        assertNotNull(second);
+        try {
+            for (int i = 0; i < 7; i++) {
+                currentKey.set("slot-unavailable-" + i);
+                assertEquals(7, state.value());
+            }
+            assertEquals(2, state.getNativePointAdaptiveTrialSlotDeferralsForTesting());
+            assertEquals(2, state.getNativeFallbackBatchesForTesting());
+            assertEquals(2, coordinator.leaseMisses());
+            assertEquals(4, state.getNativeProbeKeysForTesting());
+            assertTrue(state.isNativePointAdaptiveBypassingForTesting());
+        } finally {
+            first.close();
+            second.close();
+            state.close();
+            coordinator.close();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAdaptiveTargetedSlotDeferralConsumesSampleWithoutHotRetry() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(7);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        stubDirectPreparedSerialization(reader);
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        adaptiveValueCacheOptions(false, 2, 2, 256, 64),
+                        new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedStateWithCacheEntries(
+                        delegate, currentKey, coordinator, 74, 1, 8, 2);
+        state.setCurrentNamespace("adaptive-targeted-slot");
+        for (int i = 0; i < 4; i++) {
+            currentKey.set("initial-miss-" + i);
+            assertEquals(7, state.value());
+        }
+        for (int i = 0; i < 255; i++) {
+            currentKey.set("bypass-skip-" + i);
+            assertEquals(7, state.value());
+        }
+        currentKey.set("sampled-key");
+        assertEquals(7, state.value());
+        assertEquals(1, state.getNativePointAdaptiveSamplesRecordedForTesting());
+        for (int i = 0; i < 129; i++) {
+            currentKey.set("first-java-churn-" + i);
+            assertEquals(7, state.value());
+        }
+
+        NativeRequestPlaneCoordinator.BatchSlot first = coordinator.tryAcquireBatchSlot();
+        NativeRequestPlaneCoordinator.BatchSlot second = coordinator.tryAcquireBatchSlot();
+        assertNotNull(first);
+        assertNotNull(second);
+        try {
+            long probesBefore = state.getNativeProbeKeysForTesting();
+            currentKey.set("sampled-key");
+            assertEquals(7, state.value());
+            assertEquals(1, state.getNativePointAdaptiveTargetedSlotDeferralsForTesting());
+            assertEquals(probesBefore, state.getNativeProbeKeysForTesting());
+            assertEquals(1, coordinator.leaseMisses());
+
+            // Evict the fallback Java entry again. The consumed sample must not reacquire a slot
+            // or probe on the next matching lookup.
+            for (int i = 0; i < 129; i++) {
+                currentKey.set("second-java-churn-" + i);
+                assertEquals(7, state.value());
+            }
+            currentKey.set("sampled-key");
+            assertEquals(7, state.value());
+            assertEquals(1, state.getNativePointAdaptiveTargetedSlotDeferralsForTesting());
+            assertEquals(probesBefore, state.getNativeProbeKeysForTesting());
+            assertEquals(1, coordinator.leaseMisses());
+        } finally {
+            first.close();
+            second.close();
+            state.close();
+            coordinator.close();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAdaptiveFingerprintSamplesAreIsolatedAcrossStatesSharingCoordinator()
+            throws Exception {
+        AtomicReference<String> firstKey = new AtomicReference<>("unused-first");
+        AtomicReference<String> secondKey = new AtomicReference<>("unused-second");
+        InternalValueState<String, String, Integer> firstDelegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        InternalValueState<String, String, Integer> secondDelegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        for (InternalValueState<String, String, Integer> delegate :
+                Arrays.asList(firstDelegate, secondDelegate)) {
+            when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+            when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+            when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+            when(delegate.value()).thenReturn(7);
+            RocksDBBatchValueReader<String, String, Integer> reader =
+                    (RocksDBBatchValueReader<String, String, Integer>) delegate;
+            when(reader.getBatchDefaultValue()).thenReturn(99);
+            stubDirectPreparedSerialization(reader);
+        }
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        adaptiveValueCacheOptions(false, 2, 2, 256, 64),
+                        new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> firstState =
+                newNativePreparedStateWithCacheEntries(
+                        firstDelegate, firstKey, coordinator, 75, 1, 8, 2);
+        CachedInternalValueState<String, String, Integer> secondState =
+                newNativePreparedStateWithCacheEntries(
+                        secondDelegate, secondKey, coordinator, 76, 1, 8, 2);
+        firstState.setCurrentNamespace("shared-namespace");
+        secondState.setCurrentNamespace("shared-namespace");
+        for (int i = 0; i < 4; i++) {
+            firstKey.set("first-initial-miss-" + i);
+            assertEquals(7, firstState.value());
+            secondKey.set("second-initial-miss-" + i);
+            assertEquals(7, secondState.value());
+        }
+        for (int i = 0; i < 255; i++) {
+            firstKey.set("first-bypass-skip-" + i);
+            assertEquals(7, firstState.value());
+        }
+        firstKey.set("shared-fingerprint-key");
+        assertEquals(7, firstState.value());
+        assertEquals(1, firstState.getNativePointAdaptiveSamplesRecordedForTesting());
+        assertEquals(0, secondState.getNativePointAdaptiveSamplesRecordedForTesting());
+
+        long secondProbesBefore = secondState.getNativeProbeKeysForTesting();
+        secondKey.set("shared-fingerprint-key");
+        assertEquals(7, secondState.value());
+        assertEquals(secondProbesBefore, secondState.getNativeProbeKeysForTesting());
+        assertEquals(0, secondState.getNativePointAdaptiveTargetedProbesForTesting());
+
+        // State B's same hash did not consume State A's sample. State A can still target it after
+        // its own Java L1(128) + L2(1) horizon.
+        for (int i = 0; i < 129; i++) {
+            firstKey.set("first-java-churn-" + i);
+            assertEquals(7, firstState.value());
+        }
+        firstKey.set("shared-fingerprint-key");
+        assertEquals(7, firstState.value());
+        assertEquals(1, firstState.getNativePointAdaptiveTargetedProbesForTesting());
+        assertEquals(1, firstState.getNativePointAdaptiveTargetedRecoveryTransitionsForTesting());
+        assertEquals(0, secondState.getNativePointAdaptiveTargetedRecoveryTransitionsForTesting());
+
+        firstState.close();
+        secondState.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testAdaptivePermanentZeroHitPeriodicCostIsOneProbeAndFill() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.value()).thenReturn(7);
+        RocksDBBatchValueReader<String, String, Integer> reader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        when(reader.getBatchDefaultValue()).thenReturn(99);
+        stubDirectPreparedSerialization(reader);
+
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(
+                        adaptiveValueCacheOptions(false, 2, 2, 4096, 64),
+                        new FakeNativeRequestPlane());
+        CachedInternalValueState<String, String, Integer> state =
+                newNativePreparedState(delegate, currentKey, coordinator, 74, 8, 2);
+        state.setCurrentNamespace("adaptive-bounded-zero-hit");
+        for (int i = 0; i < 4; i++) {
+            currentKey.set("initial-miss-" + i);
+            assertEquals(7, state.value());
+        }
+        assertTrue(state.isNativePointAdaptiveBypassingForTesting());
+
+        long probesBefore = state.getNativeProbeKeysForTesting();
+        long fillsBefore = state.getNativeFillKeysForTesting();
+        for (int i = 0; i < 4096; i++) {
+            currentKey.set("bypass-opportunity-" + i);
+            assertEquals(7, state.value());
+        }
+
+        assertTrue(state.isNativePointAdaptiveBypassingForTesting());
+        assertEquals(1, state.getNativeProbeKeysForTesting() - probesBefore);
+        assertEquals(1, state.getNativeFillKeysForTesting() - fillsBefore);
+        assertEquals(4095, state.getNativePointAdaptiveBypassedProbesForTesting());
+        assertEquals(1, state.getNativePointAdaptiveTrialProbesForTesting());
+        assertEquals(1, state.getNativePointAdaptiveTrialMissesForTesting());
+        assertEquals(1, state.getNativePointAdaptiveSamplesRecordedForTesting());
+        assertEquals(0, state.getNativePointAdaptiveTargetedProbesForTesting());
+
+        state.close();
+        coordinator.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testDisabledNativeValueCacheFallsThroughToDelegate() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("point-key");
         InternalValueState<String, String, Integer> delegate =
@@ -3637,6 +4040,37 @@ class NativePreparedValueStateTest {
                 stateId);
     }
 
+    private static CachedInternalValueState<String, String, Integer>
+            newNativePreparedStateWithCacheEntries(
+                    InternalValueState<String, String, Integer> delegate,
+                    AtomicReference<String> currentKey,
+                    NativeRequestPlaneCoordinator coordinator,
+                    int stateId,
+                    int maxEntries,
+                    int chunkSize,
+                    int minBatchSize) {
+        return new CachedInternalValueState<>(
+                delegate,
+                currentKey::get,
+                currentKey::set,
+                maxEntries,
+                CachePolicyType.LRU,
+                0,
+                false,
+                0.05,
+                1000,
+                true,
+                chunkSize,
+                minBatchSize,
+                false,
+                true,
+                Math.max(8, chunkSize),
+                1 << 20,
+                false,
+                coordinator,
+                stateId);
+    }
+
     private static CachedInternalValueState<String, String, Integer> newReadActivatedValueState(
             InternalValueState<String, String, Integer> delegate,
             AtomicReference<String> currentKey,
@@ -3706,6 +4140,67 @@ class NativePreparedValueStateTest {
                 false,
                 false,
                 false);
+    }
+
+    private static NativeRequestPlaneOptions adaptiveValueCacheOptions(
+            boolean writeThroughMutations,
+            int windowProbes,
+            int zeroWindows,
+            int resampleIntervalProbes) {
+        return adaptiveValueCacheOptions(
+                writeThroughMutations,
+                windowProbes,
+                zeroWindows,
+                resampleIntervalProbes,
+                windowProbes);
+    }
+
+    private static NativeRequestPlaneOptions adaptiveValueCacheOptions(
+            boolean writeThroughMutations,
+            int windowProbes,
+            int zeroWindows,
+            int resampleIntervalProbes,
+            int sampleSlots) {
+        return new NativeRequestPlaneOptions(
+                        true,
+                        "",
+                        "auto",
+                        128,
+                        4096,
+                        4096,
+                        16,
+                        4096,
+                        4096,
+                        1,
+                        2,
+                        false,
+                        writeThroughMutations,
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false)
+                .withValuePointAdaptiveBypass(
+                        true,
+                        windowProbes,
+                        zeroWindows,
+                        resampleIntervalProbes,
+                        sampleSlots);
+    }
+
+    private static NativeRequestPlaneOptions adaptiveReadActivatedValueCacheOptions(
+            int windowProbes,
+            int zeroWindows,
+            int resampleIntervalProbes,
+            int sampleSlots) {
+        return readActivatedWriteThroughOptions()
+                .withValuePointAdaptiveBypass(
+                        true,
+                        windowProbes,
+                        zeroWindows,
+                        resampleIntervalProbes,
+                        sampleSlots);
     }
 
     private static NativeRequestPlaneOptions readActivatedWriteThroughOptions() {

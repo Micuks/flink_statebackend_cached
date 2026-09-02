@@ -379,6 +379,49 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         "Enable the independently attributable native ValueState point-cache path. "
                                                                         + "Disabled by default so Mailbox, Prefetch, and LocalPreAgg treatments do not implicitly enable VCache.");
 
+        public static final ConfigOption<Boolean> NATIVE_VALUE_CACHE_ADAPTIVE_BYPASS_ENABLED =
+                        ConfigOptions.key("state.backend.cachekit.native.value-cache.adaptive-bypass.enabled")
+                                        .booleanType()
+                                        .defaultValue(false)
+                                        .withDescription(
+                                                        "Bypass unproductive native ValueState point probes after consecutive zero-useful-hit windows. "
+                                                                        + "Mutation write-through and prepared-key prefetch remain active.");
+
+        public static final ConfigOption<Integer> NATIVE_VALUE_CACHE_ADAPTIVE_WINDOW_PROBES =
+                        ConfigOptions.key("state.backend.cachekit.native.value-cache.adaptive-bypass.window-probes")
+                                        .intType()
+                                        .defaultValue(4096)
+                                        .withDescription(
+                                                        "Successful native ValueState point probes per adaptive observation window.");
+
+        public static final ConfigOption<Integer> NATIVE_VALUE_CACHE_ADAPTIVE_ZERO_WINDOWS =
+                        ConfigOptions.key("state.backend.cachekit.native.value-cache.adaptive-bypass.zero-windows")
+                                        .intType()
+                                        .defaultValue(2)
+                                        .withDescription(
+                                                        "Consecutive point-probe windows with zero positive and zero negative hits before bypass.");
+
+        public static final ConfigOption<Integer>
+                        NATIVE_VALUE_CACHE_ADAPTIVE_RESAMPLE_INTERVAL_PROBES =
+                                        ConfigOptions.key(
+                                                                        "state.backend.cachekit.native.value-cache.adaptive-bypass.resample-interval-probes")
+                                                        .intType()
+                                                        .defaultValue(4096)
+                                                        .withDescription(
+                                                                        "Eligible BYPASS point-cache lookups from one bounded trial attempt to the next. "
+                                                                                        + "The full interval restarts when a trial slot is unavailable.");
+
+        public static final ConfigOption<Integer>
+                        NATIVE_VALUE_CACHE_ADAPTIVE_SAMPLE_SLOTS =
+                                        ConfigOptions.key(
+                                                                        "state.backend.cachekit.native.value-cache.adaptive-bypass.sample-slots")
+                                                        .intType()
+                                                        .defaultValue(64)
+                                                        .withDescription(
+                                                                        "Power-of-two slots in the per-ValueState direct-mapped fingerprint sample table. "
+                                                                                        + "A periodic BYPASS trial miss records one allocation-free key/namespace fingerprint for later targeted recovery probing; "
+                                                                                        + "a hash collision can only cause an extra exact native-key probe and cannot change the returned value.");
+
         public static final ConfigOption<Boolean> NATIVE_MAP_CACHE_ENABLED =
                         ConfigOptions.key("state.backend.cachekit.native.map-cache.enabled")
                                         .booleanType()
@@ -951,7 +994,13 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_ENTRIES),
                                 config.get(NATIVE_MAILBOX_COMPACTION_SCRATCH_KEY_ARENA_BYTES),
                                 config.get(NATIVE_DIRECT_ARENA_EAGER_MATERIALIZATION_ENABLED))
-                                .withDirectArenaBatchSize(config.get(NATIVE_DIRECT_ARENA_BATCH_SIZE));
+                                .withDirectArenaBatchSize(config.get(NATIVE_DIRECT_ARENA_BATCH_SIZE))
+                                .withValuePointAdaptiveBypass(
+                                                config.get(NATIVE_VALUE_CACHE_ADAPTIVE_BYPASS_ENABLED),
+                                                config.get(NATIVE_VALUE_CACHE_ADAPTIVE_WINDOW_PROBES),
+                                                config.get(NATIVE_VALUE_CACHE_ADAPTIVE_ZERO_WINDOWS),
+                                                config.get(NATIVE_VALUE_CACHE_ADAPTIVE_RESAMPLE_INTERVAL_PROBES),
+                                                config.get(NATIVE_VALUE_CACHE_ADAPTIVE_SAMPLE_SLOTS));
         }
 
         private static StateBackend instantiateBackend(String className, ClassLoader classLoader) {
