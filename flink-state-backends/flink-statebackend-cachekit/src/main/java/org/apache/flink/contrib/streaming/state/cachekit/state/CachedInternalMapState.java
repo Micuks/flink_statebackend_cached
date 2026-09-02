@@ -620,7 +620,14 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
 
         // MapSnapshot cache initialization
-        this.mapSnapshotCacheEnabled = mapSnapshotCacheMaxEntries > 0;
+        boolean mapSnapshotCacheRequested = mapSnapshotCacheMaxEntries > 0;
+        boolean standaloneNativeMapSnapshotRequested =
+                mapSnapshotCacheRequested && standaloneNativeSnapshotOptions.enabled();
+        this.mapSnapshotCacheEnabled =
+                mapSnapshotCacheRequested
+                        && NativeMapSnapshotCache.snapshotFeatureAvailable(
+                                standaloneNativeSnapshotOptions.libraryPath(),
+                                standaloneNativeMapSnapshotRequested);
         this.standaloneNativeMapSnapshotEnabled =
                 mapSnapshotCacheEnabled && standaloneNativeSnapshotOptions.enabled();
         if (mapSnapshotCacheEnabled) {
@@ -2510,6 +2517,14 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     long getNativeSnapshotProbesForTesting() {
         return nativeSnapshotProbes;
+    }
+
+    boolean isStandaloneNativeMapSnapshotEnabledForTesting() {
+        return standaloneNativeMapSnapshotEnabled;
+    }
+
+    boolean isMapSnapshotCacheEnabledForTesting() {
+        return mapSnapshotCacheEnabled;
     }
 
     long getNativeSnapshotAdaptiveEvaluatedWindowsForTesting() {

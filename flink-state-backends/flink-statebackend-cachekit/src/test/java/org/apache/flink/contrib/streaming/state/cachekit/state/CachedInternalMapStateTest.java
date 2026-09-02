@@ -1019,6 +1019,73 @@ class CachedInternalMapStateTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void testUnsupportedPlatformDisablesMapSnapshotCache() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                                IntSerializer.INSTANCE));
+        Map<String, Integer> entries = new LinkedHashMap<>();
+        entries.put("uk1", 7);
+        when(delegate.entries()).thenReturn(entries.entrySet());
+        when(delegate.get("uk1")).thenReturn(7);
+
+        String originalArch = System.getProperty("os.arch");
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state;
+        try {
+            System.setProperty("os.arch", "x86_64");
+            state =
+                    new CachedInternalMapState<>(
+                            delegate,
+                            currentKey::get,
+                            currentKey::set,
+                            0,
+                            CachePolicyType.LRU,
+                            0,
+                            PresenceCacheImplementation.PRIMITIVE,
+                            0,
+                            CachePolicyType.LRU,
+                            0,
+                            false,
+                            0.0,
+                            1,
+                            false,
+                            100,
+                            MapSnapshotCacheMetrics.forTesting(),
+                            null,
+                            0,
+                            false,
+                            0,
+                            false,
+                            1,
+                            false,
+                            8192,
+                            0.02,
+                            262144,
+                            new NativeMapSnapshotOptions(true, false, false, ""));
+        } finally {
+            if (originalArch == null) {
+                System.clearProperty("os.arch");
+            } else {
+                System.setProperty("os.arch", originalArch);
+            }
+        }
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        assertFalse(state.isMapSnapshotCacheEnabledForTesting());
+        assertFalse(state.isStandaloneNativeMapSnapshotEnabledForTesting());
+        assertEquals(1, consumeEntries(state.entries()));
+        assertEquals(1, consumeEntries(state.entries()));
+        verify(delegate, times(2)).entries();
+        verify(delegate, times(0)).get("uk1");
+        state.close();
+    }
+
+    @Test
     void testClearDiscardsDirtyEntriesFromScopedFlushIndex() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
         InternalMapState<String, VoidNamespace, String, Integer> delegate =
