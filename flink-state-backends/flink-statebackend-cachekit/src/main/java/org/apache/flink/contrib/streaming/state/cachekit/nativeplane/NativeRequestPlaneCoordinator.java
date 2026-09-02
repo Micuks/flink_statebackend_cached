@@ -1684,22 +1684,16 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
 
         public int probeStatus(int index) {
             checkPreparedIndex(index);
-            return probeResults
-                    .duplicate()
-                    .order(ByteOrder.nativeOrder())
-                    .getInt(
-                            index * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES
-                                    + NativeRequestPlaneBridge.PROBE_RESULT_STATUS_OFFSET);
+            return probeResults.getInt(
+                    index * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES
+                            + NativeRequestPlaneBridge.PROBE_RESULT_STATUS_OFFSET);
         }
 
         public int probeError(int index) {
             checkPreparedIndex(index);
-            return probeResults
-                    .duplicate()
-                    .order(ByteOrder.nativeOrder())
-                    .getInt(
-                            index * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES
-                                    + NativeRequestPlaneBridge.PROBE_RESULT_ERROR_OFFSET);
+            return probeResults.getInt(
+                    index * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES
+                            + NativeRequestPlaneBridge.PROBE_RESULT_ERROR_OFFSET);
         }
 
         public byte[] copyProbeValue(int index) {
@@ -1746,22 +1740,16 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
 
         public int fillStatus(int index) {
             checkMissIndex(index);
-            return fillResults
-                    .duplicate()
-                    .order(ByteOrder.nativeOrder())
-                    .getInt(
-                            index * NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES
-                                    + NativeRequestPlaneBridge.FILL_RESULT_STATUS_OFFSET);
+            return fillResults.getInt(
+                    index * NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES
+                            + NativeRequestPlaneBridge.FILL_RESULT_STATUS_OFFSET);
         }
 
         public int fillError(int index) {
             checkMissIndex(index);
-            return fillResults
-                    .duplicate()
-                    .order(ByteOrder.nativeOrder())
-                    .getInt(
-                            index * NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES
-                                    + NativeRequestPlaneBridge.FILL_RESULT_ERROR_OFFSET);
+            return fillResults.getInt(
+                    index * NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES
+                            + NativeRequestPlaneBridge.FILL_RESULT_ERROR_OFFSET);
         }
 
         @Override
