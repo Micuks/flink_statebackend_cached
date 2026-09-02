@@ -28,17 +28,23 @@ namespace cachekit {
 namespace native {
 namespace internal {
 
+#if defined(__aarch64__)
+constexpr std::size_t kCacheLineBytes = 128;
 constexpr std::size_t kSlotsPerBucket = 16;
+#else
+constexpr std::size_t kCacheLineBytes = 64;
+constexpr std::size_t kSlotsPerBucket = 8;
+#endif
 constexpr std::uint32_t kEmptyTag = 0;
 constexpr std::uint32_t kTombstoneTag = 1;
 
-struct alignas(128) Bucket {
+struct alignas(kCacheLineBytes) Bucket {
     std::uint32_t tags[kSlotsPerBucket];
     std::uint32_t entry_ids[kSlotsPerBucket];
 };
 
-static_assert(sizeof(Bucket) == 128, "one bucket must be one Kunpeng L3 cache line");
-static_assert(alignof(Bucket) == 128, "bucket alignment must match Kunpeng L3");
+static_assert(sizeof(Bucket) == kCacheLineBytes, "bucket must occupy one target cache line");
+static_assert(alignof(Bucket) == kCacheLineBytes, "bucket alignment must match target cache line");
 
 struct KernelOps {
     KernelKind kind;
@@ -57,6 +63,9 @@ const KernelOps& ScalarKernel() noexcept;
 #if defined(CACHEKIT_NATIVE_AARCH64_KERNELS)
 const KernelOps& NeonCrcKernel() noexcept;
 const KernelOps& Sve256Kernel() noexcept;
+#endif
+#if defined(CACHEKIT_NATIVE_X86_KERNELS)
+const KernelOps& Sse42CrcKernel() noexcept;
 #endif
 
 const KernelOps* SelectKernel(

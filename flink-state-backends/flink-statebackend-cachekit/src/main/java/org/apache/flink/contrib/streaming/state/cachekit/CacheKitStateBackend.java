@@ -15,11 +15,17 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit;
 
+import java.io.IOException;
+import java.util.Collection;
+import javax.annotation.Nonnull;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
+import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneOptions;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.execution.Environment;
@@ -37,27 +43,16 @@ import org.apache.flink.runtime.state.OperatorStateHandle;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.delegate.DelegatingStateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
-import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
-import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
-import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneOptions;
-
-import javax.annotation.Nonnull;
-
-import java.io.IOException;
-import java.util.Collection;
 
 /**
- * A minimal, extensible {@link StateBackend} wrapper used as the starting point
- * for a production
+ * A minimal, extensible {@link StateBackend} wrapper used as the starting point for a production
  * caching framework.
  *
- * <p>
- * Current scope:
+ * <p>Current scope:
  *
  * <ul>
  * <li>Delegates persistence/checkpointing to a delegate {@link StateBackend}.
- * <li>Adds LRU caching for {@code ValueState} via
- * {@link CacheKitKeyedStateBackend}.
+ *   <li>Adds LRU caching for {@code ValueState} via {@link CacheKitKeyedStateBackend}.
  * </ul>
  */
 public class CacheKitStateBackend extends AbstractStateBackend
@@ -84,12 +79,17 @@ public class CacheKitStateBackend extends AbstractStateBackend
     private final int mapHitRateWindow;
     private final boolean mapIterationCacheFillEnabled;
     private final int mapSnapshotCacheMaxEntries;
+    private final int mapSnapshotSmallMaxEntries;
     private final boolean listStateCowEnabled;
     private final boolean listStateRywEnabled;
     private final int listStateClearedKeysCapacity;
     private final boolean priorityQueueOptEnabled;
     private final boolean diagnosticsEnabled;
     private final NativeRequestPlaneOptions nativeRequestPlaneOptions;
+    private final boolean keyScopedPrefetchInvalidationEnabled;
+    private final boolean nativePrefetchAccessGuidedStateEnabled;
+    private final boolean nativeMapDistinctBatchPrefetchEnabled;
+    private final boolean nativeMapDistinctBatchPrefetchDirectArenaEnabled;
 
     public CacheKitStateBackend(
             StateBackend delegateBackend,
@@ -170,6 +170,130 @@ public class CacheKitStateBackend extends AbstractStateBackend
             boolean priorityQueueOptEnabled,
             boolean diagnosticsEnabled,
             NativeRequestPlaneOptions nativeRequestPlaneOptions) {
+        this(
+                delegateBackend,
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow,
+                valueBypassEnabled,
+                valueHitRateThreshold,
+                valueHitRateWindow,
+                mapPresenceCacheMaxEntries,
+                mapPresenceCachePolicy,
+                mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                1,
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled,
+                diagnosticsEnabled,
+                nativeRequestPlaneOptions,
+                false,
+                false,
+                false,
+                false);
+    }
+
+    public CacheKitStateBackend(
+            StateBackend delegateBackend,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            int mapSnapshotSmallMaxEntries,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled,
+            NativeRequestPlaneOptions nativeRequestPlaneOptions) {
+        this(
+                delegateBackend,
+                valueCacheMaxEntries,
+                valueCachePolicy,
+                valueCacheLruOverflow,
+                valueBypassEnabled,
+                valueHitRateThreshold,
+                valueHitRateWindow,
+                mapPresenceCacheMaxEntries,
+                mapPresenceCachePolicy,
+                mapPresenceCacheLruOverflow,
+                mapPresenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicy,
+                mapCacheLruOverflow,
+                mapBypassEnabled,
+                mapHitRateThreshold,
+                mapHitRateWindow,
+                mapIterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotSmallMaxEntries,
+                listStateCowEnabled,
+                listStateRywEnabled,
+                listStateClearedKeysCapacity,
+                priorityQueueOptEnabled,
+                diagnosticsEnabled,
+                nativeRequestPlaneOptions,
+                false,
+                false,
+                false,
+                false);
+    }
+
+    public CacheKitStateBackend(
+            StateBackend delegateBackend,
+            int valueCacheMaxEntries,
+            CachePolicyType valueCachePolicy,
+            int valueCacheLruOverflow,
+            boolean valueBypassEnabled,
+            double valueHitRateThreshold,
+            int valueHitRateWindow,
+            int mapPresenceCacheMaxEntries,
+            CachePolicyType mapPresenceCachePolicy,
+            int mapPresenceCacheLruOverflow,
+            PresenceCacheImplementation mapPresenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicy,
+            int mapCacheLruOverflow,
+            boolean mapBypassEnabled,
+            double mapHitRateThreshold,
+            int mapHitRateWindow,
+            boolean mapIterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            int mapSnapshotSmallMaxEntries,
+            boolean listStateCowEnabled,
+            boolean listStateRywEnabled,
+            int listStateClearedKeysCapacity,
+            boolean priorityQueueOptEnabled,
+            boolean diagnosticsEnabled,
+            NativeRequestPlaneOptions nativeRequestPlaneOptions,
+            boolean keyScopedPrefetchInvalidationEnabled,
+            boolean nativePrefetchAccessGuidedStateEnabled,
+            boolean nativeMapDistinctBatchPrefetchEnabled,
+            boolean nativeMapDistinctBatchPrefetchDirectArenaEnabled) {
         this.delegateBackend = delegateBackend;
         this.valueCacheMaxEntries = valueCacheMaxEntries;
         this.valueCachePolicy = valueCachePolicy;
@@ -189,6 +313,7 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.mapHitRateWindow = mapHitRateWindow;
         this.mapIterationCacheFillEnabled = mapIterationCacheFillEnabled;
         this.mapSnapshotCacheMaxEntries = mapSnapshotCacheMaxEntries;
+        this.mapSnapshotSmallMaxEntries = Math.max(1, Math.min(16, mapSnapshotSmallMaxEntries));
         this.listStateCowEnabled = listStateCowEnabled;
         this.listStateRywEnabled = listStateRywEnabled;
         this.listStateClearedKeysCapacity = listStateClearedKeysCapacity;
@@ -197,6 +322,27 @@ public class CacheKitStateBackend extends AbstractStateBackend
         this.nativeRequestPlaneOptions =
                 java.util.Objects.requireNonNull(
                         nativeRequestPlaneOptions, "nativeRequestPlaneOptions");
+        this.keyScopedPrefetchInvalidationEnabled = keyScopedPrefetchInvalidationEnabled;
+        this.nativePrefetchAccessGuidedStateEnabled = nativePrefetchAccessGuidedStateEnabled;
+        this.nativeMapDistinctBatchPrefetchEnabled = nativeMapDistinctBatchPrefetchEnabled;
+        this.nativeMapDistinctBatchPrefetchDirectArenaEnabled =
+                nativeMapDistinctBatchPrefetchDirectArenaEnabled;
+    }
+
+    boolean keyScopedPrefetchInvalidationEnabledForTesting() {
+        return keyScopedPrefetchInvalidationEnabled;
+    }
+
+    boolean nativePrefetchAccessGuidedStateEnabledForTesting() {
+        return nativePrefetchAccessGuidedStateEnabled;
+    }
+
+    boolean nativeMapDistinctBatchPrefetchEnabledForTesting() {
+        return nativeMapDistinctBatchPrefetchEnabled;
+    }
+
+    boolean nativeMapDistinctBatchPrefetchDirectArenaEnabledForTesting() {
+        return nativeMapDistinctBatchPrefetchDirectArenaEnabled;
     }
 
     @Override
@@ -232,7 +378,9 @@ public class CacheKitStateBackend extends AbstractStateBackend
             throws IOException {
         AbstractKeyedStateBackend<K> delegated;
         try {
-            delegated = (AbstractKeyedStateBackend<K>) delegateBackend.createKeyedStateBackend(
+            delegated =
+                    (AbstractKeyedStateBackend<K>)
+                            delegateBackend.createKeyedStateBackend(
                     env,
                     jobID,
                     operatorIdentifier,
@@ -279,12 +427,17 @@ public class CacheKitStateBackend extends AbstractStateBackend
                     mapHitRateWindow,
                     mapIterationCacheFillEnabled,
                     mapSnapshotCacheMaxEntries,
+                    mapSnapshotSmallMaxEntries,
                     listStateCowEnabled,
                     listStateRywEnabled,
                     listStateClearedKeysCapacity,
                     priorityQueueOptEnabled,
                     diagnosticsEnabled,
-                    effectiveNativeRequestPlaneOptions());
+                    effectiveNativeRequestPlaneOptions(),
+                    keyScopedPrefetchInvalidationEnabled,
+                    nativePrefetchAccessGuidedStateEnabled,
+                    nativeMapDistinctBatchPrefetchEnabled,
+                    nativeMapDistinctBatchPrefetchDirectArenaEnabled);
         } catch (RuntimeException | LinkageError failure) {
             disposeAfterInitializationFailure(delegated, failure);
             throw new IOException(
@@ -326,7 +479,8 @@ public class CacheKitStateBackend extends AbstractStateBackend
     }
 
     @Override
-    public CheckpointStorageAccess createCheckpointStorage(@Nonnull JobID jobId) throws IOException {
+    public CheckpointStorageAccess createCheckpointStorage(@Nonnull JobID jobId)
+            throws IOException {
         if (delegateBackend instanceof CheckpointStorage) {
             return ((CheckpointStorage) delegateBackend).createCheckpointStorage(jobId);
         }
@@ -338,46 +492,77 @@ public class CacheKitStateBackend extends AbstractStateBackend
     @Override
     public StateBackend configure(ReadableConfig config, ClassLoader classLoader)
             throws IllegalConfigurationException {
-        final StateBackend configuredDelegate = delegateBackend instanceof ConfigurableStateBackend
-                ? ((ConfigurableStateBackend) delegateBackend).configure(config, classLoader)
+        final StateBackend configuredDelegate =
+                delegateBackend instanceof ConfigurableStateBackend
+                        ? ((ConfigurableStateBackend) delegateBackend)
+                                .configure(config, classLoader)
                 : delegateBackend;
 
-        final int maxEntries = Math.max(0, config.get(CacheKitStateBackendFactory.VALUE_CACHE_MAX_ENTRIES));
-        final CachePolicyType policyType = config.get(CacheKitStateBackendFactory.VALUE_CACHE_POLICY);
-        final int lruOverflow = Math.max(0, config.get(CacheKitStateBackendFactory.VALUE_CACHE_LRU_OVERFLOW));
+        final int maxEntries =
+                Math.max(0, config.get(CacheKitStateBackendFactory.VALUE_CACHE_MAX_ENTRIES));
+        final CachePolicyType policyType =
+                config.get(CacheKitStateBackendFactory.VALUE_CACHE_POLICY);
+        final int lruOverflow =
+                Math.max(0, config.get(CacheKitStateBackendFactory.VALUE_CACHE_LRU_OVERFLOW));
         final boolean bypassEnabled = config.get(CacheKitStateBackendFactory.VALUE_BYPASS_ENABLED);
-        final double hitRateThreshold = config.get(CacheKitStateBackendFactory.VALUE_HIT_RATE_THRESHOLD);
+        final double hitRateThreshold =
+                config.get(CacheKitStateBackendFactory.VALUE_HIT_RATE_THRESHOLD);
         final int hitRateWindow = config.get(CacheKitStateBackendFactory.VALUE_HIT_RATE_WINDOW);
         final int mapPresenceMaxEntries =
                 Math.max(0, config.get(CacheKitStateBackendFactory.MAP_PRESENCE_CACHE_MAX_ENTRIES));
         final CachePolicyType mapPresencePolicy =
                 config.get(CacheKitStateBackendFactory.MAP_PRESENCE_CACHE_POLICY);
         final int mapPresenceLruOverflow =
-                Math.max(0, config.get(CacheKitStateBackendFactory.MAP_PRESENCE_CACHE_LRU_OVERFLOW));
+                Math.max(
+                        0, config.get(CacheKitStateBackendFactory.MAP_PRESENCE_CACHE_LRU_OVERFLOW));
         final PresenceCacheImplementation mapPresenceImpl =
                 config.get(CacheKitStateBackendFactory.MAP_PRESENCE_CACHE_IMPLEMENTATION);
-        final int mapCacheMaxEntries = Math.max(0, config.get(CacheKitStateBackendFactory.MAP_CACHE_MAX_ENTRIES));
-        final CachePolicyType mapCachePolicy = config.get(CacheKitStateBackendFactory.MAP_CACHE_POLICY);
-        final int mapCacheLruOverflow = Math.max(0, config.get(CacheKitStateBackendFactory.MAP_CACHE_LRU_OVERFLOW));
+        final int mapCacheMaxEntries =
+                Math.max(0, config.get(CacheKitStateBackendFactory.MAP_CACHE_MAX_ENTRIES));
+        final CachePolicyType mapCachePolicy =
+                config.get(CacheKitStateBackendFactory.MAP_CACHE_POLICY);
+        final int mapCacheLruOverflow =
+                Math.max(0, config.get(CacheKitStateBackendFactory.MAP_CACHE_LRU_OVERFLOW));
         final boolean mapBypassEnabled = config.get(CacheKitStateBackendFactory.MAP_BYPASS_ENABLED);
-        final double mapHitRateThreshold = config.get(CacheKitStateBackendFactory.MAP_HIT_RATE_THRESHOLD);
+        final double mapHitRateThreshold =
+                config.get(CacheKitStateBackendFactory.MAP_HIT_RATE_THRESHOLD);
         final int mapHitRateWindow = config.get(CacheKitStateBackendFactory.MAP_HIT_RATE_WINDOW);
         final boolean mapIterationCacheFillEnabled =
                 config.get(CacheKitStateBackendFactory.MAP_ITERATION_CACHE_FILL_ENABLED);
         final int mapSnapshotMaxEntries =
                 Math.max(0, config.get(CacheKitStateBackendFactory.MAP_SNAPSHOT_CACHE_MAX_ENTRIES));
+        final int mapSnapshotSmallMaxEntries =
+                Math.max(
+                        1,
+                        Math.min(
+                                16,
+                                config.get(
+                                        CacheKitStateBackendFactory
+                                                .MAP_SNAPSHOT_SMALL_MAX_ENTRIES)));
         final boolean listStateCowEnabled =
                 config.get(CacheKitStateBackendFactory.LIST_STATE_COW_ENABLED);
         final boolean listStateRywEnabled =
                 config.get(CacheKitStateBackendFactory.LIST_STATE_RYW_ENABLED);
         final int clearedKeysCapacity =
-                Math.max(1, config.get(CacheKitStateBackendFactory.LIST_STATE_CLEARED_KEYS_CAPACITY));
+                Math.max(
+                        1,
+                        config.get(CacheKitStateBackendFactory.LIST_STATE_CLEARED_KEYS_CAPACITY));
         final boolean priorityQueueOptEnabled =
                 config.get(CacheKitStateBackendFactory.PRIORITY_QUEUE_OPT_ENABLED);
         final boolean diagnosticsEnabled =
                 config.get(CacheKitStateBackendFactory.DIAGNOSTICS_ENABLED);
         final NativeRequestPlaneOptions nativeOptions =
                 CacheKitStateBackendFactory.nativeRequestPlaneOptions(config);
+        final boolean keyScopedPrefetchInvalidationEnabled =
+                config.get(CacheKitStateBackendFactory.BP_PREFETCH_KEY_SCOPED_INVALIDATION_ENABLED);
+        final boolean nativePrefetchAccessGuidedStateEnabled =
+                config.get(CacheKitStateBackendFactory.NATIVE_PREFETCH_ACCESS_GUIDED_STATE_ENABLED);
+        final boolean nativeMapDistinctBatchPrefetchEnabled =
+                config.get(CacheKitStateBackendFactory.NATIVE_MAP_DISTINCT_BATCH_PREFETCH_ENABLED);
+        final boolean nativeMapDistinctBatchPrefetchDirectArenaEnabled =
+                config.get(
+                        CacheKitStateBackendFactory
+                                .NATIVE_MAP_DISTINCT_BATCH_PREFETCH_DIRECT_ARENA_ENABLED);
 
         return new CacheKitStateBackend(
                 configuredDelegate,
@@ -399,12 +584,17 @@ public class CacheKitStateBackend extends AbstractStateBackend
                 mapHitRateWindow,
                 mapIterationCacheFillEnabled,
                 mapSnapshotMaxEntries,
+                mapSnapshotSmallMaxEntries,
                 listStateCowEnabled,
                 listStateRywEnabled,
                 clearedKeysCapacity,
                 priorityQueueOptEnabled,
                 diagnosticsEnabled,
-                nativeOptions);
+                nativeOptions,
+                keyScopedPrefetchInvalidationEnabled,
+                nativePrefetchAccessGuidedStateEnabled,
+                nativeMapDistinctBatchPrefetchEnabled,
+                nativeMapDistinctBatchPrefetchDirectArenaEnabled);
     }
 
     private NativeRequestPlaneOptions effectiveNativeRequestPlaneOptions() {

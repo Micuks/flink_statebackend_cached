@@ -41,6 +41,18 @@ import java.util.Objects;
 @Internal
 public final class SerializedKeyBatch<K, N> {
 
+    /** Serializes one exact key directly into the reusable direct arena. */
+    @FunctionalInterface
+    public interface DirectKeyWriter {
+        void write(DirectBufferDataOutputView output) throws IOException;
+    }
+
+    /** Serializes one indexed exact key directly into the reusable arena. */
+    @FunctionalInterface
+    public interface IndexedDirectKeyWriter {
+        void write(int index, DirectBufferDataOutputView output) throws IOException;
+    }
+
     public static final int STATE_ID_OFFSET = 0;
     public static final int RESERVED_OFFSET = 4;
     public static final int GENERATION_OFFSET = 8;
@@ -135,6 +147,62 @@ public final class SerializedKeyBatch<K, N> {
         }
     }
 
+    /**
+     * Appends an exact prepared-key region from direct memory without a heap intermediate.
+     *
+     * <p>The copy is transactional: capacity or bounds failure leaves both the arena position and
+     * visible metadata unchanged.
+     */
+    int appendSerialized(
+            int stateId,
+            long generation,
+            ByteBuffer source,
+            int sourceOffset,
+            int serializedLength)
+            throws IOException {
+        Objects.requireNonNull(source, "source");
+        if (entryCount >= maxEntries) {
+            throw new EOFException(
+                    "Direct metadata capacity is exhausted at " + entryCount + " entries.");
+        }
+        int arenaCheckpoint = arenaOutput.checkpoint();
+        try {
+            arenaOutput.write(source, sourceOffset, serializedLength);
+            return commitMetadata(stateId, generation, arenaCheckpoint, serializedLength);
+        } catch (IOException | RuntimeException failure) {
+            arenaOutput.truncateTo(arenaCheckpoint);
+            throw failure;
+        }
+    }
+
+    /**
+     * Appends one exact key without first materializing a heap {@code byte[]}.
+     *
+     * <p>The writer must emit the complete authoritative identity, including any key-group,
+     * namespace, or state-specific separators required by its caller. A failed writer is
+     * transactional: no metadata becomes visible and the arena position is restored.
+     */
+    public int appendSerialized(int stateId, long generation, DirectKeyWriter writer)
+            throws IOException {
+        Objects.requireNonNull(writer, "writer");
+        if (entryCount >= maxEntries) {
+            throw new EOFException(
+                    "Direct metadata capacity is exhausted at " + entryCount + " entries.");
+        }
+        int arenaCheckpoint = arenaOutput.checkpoint();
+        try {
+            writer.write(arenaOutput);
+            return commitMetadata(
+                    stateId,
+                    generation,
+                    arenaCheckpoint,
+                    arenaOutput.position() - arenaCheckpoint);
+        } catch (IOException | RuntimeException failure) {
+            arenaOutput.truncateTo(arenaCheckpoint);
+            throw failure;
+        }
+    }
+
     /** Creates a raw-prepared-key batch whose object serializers are never consulted. */
     public static SerializedKeyBatch<byte[], byte[]> forSerializedBytes(
             ByteBuffer arena, ByteBuffer metadata) {
@@ -200,6 +268,79 @@ public final class SerializedKeyBatch<K, N> {
         visible.position(0);
         visible.limit(entryCount * METADATA_RECORD_BYTES);
         return visible.slice().asReadOnlyBuffer().order(METADATA_BYTE_ORDER);
+    }
+
+    /**
+     * Projects a stable, increasing subset of metadata entries in place.
+     *
+     * <p>The serialized arena is immutable and remains untouched. Only the fixed-width metadata
+     * records are compacted, so a later native probe can reuse already-prepared key bytes without
+     * materializing heap arrays or copying those bytes back into another direct batch. Source
+     * indexes must be strictly increasing; that both preserves arrival order and makes the
+     * forward in-place copy safe.
+     */
+    void retainSerializedEntries(ByteBuffer sourceIndexes, int retainedCount) {
+        Objects.requireNonNull(sourceIndexes, "sourceIndexes");
+        if (retainedCount < 0 || retainedCount > entryCount) {
+            throw new IllegalArgumentException(
+                    "Retained entry count "
+                            + retainedCount
+                            + " outside [0, "
+                            + entryCount
+                            + "].");
+        }
+        ByteBuffer indexes = sourceIndexes.duplicate().order(METADATA_BYTE_ORDER);
+        if (indexes.limit() < retainedCount * Integer.BYTES) {
+            throw new IllegalArgumentException("Source-index buffer is too small.");
+        }
+        final int originalEntryCount = entryCount;
+        int previousSource = -1;
+        // Validate the complete projection before mutating metadata. Native compact output is an
+        // untrusted protocol boundary; a late malformed index must not leave a partially projected
+        // batch behind for a Java fallback or a reused slot.
+        for (int target = 0; target < retainedCount; target++) {
+            int source = indexes.getInt(target * Integer.BYTES);
+            if (source <= previousSource || source < target || source >= originalEntryCount) {
+                throw new IllegalArgumentException(
+                        "Projected source index "
+                                + source
+                                + " is not a stable increasing entry at target "
+                                + target
+                                + ".");
+            }
+            int sourceBase = source * METADATA_RECORD_BYTES;
+            int stateId = metadata.getInt(sourceBase + STATE_ID_OFFSET);
+            int reserved = metadata.getInt(sourceBase + RESERVED_OFFSET);
+            long generation = metadata.getLong(sourceBase + GENERATION_OFFSET);
+            int arenaOffset = metadata.getInt(sourceBase + ARENA_OFFSET_OFFSET);
+            int length = metadata.getInt(sourceBase + LENGTH_OFFSET);
+            if (reserved != 0) {
+                throw new IllegalStateException(
+                        "Projected serialized-key metadata has a non-zero reserved field.");
+            }
+            if (arenaOffset < 0
+                    || length < 0
+                    || arenaOffset > arenaOutput.position() - length) {
+                throw new IllegalStateException("Projected serialized-key metadata is invalid.");
+            }
+            previousSource = source;
+        }
+        for (int target = 0; target < retainedCount; target++) {
+            int source = indexes.getInt(target * Integer.BYTES);
+            int sourceBase = source * METADATA_RECORD_BYTES;
+            int stateId = metadata.getInt(sourceBase + STATE_ID_OFFSET);
+            int reserved = metadata.getInt(sourceBase + RESERVED_OFFSET);
+            long generation = metadata.getLong(sourceBase + GENERATION_OFFSET);
+            int arenaOffset = metadata.getInt(sourceBase + ARENA_OFFSET_OFFSET);
+            int length = metadata.getInt(sourceBase + LENGTH_OFFSET);
+            int targetBase = target * METADATA_RECORD_BYTES;
+            metadata.putInt(targetBase + STATE_ID_OFFSET, stateId);
+            metadata.putInt(targetBase + RESERVED_OFFSET, reserved);
+            metadata.putLong(targetBase + GENERATION_OFFSET, generation);
+            metadata.putInt(targetBase + ARENA_OFFSET_OFFSET, arenaOffset);
+            metadata.putInt(targetBase + LENGTH_OFFSET, length);
+        }
+        entryCount = retainedCount;
     }
 
     private int metadataBase(int entryIndex) {

@@ -27,6 +27,9 @@
 #include <linux/prctl.h>
 #endif
 #endif
+#if defined(__x86_64__) && defined(CACHEKIT_NATIVE_X86_KERNELS)
+#include <cpuid.h>
+#endif
 
 namespace cachekit {
 namespace native {
@@ -62,6 +65,16 @@ HostFeatures DetectHostFeatures() noexcept {
     }
 #endif
 #endif
+#if defined(__x86_64__) && defined(CACHEKIT_NATIVE_X86_KERNELS)
+    features.x86_64 = true;
+    unsigned int eax = 0;
+    unsigned int ebx = 0;
+    unsigned int ecx = 0;
+    unsigned int edx = 0;
+    if (__get_cpuid(1U, &eax, &ebx, &ecx, &edx) != 0) {
+        features.sse42 = (ecx & bit_SSE4_2) != 0;
+    }
+#endif
     return features;
 }
 
@@ -86,6 +99,11 @@ const KernelOps* SelectKernel(
         case KernelPreference::kScalar:
             return &ScalarKernel();
         case KernelPreference::kAuto:
+#if defined(CACHEKIT_NATIVE_X86_KERNELS)
+            if (features.x86_64 && features.sse42) {
+                return &Sse42CrcKernel();
+            }
+#endif
 #if defined(CACHEKIT_NATIVE_AARCH64_KERNELS)
             if (features.sve && features.crc32 && features.sve_vector_length_256) {
                 return &Sve256Kernel();

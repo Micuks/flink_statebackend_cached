@@ -15,39 +15,55 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import javax.annotation.Nonnull;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
+import org.apache.flink.contrib.streaming.state.RocksDBBatchMapReader;
+import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
+import org.apache.flink.contrib.streaming.state.cachekit.PrefetchExecutor;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CaffeineCachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.LruCachePolicy;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PrimitivePresenceCache;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneBridge;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneCoordinator;
 import org.apache.flink.contrib.streaming.state.cachekit.util.MurmurHash3;
+import org.apache.flink.core.memory.DataInputDeserializer;
+import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputSerializer;
+import org.apache.flink.core.memory.DataOutputView;
+import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
 import org.apache.flink.runtime.state.internal.InternalMapState;
-
-import javax.annotation.Nonnull;
-
-import java.util.AbstractMap;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Set;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
- * Minimal {@link InternalMapState} wrapper that adds a per-state cache for
- * entries and presence.
+ * Minimal {@link InternalMapState} wrapper that adds a per-state cache for entries and presence.
  *
- * <p>
- * Keying: (currentKey, namespace, userKey).
+ * <p>Keying: (currentKey, namespace, userKey).
  */
-public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapState<K, N, UK, UV> {
+public final class CachedInternalMapState<K, N, UK, UV>
+        implements InternalMapState<K, N, UK, UV>, BatchPrefetchableMapState<UK> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(CachedInternalMapState.class);
+
+    private enum NativeSnapshotAdaptiveMode {
+        EVALUATE,
+        BYPASS
+    }
 
     private final InternalMapState<K, N, UK, UV> delegate;
     private final CurrentKeyProvider<K> currentKeyProvider;
@@ -75,23 +91,111 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private final TypeSerializer<UK> userKeySerializer;
     private final TypeSerializer<UV> userValueSerializer;
     private final ThreadLocal<DataOutputSerializer> serializerView;
+    private final NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator;
+    private final boolean nativeMapCacheEnabled;
+    private final int nativeStateId;
+    private final boolean nativeMapSnapshotEnabled;
+    private final int nativeSnapshotStateId;
+    private final DataOutputSerializer nativeComponentOutput;
+    private long nativeGeneration;
+    private long nativeProbeAttempts;
+    private long nativeHits;
+    private long nativeNegativeHits;
+    private long nativeMisses;
+    private long nativeFills;
+    private long nativeFallbacks;
+    private long nativeFailures;
+    private long nativeSnapshotProbes;
+    private long nativeSnapshotHits;
+    private long nativeSnapshotNegativeHits;
+    private long nativeSnapshotMisses;
+    private long nativeSnapshotFills;
+    private long nativeSnapshotFallbacks;
+    private final boolean nativeSnapshotAdaptiveBypassEnabled;
+    private final int nativeSnapshotAdaptiveWindowProbes;
+    private final double nativeSnapshotAdaptiveMinUsefulHitRate;
+    private final int nativeSnapshotAdaptiveResampleIntervalProbes;
+    private NativeSnapshotAdaptiveMode nativeSnapshotAdaptiveMode =
+            NativeSnapshotAdaptiveMode.EVALUATE;
+    private long nativeSnapshotAdaptiveWindowProbeCount;
+    private long nativeSnapshotAdaptiveWindowPositiveHits;
+    private long nativeSnapshotAdaptiveWindowNegativeHits;
+    private long nativeSnapshotAdaptiveWindowMisses;
+    private long nativeSnapshotAdaptiveWindowFillAttempts;
+    private long nativeSnapshotAdaptiveBypassClock;
+    private long nativeSnapshotAdaptiveEvaluatedWindows;
+    private long nativeSnapshotAdaptiveBypassTransitions;
+    private long nativeSnapshotAdaptiveTrialTransitions;
+    private long nativeSnapshotAdaptiveBypassedProbes;
+    private long nativeSnapshotAdaptiveBypassedFills;
+    private final RocksDBBatchMapReader<UK> rocksDBBatchMapReader;
+    private final DataInputDeserializer batchPrefetchInput = new DataInputDeserializer();
+    private final Map<UK, PrefetchedMapValue<UV>> batchPrefetchStaging = new HashMap<>();
+    private boolean nativeDistinctBatchPrefetchEnabled;
+    private boolean nativeDistinctBatchDirectArenaEnabled;
+    private boolean nativeDistinctBatchDirectArenaDisabled;
+    private boolean batchPrefetchActive;
+    private K batchPrefetchOuterKey;
+    private N batchPrefetchNamespace;
+    private long batchPrefetchAttempts;
+    private long batchPrefetchBatches;
+    private long batchPrefetchInputKeys;
+    private long batchPrefetchUniqueKeys;
+    private long batchPrefetchFound;
+    private long batchPrefetchMissing;
+    private long batchPrefetchHits;
+    private long batchPrefetchDirectOverlayValues;
+    private long batchPrefetchFallbacks;
+    private long batchPrefetchFailures;
+    private long batchPrefetchDirectArenaAttempts;
+    private long batchPrefetchDirectArenaBatches;
+    private long batchPrefetchDirectArenaKeys;
+    private long batchPrefetchDirectArenaCompletedBatches;
+    private long batchPrefetchDirectArenaCompletedKeys;
+    private long batchPrefetchDirectArenaFound;
+    private long batchPrefetchDirectArenaMissing;
+    private long batchPrefetchDirectArenaOverflows;
+    private long batchPrefetchDirectArenaFallbacks;
+    private long batchPrefetchDirectArenaFailures;
+    private long batchPrefetchDirectArenaProtocolFallbacks;
+    private final Object asyncBatchPrefetchMonitor = new Object();
+    private final Set<PrefetchExecutor.DropAwareTask> outstandingAsyncBatchPrefetchTasks =
+            Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchAttempts =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchSubmitted =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchCompleted =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchDropped =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchFailures =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchKeys =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchAwaits =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchReadyBeforeAwait =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong asyncBatchPrefetchWaitNanos =
+            new java.util.concurrent.atomic.AtomicLong();
 
     // --- MapSnapshot cache (entries() fast path) ---
     private final CachePolicy<KeyNamespace<K, N>, MapSnapshot<UK>> mapSnapshotCache;
     private final boolean mapSnapshotCacheEnabled;
+    private final int mapSnapshotSmallMaxEntries;
     private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
     /** Reusable probe key for snapshot cache lookups (avoids allocation per lookup). */
     private final KeyNamespace<K, N> snapshotProbe = new KeyNamespace<>(null, null);
     /** Dirty MapState write-back entries, partitioned by key and namespace for scoped flushes. */
-    private final Map<
-                    KeyNamespace<K, N>,
-                    Set<KeyNamespaceUserKey<K, N, UK>>>
+    private final Map<KeyNamespace<K, N>, Set<KeyNamespaceUserKey<K, N, UK>>>
             dirtyValueEntriesByNamespace = new HashMap<>();
     /** Reusable lookup key for {@link #dirtyValueEntriesByNamespace}. */
     private final KeyNamespace<K, N> dirtyNamespaceProbe = new KeyNamespace<>(null, null);
 
     private N currentNamespace;
-    private final KeyNamespaceUserKey<K, N, UK> lookupKey = new KeyNamespaceUserKey<>(null, null, null);
+    private final KeyNamespaceUserKey<K, N, UK> lookupKey =
+            new KeyNamespaceUserKey<>(null, null, null);
 
     private volatile boolean isBypassing = false;
     private long currentWindowAccesses = 0;
@@ -99,11 +203,12 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private int opsSinceLastSample = 0;
 
     /**
-     * Prevents dirty-cache write-back from racing backend teardown. Cache eviction can call
-     * {@link #flushEntryToDelegate(KeyNamespaceUserKey, CachedMapValue)} on the task thread while
-     * {@code CacheKitKeyedStateBackend.dispose()} releases RocksDB column-family handles.
+     * Prevents dirty-cache write-back from racing backend teardown. Cache eviction can call {@link
+     * #flushEntryToDelegate(KeyNamespaceUserKey, CachedMapValue)} on the task thread while {@code
+     * CacheKitKeyedStateBackend.dispose()} releases RocksDB column-family handles.
      */
     private volatile boolean closed;
+
     private final java.util.concurrent.locks.ReadWriteLock lifecycleLock =
             new java.util.concurrent.locks.ReentrantReadWriteLock();
 
@@ -159,7 +264,161 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             boolean iterationCacheFillEnabled,
             int mapSnapshotCacheMaxEntries,
             MapSnapshotCacheMetrics mapSnapshotCacheMetrics) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                presenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicyType,
+                mapCacheLruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                iterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheMetrics,
+                null,
+                0,
+                false,
+                0,
+                false);
+    }
+
+    public CachedInternalMapState(
+            InternalMapState<K, N, UK, UV> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            PresenceCacheImplementation presenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicyType,
+            int mapCacheLruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean iterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            MapSnapshotCacheMetrics mapSnapshotCacheMetrics,
+            NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator,
+            int nativeStateId,
+            boolean nativeMapCacheEnabled,
+            int nativeSnapshotStateId,
+            boolean nativeMapSnapshotEnabled) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                presenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicyType,
+                mapCacheLruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                iterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheMetrics,
+                nativeRequestPlaneCoordinator,
+                nativeStateId,
+                nativeMapCacheEnabled,
+                nativeSnapshotStateId,
+                nativeMapSnapshotEnabled,
+                1);
+    }
+
+    public CachedInternalMapState(
+            InternalMapState<K, N, UK, UV> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            PresenceCacheImplementation presenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicyType,
+            int mapCacheLruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean iterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            MapSnapshotCacheMetrics mapSnapshotCacheMetrics,
+            NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator,
+            int nativeStateId,
+            boolean nativeMapCacheEnabled,
+            int nativeSnapshotStateId,
+            boolean nativeMapSnapshotEnabled,
+            int mapSnapshotSmallMaxEntries) {
+        this(
+                delegate,
+                currentKeyProvider,
+                keyContextSetter,
+                maxEntries,
+                cachePolicyType,
+                lruOverflow,
+                presenceCacheImplementation,
+                mapCacheMaxEntries,
+                mapCachePolicyType,
+                mapCacheLruOverflow,
+                bypassEnabled,
+                hitRateThreshold,
+                hitRateWindow,
+                iterationCacheFillEnabled,
+                mapSnapshotCacheMaxEntries,
+                mapSnapshotCacheMetrics,
+                nativeRequestPlaneCoordinator,
+                nativeStateId,
+                nativeMapCacheEnabled,
+                nativeSnapshotStateId,
+                nativeMapSnapshotEnabled,
+                mapSnapshotSmallMaxEntries,
+                false,
+                8192,
+                0.02,
+                262144);
+    }
+
+    public CachedInternalMapState(
+            InternalMapState<K, N, UK, UV> delegate,
+            CurrentKeyProvider<K> currentKeyProvider,
+            java.util.function.Consumer<K> keyContextSetter,
+            int maxEntries,
+            CachePolicyType cachePolicyType,
+            int lruOverflow,
+            PresenceCacheImplementation presenceCacheImplementation,
+            int mapCacheMaxEntries,
+            CachePolicyType mapCachePolicyType,
+            int mapCacheLruOverflow,
+            boolean bypassEnabled,
+            double hitRateThreshold,
+            int hitRateWindow,
+            boolean iterationCacheFillEnabled,
+            int mapSnapshotCacheMaxEntries,
+            MapSnapshotCacheMetrics mapSnapshotCacheMetrics,
+            NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator,
+            int nativeStateId,
+            boolean nativeMapCacheEnabled,
+            int nativeSnapshotStateId,
+            boolean nativeMapSnapshotEnabled,
+            int mapSnapshotSmallMaxEntries,
+            boolean nativeSnapshotAdaptiveBypassEnabled,
+            int nativeSnapshotAdaptiveWindowProbes,
+            double nativeSnapshotAdaptiveMinUsefulHitRate,
+            int nativeSnapshotAdaptiveResampleIntervalProbes) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
+        this.rocksDBBatchMapReader =
+                delegate instanceof RocksDBBatchMapReader
+                        ? (RocksDBBatchMapReader<UK>) delegate
+                        : null;
         this.currentKeyProvider = Objects.requireNonNull(currentKeyProvider, "currentKeyProvider");
         this.keyContextSetter = Objects.requireNonNull(keyContextSetter, "keyContextSetter");
         this.mapSnapshotCacheMetrics =
@@ -167,8 +426,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         this.presenceCachePolicyType = Objects.requireNonNull(cachePolicyType, "cachePolicyType");
         this.presenceCacheLruOverflow = Math.max(0, lruOverflow);
         this.presenceCacheEnabled = maxEntries > 0;
-        this.presenceCacheImplementation = Objects.requireNonNull(
-                presenceCacheImplementation, "presenceCacheImplementation");
+        this.presenceCacheImplementation =
+                Objects.requireNonNull(presenceCacheImplementation, "presenceCacheImplementation");
         this.mapCacheEnabled = mapCacheMaxEntries > 0;
         this.mapCachePolicyType = Objects.requireNonNull(mapCachePolicyType, "mapCachePolicyType");
         this.mapCacheLruOverflow = Math.max(0, mapCacheLruOverflow);
@@ -182,12 +441,58 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         TypeSerializer<UV> resolvedUserValueSerializer = null;
         TypeSerializer<Map<UK, UV>> valueSerializer = delegate.getValueSerializer();
         if (valueSerializer instanceof MapSerializer) {
-            resolvedUserKeySerializer = ((MapSerializer<UK, UV>) valueSerializer).getKeySerializer();
-            resolvedUserValueSerializer = ((MapSerializer<UK, UV>) valueSerializer).getValueSerializer();
+            resolvedUserKeySerializer =
+                    ((MapSerializer<UK, UV>) valueSerializer).getKeySerializer();
+            resolvedUserValueSerializer =
+                    ((MapSerializer<UK, UV>) valueSerializer).getValueSerializer();
         }
         this.userKeySerializer = resolvedUserKeySerializer;
         this.userValueSerializer = resolvedUserValueSerializer;
-        this.usePrimitivePresenceCache = presenceCacheImplementation == PresenceCacheImplementation.PRIMITIVE
+        if (nativeMapCacheEnabled
+                && (nativeRequestPlaneCoordinator == null
+                        || resolvedUserKeySerializer == null
+                        || resolvedUserValueSerializer == null)) {
+            throw new IllegalArgumentException(
+                    "Native MapState cache requires an active coordinator and MapSerializer key/value serializers.");
+        }
+        if (nativeMapSnapshotEnabled
+                && (nativeRequestPlaneCoordinator == null || resolvedUserKeySerializer == null)) {
+            throw new IllegalArgumentException(
+                    "Native MapState snapshot requires an active coordinator and MapSerializer key serializer.");
+        }
+        this.nativeRequestPlaneCoordinator = nativeRequestPlaneCoordinator;
+        this.nativeMapCacheEnabled = nativeMapCacheEnabled;
+        this.nativeStateId = nativeStateId;
+        this.nativeMapSnapshotEnabled = nativeMapSnapshotEnabled;
+        this.nativeSnapshotStateId = nativeSnapshotStateId;
+        if (nativeSnapshotAdaptiveBypassEnabled && !nativeMapSnapshotEnabled) {
+            throw new IllegalArgumentException(
+                    "Native MapSnapshot adaptive bypass requires native MapSnapshot.");
+        }
+        if (nativeSnapshotAdaptiveBypassEnabled
+                && (nativeSnapshotAdaptiveWindowProbes < 2
+                        || Double.isNaN(nativeSnapshotAdaptiveMinUsefulHitRate)
+                        || Double.isInfinite(nativeSnapshotAdaptiveMinUsefulHitRate)
+                        || nativeSnapshotAdaptiveMinUsefulHitRate < 0.0
+                        || nativeSnapshotAdaptiveMinUsefulHitRate > 1.0
+                        || nativeSnapshotAdaptiveResampleIntervalProbes <= 0)) {
+            throw new IllegalArgumentException(
+                    "Native MapSnapshot adaptive window must be at least 2, resample must be positive, and useful-hit rate must be in [0, 1].");
+        }
+        this.nativeSnapshotAdaptiveBypassEnabled = nativeSnapshotAdaptiveBypassEnabled;
+        this.nativeSnapshotAdaptiveWindowProbes = nativeSnapshotAdaptiveWindowProbes;
+        this.nativeSnapshotAdaptiveMinUsefulHitRate = nativeSnapshotAdaptiveMinUsefulHitRate;
+        this.nativeSnapshotAdaptiveResampleIntervalProbes =
+                nativeSnapshotAdaptiveResampleIntervalProbes;
+        // The native snapshot codec currently represents only EMPTY/SINGLE. Keep bounded
+        // multi-key snapshots on the Java cache until that codec gains an explicit list format.
+        this.mapSnapshotSmallMaxEntries = Math.max(1, Math.min(16, mapSnapshotSmallMaxEntries));
+        this.nativeComponentOutput =
+                nativeMapCacheEnabled || nativeMapSnapshotEnabled
+                        ? new DataOutputSerializer(128)
+                        : null;
+        this.usePrimitivePresenceCache =
+                presenceCacheImplementation == PresenceCacheImplementation.PRIMITIVE
                 && keySerializer != null
                 && namespaceSerializer != null
                 && userKeySerializer != null;
@@ -200,17 +505,25 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         if (presenceCacheEnabled) {
             int l1Size = Math.max(128, maxEntries / 5);
             if (usePrimitivePresenceCache) {
-                this.l1PrimitivePresenceCache = new PrimitivePresenceCache(
-                        l1Size, this::onL1PrimitiveEviction);
-                this.l2PrimitivePresenceCache = new PrimitivePresenceCache(
-                        maxEntries, this::onL2PrimitiveEviction);
+                this.l1PrimitivePresenceCache =
+                        new PrimitivePresenceCache(l1Size, this::onL1PrimitiveEviction);
+                this.l2PrimitivePresenceCache =
+                        new PrimitivePresenceCache(maxEntries, this::onL2PrimitiveEviction);
                 this.l1PresenceCache = new NoOpCachePolicy<>();
                 this.l2PresenceCache = new NoOpCachePolicy<>();
             } else {
-                this.l1PresenceCache = createCachePolicy(
-                        l1Size, presenceCachePolicyType, presenceCacheLruOverflow, this::onL1Eviction);
-                this.l2PresenceCache = createCachePolicy(
-                        maxEntries, presenceCachePolicyType, presenceCacheLruOverflow, this::onL2Eviction);
+                this.l1PresenceCache =
+                        createCachePolicy(
+                                l1Size,
+                                presenceCachePolicyType,
+                                presenceCacheLruOverflow,
+                                this::onL1Eviction);
+                this.l2PresenceCache =
+                        createCachePolicy(
+                                maxEntries,
+                                presenceCachePolicyType,
+                                presenceCacheLruOverflow,
+                                this::onL2Eviction);
                 this.l1PrimitivePresenceCache = new NoOpCachePolicy<>();
                 this.l2PrimitivePresenceCache = new NoOpCachePolicy<>();
             }
@@ -223,10 +536,18 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
         if (mapCacheEnabled) {
             int l1Size = Math.max(128, mapCacheMaxEntries / 5);
-            this.l1ValueCache = createCachePolicy(
-                    l1Size, mapCachePolicyType, mapCacheLruOverflow, this::onValueL1Eviction);
-            this.l2ValueCache = createCachePolicy(
-                    mapCacheMaxEntries, mapCachePolicyType, mapCacheLruOverflow, this::onValueL2Eviction);
+            this.l1ValueCache =
+                    createCachePolicy(
+                            l1Size,
+                            mapCachePolicyType,
+                            mapCacheLruOverflow,
+                            this::onValueL1Eviction);
+            this.l2ValueCache =
+                    createCachePolicy(
+                            mapCacheMaxEntries,
+                            mapCachePolicyType,
+                            mapCacheLruOverflow,
+                            this::onValueL2Eviction);
         } else {
             this.l1ValueCache = new NoOpCachePolicy<>();
             this.l2ValueCache = new NoOpCachePolicy<>();
@@ -252,20 +573,479 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         lookupKey.userKey = userKey;
     }
 
+    /** Enables the separately gated exact-DISTINCT native RocksDB MultiGet path. */
+    public void enableNativeDistinctBatchPrefetch(boolean enabled) {
+        enableNativeDistinctBatchPrefetch(enabled, false);
+    }
+
+    /** Enables the exact-DISTINCT path and its independently gated direct-arena value transport. */
+    public void enableNativeDistinctBatchPrefetch(boolean enabled, boolean directArenaEnabled) {
+        this.nativeDistinctBatchPrefetchEnabled = enabled;
+        this.nativeDistinctBatchDirectArenaEnabled = enabled && directArenaEnabled;
+    }
+
+    @Override
+    public boolean supportsDirectPrefetchedValues() {
+        return nativeDistinctBatchPrefetchEnabled && rocksDBBatchMapReader != null;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public List<UV> prefetchCurrentUniqueKeyValues(List<? extends UK> uniqueUserKeys)
+            throws Exception {
+        endPrefetchCurrentKeys();
+        batchPrefetchAttempts++;
+        if (!supportsDirectPrefetchedValues()) {
+            batchPrefetchFallbacks++;
+            return null;
+        }
+        K currentKey = currentKeyProvider.getCurrentKey();
+        N namespace = currentNamespace;
+        if (currentKey == null || namespace == null || uniqueUserKeys.size() < 2) {
+            batchPrefetchFallbacks++;
+            return null;
+        }
+
+        // The generated MapView layer already copied, de-duplicated and insertion-ordered this
+        // list. RocksDBBatchMapReader is read-only with respect to it, so retain the same list and
+        // avoid a second LinkedHashSet plus ArrayList allocation on every tiny outer-key batch.
+        List<UK> orderedKeys = (List<UK>) (List<?>) uniqueUserKeys;
+        batchPrefetchInputKeys += orderedKeys.size();
+        batchPrefetchUniqueKeys += orderedKeys.size();
+        try {
+            flushCurrentKey(currentKey);
+            ensureDelegateNamespace(currentKey);
+            if (nativeDistinctBatchDirectArenaEnabled) {
+                List<UV> directValues = tryDirectArenaPrefetch(orderedKeys);
+                if (directValues != null) {
+                    batchPrefetchBatches++;
+                    batchPrefetchDirectOverlayValues += directValues.size();
+                    return directValues;
+                }
+                batchPrefetchDirectArenaFallbacks++;
+            }
+            List<byte[]> rawValues =
+                    rocksDBBatchMapReader.getSerializedValuesByUserKeys(orderedKeys);
+            if (rawValues.size() != orderedKeys.size()) {
+                throw new IllegalStateException(
+                        "MapState MultiGet returned "
+                                + rawValues.size()
+                                + " values for "
+                                + orderedKeys.size()
+                                + " keys.");
+            }
+            ArrayList<UV> values = new ArrayList<>(rawValues.size());
+            for (byte[] rawValue : rawValues) {
+                if (rawValue == null) {
+                    values.add(null);
+                    batchPrefetchMissing++;
+                } else {
+                    batchPrefetchInput.setBuffer(rawValue);
+                    boolean isNull = batchPrefetchInput.readBoolean();
+                    values.add(isNull ? null : userValueSerializer.deserialize(batchPrefetchInput));
+                    batchPrefetchFound++;
+                }
+            }
+            batchPrefetchBatches++;
+            batchPrefetchDirectOverlayValues += values.size();
+            return values;
+        } catch (Exception | LinkageError failure) {
+            batchPrefetchFailures++;
+            batchPrefetchFallbacks++;
+            return null;
+        }
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public PreparedValues prepareCurrentUniqueKeyValues(List<? extends UK> uniqueUserKeys)
+            throws Exception {
+        asyncBatchPrefetchAttempts.incrementAndGet();
+        if (!supportsDirectPrefetchedValues() || closed) {
+            return null;
+        }
+        K currentKey = currentKeyProvider.getCurrentKey();
+        N namespace = currentNamespace;
+        if (currentKey == null || namespace == null || uniqueUserKeys.size() < 2) {
+            return null;
+        }
+
+        // Generated code already supplies stable, de-duplicated keys. Serialize the complete
+        // RocksDB keys while this outer key/namespace is current; the worker never reads mutable
+        // Flink key context or serializers.
+        List<UK> orderedKeys = (List<UK>) (List<?>) uniqueUserKeys;
+        flushCurrentKey(currentKey);
+        ensureDelegateNamespace(currentKey);
+        List<byte[]> rocksDBKeys =
+                rocksDBBatchMapReader.serializeRocksDBKeysByUserKeys(orderedKeys);
+        if (rocksDBKeys.size() != orderedKeys.size()) {
+            return null;
+        }
+        PreparedMapValues prepared = new PreparedMapValues(rocksDBKeys, orderedKeys.size());
+        synchronized (asyncBatchPrefetchMonitor) {
+            if (closed) {
+                return null;
+            }
+            outstandingAsyncBatchPrefetchTasks.add(prepared);
+        }
+        asyncBatchPrefetchSubmitted.incrementAndGet();
+        asyncBatchPrefetchKeys.addAndGet(orderedKeys.size());
+        PrefetchExecutor.trySubmit(prepared);
+        return prepared;
+    }
+
+    private final class PreparedMapValues
+            implements PreparedValues, PrefetchExecutor.DropAwareTask {
+
+        private final List<byte[]> rocksDBKeys;
+        private final int expectedValues;
+        private final java.util.concurrent.CountDownLatch completed =
+                new java.util.concurrent.CountDownLatch(1);
+        private final java.util.concurrent.atomic.AtomicInteger state =
+                new java.util.concurrent.atomic.AtomicInteger();
+        private volatile List<byte[]> rawValues;
+        private volatile Throwable failure;
+        private volatile boolean dropped;
+        private volatile long completedNanos;
+
+        private PreparedMapValues(List<byte[]> rocksDBKeys, int expectedValues) {
+            this.rocksDBKeys = rocksDBKeys;
+            this.expectedValues = expectedValues;
+        }
+
+        @Override
+        public void run() {
+            if (!state.compareAndSet(0, 1)) {
+                return;
+            }
+            try {
+                lifecycleLock.readLock().lock();
+                try {
+                    if (!closed) {
+                        List<byte[]> values =
+                                rocksDBBatchMapReader.getSerializedValuesByRocksDBKeys(
+                                        rocksDBKeys, 0, rocksDBKeys.size());
+                        if (values.size() != expectedValues) {
+                            throw new IllegalStateException(
+                                    "Async MapState MultiGet returned "
+                                            + values.size()
+                                            + " values for "
+                                            + expectedValues
+                                            + " keys.");
+                        }
+                        rawValues = values;
+                    }
+                } finally {
+                    lifecycleLock.readLock().unlock();
+                }
+            } catch (Throwable currentFailure) {
+                failure = currentFailure;
+                asyncBatchPrefetchFailures.incrementAndGet();
+            } finally {
+                finish(false);
+            }
+        }
+
+        @Override
+        public void onDrop() {
+            if (state.compareAndSet(0, 1)) {
+                dropped = true;
+                asyncBatchPrefetchDropped.incrementAndGet();
+                finish(true);
+            }
+        }
+
+        private void finish(boolean wasDropped) {
+            completedNanos = System.nanoTime();
+            state.set(2);
+            if (!wasDropped && rawValues != null) {
+                asyncBatchPrefetchCompleted.incrementAndGet();
+            }
+            completed.countDown();
+            synchronized (asyncBatchPrefetchMonitor) {
+                outstandingAsyncBatchPrefetchTasks.remove(this);
+                asyncBatchPrefetchMonitor.notifyAll();
+            }
+        }
+
+        @Override
+        public List<?> awaitValues() throws Exception {
+            asyncBatchPrefetchAwaits.incrementAndGet();
+            long awaitStarted = System.nanoTime();
+            if (completed.getCount() == 0L
+                    || completedNanos > 0L && completedNanos <= awaitStarted) {
+                asyncBatchPrefetchReadyBeforeAwait.incrementAndGet();
+            }
+            try {
+                completed.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw interrupted;
+            } finally {
+                asyncBatchPrefetchWaitNanos.addAndGet(
+                        Math.max(0L, System.nanoTime() - awaitStarted));
+            }
+            if (dropped || failure != null || rawValues == null) {
+                return null;
+            }
+            ArrayList<UV> values = new ArrayList<>(rawValues.size());
+            for (byte[] rawValue : rawValues) {
+                if (rawValue == null) {
+                    values.add(null);
+                } else {
+                    batchPrefetchInput.setBuffer(rawValue);
+                    boolean isNull = batchPrefetchInput.readBoolean();
+                    values.add(isNull ? null : userValueSerializer.deserialize(batchPrefetchInput));
+                }
+            }
+            return values;
+        }
+
+        @Override
+        public void cancel() {
+            PrefetchExecutor.cancelIfQueued(this);
+        }
+    }
+
+    private List<UV> tryDirectArenaPrefetch(List<UK> orderedKeys) {
+        batchPrefetchDirectArenaAttempts++;
+        if (nativeDistinctBatchDirectArenaDisabled
+                || nativeRequestPlaneCoordinator == null
+                || !nativeRequestPlaneCoordinator.isActive()
+                || !nativeRequestPlaneCoordinator.options().directArenaMultiGetEnabled()
+                || !rocksDBBatchMapReader.supportsDirectArenaMultiGet()
+                || nativeStateId <= 0) {
+            return null;
+        }
+
+        NativeRequestPlaneCoordinator.BatchSlot slot =
+                nativeRequestPlaneCoordinator.tryAcquireMapDistinctReadSlot();
+        if (slot == null) {
+            return null;
+        }
+        try (NativeRequestPlaneCoordinator.BatchSlot ignored = slot) {
+            List<byte[]> rocksDBKeys =
+                    rocksDBBatchMapReader.serializeRocksDBKeysByUserKeys(orderedKeys);
+            if (rocksDBKeys.size() != orderedKeys.size()) {
+                throw new IllegalStateException(
+                        "MapState prepared "
+                                + rocksDBKeys.size()
+                                + " RocksDB keys for "
+                                + orderedKeys.size()
+                                + " user keys.");
+            }
+            slot.prepareLatest(nativeStateId, nativeGeneration, rocksDBKeys);
+            int[] preparedIndices = new int[rocksDBKeys.size()];
+            for (int index = 0; index < preparedIndices.length; index++) {
+                preparedIndices[index] = index;
+            }
+
+            int configuredChunk = nativeRequestPlaneCoordinator.options().directArenaBatchSize();
+            int chunkSize =
+                    Math.max(
+                            1,
+                            Math.min(
+                                    RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
+                                    Math.min(
+                                            configuredChunk,
+                                            rocksDBBatchMapReader.directArenaMultiGetMaxBatch())));
+            ArrayList<UV> values = new ArrayList<>(orderedKeys.size());
+            int totalFound = 0;
+            int totalMissing = 0;
+            for (int start = 0; start < orderedKeys.size(); start += chunkSize) {
+                int count = Math.min(chunkSize, orderedKeys.size() - start);
+                slot.prepareDirectArenaMultiGet(
+                        preparedIndices,
+                        start,
+                        count,
+                        RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH);
+                batchPrefetchDirectArenaBatches++;
+                batchPrefetchDirectArenaKeys += count;
+                int presentCount =
+                        rocksDBBatchMapReader.getSerializedValuesByRocksDBKeyArena(
+                                slot.directMultiGetKeyArena(),
+                                slot.directMultiGetDescriptors(),
+                                count,
+                                slot.directMultiGetValueArena(),
+                                slot.directMultiGetValueStride());
+                int observedPresent = 0;
+                int observedMissing = 0;
+                boolean overflow = false;
+                boolean invalidProtocol = presentCount < 0 || presentCount > count;
+                for (int index = 0; index < count && !invalidProtocol; index++) {
+                    int result = slot.directMultiGetResult(index);
+                    if (result >= 0 && result <= slot.directMultiGetValueStride()) {
+                        observedPresent++;
+                    } else if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
+                        observedMissing++;
+                    } else if (result == RocksDBBatchValueReader.DIRECT_ARENA_OVERFLOW) {
+                        observedPresent++;
+                        overflow = true;
+                    } else {
+                        invalidProtocol = true;
+                    }
+                }
+                if (observedPresent != presentCount) {
+                    invalidProtocol = true;
+                }
+                if (invalidProtocol) {
+                    batchPrefetchDirectArenaProtocolFallbacks++;
+                    nativeDistinctBatchDirectArenaDisabled = true;
+                    return null;
+                }
+                if (overflow) {
+                    batchPrefetchDirectArenaOverflows++;
+                    return null;
+                }
+                for (int index = 0; index < count; index++) {
+                    int result = slot.directMultiGetResult(index);
+                    if (result == RocksDBBatchValueReader.DIRECT_ARENA_NOT_FOUND) {
+                        values.add(null);
+                    } else {
+                        DataInputView input = slot.directMultiGetValueInput(index);
+                        boolean isNull = input.readBoolean();
+                        values.add(
+                                isNull ? null : userValueSerializer.deserialize(input));
+                    }
+                }
+                batchPrefetchDirectArenaCompletedBatches++;
+                batchPrefetchDirectArenaCompletedKeys += count;
+                batchPrefetchDirectArenaFound += observedPresent;
+                batchPrefetchDirectArenaMissing += observedMissing;
+                totalFound += observedPresent;
+                totalMissing += observedMissing;
+            }
+            batchPrefetchFound += totalFound;
+            batchPrefetchMissing += totalMissing;
+            return values;
+        } catch (LinkageError
+                | UnsupportedOperationException
+                | IllegalArgumentException invalidDirectArenaAbi) {
+            batchPrefetchDirectArenaFailures++;
+            nativeDistinctBatchDirectArenaDisabled = true;
+            return null;
+        } catch (Exception failure) {
+            batchPrefetchDirectArenaFailures++;
+            return null;
+        }
+    }
+
+    @Override
+    public boolean beginPrefetchCurrentKeys(Iterable<? extends UK> userKeys) throws Exception {
+        endPrefetchCurrentKeys();
+        batchPrefetchAttempts++;
+        if (!nativeDistinctBatchPrefetchEnabled || rocksDBBatchMapReader == null) {
+            batchPrefetchFallbacks++;
+            return false;
+        }
+        K currentKey = currentKeyProvider.getCurrentKey();
+        N namespace = currentNamespace;
+        if (currentKey == null || namespace == null) {
+            batchPrefetchFallbacks++;
+            return false;
+        }
+
+        LinkedHashSet<UK> unique = new LinkedHashSet<>();
+        for (UK userKey : userKeys) {
+            if (userKey != null) {
+                batchPrefetchInputKeys++;
+                unique.add(userKey);
+            }
+        }
+        if (unique.size() < 2) {
+            batchPrefetchFallbacks++;
+            return false;
+        }
+
+        List<UK> orderedKeys = new ArrayList<>(unique);
+        batchPrefetchUniqueKeys += orderedKeys.size();
+        try {
+            // A write-back MapState cache can otherwise make RocksDB older than the logical state.
+            flushCurrentKey(currentKey);
+            ensureDelegateNamespace(currentKey);
+            List<byte[]> rawValues =
+                    rocksDBBatchMapReader.getSerializedValuesByUserKeys(orderedKeys);
+            if (rawValues.size() != orderedKeys.size()) {
+                throw new IllegalStateException(
+                        "MapState MultiGet returned "
+                                + rawValues.size()
+                                + " values for "
+                                + orderedKeys.size()
+                                + " keys.");
+            }
+            for (int i = 0; i < orderedKeys.size(); i++) {
+                byte[] rawValue = rawValues.get(i);
+                PrefetchedMapValue<UV> staged;
+                if (rawValue == null) {
+                    staged = PrefetchedMapValue.missing();
+                    batchPrefetchMissing++;
+                } else {
+                    batchPrefetchInput.setBuffer(rawValue);
+                    boolean isNull = batchPrefetchInput.readBoolean();
+                    UV value = isNull ? null : userValueSerializer.deserialize(batchPrefetchInput);
+                    staged = PrefetchedMapValue.present(value);
+                    batchPrefetchFound++;
+                }
+                batchPrefetchStaging.put(orderedKeys.get(i), staged);
+            }
+            batchPrefetchOuterKey = currentKey;
+            batchPrefetchNamespace = namespace;
+            batchPrefetchActive = true;
+            batchPrefetchBatches++;
+            return true;
+        } catch (Exception | LinkageError failure) {
+            batchPrefetchFailures++;
+            batchPrefetchFallbacks++;
+            endPrefetchCurrentKeys();
+            return false;
+        }
+    }
+
+    @Override
+    public void endPrefetchCurrentKeys() {
+        batchPrefetchActive = false;
+        batchPrefetchOuterKey = null;
+        batchPrefetchNamespace = null;
+        batchPrefetchStaging.clear();
+    }
+
+    private PrefetchedMapValue<UV> getBatchPrefetchedValue(K currentKey, UK userKey) {
+        if (!batchPrefetchActive
+                || !Objects.equals(batchPrefetchOuterKey, currentKey)
+                || !Objects.equals(batchPrefetchNamespace, currentNamespace)) {
+            if (batchPrefetchActive) {
+                endPrefetchCurrentKeys();
+            }
+            return null;
+        }
+        PrefetchedMapValue<UV> value = batchPrefetchStaging.get(userKey);
+        if (value != null) {
+            batchPrefetchHits++;
+        }
+        return value;
+    }
+
     @Override
     public UV get(UK userKey) throws Exception {
         if (userKey == null) {
             return null;
         }
         K currentKey = currentKeyProvider.getCurrentKey();
-        ensureDelegateNamespace(currentKey); // Pass key to avoid re-fetch if needed (though ensureDelegateNamespace
+        ensureDelegateNamespace(
+                currentKey); // Pass key to avoid re-fetch if needed (though ensureDelegateNamespace
                                              // uses currentNamespace)
 
         // Use reusable key for lookups
         setLookupKey(currentKey, currentNamespace, userKey);
 
+        PrefetchedMapValue<UV> prefetched = getBatchPrefetchedValue(currentKey, userKey);
+        if (prefetched != null) {
+            return prefetched.value;
+        }
+
         if (bypassEnabled && isBypassing && shouldBypassRead()) {
-            UV value = delegate.get(userKey);
+            NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
+            UV value = nativeRead == null ? delegate.get(userKey) : nativeRead.value;
             if (mapCacheEnabled) {
                 updateValueCache(currentKey, userKey, value, false);
             }
@@ -276,7 +1056,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
 
         if (mapCacheEnabled) {
-            CachedMapValue<UV> cached = getCachedValue(currentKey); // Optimize getCachedValue to use lookupKey
+            CachedMapValue<UV> cached =
+                    getCachedValue(currentKey); // Optimize getCachedValue to use lookupKey
             if (cached != null) {
                 recordAccess(true);
                 return cached.valueOrNull();
@@ -289,8 +1070,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 return null;
             }
         }
-        UV value = delegate.get(userKey);
-        recordAccess(false);
+        NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
+        UV value = nativeRead == null ? delegate.get(userKey) : nativeRead.value;
+        recordAccess(nativeRead != null && nativeRead.cacheHit);
         if (mapCacheEnabled) {
             updateValueCache(currentKey, userKey, value, false);
         }
@@ -312,6 +1094,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             remove(userKey);
             return;
         }
+        advanceNativeGeneration();
+        updateBatchPrefetchStaging(currentKey, userKey, true, userValue);
         boolean writeThrough = !mapCacheEnabled || (bypassEnabled && isBypassing);
         if (writeThrough) {
             delegate.put(userKey, userValue);
@@ -333,6 +1117,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
+        advanceNativeGeneration();
 
         boolean writeThrough = !mapCacheEnabled || (bypassEnabled && isBypassing);
         if (writeThrough) {
@@ -343,6 +1128,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             if (uKey == null) {
                 continue;
             }
+            updateBatchPrefetchStaging(currentKey, uKey, true, entry.getValue());
             if (mapCacheEnabled) {
                 updateValueCache(currentKey, uKey, entry.getValue(), !writeThrough);
             }
@@ -360,6 +1146,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
+        advanceNativeGeneration();
+        updateBatchPrefetchStaging(currentKey, userKey, false, null);
 
         boolean writeThrough = !mapCacheEnabled || (bypassEnabled && isBypassing);
         if (writeThrough) {
@@ -385,8 +1173,15 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         // Use reusable key for lookups
         setLookupKey(currentKey, currentNamespace, userKey);
 
+        PrefetchedMapValue<UV> prefetched = getBatchPrefetchedValue(currentKey, userKey);
+        if (prefetched != null) {
+            return prefetched.present;
+        }
+
         if (bypassEnabled && isBypassing && shouldBypassRead()) {
-            boolean exists = delegate.contains(userKey);
+            NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
+            boolean exists =
+                    nativeRead == null ? delegate.contains(userKey) : nativeRead.value != null;
             if (mapCacheEnabled && !exists) {
                 updateValueCache(currentKey, userKey, null, false);
             }
@@ -410,8 +1205,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 return present;
             }
         }
-        boolean exists = delegate.contains(userKey);
-        recordAccess(false);
+        NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
+        boolean exists = nativeRead == null ? delegate.contains(userKey) : nativeRead.value != null;
+        recordAccess(nativeRead != null && nativeRead.cacheHit);
         if (mapCacheEnabled && !exists) {
             updateValueCache(currentKey, userKey, null, false);
         }
@@ -427,7 +1223,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         ensureDelegateNamespace(currentKey);
 
         // --- MapSnapshot short-circuit ---
-        if (mapSnapshotCacheEnabled) {
+        if (snapshotOptimizationEnabled()) {
             Iterable<Map.Entry<UK, UV>> shortCircuit = trySnapshotShortCircuit(currentKey);
             if (shortCircuit != null) {
                 return shortCircuit;
@@ -436,7 +1232,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
         flushCurrentKey(currentKey);
         Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
-        if (!mapCacheEnabled && !presenceCacheEnabled && !mapSnapshotCacheEnabled) {
+        if (!mapCacheEnabled && !presenceCacheEnabled && !snapshotOptimizationEnabled()) {
             return entries;
         }
         return wrapWithSnapshotAwareIterator(
@@ -448,14 +1244,10 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
 
-        if (mapSnapshotCacheEnabled) {
+        if (snapshotOptimizationEnabled()) {
             Iterable<Map.Entry<UK, UV>> shortCircuit = trySnapshotShortCircuit(currentKey);
             if (shortCircuit != null) {
-                List<UK> keyList = new ArrayList<>();
-                for (Map.Entry<UK, UV> e : shortCircuit) {
-                    keyList.add(e.getKey());
-                }
-                return keyList;
+                return entryKeys(shortCircuit);
             }
         }
 
@@ -467,7 +1259,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             return delegate.keys();
         }
         Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
-        return cacheKeys(entries); // Keys doesn't currently use snapshot wareness
+        return cacheKeys(entries, currentKey, currentNamespace);
     }
 
     @Override
@@ -475,14 +1267,10 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
 
-        if (mapSnapshotCacheEnabled) {
+        if (snapshotOptimizationEnabled()) {
             Iterable<Map.Entry<UK, UV>> shortCircuit = trySnapshotShortCircuit(currentKey);
             if (shortCircuit != null) {
-                List<UV> valList = new ArrayList<>();
-                for (Map.Entry<UK, UV> e : shortCircuit) {
-                    valList.add(e.getValue());
-                }
-                return valList;
+                return entryValues(shortCircuit);
             }
         }
 
@@ -494,7 +1282,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             return delegate.values();
         }
         Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
-        return cacheValues(entries);
+        return cacheValues(entries, currentKey, currentNamespace);
     }
 
     @Override
@@ -502,7 +1290,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
 
-        if (mapSnapshotCacheEnabled) {
+        if (snapshotOptimizationEnabled()) {
             Iterable<Map.Entry<UK, UV>> shortCircuit = trySnapshotShortCircuit(currentKey);
             if (shortCircuit != null) {
                 return shortCircuit.iterator();
@@ -511,7 +1299,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
         flushCurrentKey(currentKey);
         Iterator<Map.Entry<UK, UV>> iterator = delegate.iterator();
-        if (!mapCacheEnabled && !presenceCacheEnabled && !mapSnapshotCacheEnabled) {
+        if (!mapCacheEnabled && !presenceCacheEnabled && !snapshotOptimizationEnabled()) {
             return iterator;
         }
         return new SnapshotAwareIterator(
@@ -523,14 +1311,18 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
 
-        if (mapSnapshotCacheEnabled) {
+        if (snapshotOptimizationEnabled()) {
             MapSnapshot<UK> snapshot = lookupSnapshot(currentKey);
             if (snapshot != null) {
                 if (snapshot.isEmpty()) {
                     mapSnapshotCacheMetrics.recordEmptyShortCircuit();
                     return true;
                 } else {
-                    mapSnapshotCacheMetrics.recordSingleShortCircuit();
+                    if (snapshot.isSingle()) {
+                        mapSnapshotCacheMetrics.recordSingleShortCircuit();
+                    } else {
+                        mapSnapshotCacheMetrics.recordSmallShortCircuit();
+                    }
                     return false;
                 }
             }
@@ -545,11 +1337,13 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
         delegate.clear();
+        endPrefetchCurrentKeys();
+        advanceNativeGeneration();
         clearPresenceCaches();
         clearValueCaches();
         resetBypassState();
 
-        if (mapSnapshotCacheEnabled) {
+        if (snapshotOptimizationEnabled()) {
             if (currentKey != null && currentNamespace != null) {
                 KeyNamespace<K, N> stored = newStoredKeyNamespace(currentKey, currentNamespace);
                 storeSnapshot(stored, MapSnapshot.empty());
@@ -574,6 +1368,9 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
     @Override
     public void setCurrentNamespace(@Nonnull N namespace) {
+        if (!Objects.equals(this.currentNamespace, namespace)) {
+            endPrefetchCurrentKeys();
+        }
         this.currentNamespace = namespace;
         if (namespace != null) {
             delegate.setCurrentNamespace(namespace);
@@ -590,7 +1387,10 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         ensureDelegateNamespace(null);
         flush();
         return delegate.getSerializedValue(
-                serializedKeyAndNamespace, safeKeySerializer, safeNamespaceSerializer, safeValueSerializer);
+                serializedKeyAndNamespace,
+                safeKeySerializer,
+                safeNamespaceSerializer,
+                safeValueSerializer);
     }
 
     @Override
@@ -604,6 +1404,257 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     private void ensureDelegateNamespace(K currentKey) {
         if (currentNamespace != null) {
             delegate.setCurrentNamespace(currentNamespace);
+        }
+    }
+
+    private void updateBatchPrefetchStaging(K currentKey, UK userKey, boolean present, UV value) {
+        if (!batchPrefetchActive
+                || !Objects.equals(batchPrefetchOuterKey, currentKey)
+                || !Objects.equals(batchPrefetchNamespace, currentNamespace)) {
+            return;
+        }
+        batchPrefetchStaging.put(
+                userKey,
+                present ? PrefetchedMapValue.present(value) : PrefetchedMapValue.missing());
+    }
+
+    private NativeMapRead<UV> readThroughNative(K currentKey, UK userKey) throws Exception {
+        if (!nativeMapCacheEnabled
+                || currentKey == null
+                || currentNamespace == null
+                || !nativeRequestPlaneCoordinator.isActive()) {
+            return null;
+        }
+        NativeRequestPlaneCoordinator.BatchSlot slot =
+                nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
+        if (slot == null) {
+            nativeFallbacks++;
+            return null;
+        }
+        try (NativeRequestPlaneCoordinator.BatchSlot ignored = slot) {
+            slot.prepareLatest(
+                    nativeStateId,
+                    nativeGeneration,
+                    output -> writeNativeMapKey(currentKey, currentNamespace, userKey, output));
+            nativeProbeAttempts++;
+            int processed = nativeRequestPlaneCoordinator.probe(slot);
+            if (processed != 1 || slot.probeError(0) != NativeRequestPlaneBridge.ERROR_OK) {
+                throw new IllegalStateException(
+                        "Native MapState probe returned an invalid result.");
+            }
+            int status = slot.probeStatus(0);
+            if (status == NativeRequestPlaneBridge.PROBE_HIT) {
+                nativeHits++;
+                return new NativeMapRead<>(
+                        userValueSerializer.deserialize(slot.probeValueInput(0)), true);
+            }
+            if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
+                nativeNegativeHits++;
+                return new NativeMapRead<>(null, true);
+            }
+            if (status != NativeRequestPlaneBridge.PROBE_MISS) {
+                throw new IllegalStateException(
+                        "Native MapState probe returned status=" + status + ".");
+            }
+            nativeMisses++;
+        } catch (Exception | LinkageError failure) {
+            nativeFailures++;
+            nativeFallbacks++;
+            nativeRequestPlaneCoordinator.disable(failure);
+            return null;
+        }
+
+        UV value = delegate.get(userKey);
+        try {
+            nativeRequestPlaneCoordinator.updateExactKey(
+                    nativeStateId,
+                    nativeGeneration,
+                    output -> writeNativeMapKey(currentKey, currentNamespace, userKey, output),
+                    value == null ? null : output -> userValueSerializer.serialize(value, output));
+            nativeFills++;
+        } catch (Exception | LinkageError fillFailure) {
+            nativeFailures++;
+            // The delegate result is authoritative. Native fill failure must not re-read or alter
+            // the MapState result; the coordinator already fails closed where appropriate.
+        }
+        return new NativeMapRead<>(value, false);
+    }
+
+    private void writeNativeMapKey(K key, N namespace, UK userKey, DataOutputView destination)
+            throws IOException {
+        writeLengthPrefixed(keySerializer, key, destination);
+        writeLengthPrefixed(namespaceSerializer, namespace, destination);
+        writeLengthPrefixed(userKeySerializer, userKey, destination);
+    }
+
+    private <T> void writeLengthPrefixed(
+            TypeSerializer<T> serializer, T value, DataOutputView destination) throws IOException {
+        nativeComponentOutput.clear();
+        serializer.serialize(value, nativeComponentOutput);
+        int length = nativeComponentOutput.length();
+        destination.writeInt(length);
+        destination.write(nativeComponentOutput.getSharedBuffer(), 0, length);
+    }
+
+    private boolean shouldProbeNativeSnapshot() {
+        if (!nativeSnapshotAdaptiveBypassEnabled) {
+            return true;
+        }
+        if (nativeSnapshotAdaptiveMode == NativeSnapshotAdaptiveMode.BYPASS) {
+            nativeSnapshotAdaptiveBypassClock++;
+            if (nativeSnapshotAdaptiveBypassClock < nativeSnapshotAdaptiveResampleIntervalProbes) {
+                nativeSnapshotAdaptiveBypassedProbes++;
+                return false;
+            }
+            nativeSnapshotAdaptiveMode = NativeSnapshotAdaptiveMode.EVALUATE;
+            nativeSnapshotAdaptiveTrialTransitions++;
+            resetNativeSnapshotAdaptiveWindow();
+        }
+        if (nativeSnapshotAdaptiveWindowProbeCount >= nativeSnapshotAdaptiveWindowProbes) {
+            nativeSnapshotAdaptiveEvaluatedWindows++;
+            long usefulHits =
+                    nativeSnapshotAdaptiveWindowPositiveHits
+                            + nativeSnapshotAdaptiveWindowNegativeHits;
+            double usefulHitRate = usefulHits / (double) nativeSnapshotAdaptiveWindowProbeCount;
+            if (usefulHitRate < nativeSnapshotAdaptiveMinUsefulHitRate) {
+                nativeSnapshotAdaptiveMode = NativeSnapshotAdaptiveMode.BYPASS;
+                nativeSnapshotAdaptiveBypassTransitions++;
+                nativeSnapshotAdaptiveBypassClock = 0;
+                nativeSnapshotAdaptiveBypassedProbes++;
+                return false;
+            }
+            resetNativeSnapshotAdaptiveWindow();
+        }
+        return true;
+    }
+
+    private void recordNativeSnapshotAdaptiveProbe(int status) {
+        if (!nativeSnapshotAdaptiveBypassEnabled) {
+            return;
+        }
+        nativeSnapshotAdaptiveWindowProbeCount++;
+        if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
+            nativeSnapshotAdaptiveWindowNegativeHits++;
+        } else if (status == NativeRequestPlaneBridge.PROBE_HIT) {
+            nativeSnapshotAdaptiveWindowPositiveHits++;
+        } else if (status == NativeRequestPlaneBridge.PROBE_MISS) {
+            nativeSnapshotAdaptiveWindowMisses++;
+        }
+    }
+
+    private boolean shouldStoreNativeSnapshot() {
+        if (!nativeSnapshotAdaptiveBypassEnabled) {
+            return true;
+        }
+        if (nativeSnapshotAdaptiveMode == NativeSnapshotAdaptiveMode.BYPASS) {
+            nativeSnapshotAdaptiveBypassedFills++;
+            return false;
+        }
+        nativeSnapshotAdaptiveWindowFillAttempts++;
+        return true;
+    }
+
+    private void resetNativeSnapshotAdaptiveWindow() {
+        nativeSnapshotAdaptiveWindowProbeCount = 0;
+        nativeSnapshotAdaptiveWindowPositiveHits = 0;
+        nativeSnapshotAdaptiveWindowNegativeHits = 0;
+        nativeSnapshotAdaptiveWindowMisses = 0;
+        nativeSnapshotAdaptiveWindowFillAttempts = 0;
+        nativeSnapshotAdaptiveBypassClock = 0;
+    }
+
+    private MapSnapshot<UK> lookupNativeSnapshot(K currentKey) {
+        if (!nativeMapSnapshotEnabled
+                || currentKey == null
+                || currentNamespace == null
+                || !nativeRequestPlaneCoordinator.isActive()) {
+            return null;
+        }
+        if (!shouldProbeNativeSnapshot()) {
+            return null;
+        }
+        try {
+            NativeRequestPlaneCoordinator.BatchSlot slot =
+                    nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
+            if (slot == null) {
+                nativeSnapshotFallbacks++;
+                return null;
+            }
+            try (NativeRequestPlaneCoordinator.BatchSlot ignored = slot) {
+                slot.prepareExact(
+                        nativeSnapshotStateId,
+                        nativeGeneration,
+                        output -> {
+                            writeLengthPrefixed(keySerializer, currentKey, output);
+                            writeLengthPrefixed(namespaceSerializer, currentNamespace, output);
+                        });
+                nativeSnapshotProbes++;
+                int processed = nativeRequestPlaneCoordinator.probe(slot);
+                if (processed != 1 || slot.probeError(0) != NativeRequestPlaneBridge.ERROR_OK) {
+                    throw new IllegalStateException(
+                            "Native MapState snapshot probe returned an invalid result.");
+                }
+                int status = slot.probeStatus(0);
+                recordNativeSnapshotAdaptiveProbe(status);
+                if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
+                    nativeSnapshotNegativeHits++;
+                    return MapSnapshot.empty();
+                }
+                if (status == NativeRequestPlaneBridge.PROBE_HIT) {
+                    nativeSnapshotHits++;
+                    return MapSnapshot.single(
+                            userKeySerializer.deserialize(slot.probeValueInput(0)));
+                }
+                if (status == NativeRequestPlaneBridge.PROBE_MISS) {
+                    nativeSnapshotMisses++;
+                    return null;
+                }
+                throw new IllegalStateException(
+                        "Native MapState snapshot probe returned status=" + status + ".");
+            }
+        } catch (Exception | LinkageError failure) {
+            nativeSnapshotFallbacks++;
+            nativeRequestPlaneCoordinator.disable(failure);
+            return null;
+        }
+    }
+
+    private void storeNativeSnapshot(K key, N namespace, MapSnapshot<UK> snapshot) {
+        if (!nativeMapSnapshotEnabled
+                || key == null
+                || namespace == null
+                || !nativeRequestPlaneCoordinator.isActive()) {
+            return;
+        }
+        if (!shouldStoreNativeSnapshot()) {
+            return;
+        }
+        try {
+            nativeRequestPlaneCoordinator.updateExactKey(
+                    nativeSnapshotStateId,
+                    nativeGeneration,
+                    output -> {
+                        writeLengthPrefixed(keySerializer, key, output);
+                        writeLengthPrefixed(namespaceSerializer, namespace, output);
+                    },
+                    snapshot.isEmpty()
+                            ? null
+                            : output ->
+                                    userKeySerializer.serialize(snapshot.singleUserKey(), output));
+            nativeSnapshotFills++;
+        } catch (Exception | LinkageError failure) {
+            nativeSnapshotFallbacks++;
+            nativeRequestPlaneCoordinator.disable(failure);
+        }
+    }
+
+    private boolean snapshotOptimizationEnabled() {
+        return mapSnapshotCacheEnabled || nativeMapSnapshotEnabled;
+    }
+
+    private void advanceNativeGeneration() {
+        if (nativeMapCacheEnabled || nativeMapSnapshotEnabled) {
+            nativeGeneration++;
         }
     }
 
@@ -641,8 +1692,14 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         present = l2PresenceCache.get(lookupKey);
         if (present != null) {
             l2PresenceCache.remove(lookupKey);
-            KeyNamespaceUserKey<K, N, UK> storage = new KeyNamespaceUserKey<>(currentKey, currentNamespace, userKey,
-                    keySerializer, namespaceSerializer, userKeySerializer);
+            KeyNamespaceUserKey<K, N, UK> storage =
+                    new KeyNamespaceUserKey<>(
+                            currentKey,
+                            currentNamespace,
+                            userKey,
+                            keySerializer,
+                            namespaceSerializer,
+                            userKeySerializer);
             l1PresenceCache.put(storage, present);
             return present;
         }
@@ -675,8 +1732,14 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         l2PresenceCache.remove(lookupKey);
 
         // Storage requries deep copy
-        KeyNamespaceUserKey<K, N, UK> storage = new KeyNamespaceUserKey<>(currentKey, namespace, userKey,
-                keySerializer, namespaceSerializer, userKeySerializer);
+        KeyNamespaceUserKey<K, N, UK> storage =
+                new KeyNamespaceUserKey<>(
+                        currentKey,
+                        namespace,
+                        userKey,
+                        keySerializer,
+                        namespaceSerializer,
+                        userKeySerializer);
         l1PresenceCache.put(storage, present);
     }
 
@@ -736,8 +1799,14 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         cached = l2ValueCache.get(lookupKey);
         if (cached != null) {
             // Must create immutable key for storage because we are PUTTING to L1
-            KeyNamespaceUserKey<K, N, UK> storage = new KeyNamespaceUserKey<>(currentKey, currentNamespace,
-                    lookupKey.userKey, keySerializer, namespaceSerializer, userKeySerializer);
+            KeyNamespaceUserKey<K, N, UK> storage =
+                    new KeyNamespaceUserKey<>(
+                            currentKey,
+                            currentNamespace,
+                            lookupKey.userKey,
+                            keySerializer,
+                            namespaceSerializer,
+                            userKeySerializer);
             l1ValueCache.put(storage, cached);
             l2ValueCache.remove(lookupKey);
         }
@@ -754,8 +1823,14 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             return;
         }
         UV cachedValue = copyUserValue(userValue);
-        KeyNamespaceUserKey<K, N, UK> storage = new KeyNamespaceUserKey<>(currentKey, namespace, userKey,
-                keySerializer, namespaceSerializer, userKeySerializer);
+        KeyNamespaceUserKey<K, N, UK> storage =
+                new KeyNamespaceUserKey<>(
+                        currentKey,
+                        namespace,
+                        userKey,
+                        keySerializer,
+                        namespaceSerializer,
+                        userKeySerializer);
         CachedMapValue<UV> cached = CachedMapValue.of(cachedValue, dirty);
         if (dirty) {
             trackDirtyEntry(storage);
@@ -775,9 +1850,13 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         return userValueSerializer.copy(value);
     }
 
-    private Iterable<UK> cacheKeys(Iterable<Map.Entry<UK, UV>> entries) {
-        return () -> new Iterator<UK>() {
-            private final Iterator<Map.Entry<UK, UV>> delegateIterator = entries.iterator();
+    private Iterable<UK> cacheKeys(Iterable<Map.Entry<UK, UV>> entries, K key, N namespace) {
+        KeyNamespace<K, N> captured = newStoredKeyNamespace(key, namespace);
+        return () ->
+                new Iterator<UK>() {
+            private final Iterator<Map.Entry<UK, UV>> delegateIterator =
+                    iteratorInContext(entries, captured.key, captured.namespace);
+            private UK lastUserKey;
 
             @Override
             public boolean hasNext() {
@@ -787,15 +1866,26 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             @Override
             public UK next() {
                 Map.Entry<UK, UV> entry = delegateIterator.next();
-                cacheEntry(entry);
+                lastUserKey = copyUserKey(entry.getKey());
+                cacheEntry(captured.key, captured.namespace, entry);
                 return entry.getKey();
+            }
+
+            @Override
+            public void remove() {
+                delegateIterator.remove();
+                recordIteratorRemoval(captured.key, captured.namespace, lastUserKey);
             }
         };
     }
 
-    private Iterable<UV> cacheValues(Iterable<Map.Entry<UK, UV>> entries) {
-        return () -> new Iterator<UV>() {
-            private final Iterator<Map.Entry<UK, UV>> delegateIterator = entries.iterator();
+    private Iterable<UV> cacheValues(Iterable<Map.Entry<UK, UV>> entries, K key, N namespace) {
+        KeyNamespace<K, N> captured = newStoredKeyNamespace(key, namespace);
+        return () ->
+                new Iterator<UV>() {
+            private final Iterator<Map.Entry<UK, UV>> delegateIterator =
+                    iteratorInContext(entries, captured.key, captured.namespace);
+            private UK lastUserKey;
 
             @Override
             public boolean hasNext() {
@@ -805,8 +1895,72 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             @Override
             public UV next() {
                 Map.Entry<UK, UV> entry = delegateIterator.next();
-                cacheEntry(entry);
+                lastUserKey = copyUserKey(entry.getKey());
+                cacheEntry(captured.key, captured.namespace, entry);
                 return entry.getValue();
+            }
+
+            @Override
+            public void remove() {
+                delegateIterator.remove();
+                recordIteratorRemoval(captured.key, captured.namespace, lastUserKey);
+            }
+        };
+    }
+
+    private void recordIteratorRemoval(K key, N namespace, UK userKey) {
+        advanceNativeGeneration();
+        if (userKey != null) {
+            if (mapCacheEnabled) {
+                updateValueCache(key, namespace, userKey, null, false);
+            }
+            if (presenceCacheEnabled) {
+                updatePresence(key, namespace, userKey, false);
+            }
+        }
+        invalidateSnapshot(key, namespace);
+    }
+
+    private Iterable<UK> entryKeys(Iterable<Map.Entry<UK, UV>> entries) {
+        return () ->
+                new Iterator<UK>() {
+            private final Iterator<Map.Entry<UK, UV>> delegateIterator = entries.iterator();
+
+            @Override
+            public boolean hasNext() {
+                return delegateIterator.hasNext();
+            }
+
+            @Override
+            public UK next() {
+                return delegateIterator.next().getKey();
+            }
+
+            @Override
+            public void remove() {
+                delegateIterator.remove();
+            }
+        };
+    }
+
+    private Iterable<UV> entryValues(Iterable<Map.Entry<UK, UV>> entries) {
+        return () ->
+                new Iterator<UV>() {
+            private final Iterator<Map.Entry<UK, UV>> delegateIterator = entries.iterator();
+
+            @Override
+            public boolean hasNext() {
+                return delegateIterator.hasNext();
+            }
+
+            @Override
+            public UV next() {
+                return delegateIterator.next().getValue();
+            }
+
+            @Override
+            public void remove() {
+                delegateIterator.remove();
             }
         };
     }
@@ -970,7 +2124,8 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 return;
             }
 
-            for (KeyNamespaceUserKey<K, N, UK> key : snapshotDirtyKeys(scopeKey, scopeNamespace, scoped)) {
+            for (KeyNamespaceUserKey<K, N, UK> key :
+                    snapshotDirtyKeys(scopeKey, scopeNamespace, scoped)) {
                 flushDirtyEntry(key);
             }
         } finally {
@@ -1031,8 +2186,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 dirtyValueEntriesByNamespace.get(dirtyNamespaceProbe);
         if (entries == null) {
             entries = new HashSet<>();
-            dirtyValueEntriesByNamespace.put(
-                    new KeyNamespace<>(key.key, key.namespace), entries);
+            dirtyValueEntriesByNamespace.put(new KeyNamespace<>(key.key, key.namespace), entries);
         }
         entries.add(key);
     }
@@ -1089,13 +2243,258 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
     }
 
-    /** Quiesces dirty write-back before the backend releases its RocksDB delegate. */
+    private void cancelQueuedAndAwaitAsyncBatchPrefetchTasks() {
+        List<PrefetchExecutor.DropAwareTask> snapshot;
+        synchronized (asyncBatchPrefetchMonitor) {
+            snapshot = new ArrayList<>(outstandingAsyncBatchPrefetchTasks);
+        }
+        for (PrefetchExecutor.DropAwareTask task : snapshot) {
+            PrefetchExecutor.cancelIfQueued(task);
+        }
+
+        boolean interrupted = false;
+        synchronized (asyncBatchPrefetchMonitor) {
+            while (!outstandingAsyncBatchPrefetchTasks.isEmpty()) {
+                try {
+                    asyncBatchPrefetchMonitor.wait();
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** Quiesces dirty write-back and async reads before releasing the RocksDB delegate. */
     public void close() {
+        closed = true;
+        cancelQueuedAndAwaitAsyncBatchPrefetchTasks();
         lifecycleLock.writeLock().lock();
         try {
-            closed = true;
+            endPrefetchCurrentKeys();
         } finally {
             lifecycleLock.writeLock().unlock();
+        }
+        if (nativeMapCacheEnabled) {
+            LOG.info(
+                    "[CACHEKIT NATIVE MAP CACHE] stateId={} generation={} probes={} hits={} "
+                            + "negativeHits={} misses={} fills={} fallbacks={} failures={} "
+                            + "nativeActive={} kernel={}",
+                    nativeStateId,
+                    nativeGeneration,
+                    nativeProbeAttempts,
+                    nativeHits,
+                    nativeNegativeHits,
+                    nativeMisses,
+                    nativeFills,
+                    nativeFallbacks,
+                    nativeFailures,
+                    nativeRequestPlaneCoordinator.isActive(),
+                    nativeRequestPlaneCoordinator.selectedKernel());
+        }
+        if (nativeMapSnapshotEnabled) {
+            LOG.info(
+                    "[CACHEKIT NATIVE MAP SNAPSHOT] stateId={} generation={} probes={} hits={} "
+                            + "negativeHits={} misses={} fills={} fallbacks={} nativeActive={} kernel={}",
+                    nativeSnapshotStateId,
+                    nativeGeneration,
+                    nativeSnapshotProbes,
+                    nativeSnapshotHits,
+                    nativeSnapshotNegativeHits,
+                    nativeSnapshotMisses,
+                    nativeSnapshotFills,
+                    nativeSnapshotFallbacks,
+                    nativeRequestPlaneCoordinator.isActive(),
+                    nativeRequestPlaneCoordinator.selectedKernel());
+            LOG.info(
+                    "[CACHEKIT NATIVE MAP SNAPSHOT ADAPTIVE] stateId={} enabled={} mode={} "
+                            + "windowProbes={} windowPositiveHits={} windowNegativeHits={} "
+                            + "windowMisses={} windowFillAttempts={} evaluatedWindows={} "
+                            + "bypassTransitions={} trialTransitions={} bypassedProbes={} "
+                            + "bypassedFills={} windowLimit={} minUsefulHitRate={} resampleInterval={}",
+                    nativeSnapshotStateId,
+                    nativeSnapshotAdaptiveBypassEnabled,
+                    nativeSnapshotAdaptiveMode,
+                    nativeSnapshotAdaptiveWindowProbeCount,
+                    nativeSnapshotAdaptiveWindowPositiveHits,
+                    nativeSnapshotAdaptiveWindowNegativeHits,
+                    nativeSnapshotAdaptiveWindowMisses,
+                    nativeSnapshotAdaptiveWindowFillAttempts,
+                    nativeSnapshotAdaptiveEvaluatedWindows,
+                    nativeSnapshotAdaptiveBypassTransitions,
+                    nativeSnapshotAdaptiveTrialTransitions,
+                    nativeSnapshotAdaptiveBypassedProbes,
+                    nativeSnapshotAdaptiveBypassedFills,
+                    nativeSnapshotAdaptiveWindowProbes,
+                    nativeSnapshotAdaptiveMinUsefulHitRate,
+                    nativeSnapshotAdaptiveResampleIntervalProbes);
+        }
+        if (nativeDistinctBatchPrefetchEnabled) {
+            LOG.info(
+                    "[CACHEKIT NATIVE MAP DISTINCT PREFETCH] attempts={} batches={} inputKeys={} "
+                            + "uniqueKeys={} found={} missing={} stagingHits={} directOverlayValues={} "
+                            + "fallbacks={} failures={} directArenaEnabled={} directArenaDisabled={} "
+                            + "directArenaAttempts={} directArenaBatches={} directArenaKeys={} "
+                            + "directArenaCompletedBatches={} directArenaCompletedKeys={} "
+                            + "directArenaFound={} directArenaMissing={} directArenaOverflows={} "
+                            + "directArenaFallbacks={} directArenaFailures={} "
+                            + "directArenaProtocolFallbacks={} "
+                            + "batchReaderAvailable={}",
+                    batchPrefetchAttempts,
+                    batchPrefetchBatches,
+                    batchPrefetchInputKeys,
+                    batchPrefetchUniqueKeys,
+                    batchPrefetchFound,
+                    batchPrefetchMissing,
+                    batchPrefetchHits,
+                    batchPrefetchDirectOverlayValues,
+                    batchPrefetchFallbacks,
+                    batchPrefetchFailures,
+                    nativeDistinctBatchDirectArenaEnabled,
+                    nativeDistinctBatchDirectArenaDisabled,
+                    batchPrefetchDirectArenaAttempts,
+                    batchPrefetchDirectArenaBatches,
+                    batchPrefetchDirectArenaKeys,
+                    batchPrefetchDirectArenaCompletedBatches,
+                    batchPrefetchDirectArenaCompletedKeys,
+                    batchPrefetchDirectArenaFound,
+                    batchPrefetchDirectArenaMissing,
+                    batchPrefetchDirectArenaOverflows,
+                    batchPrefetchDirectArenaFallbacks,
+                    batchPrefetchDirectArenaFailures,
+                    batchPrefetchDirectArenaProtocolFallbacks,
+                    rocksDBBatchMapReader != null);
+            LOG.info(
+                    "[CACHEKIT NATIVE MAP DISTINCT ASYNC] attempts={} submitted={} completed={} "
+                            + "dropped={} failures={} keys={} awaits={} readyBeforeAwait={} "
+                            + "waitNanos={}",
+                    asyncBatchPrefetchAttempts.get(),
+                    asyncBatchPrefetchSubmitted.get(),
+                    asyncBatchPrefetchCompleted.get(),
+                    asyncBatchPrefetchDropped.get(),
+                    asyncBatchPrefetchFailures.get(),
+                    asyncBatchPrefetchKeys.get(),
+                    asyncBatchPrefetchAwaits.get(),
+                    asyncBatchPrefetchReadyBeforeAwait.get(),
+                    asyncBatchPrefetchWaitNanos.get());
+        }
+    }
+
+    long getNativeProbeAttemptsForTesting() {
+        return nativeProbeAttempts;
+    }
+
+    long getNativeHitsForTesting() {
+        return nativeHits;
+    }
+
+    long getNativeNegativeHitsForTesting() {
+        return nativeNegativeHits;
+    }
+
+    long getNativeMissesForTesting() {
+        return nativeMisses;
+    }
+
+    long getNativeFillsForTesting() {
+        return nativeFills;
+    }
+
+    long getNativeSnapshotHitsForTesting() {
+        return nativeSnapshotHits;
+    }
+
+    long getNativeSnapshotNegativeHitsForTesting() {
+        return nativeSnapshotNegativeHits;
+    }
+
+    long getNativeSnapshotFillsForTesting() {
+        return nativeSnapshotFills;
+    }
+
+    long getNativeSnapshotProbesForTesting() {
+        return nativeSnapshotProbes;
+    }
+
+    long getNativeSnapshotAdaptiveEvaluatedWindowsForTesting() {
+        return nativeSnapshotAdaptiveEvaluatedWindows;
+    }
+
+    long getNativeSnapshotAdaptiveBypassTransitionsForTesting() {
+        return nativeSnapshotAdaptiveBypassTransitions;
+    }
+
+    long getNativeSnapshotAdaptiveTrialTransitionsForTesting() {
+        return nativeSnapshotAdaptiveTrialTransitions;
+    }
+
+    long getNativeSnapshotAdaptiveBypassedProbesForTesting() {
+        return nativeSnapshotAdaptiveBypassedProbes;
+    }
+
+    long getNativeSnapshotAdaptiveBypassedFillsForTesting() {
+        return nativeSnapshotAdaptiveBypassedFills;
+    }
+
+    boolean isNativeSnapshotAdaptiveBypassingForTesting() {
+        return nativeSnapshotAdaptiveMode == NativeSnapshotAdaptiveMode.BYPASS;
+    }
+
+    long getBatchPrefetchBatchesForTesting() {
+        return batchPrefetchBatches;
+    }
+
+    long getBatchPrefetchUniqueKeysForTesting() {
+        return batchPrefetchUniqueKeys;
+    }
+
+    long getBatchPrefetchHitsForTesting() {
+        return batchPrefetchHits;
+    }
+
+    long getBatchPrefetchDirectOverlayValuesForTesting() {
+        return batchPrefetchDirectOverlayValues;
+    }
+
+    long getBatchPrefetchFallbacksForTesting() {
+        return batchPrefetchFallbacks;
+    }
+
+    long getBatchPrefetchDirectArenaCompletedKeysForTesting() {
+        return batchPrefetchDirectArenaCompletedKeys;
+    }
+
+    long getBatchPrefetchDirectArenaFallbacksForTesting() {
+        return batchPrefetchDirectArenaFallbacks;
+    }
+
+    private static final class PrefetchedMapValue<V> {
+        private final boolean present;
+        private final V value;
+
+        private PrefetchedMapValue(boolean present, V value) {
+            this.present = present;
+            this.value = value;
+        }
+
+        private static <V> PrefetchedMapValue<V> present(V value) {
+            return new PrefetchedMapValue<>(true, value);
+        }
+
+        private static <V> PrefetchedMapValue<V> missing() {
+            return new PrefetchedMapValue<>(false, null);
+        }
+    }
+
+    private static final class NativeMapRead<V> {
+        private final V value;
+        private final boolean cacheHit;
+
+        private NativeMapRead(V value, boolean cacheHit) {
+            this.value = value;
+            this.cacheHit = cacheHit;
         }
     }
 
@@ -1112,12 +2511,16 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
 
         // Constructor for immutable storage (deep copy)
-        private KeyNamespaceUserKey(K key, N namespace, UK userKey,
+        private KeyNamespaceUserKey(
+                K key,
+                N namespace,
+                UK userKey,
                 TypeSerializer<K> keySerializer,
                 TypeSerializer<N> namespaceSerializer,
                 TypeSerializer<UK> userKeySerializer) {
             this.key = keySerializer != null ? keySerializer.copy(key) : key;
-            this.namespace = namespaceSerializer != null ? namespaceSerializer.copy(namespace) : namespace;
+            this.namespace =
+                    namespaceSerializer != null ? namespaceSerializer.copy(namespace) : namespace;
             this.userKey = userKeySerializer != null ? userKeySerializer.copy(userKey) : userKey;
         }
 
@@ -1137,7 +2540,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
         @Override
         public int hashCode() {
-            return Objects.hash(key, namespace, userKey);
+            return CacheKeyHash.hash(key, namespace, userKey);
         }
     }
 
@@ -1158,8 +2561,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         }
 
         @Override
-        public void clear() {
-        }
+        public void clear() {}
 
         @Override
         public int size() {
@@ -1210,26 +2612,43 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             mapSnapshotCacheMetrics.recordEmptyShortCircuit();
             return Collections.emptyList();
         }
-        // SINGLE → downgrade to point-get via this.get(cachedUK)
-        UV value = this.get(snapshot.cachedUserKey);
-        if (value != null) {
-            mapSnapshotCacheMetrics.recordSingleShortCircuit();
-            return singletonSnapshotEntry(snapshot.cachedUserKey, value);
+        // SINGLE/SMALL → downgrade the short range scan to bounded point gets. Resolve every
+        // value before publishing the iterable so a stale key can fall back without exposing a
+        // partial result.
+        List<UV> values = new ArrayList<>(snapshot.size());
+        for (UK userKey : snapshot.cachedUserKeys) {
+            UV value = this.get(userKey);
+            if (value == null) {
+                // A stale native snapshot must become a generation miss. Publishing a null
+                // exact-key fill would mean a real EMPTY snapshot, not a tombstone.
+                advanceNativeGeneration();
+                removeSnapshot(snapshotProbe);
+                mapSnapshotCacheMetrics.recordStaleInvalidation();
+                return null;
+            }
+            values.add(value);
         }
-        // Stale cache: get() returned null → invalidate and fallthrough
-        removeSnapshot(snapshotProbe);
-        mapSnapshotCacheMetrics.recordStaleInvalidation();
-        return null;
+        if (snapshot.isSingle()) {
+            mapSnapshotCacheMetrics.recordSingleShortCircuit();
+        } else {
+            mapSnapshotCacheMetrics.recordSmallShortCircuit();
+        }
+        KeyNamespace<K, N> captured = newStoredKeyNamespace(currentKey, currentNamespace);
+        return snapshotEntries(captured.key, captured.namespace, snapshot.cachedUserKeys, values);
     }
 
     private MapSnapshot<UK> lookupSnapshot(K currentKey) {
-        if (!mapSnapshotCacheEnabled || currentKey == null || currentNamespace == null) {
+        if (!snapshotOptimizationEnabled() || currentKey == null || currentNamespace == null) {
             return null;
         }
         snapshotProbe.key = currentKey;
         snapshotProbe.namespace = currentNamespace;
         mapSnapshotCacheMetrics.recordProbe();
-        MapSnapshot<UK> snapshot = mapSnapshotCache.get(snapshotProbe);
+        MapSnapshot<UK> snapshot =
+                mapSnapshotCacheEnabled ? mapSnapshotCache.get(snapshotProbe) : null;
+        if (snapshot == null) {
+            snapshot = lookupNativeSnapshot(currentKey);
+        }
         if (snapshot == null) {
             mapSnapshotCacheMetrics.recordMiss();
         } else {
@@ -1239,16 +2658,23 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private void storeSnapshot(KeyNamespace<K, N> key, MapSnapshot<UK> snapshot) {
-        mapSnapshotCache.put(key, snapshot);
+        if (mapSnapshotCacheEnabled) {
+            mapSnapshotCache.put(key, snapshot);
+        }
+        if (snapshot.isEmpty() || snapshot.isSingle()) {
+            storeNativeSnapshot(key.key, key.namespace, snapshot);
+        }
         if (snapshot.isEmpty()) {
             mapSnapshotCacheMetrics.recordStoreEmpty();
-        } else {
+        } else if (snapshot.isSingle()) {
             mapSnapshotCacheMetrics.recordStoreSingle();
+        } else {
+            mapSnapshotCacheMetrics.recordStoreSmall();
         }
     }
 
     private boolean removeSnapshot(KeyNamespace<K, N> key) {
-        boolean removed = mapSnapshotCache.remove(key) != null;
+        boolean removed = mapSnapshotCacheEnabled && mapSnapshotCache.remove(key) != null;
         if (removed) {
             mapSnapshotCacheMetrics.recordInvalidation();
         }
@@ -1260,7 +2686,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
     }
 
     private void invalidateSnapshot(K currentKey, N namespace) {
-        if (!mapSnapshotCacheEnabled || currentKey == null || namespace == null) {
+        if (!snapshotOptimizationEnabled() || currentKey == null || namespace == null) {
             return;
         }
         snapshotProbe.key = currentKey;
@@ -1273,29 +2699,72 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             K currentKey,
             N namespace,
             boolean cacheEntries) {
+        KeyNamespace<K, N> captured = newStoredKeyNamespace(currentKey, namespace);
         return () ->
                 new SnapshotAwareIterator(
-                        delegateEntries.iterator(), currentKey, namespace, cacheEntries);
+                        iteratorInContext(delegateEntries, captured.key, captured.namespace),
+                        captured.key,
+                        captured.namespace,
+                        cacheEntries);
     }
 
-    private Iterable<Map.Entry<UK, UV>> singletonSnapshotEntry(UK userKey, UV value) {
-        return () -> new Iterator<Map.Entry<UK, UV>>() {
-            private boolean hasNext = true;
+    private Iterator<Map.Entry<UK, UV>> iteratorInContext(
+            Iterable<Map.Entry<UK, UV>> entries, K stateKey, N namespace) {
+        K previousKey = currentKeyProvider.getCurrentKey();
+        N previousNamespace = currentNamespace;
+        keyContextSetter.accept(stateKey);
+        currentNamespace = namespace;
+        delegate.setCurrentNamespace(namespace);
+        try {
+            return entries.iterator();
+        } finally {
+            keyContextSetter.accept(previousKey);
+            currentNamespace = previousNamespace;
+            if (previousNamespace != null) {
+                delegate.setCurrentNamespace(previousNamespace);
+            }
+        }
+    }
+
+    private Iterable<Map.Entry<UK, UV>> snapshotEntries(
+            K stateKey, N namespace, List<UK> userKeys, List<UV> values) {
+        final List<UK> internalUserKeys = new ArrayList<>(userKeys.size());
+        for (UK userKey : userKeys) {
+            internalUserKeys.add(copyUserKey(userKey));
+        }
+        final List<UV> currentValues = new ArrayList<>(values);
+        final boolean[] removed = new boolean[internalUserKeys.size()];
+        return () ->
+                new Iterator<Map.Entry<UK, UV>>() {
+            private int index;
+            private int lastSlot = -1;
             private boolean removable;
+
+            private void skipRemoved() {
+                while (index < removed.length && removed[index]) {
+                    index++;
+                }
+            }
 
             @Override
             public boolean hasNext() {
-                return hasNext;
+                skipRemoved();
+                return index < internalUserKeys.size();
             }
 
             @Override
             public Map.Entry<UK, UV> next() {
-                if (!hasNext) {
+                if (!hasNext()) {
                     throw new java.util.NoSuchElementException();
                 }
-                hasNext = false;
+                int slot = index;
+                UK userKey = internalUserKeys.get(slot);
+                UV value = currentValues.get(slot);
+                index++;
+                lastSlot = slot;
                 removable = true;
-                return new AbstractMap.SimpleImmutableEntry<>(userKey, value);
+                return new SnapshotMapEntry(
+                        stateKey, namespace, userKey, value, currentValues, slot);
             }
 
             @Override
@@ -1304,22 +2773,111 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                     throw new IllegalStateException("remove() requires a preceding next()");
                 }
                 try {
-                    CachedInternalMapState.this.remove(userKey);
+                    mutateSnapshotEntry(
+                                    stateKey,
+                                    namespace,
+                                    internalUserKeys.get(lastSlot),
+                                    null,
+                                    true);
                 } catch (Exception e) {
                     throw new RuntimeException("Failed to remove MapState entry", e);
                 }
+                removed[lastSlot] = true;
                 removable = false;
             }
         };
     }
 
+    private final class SnapshotMapEntry implements Map.Entry<UK, UV> {
+        private final K stateKey;
+        private final N namespace;
+        private final UK internalUserKey;
+        private final UK exposedUserKey;
+        private final List<UV> sharedValues;
+        private final int sharedSlot;
+        private UV value;
+
+        private SnapshotMapEntry(K stateKey, N namespace, UK userKey, UV value) {
+            this(stateKey, namespace, userKey, value, null, -1);
+        }
+
+        private SnapshotMapEntry(
+                K stateKey,
+                N namespace,
+                UK userKey,
+                UV value,
+                List<UV> sharedValues,
+                int sharedSlot) {
+            this.stateKey = stateKey;
+            this.namespace = namespace;
+            this.internalUserKey = copyUserKey(userKey);
+            this.exposedUserKey = copyUserKey(internalUserKey);
+            this.sharedValues = sharedValues;
+            this.sharedSlot = sharedSlot;
+            this.value = value;
+        }
+
+        @Override
+        public UK getKey() {
+            return exposedUserKey;
+        }
+
+        @Override
+        public UV getValue() {
+            return value;
+        }
+
+        @Override
+        public UV setValue(UV newValue) {
+            if (newValue == null) {
+                throw new NullPointerException("MapState entries do not accept null values");
+            }
+            UV previous = value;
+            try {
+                mutateSnapshotEntry(stateKey, namespace, internalUserKey, newValue, false);
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to update MapState entry", e);
+            }
+            value = newValue;
+            if (sharedValues != null) {
+                sharedValues.set(sharedSlot, newValue);
+            }
+            return previous;
+        }
+    }
+
+    /** Applies an entry mutation to the key and namespace captured by the iterator. */
+    private void mutateSnapshotEntry(K stateKey, N namespace, UK userKey, UV value, boolean remove)
+            throws Exception {
+        K previousKey = currentKeyProvider.getCurrentKey();
+        N previousNamespace = currentNamespace;
+        keyContextSetter.accept(stateKey);
+        currentNamespace = namespace;
+        delegate.setCurrentNamespace(namespace);
+        try {
+            if (remove) {
+                CachedInternalMapState.this.remove(userKey);
+            } else {
+                CachedInternalMapState.this.put(userKey, value);
+            }
+        } finally {
+            keyContextSetter.accept(previousKey);
+            currentNamespace = previousNamespace;
+            if (previousNamespace != null) {
+                delegate.setCurrentNamespace(previousNamespace);
+            }
+        }
+    }
+
     private KeyNamespace<K, N> newStoredKeyNamespace(K key, N namespace) {
-        K keyCopy = key;
-        N nsCopy = namespace;
-        if (key instanceof org.apache.flink.table.data.binary.BinaryRowData) {
+        K keyCopy = keySerializer == null ? key : keySerializer.copy(key);
+        N nsCopy = namespaceSerializer == null ? namespace : namespaceSerializer.copy(namespace);
+        if (keySerializer == null
+                && key instanceof org.apache.flink.table.data.binary.BinaryRowData) {
             keyCopy = (K) ((org.apache.flink.table.data.binary.BinaryRowData) key).copy();
         }
-        if (namespace instanceof org.apache.flink.table.data.binary.BinaryRowData) {
+        if (namespaceSerializer == null
+                && namespace instanceof org.apache.flink.table.data.binary.BinaryRowData) {
             nsCopy = (N) ((org.apache.flink.table.data.binary.BinaryRowData) namespace).copy();
         }
         return new KeyNamespace<>(keyCopy, nsCopy);
@@ -1344,24 +2902,43 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
 
         @Override
         public int hashCode() {
-            return Objects.hash(key, namespace);
+            return CacheKeyHash.hash(key, namespace);
         }
     }
 
     private static final class MapSnapshot<UK> {
-        final UK cachedUserKey;
+        final List<UK> cachedUserKeys;
 
-        MapSnapshot(UK cachedUserKey) {
-            this.cachedUserKey = cachedUserKey;
+        MapSnapshot(List<UK> cachedUserKeys) {
+            this.cachedUserKeys = Collections.unmodifiableList(new ArrayList<>(cachedUserKeys));
         }
 
         boolean isEmpty() {
-            return cachedUserKey == null;
+            return cachedUserKeys.isEmpty();
         }
 
-        @SuppressWarnings("unchecked")
+        boolean isSingle() {
+            return cachedUserKeys.size() == 1;
+        }
+
+        int size() {
+            return cachedUserKeys.size();
+        }
+
+        UK singleUserKey() {
+            return cachedUserKeys.get(0);
+        }
+
+        static <UK> MapSnapshot<UK> single(UK userKey) {
+            return new MapSnapshot<>(Collections.singletonList(userKey));
+        }
+
+        static <UK> MapSnapshot<UK> of(List<UK> userKeys) {
+            return new MapSnapshot<>(userKeys);
+        }
+
         static <UK> MapSnapshot<UK> empty() {
-            return new MapSnapshot<>(null);
+            return new MapSnapshot<>(Collections.emptyList());
         }
     }
 
@@ -1371,7 +2948,7 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
         private final N namespace;
         private final boolean cacheEntries;
         private int iteratedCount = 0;
-        private UK firstUserKey = null;
+        private final List<UK> snapshotUserKeys = new ArrayList<>();
         private UK lastUserKey = null;
         private boolean backfilled = false;
 
@@ -1381,15 +2958,16 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 N namespace,
                 boolean cacheEntries) {
             this.delegateIterator = delegateIterator;
-            this.currentKey = currentKey;
-            this.namespace = namespace;
+            KeyNamespace<K, N> captured = newStoredKeyNamespace(currentKey, namespace);
+            this.currentKey = captured.key;
+            this.namespace = captured.namespace;
             this.cacheEntries = cacheEntries;
         }
 
         @Override
         public boolean hasNext() {
             boolean has = delegateIterator.hasNext();
-            if (!has && !backfilled && mapSnapshotCacheEnabled) {
+            if (!has && !backfilled && snapshotOptimizationEnabled()) {
                 backfilled = true;
                 backfillSnapshotCache();
             }
@@ -1403,16 +2981,19 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
                 cacheEntry(currentKey, namespace, entry);
             }
             iteratedCount++;
-            if (iteratedCount == 1) {
-                firstUserKey = entry.getKey();
+            if (iteratedCount <= mapSnapshotSmallMaxEntries) {
+                snapshotUserKeys.add(copyUserKey(entry.getKey()));
+            } else if (!snapshotUserKeys.isEmpty()) {
+                snapshotUserKeys.clear();
             }
             lastUserKey = entry.getKey();
-            return entry;
+            return new SnapshotMapEntry(currentKey, namespace, entry.getKey(), entry.getValue());
         }
 
         @Override
         public void remove() {
             delegateIterator.remove();
+            advanceNativeGeneration();
             if (lastUserKey != null) {
                 if (mapCacheEnabled) {
                     updateValueCache(currentKey, namespace, lastUserKey, null, false);
@@ -1432,19 +3013,21 @@ public final class CachedInternalMapState<K, N, UK, UV> implements InternalMapSt
             KeyNamespace<K, N> stored = newStoredKeyNamespace(currentKey, namespace);
             if (iteratedCount == 0) {
                 storeSnapshot(stored, MapSnapshot.empty());
-            } else if (iteratedCount == 1 && firstUserKey != null) {
-                // Deep copy
-                UK copiedUK = firstUserKey;
-                if (firstUserKey instanceof org.apache.flink.table.data.binary.BinaryRowData) {
-                    copiedUK = (UK) ((org.apache.flink.table.data.binary.BinaryRowData) firstUserKey).copy();
-                } else if (userKeySerializer != null) {
-                    copiedUK = userKeySerializer.copy(firstUserKey);
-                }
-                storeSnapshot(stored, new MapSnapshot<>(copiedUK));
+            } else if (iteratedCount <= mapSnapshotSmallMaxEntries
+                    && snapshotUserKeys.size() == iteratedCount) {
+                storeSnapshot(stored, MapSnapshot.of(snapshotUserKeys));
             } else {
                 mapSnapshotCacheMetrics.recordMultiEntrySkip();
                 removeSnapshot(stored);
             }
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private UK copyUserKey(UK userKey) {
+        if (userKey instanceof org.apache.flink.table.data.binary.BinaryRowData) {
+            return (UK) ((org.apache.flink.table.data.binary.BinaryRowData) userKey).copy();
+        }
+        return userKeySerializer == null ? userKey : userKeySerializer.copy(userKey);
     }
 }

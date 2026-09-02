@@ -18,8 +18,6 @@
 
 package org.apache.flink.contrib.streaming.state.cachekit.nativeplane;
 
-import org.apache.flink.annotation.Internal;
-
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -27,22 +25,40 @@ import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicLongArray;
+import org.apache.flink.annotation.Internal;
+import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 
 /**
  * Keyed-backend owner for one native request plane and a bounded set of direct batch slots.
  *
- * <p>Probe, fill, disable, and close are serialized because the native plane is single-owner.
- * A slot is leased before an async task is queued; inability to lease is an explicit Java-path
+ * <p>Probe, fill, disable, and close are serialized because the native plane is single-owner. A
+ * slot is leased before an async task is queued; inability to lease is an explicit Java-path
  * fallback rather than unbounded direct-memory allocation.
  */
 @Internal
 public final class NativeRequestPlaneCoordinator implements AutoCloseable {
 
+    /** Serializes one non-negative fill value directly into the mutation slot's value arena. */
+    @FunctionalInterface
+    public interface DirectValueWriter {
+        void write(DirectBufferDataOutputView output) throws IOException;
+    }
+
     private final Object planeLock = new Object();
     private final NativeRequestPlaneOptions options;
     private final NativeRequestPlane plane;
     private final ArrayDeque<BatchSlot> availableSlots;
+    private final ArrayDeque<BatchSlot> availableMapDistinctReadSlots;
+    private final ArrayDeque<BatchSlot> availableCompactionScratchSlots;
     private final BatchSlot mutationSlot;
+    private final ResidentKeyHint residentKeyHint;
+    private final ConcurrentMap<Integer, ValueReadActivation> valueReadActivations =
+            new ConcurrentHashMap<>();
     private final String selectedKernel;
     private final long detectedFeatureBits;
 
@@ -51,8 +67,14 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private boolean planeClosed;
     private long leases;
     private long leaseMisses;
+    private long mapDistinctReadLeases;
+    private long mapDistinctReadLeaseMisses;
+    private long compactionScratchLeases;
+    private long compactionScratchLeaseMisses;
     private long probeCalls;
     private long fillCalls;
+    private long compactCalls;
+    private long groupCalls;
 
     public static NativeRequestPlaneCoordinator open(NativeRequestPlaneOptions options) {
         Objects.requireNonNull(options, "options");
@@ -63,6 +85,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 NativeRequestPlaneBridge.open(
                         true,
                         options.capacityEntries(),
+                        nativeMaxBatchEntries(options),
                         options.keyArenaBytes(),
                         options.valueArenaBytes(),
                         options.kernelPreference(),
@@ -77,6 +100,12 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             }
             throw failure;
         }
+    }
+
+    static int nativeMaxBatchEntries(NativeRequestPlaneOptions options) {
+        return options.compactionScratchSlotEnabled()
+                ? Math.max(options.batchEntries(), options.compactionScratchEntries())
+                : options.batchEntries();
     }
 
     /** Test seam for deterministic probe/fill/failure and lifecycle tests without JNI. */
@@ -106,8 +135,19 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         for (int i = 0; i < options.batchSlots(); i++) {
             availableSlots.addLast(new BatchSlot(this, options));
         }
-        this.mutationSlot = new BatchSlot(this, options, true);
+        this.availableMapDistinctReadSlots = new ArrayDeque<>(1);
+        if (options.directArenaMultiGetEnabled()) {
+            availableMapDistinctReadSlots.addLast(
+                    new BatchSlot(this, options, SlotKind.MAP_DISTINCT_READ));
+        }
+        this.availableCompactionScratchSlots = new ArrayDeque<>(1);
+        if (options.compactionScratchSlotEnabled()) {
+            availableCompactionScratchSlots.addLast(
+                    new BatchSlot(this, options, SlotKind.COMPACTION_SCRATCH));
+        }
+        this.mutationSlot = new BatchSlot(this, options, SlotKind.MUTATION);
         this.mutationSlot.markLeased();
+        this.residentKeyHint = new ResidentKeyHint(options.capacityEntries());
         // Capture audit metadata during construction. If either JNI query fails, open() closes the
         // bridge before ownership can escape. These getters are thereafter non-JNI and cannot make
         // CacheKitKeyedStateBackend construction leak an already-open plane.
@@ -129,6 +169,20 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         return options;
     }
 
+    /**
+     * Returns the backend-lifetime activation token for one native state id.
+     *
+     * <p>The production backend assigns each writable wrapper an exclusive state id. Tests may
+     * attach read-only observers to the same token, but multiple writable wrappers would also need
+     * to share their generation clock and are deliberately outside this contract.
+     */
+    public ValueReadActivation valueReadActivation(int stateId) {
+        if (stateId <= 0) {
+            throw new IllegalArgumentException("Native state id must be positive: " + stateId);
+        }
+        return valueReadActivations.computeIfAbsent(stateId, ignored -> new ValueReadActivation());
+    }
+
     public BatchSlot tryAcquireBatchSlot() {
         synchronized (availableSlots) {
             if (!active) {
@@ -141,6 +195,56 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             }
             slot.markLeased();
             leases++;
+            return slot;
+        }
+    }
+
+    /**
+     * Leases the synchronous exact-DISTINCT direct-arena slot.
+     *
+     * <p>The mailbox thread must not compete with queued asynchronous prefetch tasks for the
+     * regular slot pool: a transient miss there would send a small subset of exact-key batches
+     * back through the heap-value transport and defeat an otherwise closed treatment. A keyed
+     * backend executes this path serially, so one dedicated slot is sufficient and remains
+     * bounded.
+     */
+    public BatchSlot tryAcquireMapDistinctReadSlot() {
+        synchronized (availableMapDistinctReadSlots) {
+            if (!active || !options.directArenaMultiGetEnabled()) {
+                return null;
+            }
+            BatchSlot slot = availableMapDistinctReadSlots.pollFirst();
+            if (slot == null) {
+                mapDistinctReadLeaseMisses++;
+                return null;
+            }
+            slot.markLeased();
+            mapDistinctReadLeases++;
+            return slot;
+        }
+    }
+
+    /**
+     * Leases the single short-lived mailbox-compaction scratch slot.
+     *
+     * <p>This slot has no probe/fill or direct-MultiGet value arenas. Callers must copy the unique
+     * prepared keys to their established Java queue and release it before submitting async work.
+     */
+    public BatchSlot tryAcquireCompactionScratchSlot() {
+        if (!options.compactionScratchSlotEnabled()) {
+            return null;
+        }
+        synchronized (availableCompactionScratchSlots) {
+            if (!active) {
+                return null;
+            }
+            BatchSlot slot = availableCompactionScratchSlots.pollFirst();
+            if (slot == null) {
+                compactionScratchLeaseMisses++;
+                return null;
+            }
+            slot.markLeased();
+            compactionScratchLeases++;
             return slot;
         }
     }
@@ -167,14 +271,103 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         synchronized (planeLock) {
             requireActive();
             try {
-                int processed =
-                        plane.fillBatch(
-                                slot.missKeys,
-                                slot.fillValueArena(),
-                                slot.fillValueMetadata(),
-                                slot.fillResults());
+                int processed;
+                residentKeyHint.beginUpdate();
+                try {
+                    processed =
+                            plane.fillBatch(
+                                    slot.missKeys,
+                                    slot.fillValueArena(),
+                                    slot.fillValueMetadata(),
+                                    slot.fillResults());
+                    recordAcceptedResidentHints(slot, processed);
+                } finally {
+                    residentKeyHint.endUpdate();
+                }
                 fillCalls++;
                 return processed;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
+    public int compact(BatchSlot slot) {
+        requireOwnedSlot(slot);
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                int unique = plane.compactBatch(slot.preparedKeys, slot.uniqueSourceIndexes());
+                validateCompactedSources(slot, unique);
+                compactCalls++;
+                slot.compactedEntryCount = unique;
+                return unique;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
+    private static void validateCompactedSources(BatchSlot slot, int unique) {
+        int inputCount = slot.preparedKeys.entryCount();
+        if (unique < (inputCount == 0 ? 0 : 1) || unique > inputCount) {
+            throw new IllegalStateException(
+                    "Native compact returned invalid unique count "
+                            + unique
+                            + " for "
+                            + inputCount
+                            + " entries.");
+        }
+        ByteBuffer indexes = slot.uniqueSourceIndexes.duplicate().order(ByteOrder.nativeOrder());
+        int previous = -1;
+        for (int target = 0; target < unique; target++) {
+            int source = indexes.getInt(target * Integer.BYTES);
+            if (source <= previous || source < target || source >= inputCount) {
+                throw new IllegalStateException(
+                        "Native compact returned invalid source index "
+                                + source
+                                + " at compacted index "
+                                + target
+                                + ".");
+            }
+            previous = source;
+        }
+    }
+
+    public int group(BatchSlot slot) {
+        requireOwnedSlot(slot);
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                int unique =
+                        plane.groupBatch(
+                                slot.preparedKeys,
+                                slot.uniqueSourceIndexes(),
+                                slot.sourceGroupIndexes());
+                groupCalls++;
+                slot.compactedEntryCount = unique;
+                return unique;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
+    /** Groups caller-owned 32-bit hash tokens without constructing generic key metadata. */
+    public int groupHashTokens(ByteBuffer tokens, int count, ByteBuffer packedPlan) {
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                int unique = plane.groupHashTokens(tokens, count, packedPlan);
+                if (unique <= 0 || unique > count) {
+                    throw new IllegalStateException(
+                            "Native token grouping returned invalid group count " + unique);
+                }
+                groupCalls++;
+                return unique;
             } catch (RuntimeException | LinkageError failure) {
                 disableLocked(failure);
                 throw failure;
@@ -197,43 +390,386 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             try {
                 mutationSlot.prepareSingleFill(
                         stateId, generation, preparedRocksDBKey, serializedValue);
-                int processed =
-                        plane.fillBatch(
-                                mutationSlot.missKeys,
-                                mutationSlot.fillValueArena(),
-                                mutationSlot.fillValueMetadata(),
-                                mutationSlot.fillResults());
-                fillCalls++;
-                if (processed != 1) {
-                    throw new IllegalStateException(
-                            "Native exact-key update processed " + processed + " of 1 entry.");
-                }
-                int status = mutationSlot.fillStatus(0);
-                int error = mutationSlot.fillError(0);
-                boolean applied =
-                        error == NativeRequestPlaneBridge.ERROR_OK
-                                && (status == NativeRequestPlaneBridge.FILL_INSERTED
-                                        || status == NativeRequestPlaneBridge.FILL_UPDATED);
-                boolean superseded =
-                        error == NativeRequestPlaneBridge.ERROR_OK
-                                && status
-                                        == NativeRequestPlaneBridge
-                                                .FILL_REJECTED_STALE_GENERATION;
-                if (!applied && !superseded) {
-                    throw new IllegalStateException(
-                            "Native exact-key update returned status="
-                                    + status
-                                    + ", error="
-                                    + error
-                                    + ".");
-                }
-                return status;
+                return fillPreparedMutation();
             } catch (IOException failure) {
                 disableLocked(failure);
                 throw failure;
             } catch (RuntimeException | LinkageError failure) {
                 disableLocked(failure);
                 throw failure;
+            }
+        }
+    }
+
+    /**
+     * Writes one exact key/value pair directly into the reusable mutation slot.
+     *
+     * <p>A {@code null} value writer denotes a negative entry. Both writers are invoked while the
+     * plane lock is held, and a serialization failure publishes no fill to the native plane.
+     */
+    public int updateExactKey(
+            int stateId,
+            long generation,
+            SerializedKeyBatch.DirectKeyWriter directKeyWriter,
+            DirectValueWriter directValueWriter)
+            throws IOException {
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                mutationSlot.prepareSingleFill(
+                        stateId, generation, directKeyWriter, directValueWriter);
+                return fillPreparedMutation();
+            } catch (IOException failure) {
+                disableLocked(failure);
+                throw failure;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
+    /**
+     * Advances the state watermark and updates one exact key only when it is already resident.
+     *
+     * <p>The membership check, conditional value serialization, and update are serialized under
+     * the plane lock, so no native probe can interleave between the check and update. The earlier
+     * interval from the authoritative RocksDB mutation to this method is protected by mailbox
+     * serialization and by the generation revalidation on asynchronous reads.
+     */
+    public int updateExactKeyIfPresent(
+            int stateId,
+            long generation,
+            SerializedKeyBatch.DirectKeyWriter directKeyWriter,
+            DirectValueWriter directValueWriter)
+            throws IOException {
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                mutationSlot.prepareSingleMutationCheck(
+                        stateId, generation, directKeyWriter);
+                int checkStatus = fillPreparedMutationControl();
+                if (checkStatus != NativeRequestPlaneBridge.FILL_UPDATED) {
+                    return checkStatus;
+                }
+                mutationSlot.prepareConditionalUpdateForPreparedKey(directValueWriter);
+                return fillPreparedConditionalMutation();
+            } catch (IOException failure) {
+                disableLocked(failure);
+                throw failure;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
+    /**
+     * Advances one state's generation fence without publishing a value.
+     *
+     * <p>The exact key is only a carrier for the state id and generation. A resident entry is not
+     * changed and an absent entry is never inserted. This is used when a mailbox batch contains
+     * authoritative RocksDB writes but the no-false-negative resident hint rejects every mutation
+     * candidate; advancing the watermark still invalidates any older asynchronous fill.
+     */
+    public int advanceGenerationFence(
+            int stateId, long generation, byte[] preparedRocksDBKey) throws IOException {
+        Objects.requireNonNull(preparedRocksDBKey, "preparedRocksDBKey");
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                mutationSlot.prepareSingleMutationCheck(
+                        stateId, generation, output -> output.write(preparedRocksDBKey));
+                return fillPreparedMutationControl();
+            } catch (IOException failure) {
+                disableLocked(failure);
+                throw failure;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
+    /**
+     * Returns a no-false-negative hint for keys that have ever been accepted by this native plane.
+     *
+     * <p>A false positive only causes the authoritative update-only path to perform an extra exact
+     * lookup. Bits are never cleared during the coordinator lifetime, so eviction cannot turn a
+     * previously resident key into a false negative.
+     */
+    public boolean mightContainResidentKey(int stateId, byte[] preparedRocksDBKey) {
+        Objects.requireNonNull(preparedRocksDBKey, "preparedRocksDBKey");
+        return residentKeyHint.mightContain(stateId, preparedRocksDBKey);
+    }
+
+    /**
+     * Advances one state's generation fence and checks a bounded exact-key vector in JNI batches.
+     *
+     * <p>The returned status vector is aligned with {@code preparedRocksDBKeys}. A {@code null}
+     * return means no bounded slot was available before any native call; callers may safely fall
+     * back to the established per-mutation path. Once a slot is acquired, every native error fails
+     * closed and disables the request plane.
+     */
+    public int[] tryCheckExactKeysPresent(
+            int stateId, long generation, List<byte[]> preparedRocksDBKeys) throws IOException {
+        Objects.requireNonNull(preparedRocksDBKeys, "preparedRocksDBKeys");
+        if (preparedRocksDBKeys.isEmpty()) {
+            return new int[0];
+        }
+        BatchSlot slot = tryAcquireBatchSlot();
+        if (slot == null) {
+            return null;
+        }
+        try (BatchSlot ignored = slot) {
+            int[] statuses = new int[preparedRocksDBKeys.size()];
+            int from = 0;
+            while (from < preparedRocksDBKeys.size()) {
+                int to = boundedMutationChunkEnd(preparedRocksDBKeys, null, from);
+                slot.prepareMutationChecks(
+                        stateId, generation, preparedRocksDBKeys, from, to);
+                fillAndCopyMutationStatuses(slot, statuses, from, to);
+                from = to;
+            }
+            return statuses;
+        } catch (IOException failure) {
+            disable(failure);
+            throw failure;
+        } catch (RuntimeException | LinkageError failure) {
+            disable(failure);
+            throw failure;
+        }
+    }
+
+    /**
+     * Publishes an aligned exact-key/value vector with update-only semantics.
+     *
+     * <p>Absent or concurrently evicted entries remain absent; this method never inserts or
+     * resurrects a cache entry. The generation fence must already have been advanced by {@link
+     * #tryCheckExactKeysPresent(int, long, List)}.
+     */
+    public int[] updateExactKeysIfPresent(
+            int stateId,
+            long generation,
+            List<byte[]> preparedRocksDBKeys,
+            List<byte[]> serializedValues)
+            throws IOException {
+        Objects.requireNonNull(preparedRocksDBKeys, "preparedRocksDBKeys");
+        Objects.requireNonNull(serializedValues, "serializedValues");
+        if (preparedRocksDBKeys.size() != serializedValues.size()) {
+            throw new IllegalArgumentException("Native mutation key/value vectors must align.");
+        }
+        if (preparedRocksDBKeys.isEmpty()) {
+            return new int[0];
+        }
+        BatchSlot slot = tryAcquireBatchSlot();
+        if (slot == null) {
+            int[] statuses = new int[preparedRocksDBKeys.size()];
+            for (int index = 0; index < statuses.length; index++) {
+                statuses[index] =
+                        updateExactKeyKnownPresent(
+                                stateId,
+                                generation,
+                                preparedRocksDBKeys.get(index),
+                                serializedValues.get(index));
+            }
+            return statuses;
+        }
+        try (BatchSlot ignored = slot) {
+            int[] statuses = new int[preparedRocksDBKeys.size()];
+            int from = 0;
+            while (from < preparedRocksDBKeys.size()) {
+                int to = boundedMutationChunkEnd(preparedRocksDBKeys, serializedValues, from);
+                slot.prepareConditionalMutationUpdates(
+                        stateId,
+                        generation,
+                        preparedRocksDBKeys,
+                        serializedValues,
+                        from,
+                        to);
+                fillAndCopyMutationStatuses(slot, statuses, from, to);
+                from = to;
+            }
+            return statuses;
+        } catch (IOException failure) {
+            disable(failure);
+            throw failure;
+        } catch (RuntimeException | LinkageError failure) {
+            disable(failure);
+            throw failure;
+        }
+    }
+
+    private int updateExactKeyKnownPresent(
+            int stateId, long generation, byte[] preparedRocksDBKey, byte[] serializedValue)
+            throws IOException {
+        synchronized (planeLock) {
+            requireActive();
+            try {
+                mutationSlot.prepareSingleConditionalUpdate(
+                        stateId, generation, preparedRocksDBKey, serializedValue);
+                return fillPreparedConditionalMutation();
+            } catch (IOException failure) {
+                disableLocked(failure);
+                throw failure;
+            } catch (RuntimeException | LinkageError failure) {
+                disableLocked(failure);
+                throw failure;
+            }
+        }
+    }
+
+    private int boundedMutationChunkEnd(
+            List<byte[]> keys, List<byte[]> values, int fromIndex) throws IOException {
+        int maxEntries = Math.min(options.batchEntries(), keys.size() - fromIndex);
+        long keyBytes = 0;
+        long valueBytes = 0;
+        int count = 0;
+        while (count < maxEntries) {
+            byte[] key = Objects.requireNonNull(keys.get(fromIndex + count), "mutation key");
+            byte[] value = values == null ? null : values.get(fromIndex + count);
+            long nextKeyBytes = keyBytes + key.length;
+            long nextValueBytes = valueBytes + (value == null ? 0 : value.length);
+            if (count > 0
+                    && (nextKeyBytes > options.batchKeyArenaBytes()
+                            || nextValueBytes > options.batchValueArenaBytes())) {
+                break;
+            }
+            if (nextKeyBytes > options.batchKeyArenaBytes()
+                    || nextValueBytes > options.batchValueArenaBytes()) {
+                throw new IOException("One native mutation exceeds the bounded batch arena.");
+            }
+            keyBytes = nextKeyBytes;
+            valueBytes = nextValueBytes;
+            count++;
+        }
+        return fromIndex + count;
+    }
+
+    private void fillAndCopyMutationStatuses(
+            BatchSlot slot, int[] statuses, int fromIndex, int toIndex) {
+        int expected = toIndex - fromIndex;
+        int processed = fill(slot);
+        if (processed != expected) {
+            throw new IllegalStateException(
+                    "Native resident mutation batch processed "
+                            + processed
+                            + " of "
+                            + expected
+                            + " entries.");
+        }
+        for (int local = 0; local < expected; local++) {
+            int status = slot.fillStatus(local);
+            int error = slot.fillError(local);
+            boolean valid =
+                    error == NativeRequestPlaneBridge.ERROR_OK
+                            && (status == NativeRequestPlaneBridge.FILL_UPDATED
+                                    || status == NativeRequestPlaneBridge.FILL_NOT_PRESENT
+                                    || status
+                                            == NativeRequestPlaneBridge
+                                                    .FILL_REJECTED_STALE_GENERATION);
+            if (!valid) {
+                throw new IllegalStateException(
+                        "Native resident mutation batch returned status="
+                                + status
+                                + ", error="
+                                + error
+                                + ".");
+            }
+            statuses[fromIndex + local] = status;
+        }
+    }
+
+    private int fillPreparedMutation() {
+        int status = fillPreparedMutationRaw();
+        int error = mutationSlot.fillError(0);
+        boolean applied =
+                error == NativeRequestPlaneBridge.ERROR_OK
+                        && (status == NativeRequestPlaneBridge.FILL_INSERTED
+                                || status == NativeRequestPlaneBridge.FILL_UPDATED);
+        boolean superseded =
+                error == NativeRequestPlaneBridge.ERROR_OK
+                        && status == NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION;
+        if (!applied && !superseded) {
+            throw new IllegalStateException(
+                    "Native exact-key update returned status=" + status + ", error=" + error + ".");
+        }
+        return status;
+    }
+
+    private int fillPreparedMutationControl() {
+        int status = fillPreparedMutationRaw();
+        int error = mutationSlot.fillError(0);
+        boolean valid =
+                error == NativeRequestPlaneBridge.ERROR_OK
+                        && (status == NativeRequestPlaneBridge.FILL_UPDATED
+                                || status == NativeRequestPlaneBridge.FILL_NOT_PRESENT
+                                || status
+                                        == NativeRequestPlaneBridge
+                                                .FILL_REJECTED_STALE_GENERATION);
+        if (!valid) {
+            throw new IllegalStateException(
+                    "Native resident check returned status=" + status + ", error=" + error + ".");
+        }
+        return status;
+    }
+
+    private int fillPreparedConditionalMutation() {
+        int status = fillPreparedMutationRaw();
+        int error = mutationSlot.fillError(0);
+        boolean valid =
+                error == NativeRequestPlaneBridge.ERROR_OK
+                        && (status == NativeRequestPlaneBridge.FILL_UPDATED
+                                || status == NativeRequestPlaneBridge.FILL_NOT_PRESENT
+                                || status
+                                        == NativeRequestPlaneBridge
+                                                .FILL_REJECTED_STALE_GENERATION);
+        if (!valid) {
+            throw new IllegalStateException(
+                    "Native resident update returned status=" + status + ", error=" + error + ".");
+        }
+        return status;
+    }
+
+    private int fillPreparedMutationRaw() {
+        int processed;
+        residentKeyHint.beginUpdate();
+        try {
+            processed =
+                    plane.fillBatch(
+                            mutationSlot.missKeys,
+                            mutationSlot.fillValueArena(),
+                            mutationSlot.fillValueMetadata(),
+                            mutationSlot.fillResults());
+            recordAcceptedResidentHints(mutationSlot, processed);
+        } finally {
+            residentKeyHint.endUpdate();
+        }
+        fillCalls++;
+        if (processed != 1) {
+            throw new IllegalStateException(
+                    "Native exact-key update processed " + processed + " of 1 entry.");
+        }
+        return mutationSlot.fillStatus(0);
+    }
+
+    private void recordAcceptedResidentHints(BatchSlot slot, int processed) {
+        int count = Math.min(processed, slot.missKeys.entryCount());
+        if (count <= 0) {
+            return;
+        }
+        ByteBuffer arena = slot.missKeys.arenaSlice();
+        for (int index = 0; index < count; index++) {
+            int status = slot.fillStatus(index);
+            int error = slot.fillError(index);
+            if (error == NativeRequestPlaneBridge.ERROR_OK
+                    && (status == NativeRequestPlaneBridge.FILL_INSERTED
+                            || status == NativeRequestPlaneBridge.FILL_UPDATED)) {
+                residentKeyHint.add(
+                        slot.missKeys.stateId(index),
+                        arena,
+                        slot.missKeys.arenaOffset(index),
+                        slot.missKeys.serializedLength(index));
             }
         }
     }
@@ -297,12 +833,36 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         return leaseMisses;
     }
 
+    public long mapDistinctReadLeases() {
+        return mapDistinctReadLeases;
+    }
+
+    public long mapDistinctReadLeaseMisses() {
+        return mapDistinctReadLeaseMisses;
+    }
+
+    public long compactionScratchLeases() {
+        return compactionScratchLeases;
+    }
+
+    public long compactionScratchLeaseMisses() {
+        return compactionScratchLeaseMisses;
+    }
+
     public long probeCalls() {
         return probeCalls;
     }
 
     public long fillCalls() {
         return fillCalls;
+    }
+
+    public long compactCalls() {
+        return compactCalls;
+    }
+
+    public long groupCalls() {
+        return groupCalls;
     }
 
     long mutationSlotDirectBytesForTesting() {
@@ -319,6 +879,17 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         }
     }
 
+    long compactionScratchSlotDirectBytesForTesting() {
+        synchronized (availableCompactionScratchSlots) {
+            BatchSlot slot = availableCompactionScratchSlots.peekFirst();
+            if (slot == null) {
+                throw new IllegalStateException(
+                        "No native mailbox compaction scratch slot is available.");
+            }
+            return slot.allocatedDirectBytes;
+        }
+    }
+
     public void disable(Throwable cause) {
         synchronized (planeLock) {
             disableLocked(Objects.requireNonNull(cause, "cause"));
@@ -327,14 +898,56 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
 
     @Override
     public void close() {
+        // First serialize with any JNI caller and stop new leases/calls. Existing batch slots can
+        // still be owned by queued or completing state tasks; destroying the plane before those
+        // leases are returned leaves teardown correctness dependent on task timing.
         synchronized (planeLock) {
             if (planeClosed) {
                 return;
             }
             active = false;
             disableCause = new IllegalStateException("Native request plane was closed.");
-            planeClosed = true;
-            plane.close();
+        }
+
+        boolean interrupted = false;
+        synchronized (availableSlots) {
+            while (availableSlots.size() != options.batchSlots()) {
+                try {
+                    availableSlots.wait();
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        }
+        int expectedMapDistinctReadSlots = options.directArenaMultiGetEnabled() ? 1 : 0;
+        synchronized (availableMapDistinctReadSlots) {
+            while (availableMapDistinctReadSlots.size() != expectedMapDistinctReadSlots) {
+                try {
+                    availableMapDistinctReadSlots.wait();
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        }
+        int expectedScratchSlots = options.compactionScratchSlotEnabled() ? 1 : 0;
+        synchronized (availableCompactionScratchSlots) {
+            while (availableCompactionScratchSlots.size() != expectedScratchSlots) {
+                try {
+                    availableCompactionScratchSlots.wait();
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        }
+
+        synchronized (planeLock) {
+            if (!planeClosed) {
+                planeClosed = true;
+                plane.close();
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -363,9 +976,147 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     private void release(BatchSlot slot) {
         requireOwnedSlot(slot);
         slot.reset();
-        synchronized (availableSlots) {
+        ArrayDeque<BatchSlot> pool =
+                slot.kind == SlotKind.COMPACTION_SCRATCH
+                        ? availableCompactionScratchSlots
+                        : (slot.kind == SlotKind.MAP_DISTINCT_READ
+                                ? availableMapDistinctReadSlots
+                                : availableSlots);
+        synchronized (pool) {
             slot.leased = false;
-            availableSlots.addLast(slot);
+            pool.addLast(slot);
+            pool.notifyAll();
+        }
+    }
+
+    private enum SlotKind {
+        REGULAR,
+        MAP_DISTINCT_READ,
+        COMPACTION_SCRATCH,
+        MUTATION
+    }
+
+    /** Backend-lifetime one-way gate used to preserve coherent read-activated write-through. */
+    @Internal
+    public static final class ValueReadActivation {
+        private final AtomicBoolean active = new AtomicBoolean();
+
+        public boolean activate() {
+            return active.compareAndSet(false, true);
+        }
+
+        public boolean isActive() {
+            return active.get();
+        }
+    }
+
+    /** Fixed-size, monotonically populated Bloom hint; saturation affects cost, never semantics. */
+    private static final class ResidentKeyHint {
+        private static final int MIN_BITS = 1 << 16;
+        private static final int MAX_BITS = 1 << 26;
+        private static final int BITS_PER_CAPACITY_ENTRY = 8;
+        private static final int PROBES = 3;
+        private static final long HASH_OFFSET = 0xcbf29ce484222325L;
+        private static final long HASH_PRIME = 0x100000001b3L;
+        private static final long HASH_SALT = 0x9e3779b97f4a7c15L;
+
+        private final AtomicLongArray words;
+        private final AtomicLong updateVersion = new AtomicLong();
+        private final int bitMask;
+
+        private ResidentKeyHint(int capacityEntries) {
+            long requested = Math.max(MIN_BITS, (long) capacityEntries * BITS_PER_CAPACITY_ENTRY);
+            int bits = MIN_BITS;
+            while (bits < requested && bits < MAX_BITS) {
+                bits <<= 1;
+            }
+            words = new AtomicLongArray(bits >>> 6);
+            bitMask = bits - 1;
+        }
+
+        private void add(int stateId, ByteBuffer bytes, int offset, int length) {
+            long hash = hash(stateId, bytes, offset, length);
+            setProbes(hash);
+        }
+
+        private void beginUpdate() {
+            long version = updateVersion.incrementAndGet();
+            if ((version & 1L) == 0L) {
+                throw new IllegalStateException("Resident-key hint update already in progress.");
+            }
+        }
+
+        private void endUpdate() {
+            long version = updateVersion.incrementAndGet();
+            if ((version & 1L) != 0L) {
+                throw new IllegalStateException("Resident-key hint update was not in progress.");
+            }
+        }
+
+        private boolean mightContain(int stateId, byte[] bytes) {
+            long before = updateVersion.get();
+            if ((before & 1L) != 0L) {
+                return true;
+            }
+            long hash = hash(stateId, bytes);
+            long stride = mix64(hash ^ HASH_SALT) | 1L;
+            for (int probe = 0; probe < PROBES; probe++) {
+                int bit = (int) (hash + probe * stride) & bitMask;
+                long mask = 1L << (bit & 63);
+                if ((words.get(bit >>> 6) & mask) == 0L) {
+                    long after = updateVersion.get();
+                    return before != after || (after & 1L) != 0L;
+                }
+            }
+            return true;
+        }
+
+        private void setProbes(long hash) {
+            long stride = mix64(hash ^ HASH_SALT) | 1L;
+            for (int probe = 0; probe < PROBES; probe++) {
+                int bit = (int) (hash + probe * stride) & bitMask;
+                int wordIndex = bit >>> 6;
+                long mask = 1L << (bit & 63);
+                long observed;
+                do {
+                    observed = words.get(wordIndex);
+                    if ((observed & mask) != 0L) {
+                        break;
+                    }
+                } while (!words.compareAndSet(wordIndex, observed, observed | mask));
+            }
+        }
+
+        private static long hash(int stateId, byte[] bytes) {
+            long hash = seed(stateId, bytes.length);
+            for (byte value : bytes) {
+                hash ^= value & 0xffL;
+                hash *= HASH_PRIME;
+            }
+            return mix64(hash);
+        }
+
+        private static long hash(int stateId, ByteBuffer bytes, int offset, int length) {
+            long hash = seed(stateId, length);
+            for (int index = 0; index < length; index++) {
+                hash ^= bytes.get(offset + index) & 0xffL;
+                hash *= HASH_PRIME;
+            }
+            return mix64(hash);
+        }
+
+        private static long seed(int stateId, int length) {
+            return HASH_OFFSET
+                    ^ (Integer.toUnsignedLong(stateId) * HASH_SALT)
+                    ^ Integer.toUnsignedLong(length);
+        }
+
+        private static long mix64(long value) {
+            value ^= value >>> 33;
+            value *= 0xff51afd7ed558ccdL;
+            value ^= value >>> 33;
+            value *= 0xc4ceb9fe1a85ec53L;
+            return value ^ (value >>> 33);
         }
     }
 
@@ -374,58 +1125,92 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     public static final class BatchSlot implements AutoCloseable {
 
         private final NativeRequestPlaneCoordinator owner;
+        private final SlotKind kind;
         private final SerializedKeyBatch<byte[], byte[]> preparedKeys;
         private final SerializedKeyBatch<byte[], byte[]> missKeys;
         private final ByteBuffer probeValueOutput;
         private final DirectBufferDataInputView probeValueInput;
         private final ByteBuffer probeResults;
         private final ByteBuffer valueArena;
+        private final DirectBufferDataInputView directMultiGetValueInput;
+        private final DirectBufferDataOutputView valueArenaOutput;
         private final ByteBuffer valueMetadata;
         private final ByteBuffer fillResults;
+        private final ByteBuffer directMultiGetDescriptors;
+        private final ByteBuffer uniqueSourceIndexes;
+        private final ByteBuffer sourceGroupIndexes;
         private final long allocatedDirectBytes;
 
         private boolean leased;
         private int fillValueBytes;
         private long preparedFillGeneration;
+        private int compactedEntryCount;
+        private int directMultiGetCount;
+        private int directMultiGetValueStride;
 
-        private BatchSlot(
-                NativeRequestPlaneCoordinator owner, NativeRequestPlaneOptions options) {
-            this(owner, options, false);
+        private BatchSlot(NativeRequestPlaneCoordinator owner, NativeRequestPlaneOptions options) {
+            this(owner, options, SlotKind.REGULAR);
         }
 
         private BatchSlot(
                 NativeRequestPlaneCoordinator owner,
                 NativeRequestPlaneOptions options,
-                boolean mutationOnly) {
+                SlotKind kind) {
             this.owner = owner;
-            int entries = mutationOnly ? 1 : options.batchEntries();
-            int preparedArenaBytes = mutationOnly ? 0 : options.batchKeyArenaBytes();
+            this.kind = kind;
+            boolean mutationOnly = kind == SlotKind.MUTATION;
+            boolean compactionOnly = kind == SlotKind.COMPACTION_SCRATCH;
+            int entries =
+                    mutationOnly
+                            ? 1
+                            : (compactionOnly
+                                    ? options.compactionScratchEntries()
+                                    : options.batchEntries());
+            int preparedArenaBytes =
+                    mutationOnly
+                            ? 0
+                            : (compactionOnly
+                                    ? options.compactionScratchKeyArenaBytes()
+                                    : options.batchKeyArenaBytes());
             int preparedMetadataBytes =
                     mutationOnly
                             ? 0
-                            : Math.multiplyExact(
-                                    entries, SerializedKeyBatch.METADATA_RECORD_BYTES);
-            int missArenaBytes = options.batchKeyArenaBytes();
+                            : Math.multiplyExact(entries, SerializedKeyBatch.METADATA_RECORD_BYTES);
+            int missArenaBytes = compactionOnly ? 0 : options.batchKeyArenaBytes();
             int missMetadataBytes =
-                    Math.multiplyExact(entries, SerializedKeyBatch.METADATA_RECORD_BYTES);
-            int probeValueBytes = mutationOnly ? 0 : options.batchValueArenaBytes();
-            int probeResultBytes =
-                    mutationOnly
+                    compactionOnly
                             ? 0
                             : Math.multiplyExact(
-                                    entries,
-                                    NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
-            int valueArenaBytes = options.batchValueArenaBytes();
+                                    entries, SerializedKeyBatch.METADATA_RECORD_BYTES);
+            int probeValueBytes =
+                    mutationOnly || compactionOnly ? 0 : options.batchValueArenaBytes();
+            int probeResultBytes =
+                    mutationOnly || compactionOnly
+                            ? 0
+                            : Math.multiplyExact(
+                                    entries, NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
+            int valueArenaBytes = compactionOnly ? 0 : options.batchValueArenaBytes();
             int valueMetadataBytes =
-                    Math.multiplyExact(
-                            entries, NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES);
+                    compactionOnly
+                            ? 0
+                            : Math.multiplyExact(
+                                    entries, NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES);
             int fillResultBytes =
-                    Math.multiplyExact(
-                            entries, NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES);
+                    compactionOnly
+                            ? 0
+                            : Math.multiplyExact(
+                                    entries, NativeRequestPlaneBridge.FILL_RESULT_RECORD_BYTES);
+            int directMultiGetDescriptorBytes =
+                    mutationOnly || compactionOnly || !options.directArenaMultiGetEnabled()
+                            ? 0
+                            : Math.multiplyExact(
+                                    RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH,
+                                    RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES);
+            int uniqueIndexBytes = mutationOnly ? 0 : Math.multiplyExact(entries, Integer.BYTES);
+            int groupIndexBytes = compactionOnly ? 0 : uniqueIndexBytes;
 
             ByteBuffer preparedArena = ByteBuffer.allocateDirect(preparedArenaBytes);
-            ByteBuffer preparedMetadata =
-                    ByteBuffer.allocateDirect(preparedMetadataBytes);
+            ByteBuffer preparedMetadata = ByteBuffer.allocateDirect(preparedMetadataBytes);
             ByteBuffer missArena = ByteBuffer.allocateDirect(missArenaBytes);
             ByteBuffer missMetadata = ByteBuffer.allocateDirect(missMetadataBytes);
             this.preparedKeys =
@@ -434,15 +1219,21 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             this.probeValueOutput = ByteBuffer.allocateDirect(probeValueBytes);
             this.probeValueInput = new DirectBufferDataInputView(probeValueOutput);
             this.probeResults =
-                    ByteBuffer.allocateDirect(probeResultBytes)
-                            .order(ByteOrder.nativeOrder());
+                    ByteBuffer.allocateDirect(probeResultBytes).order(ByteOrder.nativeOrder());
             this.valueArena = ByteBuffer.allocateDirect(valueArenaBytes);
+            this.directMultiGetValueInput = new DirectBufferDataInputView(this.valueArena);
+            this.valueArenaOutput = new DirectBufferDataOutputView(this.valueArena);
             this.valueMetadata =
-                    ByteBuffer.allocateDirect(valueMetadataBytes)
-                            .order(ByteOrder.nativeOrder());
+                    ByteBuffer.allocateDirect(valueMetadataBytes).order(ByteOrder.nativeOrder());
             this.fillResults =
-                    ByteBuffer.allocateDirect(fillResultBytes)
+                    ByteBuffer.allocateDirect(fillResultBytes).order(ByteOrder.nativeOrder());
+            this.directMultiGetDescriptors =
+                    ByteBuffer.allocateDirect(directMultiGetDescriptorBytes)
                             .order(ByteOrder.nativeOrder());
+            this.uniqueSourceIndexes =
+                    ByteBuffer.allocateDirect(uniqueIndexBytes).order(ByteOrder.nativeOrder());
+            this.sourceGroupIndexes =
+                    ByteBuffer.allocateDirect(groupIndexBytes).order(ByteOrder.nativeOrder());
             this.allocatedDirectBytes =
                     (long) preparedArenaBytes
                             + preparedMetadataBytes
@@ -452,7 +1243,15 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                             + probeResultBytes
                             + valueArenaBytes
                             + valueMetadataBytes
-                            + fillResultBytes;
+                            + fillResultBytes
+                            + directMultiGetDescriptorBytes
+                            + uniqueIndexBytes
+                            + groupIndexBytes;
+        }
+
+        /** Whether this lease can only compact and must not escape the mailbox thread. */
+        public boolean isCompactionScratch() {
+            return kind == SlotKind.COMPACTION_SCRATCH;
         }
 
         public void prepareLatest(
@@ -460,6 +1259,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                 throws IOException {
             requireLeased();
             preparedKeys.clear();
+            compactedEntryCount = 0;
             preparedFillGeneration = fillGeneration;
             if (preparedRocksDBKeys.size() > preparedKeys.maxEntries()) {
                 throw new IOException(
@@ -469,10 +1269,226 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                                 + preparedKeys.maxEntries()
                                 + ".");
             }
+            long probeGeneration =
+                    owner.options.writeThroughMutations()
+                            ? NativeRequestPlaneBridge.PROBE_LATEST_GENERATION
+                            : fillGeneration;
             for (byte[] key : preparedRocksDBKeys) {
-                preparedKeys.appendSerialized(
-                        stateId, NativeRequestPlaneBridge.PROBE_LATEST_GENERATION, key);
+                preparedKeys.appendSerialized(stateId, probeGeneration, key);
             }
+        }
+
+        /** Prepares one exact key by serializing directly into this slot's direct arena. */
+        public void prepareLatest(
+                int stateId,
+                long fillGeneration,
+                SerializedKeyBatch.DirectKeyWriter directKeyWriter)
+                throws IOException {
+            requireLeased();
+            preparedKeys.clear();
+            compactedEntryCount = 0;
+            preparedFillGeneration = fillGeneration;
+            long probeGeneration =
+                    owner.options.writeThroughMutations()
+                            ? NativeRequestPlaneBridge.PROBE_LATEST_GENERATION
+                            : fillGeneration;
+            preparedKeys.appendSerialized(stateId, probeGeneration, directKeyWriter);
+        }
+
+        /**
+         * Prepares one exact-generation key even when value-cache mutations use latest-key probes.
+         *
+         * <p>MapSnapshot invalidation relies on a generation mismatch producing MISS. It must not
+         * observe an older EMPTY/SINGLE entry through the latest-generation sentinel.
+         */
+        public void prepareExact(
+                int stateId,
+                long generation,
+                SerializedKeyBatch.DirectKeyWriter directKeyWriter)
+                throws IOException {
+            requireLeased();
+            preparedKeys.clear();
+            compactedEntryCount = 0;
+            preparedFillGeneration = generation;
+            preparedKeys.appendSerialized(stateId, generation, directKeyWriter);
+        }
+
+        /** Prepares an indexed exact-key batch without materializing per-key heap arrays. */
+        public void prepareLatestDirect(
+                int stateId,
+                long fillGeneration,
+                int count,
+                SerializedKeyBatch.IndexedDirectKeyWriter directKeyWriter)
+                throws IOException {
+            requireLeased();
+            if (count < 0 || count > preparedKeys.maxEntries()) {
+                throw new IOException(
+                        "Prepared native direct batch has "
+                                + count
+                                + " entries but slot capacity is "
+                                + preparedKeys.maxEntries()
+                                + ".");
+            }
+            preparedKeys.clear();
+            compactedEntryCount = 0;
+            preparedFillGeneration = fillGeneration;
+            long probeGeneration =
+                    owner.options.writeThroughMutations()
+                            ? NativeRequestPlaneBridge.PROBE_LATEST_GENERATION
+                            : fillGeneration;
+            for (int index = 0; index < count; index++) {
+                final int sourceIndex = index;
+                int appended =
+                        preparedKeys.appendSerialized(
+                                stateId,
+                                probeGeneration,
+                                output -> directKeyWriter.write(sourceIndex, output));
+                if (preparedKeys.serializedLength(appended) == 0) {
+                    throw new IOException(
+                            "Prepared native direct key at index " + index + " is empty.");
+                }
+            }
+        }
+
+        /** Copies one prepared exact key for an API that still requires a heap byte array. */
+        public byte[] copyPreparedKey(int index) {
+            requireLeased();
+            int offset = preparedKeys.arenaOffset(index);
+            int length = preparedKeys.serializedLength(index);
+            byte[] copy = new byte[length];
+            ByteBuffer source = preparedKeys.arenaSlice();
+            source.position(offset);
+            source.get(copy);
+            return copy;
+        }
+
+        /**
+         * Builds one bounded direct-arena MultiGet descriptor chunk over prepared keys.
+         *
+         * <p>The prepared key arena remains immutable. The value arena is divided by the selected
+         * call geometry rather than the final chunk length, so a short tail cannot change the
+         * overflow boundary. The three-argument overload retains the legacy 64-slot geometry.
+         */
+        public void prepareDirectArenaMultiGet(
+                int[] preparedIndices, int fromIndex, int count) {
+            prepareDirectArenaMultiGet(
+                    preparedIndices,
+                    fromIndex,
+                    count,
+                    RocksDBBatchValueReader.DIRECT_ARENA_DEFAULT_BATCH);
+        }
+
+        public void prepareDirectArenaMultiGet(
+                int[] preparedIndices, int fromIndex, int count, int valueSlotCount) {
+            requireLeased();
+            Objects.requireNonNull(preparedIndices, "preparedIndices");
+            if (fromIndex < 0
+                    || count <= 0
+                    || count > RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH
+                    || fromIndex > preparedIndices.length - count) {
+                throw new IllegalArgumentException("Invalid direct-arena MultiGet chunk.");
+            }
+            if (valueSlotCount < count
+                    || valueSlotCount > RocksDBBatchValueReader.DIRECT_ARENA_MAX_BATCH) {
+                throw new IllegalArgumentException("Invalid direct-arena value-slot count.");
+            }
+            int stride = valueArena.capacity() / valueSlotCount;
+            if (stride <= 0) {
+                throw new IllegalStateException(
+                        "Native batch value arena is too small for direct MultiGet slots.");
+            }
+            directMultiGetDescriptors.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            for (int target = 0; target < count; target++) {
+                int source = preparedIndices[fromIndex + target];
+                checkPreparedIndex(source);
+                int base = target * RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES;
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_STATE_ID_OFFSET,
+                        preparedKeys.stateId(source));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_ORIGINAL_INDEX_OFFSET, source);
+                directMultiGetDescriptors.putLong(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_GENERATION_OFFSET,
+                        preparedKeys.generation(source));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_KEY_OFFSET,
+                        preparedKeys.arenaOffset(source));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_KEY_LENGTH_OFFSET,
+                        preparedKeys.serializedLength(source));
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_VALUE_OFFSET,
+                        target * stride);
+                directMultiGetDescriptors.putInt(
+                        base + RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET,
+                        Integer.MIN_VALUE);
+            }
+            directMultiGetCount = count;
+            directMultiGetValueStride = stride;
+        }
+
+        public ByteBuffer directMultiGetKeyArena() {
+            requireDirectMultiGetPrepared();
+            return preparedKeys.arenaSlice();
+        }
+
+        public ByteBuffer directMultiGetDescriptors() {
+            requireDirectMultiGetPrepared();
+            ByteBuffer descriptors =
+                    directMultiGetDescriptors.duplicate().order(ByteOrder.nativeOrder());
+            descriptors.position(0);
+            descriptors.limit(
+                    directMultiGetCount
+                            * RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES);
+            return descriptors.slice().order(ByteOrder.nativeOrder());
+        }
+
+        public ByteBuffer directMultiGetValueArena() {
+            requireDirectMultiGetPrepared();
+            ByteBuffer values = valueArena.duplicate();
+            values.position(0);
+            values.limit(directMultiGetCount * directMultiGetValueStride);
+            return values.slice();
+        }
+
+        public int directMultiGetValueStride() {
+            requireDirectMultiGetPrepared();
+            return directMultiGetValueStride;
+        }
+
+        public int directMultiGetResult(int index) {
+            requireDirectMultiGetIndex(index);
+            return directMultiGetDescriptors.getInt(
+                    index * RocksDBBatchValueReader.DIRECT_ARENA_DESCRIPTOR_BYTES
+                            + RocksDBBatchValueReader.DIRECT_ARENA_RESULT_OFFSET);
+        }
+
+        public byte[] copyDirectMultiGetValue(int index) {
+            int length = directMultiGetResult(index);
+            if (length < 0 || length > directMultiGetValueStride) {
+                throw new IllegalStateException(
+                        "Direct-arena result at " + index + " is not a present in-slot value.");
+            }
+            byte[] copy = new byte[length];
+            if (length != 0) {
+                ByteBuffer source = valueArena.duplicate();
+                source.position(index * directMultiGetValueStride);
+                source.get(copy);
+            }
+            return copy;
+        }
+
+        /** Reuses one bounded view over an in-slot direct MultiGet value without a heap copy. */
+        public DirectBufferDataInputView directMultiGetValueInput(int index) {
+            int length = directMultiGetResult(index);
+            if (length < 0 || length > directMultiGetValueStride) {
+                throw new IllegalStateException(
+                        "Direct-arena result at " + index + " is not a present in-slot value.");
+            }
+            directMultiGetValueInput.reset(index * directMultiGetValueStride, length);
+            return directMultiGetValueInput;
         }
 
         public void prepareFill(
@@ -523,8 +1539,106 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             }
         }
 
+        /** Prepares native fill while copying miss keys direct-to-direct from the prepared arena. */
+        public void prepareFillFromPreparedIndices(
+                int stateId,
+                long generation,
+                int[] preparedIndices,
+                int count,
+                List<byte[]> compactMissValues)
+                throws IOException {
+            requireLeased();
+            Objects.requireNonNull(preparedIndices, "preparedIndices");
+            Objects.requireNonNull(compactMissValues, "compactMissValues");
+            if (count < 0
+                    || count > preparedIndices.length
+                    || count != compactMissValues.size()) {
+                throw new IllegalArgumentException("Prepared miss key/value counts differ.");
+            }
+            missKeys.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            fillValueBytes = 0;
+            ByteBuffer preparedArena = preparedKeys.arenaSlice();
+            for (int index = 0; index < count; index++) {
+                int source = preparedIndices[index];
+                checkPreparedIndex(source);
+                missKeys.appendSerialized(
+                        stateId,
+                        generation,
+                        preparedArena,
+                        preparedKeys.arenaOffset(source),
+                        preparedKeys.serializedLength(source));
+                putFillValueMetadata(index, compactMissValues.get(index));
+            }
+        }
+
         public int preparedEntryCount() {
             return preparedKeys.entryCount();
+        }
+
+        public int compactedSourceIndex(int compactedIndex) {
+            requireLeased();
+            if (compactedIndex < 0 || compactedIndex >= compactedEntryCount) {
+                throw new IndexOutOfBoundsException(
+                        "Compacted index "
+                                + compactedIndex
+                                + " outside [0, "
+                                + compactedEntryCount
+                                + ").");
+            }
+            return uniqueSourceIndexes.getInt(compactedIndex * Integer.BYTES);
+        }
+
+        /** Retains one compacted source index after Java reservation filtering. */
+        public void retainCompactedSource(int compactedIndex, int retainedIndex) {
+            requireLeased();
+            if (compactedIndex < 0
+                    || compactedIndex >= compactedEntryCount
+                    || retainedIndex < 0
+                    || retainedIndex > compactedIndex) {
+                throw new IndexOutOfBoundsException(
+                        "Cannot retain compacted index "
+                                + compactedIndex
+                                + " at "
+                                + retainedIndex
+                                + ".");
+            }
+            int source = uniqueSourceIndexes.getInt(compactedIndex * Integer.BYTES);
+            uniqueSourceIndexes.putInt(retainedIndex * Integer.BYTES, source);
+        }
+
+        /**
+         * Projects the prepared-key metadata onto the retained compacted sources.
+         *
+         * <p>The direct key arena is not copied. The selected metadata remains in stable first-seen
+         * order and becomes the exact batch consumed by the following native probe.
+         */
+        public void projectRetainedCompactedSources(int retainedCount) {
+            requireLeased();
+            if (retainedCount < 0 || retainedCount > compactedEntryCount) {
+                throw new IllegalArgumentException(
+                        "Retained compacted count "
+                                + retainedCount
+                                + " outside [0, "
+                                + compactedEntryCount
+                                + "].");
+            }
+            preparedKeys.retainSerializedEntries(uniqueSourceIndexes, retainedCount);
+            compactedEntryCount = retainedCount;
+        }
+
+        public int sourceGroupIndex(int sourceIndex) {
+            requireLeased();
+            if (sourceIndex < 0 || sourceIndex >= preparedKeys.entryCount()) {
+                throw new IndexOutOfBoundsException(
+                        "Source index "
+                                + sourceIndex
+                                + " outside [0, "
+                                + preparedKeys.entryCount()
+                                + ").");
+            }
+            return sourceGroupIndexes.getInt(sourceIndex * Integer.BYTES);
         }
 
         public int missEntryCount() {
@@ -563,8 +1677,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             checkPreparedIndex(index);
             ByteBuffer results = probeResults.duplicate().order(ByteOrder.nativeOrder());
             int base = index * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES;
-            int offset =
-                    results.getInt(base + NativeRequestPlaneBridge.PROBE_RESULT_ARENA_OFFSET);
+            int offset = results.getInt(base + NativeRequestPlaneBridge.PROBE_RESULT_ARENA_OFFSET);
             int length = results.getInt(base + NativeRequestPlaneBridge.PROBE_RESULT_LENGTH_OFFSET);
             if (offset < 0 || length < 0 || offset > probeValueOutput.capacity() - length) {
                 throw new IllegalStateException("Native probe returned an invalid value slice.");
@@ -640,9 +1753,19 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             ByteBuffer results = probeResults.duplicate().order(ByteOrder.nativeOrder());
             results.position(0);
             results.limit(
-                    preparedKeys.entryCount()
-                            * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
+                    preparedKeys.entryCount() * NativeRequestPlaneBridge.PROBE_RESULT_RECORD_BYTES);
             return results.slice().order(ByteOrder.nativeOrder());
+        }
+
+        private ByteBuffer uniqueSourceIndexes() {
+            requireLeased();
+            uniqueSourceIndexes.clear();
+            return uniqueSourceIndexes;
+        }
+
+        private ByteBuffer sourceGroupIndexes() {
+            sourceGroupIndexes.clear();
+            return sourceGroupIndexes;
         }
 
         private ByteBuffer fillValueArena() {
@@ -681,9 +1804,128 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
             requireLeased();
             missKeys.clear();
             valueArena.clear();
+            valueArenaOutput.reset();
             fillValueBytes = 0;
             missKeys.appendSerialized(stateId, generation, preparedRocksDBKey);
             putFillValueMetadata(0, serializedValue);
+        }
+
+        private void prepareSingleFill(
+                int stateId,
+                long generation,
+                SerializedKeyBatch.DirectKeyWriter directKeyWriter,
+                DirectValueWriter directValueWriter)
+                throws IOException {
+            requireLeased();
+            missKeys.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            fillValueBytes = 0;
+            missKeys.appendSerialized(stateId, generation, directKeyWriter);
+            putFillValueMetadata(0, directValueWriter);
+        }
+
+        private void prepareSingleMutationCheck(
+                int stateId,
+                long generation,
+                SerializedKeyBatch.DirectKeyWriter directKeyWriter)
+                throws IOException {
+            requireLeased();
+            missKeys.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            fillValueBytes = 0;
+            missKeys.appendSerialized(stateId, generation, directKeyWriter);
+            putFillValueMetadata(
+                    0,
+                    (DirectValueWriter) null,
+                    NativeRequestPlaneBridge.FILL_VALUE_CHECK_ONLY_FLAG);
+        }
+
+        private void prepareMutationChecks(
+                int stateId,
+                long generation,
+                List<byte[]> preparedRocksDBKeys,
+                int fromIndex,
+                int toIndex)
+                throws IOException {
+            requireLeased();
+            missKeys.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            fillValueBytes = 0;
+            for (int index = fromIndex; index < toIndex; index++) {
+                int local = index - fromIndex;
+                missKeys.appendSerialized(
+                        stateId, generation, preparedRocksDBKeys.get(index));
+                putFillValueMetadata(
+                        local,
+                        (DirectValueWriter) null,
+                        NativeRequestPlaneBridge.FILL_VALUE_CHECK_ONLY_FLAG);
+            }
+        }
+
+        private void prepareConditionalMutationUpdates(
+                int stateId,
+                long generation,
+                List<byte[]> preparedRocksDBKeys,
+                List<byte[]> serializedValues,
+                int fromIndex,
+                int toIndex)
+                throws IOException {
+            requireLeased();
+            missKeys.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            fillValueBytes = 0;
+            for (int index = fromIndex; index < toIndex; index++) {
+                int local = index - fromIndex;
+                missKeys.appendSerialized(
+                        stateId, generation, preparedRocksDBKeys.get(index));
+                byte[] value = serializedValues.get(index);
+                putFillValueMetadata(
+                        local,
+                        value == null
+                                ? null
+                                : output -> output.write(value),
+                        NativeRequestPlaneBridge.FILL_VALUE_UPDATE_ONLY_FLAG);
+            }
+        }
+
+        private void prepareConditionalUpdateForPreparedKey(DirectValueWriter directValueWriter)
+                throws IOException {
+            requireLeased();
+            if (missKeys.entryCount() != 1) {
+                throw new IllegalStateException(
+                        "Conditional native mutation requires exactly one prepared key.");
+            }
+            valueArena.clear();
+            valueArenaOutput.reset();
+            fillValueBytes = 0;
+            putFillValueMetadata(
+                    0,
+                    directValueWriter,
+                    NativeRequestPlaneBridge.FILL_VALUE_UPDATE_ONLY_FLAG);
+        }
+
+        private void prepareSingleConditionalUpdate(
+                int stateId,
+                long generation,
+                byte[] preparedRocksDBKey,
+                byte[] serializedValue)
+                throws IOException {
+            requireLeased();
+            missKeys.clear();
+            valueArena.clear();
+            valueArenaOutput.reset();
+            fillValueBytes = 0;
+            missKeys.appendSerialized(stateId, generation, preparedRocksDBKey);
+            putFillValueMetadata(
+                    0,
+                    serializedValue == null
+                            ? null
+                            : output -> output.write(serializedValue),
+                    NativeRequestPlaneBridge.FILL_VALUE_UPDATE_ONLY_FLAG);
         }
 
         private void putFillValueMetadata(int index, byte[] value) throws IOException {
@@ -716,11 +1958,66 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
                     metadataBase + NativeRequestPlaneBridge.FILL_VALUE_RESERVED_OFFSET, 0);
         }
 
+        private void putFillValueMetadata(int index, DirectValueWriter writer) throws IOException {
+            putFillValueMetadata(index, writer, 0);
+        }
+
+        private void putFillValueMetadata(
+                int index, DirectValueWriter writer, int controlFlags) throws IOException {
+            int metadataBase = index * NativeRequestPlaneBridge.FILL_VALUE_RECORD_BYTES;
+            if (writer == null) {
+                valueMetadata.putInt(
+                        metadataBase + NativeRequestPlaneBridge.FILL_VALUE_ARENA_OFFSET, 0);
+                valueMetadata.putInt(
+                        metadataBase + NativeRequestPlaneBridge.FILL_VALUE_LENGTH_OFFSET, 0);
+                valueMetadata.putInt(
+                        metadataBase + NativeRequestPlaneBridge.FILL_VALUE_FLAGS_OFFSET,
+                        NativeRequestPlaneBridge.FILL_VALUE_NEGATIVE_FLAG);
+            } else {
+                int checkpoint = valueArenaOutput.checkpoint();
+                try {
+                    writer.write(valueArenaOutput);
+                } catch (IOException | RuntimeException failure) {
+                    valueArenaOutput.truncateTo(checkpoint);
+                    throw failure;
+                }
+                int length = valueArenaOutput.position() - checkpoint;
+                valueMetadata.putInt(
+                        metadataBase + NativeRequestPlaneBridge.FILL_VALUE_ARENA_OFFSET,
+                        checkpoint);
+                valueMetadata.putInt(
+                        metadataBase + NativeRequestPlaneBridge.FILL_VALUE_LENGTH_OFFSET, length);
+                valueMetadata.putInt(
+                        metadataBase + NativeRequestPlaneBridge.FILL_VALUE_FLAGS_OFFSET, 0);
+                fillValueBytes = valueArenaOutput.position();
+            }
+            valueMetadata.putInt(
+                    metadataBase + NativeRequestPlaneBridge.FILL_VALUE_RESERVED_OFFSET,
+                    controlFlags);
+        }
+
         private void reset() {
             preparedKeys.clear();
             missKeys.clear();
             fillValueBytes = 0;
             preparedFillGeneration = 0;
+            compactedEntryCount = 0;
+            directMultiGetCount = 0;
+            directMultiGetValueStride = 0;
+        }
+
+        private void requireDirectMultiGetPrepared() {
+            requireLeased();
+            if (directMultiGetCount <= 0 || directMultiGetValueStride <= 0) {
+                throw new IllegalStateException("Direct-arena MultiGet chunk is not prepared.");
+            }
+        }
+
+        private void requireDirectMultiGetIndex(int index) {
+            requireDirectMultiGetPrepared();
+            if (index < 0 || index >= directMultiGetCount) {
+                throw new IndexOutOfBoundsException("Direct-arena result index: " + index);
+            }
         }
 
         private void requireLeased() {

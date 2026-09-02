@@ -20,6 +20,7 @@
 
 #include <jni.h>
 
+#include <cstring>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -38,6 +39,9 @@ using cachekit::native::bridge::BatchBridgeCode;
 using cachekit::native::bridge::BatchBridgeCodeName;
 using cachekit::native::bridge::BatchScratch;
 using cachekit::native::bridge::ConstBuffer;
+using cachekit::native::bridge::CompactDirectBatch;
+using cachekit::native::bridge::GroupDirectBatch;
+using cachekit::native::bridge::GroupTokenPlanDirectBatch;
 using cachekit::native::bridge::FillDirectBatch;
 using cachekit::native::bridge::MutableBuffer;
 using cachekit::native::bridge::ProbeDirectBatch;
@@ -45,6 +49,7 @@ using cachekit::native::bridge::ProbeDirectBatch;
 constexpr const char* kIllegalArgument = "java/lang/IllegalArgumentException";
 constexpr const char* kIllegalState = "java/lang/IllegalStateException";
 constexpr const char* kOutOfMemory = "java/lang/OutOfMemoryError";
+constexpr jint kJniAbiVersion = 4;
 
 struct BridgeHandle final {
     BridgeHandle(
@@ -146,16 +151,24 @@ void ThrowBridgeFailure(JNIEnv* environment, BatchBridgeCode code) {
 
 extern "C" {
 
+JNIEXPORT jint JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequestPlaneBridge_nativeAbiVersion(
+        JNIEnv*, jclass) {
+    return kJniAbiVersion;
+}
+
 JNIEXPORT jlong JNICALL
-Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequestPlaneBridge_nativeCreate(
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequestPlaneBridge_nativeCreateV3(
         JNIEnv* environment,
         jclass,
         jint capacity_entries,
+        jint max_batch_entries,
         jlong key_arena_bytes,
         jlong value_arena_bytes,
         jint kernel_preference) {
     try {
-        if (capacity_entries <= 0 || key_arena_bytes < 0 || value_arena_bytes < 0 ||
+        if (capacity_entries <= 0 || max_batch_entries <= 0 || key_arena_bytes < 0 ||
+            value_arena_bytes < 0 ||
             kernel_preference <
                     static_cast<jint>(KernelPreference::kAuto) ||
             kernel_preference >
@@ -172,6 +185,7 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
         }
         Options options;
         options.capacity_entries = static_cast<std::size_t>(capacity_entries);
+        options.max_batch_entries = static_cast<std::size_t>(max_batch_entries);
         options.key_arena_bytes = static_cast<std::size_t>(key_arena_bytes);
         options.value_arena_bytes = static_cast<std::size_t>(value_arena_bytes);
         options.kernel = static_cast<KernelPreference>(kernel_preference);
@@ -191,7 +205,7 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
         }
         std::unique_ptr<BridgeHandle> bridge =
                 std::make_unique<BridgeHandle>(
-                        std::move(plane), options.capacity_entries);
+                        std::move(plane), options.max_batch_entries);
         return ToHandle(bridge.release());
     } catch (const std::bad_alloc&) {
         Throw(environment, kOutOfMemory, "native request-plane creation allocation failed");
@@ -320,6 +334,182 @@ Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequest
         Throw(environment, kIllegalState, exception.what());
     } catch (...) {
         Throw(environment, kIllegalState, "unknown JNI probe failure");
+    }
+    return -1;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequestPlaneBridge_nativeCompact(
+        JNIEnv* environment,
+        jclass,
+        jlong handle,
+        jobject key_arena_object,
+        jobject key_metadata_object,
+        jint count,
+        jobject unique_source_indexes_object) {
+    try {
+        BridgeHandle* bridge = nullptr;
+        std::size_t unsigned_count = 0;
+        ConstBuffer key_arena;
+        ConstBuffer key_metadata;
+        MutableBuffer unique_source_indexes;
+        if (!ValidateCall(
+                    environment, handle, count, &bridge, &unsigned_count) ||
+            !GetConstBuffer(
+                    environment, key_arena_object, "keyArena", &key_arena) ||
+            !GetConstBuffer(
+                    environment, key_metadata_object, "keyMetadata", &key_metadata) ||
+            !GetMutableBuffer(
+                    environment,
+                    unique_source_indexes_object,
+                    "uniqueSourceIndexes",
+                    &unique_source_indexes)) {
+            return -1;
+        }
+        std::size_t unique_count = 0;
+        const BatchBridgeCode code = CompactDirectBatch(
+                bridge->plane.get(),
+                &bridge->scratch,
+                key_arena,
+                key_metadata,
+                unsigned_count,
+                unique_source_indexes,
+                &unique_count);
+        if (code != BatchBridgeCode::kOk) {
+            ThrowBridgeFailure(environment, code);
+            return -1;
+        }
+        if (unique_count > static_cast<std::size_t>(
+                                   std::numeric_limits<jint>::max())) {
+            Throw(environment, kIllegalState, "native compact result is too large");
+            return -1;
+        }
+        return static_cast<jint>(unique_count);
+    } catch (const std::bad_alloc&) {
+        Throw(environment, kOutOfMemory, "JNI compact allocation failed");
+    } catch (const std::exception& exception) {
+        Throw(environment, kIllegalState, exception.what());
+    } catch (...) {
+        Throw(environment, kIllegalState, "unknown JNI compact failure");
+    }
+    return -1;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequestPlaneBridge_nativeGroup(
+        JNIEnv* environment,
+        jclass,
+        jlong handle,
+        jobject key_arena_object,
+        jobject key_metadata_object,
+        jint count,
+        jobject unique_source_indexes_object,
+        jobject source_group_indexes_object) {
+    try {
+        BridgeHandle* bridge = nullptr;
+        std::size_t unsigned_count = 0;
+        ConstBuffer key_arena;
+        ConstBuffer key_metadata;
+        MutableBuffer unique_source_indexes;
+        MutableBuffer source_group_indexes;
+        if (!ValidateCall(environment, handle, count, &bridge, &unsigned_count) ||
+            !GetConstBuffer(environment, key_arena_object, "keyArena", &key_arena) ||
+            !GetConstBuffer(environment, key_metadata_object, "keyMetadata", &key_metadata) ||
+            !GetMutableBuffer(
+                    environment,
+                    unique_source_indexes_object,
+                    "uniqueSourceIndexes",
+                    &unique_source_indexes) ||
+            !GetMutableBuffer(
+                    environment,
+                    source_group_indexes_object,
+                    "sourceGroupIndexes",
+                    &source_group_indexes)) {
+            return -1;
+        }
+        std::size_t unique_count = 0;
+        const BatchBridgeCode code = GroupDirectBatch(
+                bridge->plane.get(),
+                &bridge->scratch,
+                key_arena,
+                key_metadata,
+                unsigned_count,
+                unique_source_indexes,
+                source_group_indexes,
+                &unique_count);
+        if (code != BatchBridgeCode::kOk) {
+            ThrowBridgeFailure(environment, code);
+            return -1;
+        }
+        if (unique_count > static_cast<std::size_t>(std::numeric_limits<jint>::max())) {
+            Throw(environment, kIllegalState, "native group result is too large");
+            return -1;
+        }
+        return static_cast<jint>(unique_count);
+    } catch (const std::bad_alloc&) {
+        Throw(environment, kOutOfMemory, "JNI group allocation failed");
+    } catch (const std::exception& exception) {
+        Throw(environment, kIllegalState, exception.what());
+    } catch (...) {
+        Throw(environment, kIllegalState, "unknown JNI group failure");
+    }
+    return -1;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_apache_flink_contrib_streaming_state_cachekit_nativeplane_NativeRequestPlaneBridge_nativeGroupTokensV3(
+        JNIEnv* environment,
+        jclass,
+        jlong handle,
+        jobject source_tokens_object,
+        jint count,
+        jobject packed_plan_object) {
+    try {
+        MutableBuffer packed_plan;
+        if (!GetMutableBuffer(
+                    environment, packed_plan_object, "packedPlan", &packed_plan)) {
+            return -1;
+        }
+        if (packed_plan.size >= sizeof(std::uint32_t)) {
+            std::memset(packed_plan.data, 0, sizeof(std::uint32_t));
+        }
+
+        BridgeHandle* bridge = nullptr;
+        std::size_t unsigned_count = 0;
+        ConstBuffer source_tokens;
+        if (!ValidateCall(
+                    environment, handle, count, &bridge, &unsigned_count) ||
+            !GetConstBuffer(
+                    environment,
+                    source_tokens_object,
+                    "sourceTokens",
+                    &source_tokens)) {
+            return -1;
+        }
+        std::size_t group_count = 0;
+        const BatchBridgeCode code = GroupTokenPlanDirectBatch(
+                bridge->plane.get(),
+                &bridge->scratch,
+                source_tokens,
+                unsigned_count,
+                packed_plan,
+                &group_count);
+        if (code != BatchBridgeCode::kOk) {
+            ThrowBridgeFailure(environment, code);
+            return -1;
+        }
+        if (group_count >
+            static_cast<std::size_t>(std::numeric_limits<jint>::max())) {
+            Throw(environment, kIllegalState, "native token group result is too large");
+            return -1;
+        }
+        return static_cast<jint>(group_count);
+    } catch (const std::bad_alloc&) {
+        Throw(environment, kOutOfMemory, "JNI token group allocation failed");
+    } catch (const std::exception& exception) {
+        Throw(environment, kIllegalState, exception.what());
+    } catch (...) {
+        Throw(environment, kIllegalState, "unknown JNI token group failure");
     }
     return -1;
 }
