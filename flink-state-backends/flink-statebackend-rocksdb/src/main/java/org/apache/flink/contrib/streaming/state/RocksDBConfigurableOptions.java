@@ -256,6 +256,29 @@ public class RocksDBConfigurableOptions implements Serializable {
                             "If true, RocksDB will use block-based filter instead of full filter, this only take effect when bloom filter is used. "
                                     + "The default value is 'false'.");
 
+    public static final ConfigOption<Integer> BLOOM_FILTER_FASTLOCAL_BLOCK_BYTES =
+            key("state.backend.rocksdb.bloom-filter.fastlocal.block-bytes")
+                    .intType()
+                    .defaultValue(64)
+                    .withDescription(
+                            "CacheKit FastLocal Bloom block geometry. Valid values are 64 and 128; "
+                                    + "0 delegates geometry selection to the native runtime dispatcher.");
+
+    public static final ConfigOption<String> BLOOM_FILTER_FASTLOCAL_PROBE_MODE =
+            key("state.backend.rocksdb.bloom-filter.fastlocal.probe-mode")
+                    .stringType()
+                    .defaultValue("platform-default")
+                    .withDescription(
+                            "CacheKit FastLocal Bloom probe implementation: platform-default, scalar, sve, or auto.");
+
+    public static final ConfigOption<Boolean> BLOOM_FILTER_FASTLOCAL_RUNTIME_DISPATCH =
+            key("state.backend.rocksdb.bloom-filter.fastlocal.runtime-dispatch")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "If true, CacheKit selects the FastLocal block geometry and probe implementation "
+                                    + "from the runtime L3 line size, SVE capability, and SVE vector length.");
+
     public static final ConfigOption<Double> MEMTABLE_BLOOM_RATIO =
             key("state.backend.rocksdb.memtable-bloom.ratio")
                     .doubleType()
@@ -271,6 +294,43 @@ public class RocksDBConfigurableOptions implements Serializable {
                     .withDescription(
                             "If true, add and probe whole keys in the memtable Bloom filter. "
                                     + "This only takes effect when the memtable Bloom ratio is greater than 0.0.");
+
+    public static final ConfigOption<Boolean> MEMTABLE_ARM_POINT_ENABLED =
+            key("state.backend.rocksdb.memtable.arm-point.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Use CacheKit's 128-byte ArmPoint memtable for ValueState column families only.");
+
+    public static final ConfigOption<Integer> MEMTABLE_ARM_POINT_BUCKET_COUNT =
+            key("state.backend.rocksdb.memtable.arm-point.bucket-count")
+                    .intType()
+                    .defaultValue(16384)
+                    .withDescription(
+                            "Number of 128-byte buckets in each ArmPoint ValueState memtable directory.");
+
+    public static final ConfigOption<String> MEMTABLE_ARM_POINT_PROBE_MODE =
+            key("state.backend.rocksdb.memtable.arm-point.probe-mode")
+                    .stringType()
+                    .defaultValue("auto")
+                    .withDescription(
+                            "ArmPoint tag probe mode: scalar, sve, or auto. Forced sve fails closed when unavailable.");
+
+    public static final ConfigOption<Boolean> MEMTABLE_ARM_POINT_MAP_FLAT_AUTHORITY =
+            key("state.backend.rocksdb.memtable.arm-point.map-flat-authority")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Experimentally use ArmPoint's append-and-KeyHead flat authority for MapState. "
+                                    + "When false, MapState keeps the ordered InlineSkipList authority.");
+
+    public static final ConfigOption<Boolean> MEMTABLE_ARM_POINT_MAP_KEYHEAD_POINT_INDEX =
+            key("state.backend.rocksdb.memtable.arm-point.map-keyhead-point-index.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Keep MapState's ordered InlineSkipList for range iteration while maintaining "
+                                    + "an additional native per-user-key version chain for exact point lookups.");
 
     public static final ConfigOption<Double> RESTORE_OVERLAP_FRACTION_THRESHOLD =
             key("state.backend.rocksdb.restore-overlap-fraction-threshold")
@@ -306,8 +366,16 @@ public class RocksDBConfigurableOptions implements Serializable {
                 USE_BLOOM_FILTER,
                 BLOOM_FILTER_BITS_PER_KEY,
                 BLOOM_FILTER_BLOCK_BASED_MODE,
+                BLOOM_FILTER_FASTLOCAL_BLOCK_BYTES,
+                BLOOM_FILTER_FASTLOCAL_PROBE_MODE,
+                BLOOM_FILTER_FASTLOCAL_RUNTIME_DISPATCH,
                 MEMTABLE_BLOOM_RATIO,
                 MEMTABLE_BLOOM_WHOLE_KEY,
+                MEMTABLE_ARM_POINT_ENABLED,
+                MEMTABLE_ARM_POINT_BUCKET_COUNT,
+                MEMTABLE_ARM_POINT_PROBE_MODE,
+                MEMTABLE_ARM_POINT_MAP_FLAT_AUTHORITY,
+                MEMTABLE_ARM_POINT_MAP_KEYHEAD_POINT_INDEX,
                 RESTORE_OVERLAP_FRACTION_THRESHOLD
             };
 
@@ -317,7 +385,8 @@ public class RocksDBConfigurableOptions implements Serializable {
                             MAX_BACKGROUND_THREADS,
                             LOG_FILE_NUM,
                             MAX_WRITE_BUFFER_NUMBER,
-                            MIN_WRITE_BUFFER_NUMBER_TO_MERGE));
+                            MIN_WRITE_BUFFER_NUMBER_TO_MERGE,
+                            MEMTABLE_ARM_POINT_BUCKET_COUNT));
 
     private static final Set<ConfigOption<?>> SIZE_CONFIG_SET =
             new HashSet<>(
@@ -361,6 +430,28 @@ public class RocksDBConfigurableOptions implements Serializable {
             Preconditions.checkArgument(
                     ratio >= 0.0 && ratio <= 0.25,
                     "Configured value for key " + key + " must be between 0.0 and 0.25.");
+        } else if (BLOOM_FILTER_FASTLOCAL_BLOCK_BYTES.equals(option)) {
+            int blockBytes = (Integer) value;
+            Preconditions.checkArgument(
+                    blockBytes == 0 || blockBytes == 64 || blockBytes == 128,
+                    "Configured value for key " + key + " must be 0, 64, or 128.");
+        } else if (BLOOM_FILTER_FASTLOCAL_PROBE_MODE.equals(option)) {
+            String mode = ((String) value).toLowerCase(java.util.Locale.ROOT);
+            Preconditions.checkArgument(
+                    mode.equals("platform-default")
+                            || mode.equals("scalar")
+                            || mode.equals("sve")
+                            || mode.equals("auto"),
+                    "Configured value for key "
+                            + key
+                            + " must be platform-default, scalar, sve, or auto.");
+        } else if (MEMTABLE_ARM_POINT_PROBE_MODE.equals(option)) {
+            String probeMode = ((String) value).toLowerCase(java.util.Locale.ROOT);
+            Preconditions.checkArgument(
+                    probeMode.equals("scalar")
+                            || probeMode.equals("sve")
+                            || probeMode.equals("auto"),
+                    "Configured value for key " + key + " must be one of scalar, sve, or auto.");
         }
     }
 }

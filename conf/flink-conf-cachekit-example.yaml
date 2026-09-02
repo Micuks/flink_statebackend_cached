@@ -42,6 +42,12 @@ state.backend.local-recovery: true
 state.backend.rocksdb.memory.managed: true
 state.backend.rocksdb.memory.fixed-per-slot: 1024m
 state.backend.rocksdb.localdir: /tmp
+
+# CacheKit Kunpeng point-lookup memtable (ValueState column families only).
+# Keep disabled outside an audited AArch64 experiment.
+state.backend.rocksdb.memtable.arm-point.enabled: false
+state.backend.rocksdb.memtable.arm-point.bucket-count: 16384
+state.backend.rocksdb.memtable.arm-point.probe-mode: auto
 execution.checkpointing.interval: 180000
 execution.checkpointing.mode: EXACTLY_ONCE
 execution.checkpointing.tolerable-failed-checkpoints: 0
@@ -69,16 +75,17 @@ state.backend.cachekit.map.iteration.cache-fill.enabled: false
 state.backend.cachekit.map.bypass.enabled: false
 
 # --- Truly-async backpressure prefetch ----------------------------------------
-# Mailbox thread only serializes key+namespace and enqueues; a shared daemon
-# worker (`cachekit-bp-prefetch`) reads RocksDB via getSerializedValue and
-# stages results. Promote into L1 only when writeGen still matches.
+# Mailbox thread prepares key+namespace and enqueues; a shared daemon worker
+# (`cachekit-bp-prefetch`) reads RocksDB and stages results. Promote into L1
+# only when writeGen still matches. MultiGet publishes each completed chunk.
 state.backend.cachekit.bp-prefetch.enabled: true
 state.backend.cachekit.bp-prefetch.distance: 64
 state.backend.cachekit.bp-prefetch.backpressure-gated: true
 state.backend.cachekit.bp-prefetch.commutative-key-sort: false
 state.backend.cachekit.bp-prefetch.async.enabled: true
+state.backend.cachekit.bp-prefetch.multiget.enabled: false
+# state.backend.cachekit.bp-prefetch.multiget.chunk-size: 8
 state.backend.cachekit.bp-prefetch.async-chunks.enabled: false
-state.backend.cachekit.bp-prefetch.map-snapshots.enabled: false
 # state.backend.cachekit.bp-prefetch.staging.max-entries: 8192
 
 # Candidate ValueState hot-path switches. Keep disabled for the baseline leg.
@@ -91,6 +98,16 @@ state.backend.cachekit.value.lazy-staging.enabled: false
 # TaskManager. auto selects SVE-256 on a host that reports SVE VL=256, otherwise
 # NEON+CRC32 on AArch64, otherwise scalar. This is SVE, not an SVE2 requirement.
 state.backend.cachekit.native.request-plane.enabled: false
+# Independent native feature gates. The request-plane switch above is the
+# master gate; every feature remains opt-in and defaults to false.
+state.backend.cachekit.native.value-cache.enabled: false
+state.backend.cachekit.native.map-cache.enabled: false
+state.backend.cachekit.native.map-snapshot.enabled: false
+state.backend.cachekit.native.mailbox-batch.enabled: false
+state.backend.cachekit.native.prefetch.enabled: false
+state.backend.cachekit.native.local-preagg.enabled: false
+# Experimental low-allocation consumer for the validated native packed grouping plan.
+state.backend.cachekit.native.local-preagg.indexed-fold.enabled: false
 # state.backend.cachekit.native.request-plane.library: /absolute/path/libcachekit_native_request_plane_jni.so
 # state.backend.cachekit.native.request-plane.kernel: auto
 # state.backend.cachekit.native.request-plane.min-batch-size: 64

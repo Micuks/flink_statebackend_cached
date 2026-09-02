@@ -331,6 +331,7 @@ class AggsHandlerCodeGenerator(
     val getAccumulatorsCode = genGetAccumulators()
     val setAccumulatorsCode = genSetAccumulators()
     val resetAccumulatorsCode = genResetAccumulators()
+    val prefetchDistinctBatchCode = genPrefetchDistinctBatch()
     val accumulateCode = genAccumulate()
     val retractCode = genRetract()
     val mergeCode = genMerge()
@@ -363,6 +364,12 @@ class AggsHandlerCodeGenerator(
           @Override
           public void setWindowSize(int $WINDOWS_SIZE) {
             $setWindowSizeCode
+          }
+
+          @Override
+          public boolean prefetchDistinctBatch(
+              java.util.List<$ROW_DATA> prefetchInputs) throws Exception {
+            $prefetchDistinctBatchCode
           }
 
           @Override
@@ -984,6 +991,66 @@ class AggsHandlerCodeGenerator(
     } else {
       genThrowException(
         "This function not require accumulate method, but the accumulate method is called.")
+    }
+  }
+
+  private def genPrefetchDistinctBatch(): String = {
+    val distinctCodeGens = aggActionCodeGens.collect { case codegen: DistinctAggCodeGen => codegen }
+    if (distinctCodeGens.isEmpty) {
+      "return false;"
+    } else {
+      val methodName = "prefetchDistinctBatch"
+      val inputTerm = "prefetchInput"
+      val resultTerm = "prefetchExercised"
+      ctx.startNewLocalVariableStatement(methodName)
+      val exprGenerator = new ExprCodeGenerator(ctx, INPUT_NOT_NULL)
+        .bindInput(inputType, inputTerm = inputTerm)
+      val sessionTerms = distinctCodeGens.map(_ => newName("distinct_prefetch_session"))
+      val sessionDeclarations = sessionTerms
+        .map(term => s"java.lang.Object $term = null;")
+        .mkString("\n")
+      val beginCode = distinctCodeGens
+        .zip(sessionTerms)
+        .map {
+          case (codegen, term) =>
+            codegen.beginBatchPrefetch("prefetchInputs.size()", term)
+        }
+        .mkString("\n")
+      val addCode = distinctCodeGens
+        .zip(sessionTerms)
+        .map { case (codegen, term) => codegen.addBatchPrefetchKey(exprGenerator, term) }
+        .mkString("\n")
+      val finishCode = distinctCodeGens
+        .zip(sessionTerms)
+        .map { case (codegen, term) => codegen.finishBatchPrefetch(resultTerm, term) }
+        .mkString("\n")
+      val abortCode = distinctCodeGens
+        .zip(sessionTerms)
+        .map { case (codegen, term) => codegen.abortBatchPrefetch(term) }
+        .mkString("\n")
+      val anySession = sessionTerms.map(term => s"$term != null").mkString(" || ")
+      s"""
+         |if (prefetchInputs == null || prefetchInputs.isEmpty()) {
+         |  return false;
+         |}
+         |${ctx.reuseLocalVariableCode(methodName)}
+         |$sessionDeclarations
+         |try {
+         |  $beginCode
+         |  if ($anySession) {
+         |    for ($ROW_DATA $inputTerm : prefetchInputs) {
+         |      ${ctx.reuseInputUnboxingCode(inputTerm)}
+         |      $addCode
+         |    }
+         |  }
+         |  boolean $resultTerm = false;
+         |  $finishCode
+         |  return $resultTerm;
+         |} catch (java.lang.Exception prefetchFailure) {
+         |  $abortCode
+         |  return false;
+         |}
+       """.stripMargin
     }
   }
 

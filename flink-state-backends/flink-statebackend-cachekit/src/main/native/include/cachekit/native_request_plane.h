@@ -47,6 +47,7 @@ enum class KernelKind : std::uint32_t {
     kScalar = 1,
     kNeonCrc = 2,
     kSve256 = 3,
+    kSse42Crc = 4,
 };
 
 enum class ErrorCode : std::uint32_t {
@@ -72,10 +73,14 @@ enum class FillStatus : std::uint8_t {
     kRejectedCapacity = 3,
     kInvalidArgument = 4,
     kInternalError = 5,
+    kNotPresent = 6,
 };
 
 struct Options {
     std::size_t capacity_entries = 1024;
+    // Zero preserves the legacy C++ API contract by using capacity_entries.
+    // JNI callers pass their configured batch-entry limit explicitly.
+    std::size_t max_batch_entries = 0;
     std::size_t key_arena_bytes = 1U << 20U;
     std::size_t value_arena_bytes = 4U << 20U;
     std::uint32_t min_native_batch_size = kDefaultMinNativeBatchSize;
@@ -84,6 +89,14 @@ struct Options {
     // Production callers leave this at all ones.  Tests may reduce it to force
     // fingerprint collisions and verify the mandatory exact-key comparison.
     std::uint32_t fingerprint_mask = 0xffffffffU;
+};
+
+struct GroupBatchDiagnostics {
+    std::uint64_t batches = 0;
+    std::uint64_t fingerprint_calls = 0;
+    std::uint64_t probe_steps = 0;
+    std::uint64_t exact_comparisons = 0;
+    std::uint64_t epoch_resets = 0;
 };
 
 struct KeyView {
@@ -100,6 +113,11 @@ struct FillView {
     const std::uint8_t* value = nullptr;
     std::size_t value_size = 0;
     bool negative = false;
+    // Mutation-only controls. check_only advances the state generation watermark and reports
+    // exact-key residency without changing the entry. update_only updates an exact resident key
+    // but must never insert. Production fill callers leave both false.
+    bool update_only = false;
+    bool check_only = false;
 };
 
 struct ProbeResult {
@@ -120,6 +138,8 @@ struct HostFeatures {
     bool crc32 = false;
     bool sve = false;
     bool sve_vector_length_256 = false;
+    bool x86_64 = false;
+    bool sse42 = false;
 };
 
 // A single RequestPlane is owned by one request-processing thread.  Probe
@@ -141,13 +161,39 @@ public:
             const KeyView* keys, ProbeResult* results, std::size_t count) noexcept;
     ErrorCode FillBatch(
             const FillView* fills, FillResult* results, std::size_t count) noexcept;
+    // Keeps first occurrence order and writes source indexes for exact duplicate keys.
+    // Fingerprint and equality use the runtime-selected scalar/NEON/SVE kernel.
+    ErrorCode CompactBatch(
+            const KeyView* keys,
+            std::uint32_t* unique_source_indexes,
+            std::size_t count,
+            std::size_t* unique_count) const noexcept;
+    // Additionally maps every source entry to its stable, first-seen group id.
+    ErrorCode GroupBatch(
+            const KeyView* keys,
+            std::uint32_t* unique_source_indexes,
+            std::uint32_t* source_group_indexes,
+            std::size_t count,
+            std::size_t* unique_count) const noexcept;
+    // Groups caller-provided 32-bit identity tokens without fingerprinting key
+    // bytes.  This is a speculative grouping plan only: callers must still
+    // validate exact Java key equality before applying a grouped operation.
+    ErrorCode GroupTokenBatch(
+            const std::uint32_t* tokens,
+            std::uint32_t* first_source_indexes,
+            std::uint32_t* source_group_indexes,
+            std::uint32_t* group_counts,
+            std::size_t count,
+            std::size_t* group_count) const noexcept;
 
     void Clear() noexcept;
 
     std::size_t size() const noexcept;
     std::size_t capacity() const noexcept;
+    std::size_t max_batch_entries() const noexcept;
     std::uint64_t evictions() const noexcept;
     std::uint32_t min_native_batch_size() const noexcept;
+    GroupBatchDiagnostics group_batch_diagnostics() const noexcept;
     KernelKind kernel_kind() const noexcept;
     const char* kernel_name() const noexcept;
     HostFeatures host_features() const noexcept;

@@ -19,13 +19,17 @@
 package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.runtime.memory.OpaqueMemoryResource;
+import org.apache.flink.runtime.state.RegisteredKeyValueStateBackendMetaInfo;
+import org.apache.flink.runtime.state.RegisteredStateMetaInfoBase;
 import org.apache.flink.util.IOUtils;
 import org.apache.flink.util.Preconditions;
 
+import org.rocksdb.ArmPointMemTableConfig;
 import org.rocksdb.BlockBasedTableConfig;
 import org.rocksdb.BloomFilter;
 import org.rocksdb.Cache;
@@ -46,6 +50,8 @@ import javax.annotation.Nullable;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Locale;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -59,6 +65,7 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 public final class RocksDBResourceContainer implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(RocksDBResourceContainer.class);
 
+    private static final AtomicBoolean ARMLOCAL_ACTIVATION_LOGGED = new AtomicBoolean();
     // the filename length limit is 255 on most operating systems
     private static final int INSTANCE_PATH_LENGTH_LIMIT = 255 - "_LOG".length();
 
@@ -231,6 +238,110 @@ public final class RocksDBResourceContainer implements AutoCloseable {
         return opt;
     }
 
+    /**
+     * Gets state-aware column-family options without applying point-only layouts to range state.
+     */
+    public ColumnFamilyOptions getColumnOptions(
+            @Nullable RegisteredStateMetaInfoBase stateMetaInfo) {
+        final ColumnFamilyOptions options = getColumnOptions();
+        final boolean configured =
+                internalGetOption(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_ENABLED);
+        final String configuredProbeMode =
+                internalGetOption(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_PROBE_MODE);
+        final ArmPointMemTableRuntime.Selection selection =
+                ArmPointMemTableRuntime.currentSelection(configured, configuredProbeMode);
+        ArmPointMemTableRuntime.initializeAndRecord(selection);
+        final String stateType =
+                stateMetaInfo instanceof RegisteredKeyValueStateBackendMetaInfo
+                        ? ((RegisteredKeyValueStateBackendMetaInfo<?, ?>) stateMetaInfo)
+                                .getStateType()
+                                .name()
+                        : "NON_KV";
+        final boolean valueState =
+                stateMetaInfo instanceof RegisteredKeyValueStateBackendMetaInfo
+                        && ((RegisteredKeyValueStateBackendMetaInfo<?, ?>) stateMetaInfo)
+                                        .getStateType()
+                                == StateDescriptor.Type.VALUE;
+        final boolean mapState =
+                stateMetaInfo instanceof RegisteredKeyValueStateBackendMetaInfo
+                        && ((RegisteredKeyValueStateBackendMetaInfo<?, ?>) stateMetaInfo)
+                                        .getStateType()
+                                == StateDescriptor.Type.MAP;
+        final boolean mapFlatAuthority =
+                internalGetOption(
+                        RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_MAP_FLAT_AUTHORITY);
+        final boolean mapKeyHeadPointIndex =
+                internalGetOption(
+                        RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_MAP_KEYHEAD_POINT_INDEX);
+        Preconditions.checkArgument(
+                !(mapFlatAuthority && mapKeyHeadPointIndex),
+                "ArmPoint MapState flat authority and KeyHead point index are mutually exclusive");
+        final boolean flatAuthority =
+                armPointFlatAuthority(valueState, mapState, mapFlatAuthority);
+        final boolean keyHeadPointIndex = mapState && mapKeyHeadPointIndex;
+
+        if (selection.appliesTo(stateMetaInfo)) {
+            final String previousFactory = options.memTableFactoryName();
+            Preconditions.checkState(
+                    "SkipListFactory".equals(previousFactory),
+                    "ArmPoint refuses to overwrite user memtable factory %s for state %s",
+                    previousFactory,
+                    stateMetaInfo.getName());
+
+            final int bucketCount =
+                    internalGetOption(RocksDBConfigurableOptions.MEMTABLE_ARM_POINT_BUCKET_COUNT);
+            // Flat append authority removes ordered-write maintenance. ValueState always uses
+            // it. MapState may opt in experimentally; every other state retains ordered authority.
+            final String factoryProbeMode =
+                    armPointFactoryProbeMode(
+                            selection.probeMode, flatAuthority, keyHeadPointIndex);
+            options.setMemTableConfig(
+                    new ArmPointMemTableConfig()
+                            .setBucketCount(bucketCount)
+                            .setProbeMode(factoryProbeMode));
+            LOG.info(
+                    "[CACHEKIT_ARM_POINT] state={} state_type={} enabled=true factory={} "
+                            + "bucket_count={} tag_bits=16 probe_mode={} authority={} scope={} "
+                            + "sve_supported={}",
+                    stateMetaInfo.getName(),
+                    stateType,
+                    options.memTableFactoryName(),
+                    bucketCount,
+                    selection.probeMode,
+                    flatAuthority
+                            ? "flat"
+                            : (keyHeadPointIndex ? "ordered-keyhead" : "ordered"),
+                    selection.allKeyValueStates ? "all-kv" : "value-only",
+                    ArmPointMemTableConfig.isSveSupported());
+        } else {
+            LOG.info(
+                    "[CACHEKIT_ARM_POINT] state={} state_type={} enabled=false factory={} "
+                            + "bucket_count=0 tag_bits=0 probe_mode=off sve_supported={}",
+                    stateMetaInfo == null ? "<default>" : stateMetaInfo.getName(),
+                    stateType,
+                    options.memTableFactoryName(),
+                    ArmPointMemTableConfig.isSveSupported());
+        }
+        return options;
+    }
+
+    @VisibleForTesting
+    static String armPointFactoryProbeMode(
+            String probeMode, boolean flatAuthority, boolean keyHeadPointIndex) {
+        Preconditions.checkArgument(
+                !(flatAuthority && keyHeadPointIndex),
+                "ArmPoint flat authority and KeyHead point index are mutually exclusive");
+        return flatAuthority
+                ? probeMode + "-flat"
+                : (keyHeadPointIndex ? probeMode + "-keyhead" : probeMode);
+    }
+
+    @VisibleForTesting
+    static boolean armPointFlatAuthority(
+            boolean valueState, boolean mapState, boolean mapFlatAuthority) {
+        return valueState || (mapState && mapFlatAuthority);
+    }
+
     /** Gets the RocksDB {@link WriteOptions} to be used for write operations. */
     public WriteOptions getWriteOptions() {
         // Disable WAL by default
@@ -303,7 +414,15 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
     /** Create a {@link DBOptions} for RocksDB, including some common settings. */
     DBOptions createBaseCommonDBOptions() {
-        return new DBOptions().setUseFsync(false).setStatsDumpPeriodSec(0);
+        return new DBOptions()
+                .setUseFsync(false)
+                .setStatsDumpPeriodSec(0)
+                // A Flink task backend is disposable state. Its durable copy is a checkpoint;
+                // flushing a canceled task's private memtables while closing the local DB cannot
+                // improve recovery, but it can make RocksDB.closeDatabase() wait indefinitely
+                // after a write-heavy join. Skip that shutdown-only flush. Normal runtime flushes
+                // and checkpoint semantics are unchanged.
+                .setAvoidFlushDuringShutdown(true);
     }
 
     /** Create a {@link ColumnFamilyOptions} for RocksDB, including some common settings. */
@@ -430,12 +549,76 @@ public final class RocksDBResourceContainer implements AutoCloseable {
                     internalGetOption(RocksDBConfigurableOptions.BLOOM_FILTER_BITS_PER_KEY);
             final boolean blockBasedMode =
                     internalGetOption(RocksDBConfigurableOptions.BLOOM_FILTER_BLOCK_BASED_MODE);
-            BloomFilter bloomFilter = new BloomFilter(bitsPerKey, blockBasedMode);
+            final boolean armLocalConfigured =
+                    configuration
+                                    .getOptional(
+                                            RocksDBConfigurableOptions
+                                                    .BLOOM_FILTER_FASTLOCAL_BLOCK_BYTES)
+                                    .isPresent()
+                            || configuration
+                                    .getOptional(
+                                            RocksDBConfigurableOptions
+                                                    .BLOOM_FILTER_FASTLOCAL_PROBE_MODE)
+                                    .isPresent()
+                            || configuration
+                                    .getOptional(
+                                            RocksDBConfigurableOptions
+                                                    .BLOOM_FILTER_FASTLOCAL_RUNTIME_DISPATCH)
+                                    .isPresent();
+            final BloomFilter bloomFilter;
+            if (armLocalConfigured) {
+                if (blockBasedMode) {
+                    throw new IllegalArgumentException(
+                            "CacheKit ArmLocal Bloom requires full-filter mode");
+                }
+                final boolean runtimeDispatch =
+                        internalGetOption(
+                                RocksDBConfigurableOptions.BLOOM_FILTER_FASTLOCAL_RUNTIME_DISPATCH);
+                final int blockBytes =
+                        runtimeDispatch
+                                ? 0
+                                : internalGetOption(
+                                        RocksDBConfigurableOptions
+                                                .BLOOM_FILTER_FASTLOCAL_BLOCK_BYTES);
+                final BloomFilter.CacheKitFastLocalProbeMode probeMode =
+                        runtimeDispatch
+                                ? BloomFilter.CacheKitFastLocalProbeMode.AUTO
+                                : parseArmLocalProbeMode(
+                                        internalGetOption(
+                                                RocksDBConfigurableOptions
+                                                        .BLOOM_FILTER_FASTLOCAL_PROBE_MODE));
+                bloomFilter = new BloomFilter(bitsPerKey, blockBytes, probeMode);
+                if (ARMLOCAL_ACTIVATION_LOGGED.compareAndSet(false, true)) {
+                    LOG.info(
+                            "CACHEKIT_ARMLOCAL_ACTIVATION block_bytes={} probe_mode={} runtime_dispatch={}",
+                            blockBytes,
+                            probeMode.name().toLowerCase(Locale.ROOT),
+                            runtimeDispatch);
+                }
+            } else {
+                bloomFilter = new BloomFilter(bitsPerKey, blockBasedMode);
+            }
             handlesToClose.add(bloomFilter);
             blockBasedTableConfig.setFilterPolicy(bloomFilter);
         }
 
         return currentOptions.setTableFormatConfig(blockBasedTableConfig);
+    }
+
+    private static BloomFilter.CacheKitFastLocalProbeMode parseArmLocalProbeMode(String value) {
+        switch (value.toLowerCase(Locale.ROOT)) {
+            case "scalar":
+                return BloomFilter.CacheKitFastLocalProbeMode.SCALAR;
+            case "sve":
+                return BloomFilter.CacheKitFastLocalProbeMode.SVE;
+            case "auto":
+                return BloomFilter.CacheKitFastLocalProbeMode.AUTO;
+            case "platform-default":
+                return BloomFilter.CacheKitFastLocalProbeMode.PLATFORM_DEFAULT;
+            default:
+                throw new IllegalArgumentException(
+                        "Unknown CacheKit ArmLocal probe mode: " + value);
+        }
     }
 
     /**

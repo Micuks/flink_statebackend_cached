@@ -21,11 +21,13 @@ package org.apache.flink.table.runtime.operators.aggregate;
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
-import org.apache.flink.streaming.api.operators.BatchableKeyedFunction;
+import org.apache.flink.streaming.api.operators.PipelinedBatchableKeyedFunction;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.utils.JoinedRowData;
+import org.apache.flink.table.runtime.dataview.DistinctBatchPrefetchSupport;
 import org.apache.flink.table.runtime.dataview.PerKeyStateDataViewStore;
 import org.apache.flink.table.runtime.generated.AggsHandleFunction;
 import org.apache.flink.table.runtime.generated.GeneratedAggsHandleFunction;
@@ -36,6 +38,9 @@ import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.types.RowKind;
 import org.apache.flink.util.Collector;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.Iterator;
 import java.util.List;
 
@@ -45,9 +50,10 @@ import static org.apache.flink.table.runtime.util.StateConfigUtil.createTtlConfi
 
 /** Aggregate Function used for the groupby (without window) aggregate. */
 public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, RowData>
-        implements BatchableKeyedFunction<RowData, RowData> {
+        implements PipelinedBatchableKeyedFunction<RowData, RowData> {
 
     private static final long serialVersionUID = -4767158666069797704L;
+    private static final Logger LOG = LoggerFactory.getLogger(GroupAggFunction.class);
 
     /** The code generated function used to handle aggregates. */
     private final GeneratedAggsHandleFunction genAggsHandler;
@@ -78,6 +84,10 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
 
     // stores the accumulators
     private transient ValueState<RowData> accState = null;
+    private transient TypeSerializer<RowData> accSerializer = null;
+
+    // Owns the exact-DISTINCT MapViews and their optional batch-scoped overlays.
+    private transient PerKeyStateDataViewStore dataViewStore = null;
 
     /**
      * Creates a {@link GroupAggFunction}.
@@ -112,11 +122,13 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
         // instantiate function
         StateTtlConfig ttlConfig = createTtlConfig(stateRetentionTime);
         function = genAggsHandler.newInstance(getRuntimeContext().getUserCodeClassLoader());
-        function.open(new PerKeyStateDataViewStore(getRuntimeContext(), ttlConfig));
+        dataViewStore = new PerKeyStateDataViewStore(getRuntimeContext(), ttlConfig);
+        function.open(dataViewStore);
         // instantiate equaliser
         equaliser = genRecordEqualiser.newInstance(getRuntimeContext().getUserCodeClassLoader());
 
         InternalTypeInfo<RowData> accTypeInfo = InternalTypeInfo.ofFields(accTypes);
+        accSerializer = accTypeInfo.createSerializer(getRuntimeContext().getExecutionConfig());
         ValueStateDescriptor<RowData> accDesc = new ValueStateDescriptor<>("accState", accTypeInfo);
         if (ttlConfig.isEnabled()) {
             accDesc.enableTimeToLive(ttlConfig);
@@ -240,40 +252,165 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
             firstRow = true;
         }
 
-        function.setAccumulators(accumulators);
-        RowData prevAggValue = function.getValue();
-        for (RowData input : inputRows) {
-            if (isAccumulateMsg(input)) {
-                function.accumulate(input);
-            } else {
-                function.retract(input);
+        processBatchFromPreparation(
+                key, inputRows, new BatchPreparation(accumulators, firstRow, 0, false, null), out);
+    }
+
+    @Override
+    public Object prepareBatchForKey(Object currentKey, List<RowData> inputRows) throws Exception {
+        if (inputRows == null || inputRows.isEmpty()) {
+            return BatchPreparation.SKIP;
+        }
+        RowData accumulators = accState.value();
+        int inputStart = 0;
+        boolean firstRow = false;
+        if (accumulators == null) {
+            while (inputStart < inputRows.size() && isRetractMsg(inputRows.get(inputStart))) {
+                inputStart++;
+            }
+            if (inputStart == inputRows.size()) {
+                return BatchPreparation.SKIP;
+            }
+            accumulators = function.createAccumulators();
+            firstRow = true;
+        }
+
+        // Reading the next outer key may reuse backend deserialization buffers. Retain a stable
+        // accumulator while its immutable RocksDB keys execute off mailbox.
+        RowData stableAccumulators = accSerializer.copy(accumulators);
+        function.setAccumulators(stableAccumulators);
+        Object distinctPrepared = null;
+        boolean captureEnded = false;
+        DistinctBatchPrefetchSupport.beginPreparedCapture();
+        try {
+            function.prefetchDistinctBatch(
+                    inputStart == 0 ? inputRows : inputRows.subList(inputStart, inputRows.size()));
+            distinctPrepared = DistinctBatchPrefetchSupport.endPreparedCapture();
+            captureEnded = true;
+        } finally {
+            if (!captureEnded) {
+                DistinctBatchPrefetchSupport.abortPreparedCapture();
             }
         }
-        RowData newAggValue = function.getValue();
-        accumulators = function.getAccumulators();
+        return new BatchPreparation(
+                stableAccumulators, firstRow, inputStart, false, distinctPrepared);
+    }
 
-        if (!recordCounter.recordCountIsZero(accumulators)) {
-            accState.update(accumulators);
-            if (!firstRow) {
-                if (stateRetentionTime <= 0 && equaliser.equals(prevAggValue, newAggValue)) {
-                    return;
+    @Override
+    public void processPreparedBatchForKey(
+            Object currentKey, List<RowData> inputRows, Object prepared, Collector<RowData> out)
+            throws Exception {
+        if (!(prepared instanceof BatchPreparation)) {
+            processBatchForKey(currentKey, inputRows, out);
+            return;
+        }
+        BatchPreparation preparation = (BatchPreparation) prepared;
+        if (preparation.skip) {
+            return;
+        }
+        processBatchFromPreparation((RowData) currentKey, inputRows, preparation, out);
+    }
+
+    @Override
+    public void abortPreparedBatch(Object prepared) {
+        if (prepared instanceof BatchPreparation) {
+            DistinctBatchPrefetchSupport.abortPreparedCapture(
+                    ((BatchPreparation) prepared).distinctPrepared);
+        }
+    }
+
+    private void processBatchFromPreparation(
+            RowData key,
+            List<RowData> inputRows,
+            BatchPreparation preparation,
+            Collector<RowData> out)
+            throws Exception {
+        RowData accumulators = preparation.accumulators;
+        boolean firstRow = preparation.firstRow;
+        function.setAccumulators(accumulators);
+        boolean installed =
+                DistinctBatchPrefetchSupport.installPreparedCapture(preparation.distinctPrepared);
+        if (!installed) {
+            function.prefetchDistinctBatch(
+                    preparation.inputStart == 0
+                            ? inputRows
+                            : inputRows.subList(preparation.inputStart, inputRows.size()));
+        }
+        final boolean distinctBatch = dataViewStore.beginDistinctBatch();
+        boolean distinctBatchCommitted = false;
+        try {
+            RowData prevAggValue = function.getValue();
+            for (int inputIndex = preparation.inputStart;
+                    inputIndex < inputRows.size();
+                    inputIndex++) {
+                RowData input = inputRows.get(inputIndex);
+                if (isAccumulateMsg(input)) {
+                    function.accumulate(input);
+                } else {
+                    function.retract(input);
                 }
-                if (generateUpdateBefore) {
-                    resultRow.replace(key, prevAggValue).setRowKind(RowKind.UPDATE_BEFORE);
+            }
+            RowData newAggValue = function.getValue();
+            accumulators = function.getAccumulators();
+
+            // Make the DISTINCT map update durable before the accumulator/output of this batch is
+            // made visible. A failure therefore cannot emit a result whose dedup state was lost.
+            if (distinctBatch) {
+                dataViewStore.commitDistinctBatch();
+                distinctBatchCommitted = true;
+            }
+
+            if (!recordCounter.recordCountIsZero(accumulators)) {
+                accState.update(accumulators);
+                if (!firstRow) {
+                    if (stateRetentionTime <= 0 && equaliser.equals(prevAggValue, newAggValue)) {
+                        return;
+                    }
+                    if (generateUpdateBefore) {
+                        resultRow.replace(key, prevAggValue).setRowKind(RowKind.UPDATE_BEFORE);
+                        out.collect(resultRow);
+                    }
+                    resultRow.replace(key, newAggValue).setRowKind(RowKind.UPDATE_AFTER);
+                } else {
+                    resultRow.replace(key, newAggValue).setRowKind(RowKind.INSERT);
+                }
+                out.collect(resultRow);
+            } else {
+                if (!firstRow) {
+                    resultRow.replace(key, prevAggValue).setRowKind(RowKind.DELETE);
                     out.collect(resultRow);
                 }
-                resultRow.replace(key, newAggValue).setRowKind(RowKind.UPDATE_AFTER);
-            } else {
-                resultRow.replace(key, newAggValue).setRowKind(RowKind.INSERT);
+                accState.clear();
+                function.cleanup();
             }
-            out.collect(resultRow);
-        } else {
-            if (!firstRow) {
-                resultRow.replace(key, prevAggValue).setRowKind(RowKind.DELETE);
-                out.collect(resultRow);
+        } finally {
+            if (distinctBatch && !distinctBatchCommitted) {
+                dataViewStore.abortDistinctBatch();
             }
-            accState.clear();
-            function.cleanup();
+        }
+    }
+
+    private static final class BatchPreparation {
+        private static final BatchPreparation SKIP =
+                new BatchPreparation(null, false, 0, true, null);
+
+        private final RowData accumulators;
+        private final boolean firstRow;
+        private final int inputStart;
+        private final boolean skip;
+        private final Object distinctPrepared;
+
+        private BatchPreparation(
+                RowData accumulators,
+                boolean firstRow,
+                int inputStart,
+                boolean skip,
+                Object distinctPrepared) {
+            this.accumulators = accumulators;
+            this.firstRow = firstRow;
+            this.inputStart = inputStart;
+            this.skip = skip;
+            this.distinctPrepared = distinctPrepared;
         }
     }
 
@@ -281,6 +418,11 @@ public class GroupAggFunction extends KeyedProcessFunction<RowData, RowData, Row
     public void close() throws Exception {
         if (function != null) {
             function.close();
+        }
+        if (dataViewStore != null) {
+            LOG.info(
+                    "[CACHEKIT DISTINCT BATCH OVERLAY] {}",
+                    dataViewStore.distinctBatchDiagnosticSummary());
         }
     }
 }

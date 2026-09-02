@@ -21,6 +21,7 @@ package org.apache.flink.table.runtime.dataview;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.table.api.dataview.MapView;
@@ -30,6 +31,7 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -41,6 +43,37 @@ import java.util.Map;
  */
 @Internal
 public abstract class StateMapView<N, EK, EV> extends MapView<EK, EV> implements StateDataView<N> {
+
+    /** Optional exact-key prefetch hook used by a batch-scoped DISTINCT overlay. */
+    boolean beginPrefetchKeys(Iterable<? extends EK> keys) throws Exception {
+        return false;
+    }
+
+    /** Whether exact-key prefetch can return values directly to this MapView layer. */
+    boolean supportsDirectPrefetchedValues() {
+        return false;
+    }
+
+    /** Returns values aligned with stable insertion-ordered unique keys, or null on failure. */
+    List<EV> prefetchUniqueKeyValues(List<? extends EK> keys) throws Exception {
+        return null;
+    }
+
+    /** Prepares immutable backend keys for an off-mailbox exact-key read. */
+    Object prepareUniqueKeyValues(List<? extends EK> keys) throws Exception {
+        return null;
+    }
+
+    /** Awaits values from one prepared exact-key read. */
+    List<EV> awaitPreparedUniqueKeyValues(Object prepared) throws Exception {
+        return null;
+    }
+
+    /** Cancels one prepared exact-key read. */
+    void abortPreparedUniqueKeyValues(Object prepared) {}
+
+    /** Ends an optional batch-scoped exact-key prefetch. */
+    void endPrefetchKeys() {}
 
     @Override
     public Map<EK, EV> getMap() {
@@ -78,6 +111,65 @@ public abstract class StateMapView<N, EK, EV> extends MapView<EK, EV> implements
         private final Map<EK, EV> emptyState = Collections.emptyMap();
 
         protected abstract MapState<EK, EV> getMapState();
+
+        @Override
+        @SuppressWarnings("unchecked")
+        boolean beginPrefetchKeys(Iterable<? extends EK> keys) throws Exception {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof BatchPrefetchableMapState
+                    && ((BatchPrefetchableMapState<EK>) state).beginPrefetchCurrentKeys(keys);
+        }
+
+        @Override
+        boolean supportsDirectPrefetchedValues() {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof BatchPrefetchableMapState
+                    && ((BatchPrefetchableMapState<?>) state).supportsDirectPrefetchedValues();
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        List<EV> prefetchUniqueKeyValues(List<? extends EK> keys) throws Exception {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof BatchPrefetchableMapState
+                    ? (List<EV>)
+                            ((BatchPrefetchableMapState<EK>) state)
+                                    .prefetchCurrentUniqueKeyValues(keys)
+                    : null;
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        Object prepareUniqueKeyValues(List<? extends EK> keys) throws Exception {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof BatchPrefetchableMapState
+                    ? ((BatchPrefetchableMapState<EK>) state).prepareCurrentUniqueKeyValues(keys)
+                    : null;
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        List<EV> awaitPreparedUniqueKeyValues(Object prepared) throws Exception {
+            return prepared instanceof BatchPrefetchableMapState.PreparedValues
+                    ? (List<EV>) ((BatchPrefetchableMapState.PreparedValues) prepared).awaitValues()
+                    : null;
+        }
+
+        @Override
+        void abortPreparedUniqueKeyValues(Object prepared) {
+            if (prepared instanceof BatchPrefetchableMapState.PreparedValues) {
+                ((BatchPrefetchableMapState.PreparedValues) prepared).cancel();
+            }
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        void endPrefetchKeys() {
+            MapState<EK, EV> state = getMapState();
+            if (state instanceof BatchPrefetchableMapState) {
+                ((BatchPrefetchableMapState<EK>) state).endPrefetchCurrentKeys();
+            }
+        }
 
         @Override
         public EV get(EK key) throws Exception {
@@ -171,9 +263,27 @@ public abstract class StateMapView<N, EK, EV> extends MapView<EK, EV> implements
 
         @Override
         public void putAll(Map<EK, EV> map) throws Exception {
+            if (map == null || map.isEmpty()) {
+                return;
+            }
+            Map<EK, EV> nonNullEntries = new HashMap<>(map.size());
+            boolean hasNullKey = false;
+            EV nullValue = null;
             for (Map.Entry<EK, EV> entry : map.entrySet()) {
-                // entry key might be null, so we can't invoke mapState.putAll(map) directly here
-                put(entry.getKey(), entry.getValue());
+                if (entry.getKey() == null) {
+                    hasNullKey = true;
+                    nullValue = entry.getValue();
+                } else {
+                    nonNullEntries.put(entry.getKey(), entry.getValue());
+                }
+            }
+            if (!nonNullEntries.isEmpty()) {
+                // RocksDB MapState maps this call to one WriteBatch. Keeping the null-key value in
+                // its dedicated ValueState preserves nullable DISTINCT semantics.
+                getMapState().putAll(nonNullEntries);
+            }
+            if (hasNullKey) {
+                getNullState().update(nullValue);
             }
         }
 
@@ -228,6 +338,65 @@ public abstract class StateMapView<N, EK, EV> extends MapView<EK, EV> implements
         }
 
         protected abstract MapState<EK, EV> getMapState();
+
+        @Override
+        @SuppressWarnings("unchecked")
+        boolean beginPrefetchKeys(Iterable<? extends EK> keys) throws Exception {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof BatchPrefetchableMapState
+                    && ((BatchPrefetchableMapState<EK>) state).beginPrefetchCurrentKeys(keys);
+        }
+
+        @Override
+        boolean supportsDirectPrefetchedValues() {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof BatchPrefetchableMapState
+                    && ((BatchPrefetchableMapState<?>) state).supportsDirectPrefetchedValues();
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        List<EV> prefetchUniqueKeyValues(List<? extends EK> keys) throws Exception {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof BatchPrefetchableMapState
+                    ? (List<EV>)
+                            ((BatchPrefetchableMapState<EK>) state)
+                                    .prefetchCurrentUniqueKeyValues(keys)
+                    : null;
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        Object prepareUniqueKeyValues(List<? extends EK> keys) throws Exception {
+            MapState<EK, EV> state = getMapState();
+            return state instanceof BatchPrefetchableMapState
+                    ? ((BatchPrefetchableMapState<EK>) state).prepareCurrentUniqueKeyValues(keys)
+                    : null;
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        List<EV> awaitPreparedUniqueKeyValues(Object prepared) throws Exception {
+            return prepared instanceof BatchPrefetchableMapState.PreparedValues
+                    ? (List<EV>) ((BatchPrefetchableMapState.PreparedValues) prepared).awaitValues()
+                    : null;
+        }
+
+        @Override
+        void abortPreparedUniqueKeyValues(Object prepared) {
+            if (prepared instanceof BatchPrefetchableMapState.PreparedValues) {
+                ((BatchPrefetchableMapState.PreparedValues) prepared).cancel();
+            }
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        void endPrefetchKeys() {
+            MapState<EK, EV> state = getMapState();
+            if (state instanceof BatchPrefetchableMapState) {
+                ((BatchPrefetchableMapState<EK>) state).endPrefetchCurrentKeys();
+            }
+        }
 
         protected abstract ValueState<EV> getNullState();
 

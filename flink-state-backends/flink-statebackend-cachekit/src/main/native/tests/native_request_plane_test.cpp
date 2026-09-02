@@ -41,6 +41,7 @@ using cachekit::native::ErrorCode;
 using cachekit::native::FillResult;
 using cachekit::native::FillStatus;
 using cachekit::native::FillView;
+using cachekit::native::GroupBatchDiagnostics;
 using cachekit::native::KernelKind;
 using cachekit::native::KernelPreference;
 using cachekit::native::KeyView;
@@ -87,15 +88,105 @@ FillResult Fill(
         RequestPlane& plane,
         const KeyView& key,
         const std::string& value,
-        bool negative = false) {
+        bool negative = false,
+        bool update_only = false,
+        bool check_only = false) {
     const FillView fill{
             key,
             reinterpret_cast<const std::uint8_t*>(value.data()),
             value.size(),
-            negative};
+            negative,
+            update_only,
+            check_only};
     FillResult result;
     CHECK(plane.FillBatch(&fill, &result, 1) == ErrorCode::kOk);
     return result;
+}
+
+ProbeResult Probe(RequestPlane& plane, const KeyView& key);
+std::string ResultValue(const ProbeResult& result);
+
+void TestResidentOnlyMutationControls() {
+    Options options;
+    options.capacity_entries = 1;
+    options.key_arena_bytes = 64;
+    options.value_arena_bytes = 64;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+    const std::string key = "resident";
+    const std::string other = "other";
+
+    CHECK(Fill(*plane, Key(41, 2, key), std::string(), true, false, true).status ==
+          FillStatus::kNotPresent);
+    CHECK(plane->size() == 0);
+    CHECK(Fill(*plane, Key(41, 1, key), std::string("delayed")).status ==
+          FillStatus::kRejectedStaleGeneration);
+
+    CHECK(Fill(*plane, Key(41, 2, key), std::string("v2")).status ==
+          FillStatus::kInserted);
+    CHECK(Fill(*plane, Key(41, 3, key), std::string(), true, false, true).status ==
+          FillStatus::kUpdated);
+    CHECK(Fill(*plane, Key(41, 3, key), std::string("v3"), false, true).status ==
+          FillStatus::kUpdated);
+    CHECK(ResultValue(
+                  Probe(*plane,
+                        Key(41, cachekit::native::kLatestGeneration, key))) ==
+          "v3");
+
+    CHECK(Fill(*plane, Key(41, 4, key), std::string(), true, true).status ==
+          FillStatus::kUpdated);
+    CHECK(Probe(*plane, Key(41, cachekit::native::kLatestGeneration, key)).status ==
+          ProbeStatus::kNegative);
+    CHECK(Fill(*plane, Key(41, 5, key), std::string("v5"), false, true).status ==
+          FillStatus::kUpdated);
+    CHECK(ResultValue(
+                  Probe(*plane,
+                        Key(41, cachekit::native::kLatestGeneration, key))) ==
+          "v5");
+
+    // An absent update-only operation must not evict or insert.
+    CHECK(Fill(*plane, Key(41, 6, other), std::string("bad"), false, true).status ==
+          FillStatus::kNotPresent);
+    CHECK(plane->size() == 1);
+    CHECK(ResultValue(
+                  Probe(*plane,
+                        Key(41, cachekit::native::kLatestGeneration, key))) ==
+          "v5");
+
+    // Simulate eviction between check-only and update-only. The conditional
+    // update must not resurrect the evicted key.
+    CHECK(Fill(*plane, Key(41, 7, key), std::string(), true, false, true).status ==
+          FillStatus::kUpdated);
+    CHECK(Fill(*plane, Key(41, 7, other), std::string("other-v7")).status ==
+          FillStatus::kInserted);
+    CHECK(Fill(*plane, Key(41, 7, key), std::string("resurrect"), false, true).status ==
+          FillStatus::kNotPresent);
+    CHECK(Probe(*plane, Key(41, cachekit::native::kLatestGeneration, key)).status ==
+          ProbeStatus::kMiss);
+    CHECK(ResultValue(
+                  Probe(*plane,
+                        Key(41, cachekit::native::kLatestGeneration, other))) ==
+          "other-v7");
+
+    // A newer mutation wins if a stale conditional update is attempted.
+    CHECK(Fill(*plane, Key(41, 8, other), std::string(), true, false, true).status ==
+          FillStatus::kUpdated);
+    CHECK(Fill(*plane, Key(41, 9, other), std::string("newer")).status ==
+          FillStatus::kUpdated);
+    CHECK(Fill(*plane, Key(41, 8, other), std::string("older"), false, true).status ==
+          FillStatus::kRejectedStaleGeneration);
+    CHECK(ResultValue(
+                  Probe(*plane,
+                        Key(41, cachekit::native::kLatestGeneration, other))) ==
+          "newer");
+
+    CHECK(Fill(*plane,
+               Key(41, 10, other),
+               std::string("invalid"),
+               false,
+               true,
+               true)
+                  .status == FillStatus::kInvalidArgument);
 }
 
 ProbeResult Probe(RequestPlane& plane, const KeyView& key) {
@@ -114,8 +205,8 @@ std::string ResultValue(const ProbeResult& result) {
 
 void TestBucketLayoutAndForcedScalar() {
     using cachekit::native::internal::Bucket;
-    CHECK(sizeof(Bucket) == 128);
-    CHECK(alignof(Bucket) == 128);
+    CHECK(sizeof(Bucket) == cachekit::native::internal::kCacheLineBytes);
+    CHECK(alignof(Bucket) == cachekit::native::internal::kCacheLineBytes);
 
     Options options;
     options.kernel = KernelPreference::kScalar;
@@ -744,6 +835,347 @@ void TestCAbiBatchSmoke() {
     cachekit_native_plane_destroy(plane);
 }
 
+void TestCompactBatchPreservesFirstOccurrenceAndIdentity() {
+    Options options;
+    options.capacity_entries = 16;
+    options.key_arena_bytes = 1024;
+    options.value_arena_bytes = 1024;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+    const std::string a = "alpha";
+    const std::string b = "beta";
+    const KeyView keys[] = {
+            Key(7, 3, a),
+            Key(7, 3, b),
+            Key(7, 3, a),
+            Key(8, 3, a),
+            Key(7, 4, a),
+            Key(7, 3, b)};
+    std::uint32_t indexes[6] = {};
+    std::size_t unique_count = 0;
+    CHECK(plane->CompactBatch(keys, indexes, 6, &unique_count) == ErrorCode::kOk);
+    CHECK(unique_count == 4);
+    CHECK(indexes[0] == 0);
+    CHECK(indexes[1] == 1);
+    CHECK(indexes[2] == 3);
+    CHECK(indexes[3] == 4);
+}
+
+void TestGroupBatchMapsEverySourceToStableGroup() {
+    Options options;
+    options.capacity_entries = 16;
+    options.key_arena_bytes = 1024;
+    options.value_arena_bytes = 1024;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+    const std::string a = "alpha";
+    const std::string b = "beta";
+    const KeyView keys[] = {
+            Key(7, 3, a), Key(7, 3, b), Key(7, 3, a), Key(8, 3, a), Key(7, 3, b)};
+    std::uint32_t uniques[5] = {};
+    std::uint32_t groups[5] = {};
+    std::size_t unique_count = 0;
+    CHECK(plane->GroupBatch(keys, uniques, groups, 5, &unique_count) == ErrorCode::kOk);
+    CHECK(unique_count == 3);
+    CHECK(uniques[0] == 0 && uniques[1] == 1 && uniques[2] == 3);
+    CHECK(groups[0] == 0 && groups[1] == 1 && groups[2] == 0);
+    CHECK(groups[3] == 2 && groups[4] == 1);
+}
+
+std::string ReferenceIdentity(const KeyView& key) {
+    std::string identity;
+    identity.append(
+            reinterpret_cast<const char*>(&key.state_id), sizeof(key.state_id));
+    identity.append(
+            reinterpret_cast<const char*>(&key.generation), sizeof(key.generation));
+    identity.append(reinterpret_cast<const char*>(&key.size), sizeof(key.size));
+    if (key.size != 0) {
+        identity.append(reinterpret_cast<const char*>(key.data), key.size);
+    }
+    return identity;
+}
+
+void ReferenceGroup(
+        const std::vector<KeyView>& keys,
+        std::vector<std::uint32_t>* unique_indexes,
+        std::vector<std::uint32_t>* groups) {
+    std::unordered_map<std::string, std::uint32_t> seen;
+    unique_indexes->clear();
+    groups->resize(keys.size());
+    for (std::size_t index = 0; index < keys.size(); ++index) {
+        std::string identity = ReferenceIdentity(keys[index]);
+        const auto existing = seen.find(identity);
+        if (existing != seen.end()) {
+            (*groups)[index] = existing->second;
+            continue;
+        }
+        const std::uint32_t group =
+                static_cast<std::uint32_t>(unique_indexes->size());
+        seen.emplace(std::move(identity), group);
+        unique_indexes->push_back(static_cast<std::uint32_t>(index));
+        (*groups)[index] = group;
+    }
+}
+
+void TestGroupBatchForcedFingerprintCollisionUsesExactBytes() {
+    Options options;
+    options.capacity_entries = 4;
+    options.max_batch_entries = 8;
+    options.fingerprint_mask = 0U;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+    const std::string aa = "aa";
+    const std::string bb = "bb";
+    const KeyView keys[] = {
+            Key(7, 3, aa), Key(7, 3, bb), Key(7, 3, aa), Key(8, 3, aa)};
+    std::uint32_t uniques[4] = {};
+    std::uint32_t groups[4] = {};
+    std::size_t unique_count = 0;
+    const GroupBatchDiagnostics before = plane->group_batch_diagnostics();
+    CHECK(plane->GroupBatch(keys, uniques, groups, 4, &unique_count) == ErrorCode::kOk);
+    const GroupBatchDiagnostics after = plane->group_batch_diagnostics();
+    CHECK(unique_count == 3);
+    CHECK(uniques[0] == 0 && uniques[1] == 1 && uniques[2] == 3);
+    CHECK(groups[0] == 0 && groups[1] == 1 && groups[2] == 0 && groups[3] == 2);
+    CHECK(after.fingerprint_calls - before.fingerprint_calls == 4);
+    CHECK(after.exact_comparisons - before.exact_comparisons >= 2);
+}
+
+void TestGroupBatchUsesIndependentBatchLimitAndFailsClosed() {
+    Options options;
+    options.capacity_entries = 2;
+    options.max_batch_entries = 4;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+    CHECK(plane->capacity() == 2);
+    CHECK(plane->max_batch_entries() == 4);
+    const std::array<std::string, 5> values = {"a", "b", "c", "d", "e"};
+    std::array<KeyView, 5> keys;
+    for (std::size_t index = 0; index < keys.size(); ++index) {
+        keys[index] = Key(1, 1, values[index]);
+    }
+    std::uint32_t uniques[5] = {};
+    std::uint32_t groups[5] = {};
+    std::size_t unique_count = 999;
+    CHECK(plane->GroupBatch(keys.data(), uniques, groups, 4, &unique_count) == ErrorCode::kOk);
+    CHECK(unique_count == 4);
+    unique_count = 999;
+    CHECK(plane->GroupBatch(keys.data(), uniques, groups, 5, &unique_count) ==
+          ErrorCode::kCapacityExceeded);
+    CHECK(unique_count == 0);
+
+    Options legacy;
+    legacy.capacity_entries = 3;
+    std::unique_ptr<RequestPlane> legacy_plane = MakePlane(legacy);
+    CHECK(legacy_plane->max_batch_entries() == legacy.capacity_entries);
+}
+
+void TestGroupBatchEpochWrapPreservesResults() {
+    Options options;
+    options.capacity_entries = 2;
+    options.max_batch_entries = 8;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+    const std::string a = "alpha";
+    const std::string b = "beta";
+    const KeyView keys[] = {Key(1, 1, a), Key(1, 1, b), Key(1, 1, a)};
+    for (std::size_t batch = 0; batch < 256; ++batch) {
+        std::uint32_t uniques[3] = {};
+        std::uint32_t groups[3] = {};
+        std::size_t unique_count = 0;
+        CHECK(plane->GroupBatch(keys, uniques, groups, 3, &unique_count) == ErrorCode::kOk);
+        CHECK(unique_count == 2);
+        CHECK(uniques[0] == 0 && uniques[1] == 1);
+        CHECK(groups[0] == 0 && groups[1] == 1 && groups[2] == 0);
+    }
+    const GroupBatchDiagnostics diagnostics = plane->group_batch_diagnostics();
+    CHECK(diagnostics.batches == 256);
+    CHECK(diagnostics.epoch_resets == 1);
+    CHECK(diagnostics.fingerprint_calls == 256 * 3);
+}
+
+void TestGroupBatchRandomDifferentialAndLinearCounters() {
+    constexpr std::size_t kMaxBatch = 512;
+    Options options;
+    options.capacity_entries = 16;
+    options.max_batch_entries = kMaxBatch;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+    std::mt19937_64 random(0x7f4a7c159e3779b9ULL);
+
+    for (std::size_t seed = 0; seed < 10000; ++seed) {
+        const std::size_t count = static_cast<std::size_t>(random() % (kMaxBatch + 1U));
+        std::vector<std::string> owned;
+        std::vector<std::uint32_t> states;
+        std::vector<std::uint64_t> generations;
+        owned.reserve(count);
+        states.reserve(count);
+        generations.reserve(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            const std::uint64_t token = random() % 96U;
+            std::string value = "key-" + std::to_string(token);
+            if ((token % 13U) == 0U) {
+                value.push_back('\0');
+                value.push_back(static_cast<char>(token));
+            }
+            owned.push_back(std::move(value));
+            states.push_back(static_cast<std::uint32_t>(random() % 5U));
+            generations.push_back(random() % 4U);
+        }
+        std::vector<KeyView> keys;
+        keys.reserve(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            keys.push_back(Key(states[index], generations[index], owned[index]));
+        }
+
+        std::vector<std::uint32_t> expected_uniques;
+        std::vector<std::uint32_t> expected_groups;
+        ReferenceGroup(keys, &expected_uniques, &expected_groups);
+        std::vector<std::uint32_t> actual_uniques(count, 0U);
+        std::vector<std::uint32_t> actual_groups(count, 0U);
+        std::size_t actual_unique_count = 0;
+        const GroupBatchDiagnostics before = plane->group_batch_diagnostics();
+        CHECK(plane->GroupBatch(
+                      keys.data(),
+                      actual_uniques.data(),
+                      actual_groups.data(),
+                      count,
+                      &actual_unique_count) == ErrorCode::kOk);
+        const GroupBatchDiagnostics after = plane->group_batch_diagnostics();
+        CHECK(actual_unique_count == expected_uniques.size());
+        CHECK(std::equal(
+                expected_uniques.begin(),
+                expected_uniques.end(),
+                actual_uniques.begin()));
+        CHECK(actual_groups == expected_groups);
+        CHECK(after.fingerprint_calls - before.fingerprint_calls == count);
+        if (count != 0) {
+            CHECK(after.probe_steps - before.probe_steps <= count * 8U);
+        }
+
+        if ((seed % 97U) == 0U) {
+            std::fill(actual_uniques.begin(), actual_uniques.end(), 0U);
+            actual_unique_count = 0;
+            CHECK(plane->CompactBatch(
+                          keys.data(),
+                          actual_uniques.data(),
+                          count,
+                          &actual_unique_count) == ErrorCode::kOk);
+            CHECK(actual_unique_count == expected_uniques.size());
+            CHECK(std::equal(
+                    expected_uniques.begin(),
+                    expected_uniques.end(),
+                    actual_uniques.begin()));
+        }
+    }
+}
+
+void TestGroupBatchLargeCollisionSafePlan() {
+    Options options;
+    options.capacity_entries = 4096;
+    options.max_batch_entries = 4096;
+    options.key_arena_bytes = 1U << 20U;
+    options.value_arena_bytes = 1U << 20U;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+
+    std::vector<std::string> values;
+    values.reserve(1024);
+    for (std::size_t index = 0; index < 1024; ++index) {
+        values.push_back("key-" + std::to_string(index));
+    }
+    std::vector<KeyView> keys;
+    keys.reserve(4096);
+    for (std::size_t index = 0; index < 4096; ++index) {
+        keys.push_back(Key(17, 9, values[index % values.size()]));
+    }
+    std::vector<std::uint32_t> uniques(keys.size(), 0U);
+    std::vector<std::uint32_t> groups(keys.size(), 0U);
+    std::size_t unique_count = 0;
+    CHECK(plane->GroupBatch(
+                  keys.data(),
+                  uniques.data(),
+                  groups.data(),
+                  keys.size(),
+                  &unique_count) == ErrorCode::kOk);
+    CHECK(unique_count == values.size());
+    for (std::size_t index = 0; index < keys.size(); ++index) {
+        CHECK(groups[index] == index % values.size());
+    }
+}
+
+void TestGroupTokenBatchStablePlanAndCounts() {
+    Options options;
+    options.capacity_entries = 2;
+    options.max_batch_entries = 8;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+    const std::uint32_t tokens[] = {7U, 8U, 7U, 9U, 8U};
+    std::uint32_t first_sources[5] = {};
+    std::uint32_t source_groups[5] = {};
+    std::uint32_t group_counts[5] = {};
+    std::size_t group_count = 0;
+    const GroupBatchDiagnostics before = plane->group_batch_diagnostics();
+    CHECK(plane->GroupTokenBatch(
+                  tokens,
+                  first_sources,
+                  source_groups,
+                  group_counts,
+                  5,
+                  &group_count) == ErrorCode::kOk);
+    const GroupBatchDiagnostics after = plane->group_batch_diagnostics();
+    CHECK(group_count == 3);
+    CHECK(first_sources[0] == 0 && first_sources[1] == 1 && first_sources[2] == 3);
+    CHECK(source_groups[0] == 0 && source_groups[1] == 1 && source_groups[2] == 0);
+    CHECK(source_groups[3] == 2 && source_groups[4] == 1);
+    CHECK(group_counts[0] == 2 && group_counts[1] == 2 && group_counts[2] == 1);
+    CHECK(after.fingerprint_calls == before.fingerprint_calls);
+    CHECK(after.batches - before.batches == 1);
+}
+
+void TestGroupTokenBatchFailsClosedAndSurvivesEpochWrap() {
+    Options options;
+    options.capacity_entries = 2;
+    options.max_batch_entries = 4;
+    options.kernel = KernelPreference::kScalar;
+    std::unique_ptr<RequestPlane> plane = MakePlane(options);
+    const std::uint32_t tokens[] = {1U, 2U, 1U, 3U, 4U};
+
+    for (std::size_t batch = 0; batch < 256; ++batch) {
+        std::uint32_t first_sources[4] = {};
+        std::uint32_t source_groups[4] = {};
+        std::uint32_t group_counts[4] = {};
+        std::size_t group_count = 99;
+        CHECK(plane->GroupTokenBatch(
+                      tokens,
+                      first_sources,
+                      source_groups,
+                      group_counts,
+                      4,
+                      &group_count) == ErrorCode::kOk);
+        CHECK(group_count == 3);
+        CHECK(first_sources[0] == 0 && first_sources[1] == 1 && first_sources[2] == 3);
+        CHECK(source_groups[0] == 0 && source_groups[1] == 1 &&
+              source_groups[2] == 0 && source_groups[3] == 2);
+        CHECK(group_counts[0] == 2 && group_counts[1] == 1 && group_counts[2] == 1);
+    }
+    const GroupBatchDiagnostics diagnostics = plane->group_batch_diagnostics();
+    CHECK(diagnostics.epoch_resets == 1);
+
+    std::uint32_t first_sources[5] = {};
+    std::uint32_t source_groups[5] = {};
+    std::uint32_t group_counts[5] = {};
+    std::size_t group_count = 99;
+    CHECK(plane->GroupTokenBatch(
+                  tokens,
+                  first_sources,
+                  source_groups,
+                  group_counts,
+                  5,
+                  &group_count) == ErrorCode::kCapacityExceeded);
+    CHECK(group_count == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -754,11 +1186,21 @@ int main() {
     TestCollisionRequiresExactCompare();
     TestGenerationAndNegativeEntries();
     TestStateGenerationWatermarkSurvivesEvictionAndAdmissionFailure();
+    TestResidentOnlyMutationControls();
     TestEvictionAndArenaReuse();
     TestIntrusiveLruOrderAndSustainedCapacityChurn();
     TestUpdateCanReclaimFragmentedArena();
     TestCapacityAndOverflowRejection();
     TestRandomDifferentialAgainstReference();
+    TestCompactBatchPreservesFirstOccurrenceAndIdentity();
+    TestGroupBatchMapsEverySourceToStableGroup();
+    TestGroupBatchForcedFingerprintCollisionUsesExactBytes();
+    TestGroupBatchUsesIndependentBatchLimitAndFailsClosed();
+    TestGroupBatchEpochWrapPreservesResults();
+    TestGroupBatchRandomDifferentialAndLinearCounters();
+    TestGroupBatchLargeCollisionSafePlan();
+    TestGroupTokenBatchStablePlanAndCounts();
+    TestGroupTokenBatchFailsClosedAndSurvivesEpochWrap();
     TestCAbiBatchSmoke();
     std::cout << "all native request-plane tests passed" << std::endl;
     return 0;

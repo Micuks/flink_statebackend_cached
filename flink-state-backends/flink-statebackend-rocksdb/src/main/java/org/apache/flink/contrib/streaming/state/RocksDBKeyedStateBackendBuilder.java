@@ -116,6 +116,14 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
     /** RocksDB property-based and statistics-based native metrics options. */
     private RocksDBNativeMetricOptions nativeMetricOptions;
 
+    private boolean mapIteratorSingleKeyFetchEnabled;
+    private boolean mapIteratorPrefixUpperBoundEnabled;
+    private boolean mapIteratorPackedTinyScanEnabled;
+    private boolean mapIteratorPackedTinyScanReuseEnabled;
+    private boolean mapIteratorPackedTinyScanFlatPageEnabled;
+    private int mapIteratorPackedTinyScanMaxEntries;
+    private int mapIteratorPackedTinyScanMaxBytes;
+
     private int numberOfTransferingThreads;
     private long writeBatchSize =
             RocksDBConfigurableOptions.WRITE_BATCH_SIZE.defaultValue().getBytes();
@@ -169,6 +177,16 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
         this.metricGroup = metricGroup;
         this.enableIncrementalCheckpointing = false;
         this.nativeMetricOptions = new RocksDBNativeMetricOptions();
+        this.mapIteratorSingleKeyFetchEnabled = false;
+        this.mapIteratorPrefixUpperBoundEnabled = false;
+        this.mapIteratorPackedTinyScanEnabled = false;
+        this.mapIteratorPackedTinyScanReuseEnabled = false;
+        this.mapIteratorPackedTinyScanFlatPageEnabled =
+                RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_FLAT_PAGE_ENABLED.defaultValue();
+        this.mapIteratorPackedTinyScanMaxEntries =
+                RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_ENTRIES.defaultValue();
+        this.mapIteratorPackedTinyScanMaxBytes =
+                RocksDBOptions.MAP_ITERATOR_PACKED_TINY_SCAN_MAX_BYTES.defaultValue();
         this.numberOfTransferingThreads =
                 RocksDBOptions.CHECKPOINT_TRANSFER_THREAD_NUM.defaultValue();
     }
@@ -227,6 +245,42 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
     RocksDBKeyedStateBackendBuilder<K> setNativeMetricOptions(
             RocksDBNativeMetricOptions nativeMetricOptions) {
         this.nativeMetricOptions = nativeMetricOptions;
+        return this;
+    }
+
+    RocksDBKeyedStateBackendBuilder<K> setMapIteratorSingleKeyFetchEnabled(
+            boolean mapIteratorSingleKeyFetchEnabled) {
+        this.mapIteratorSingleKeyFetchEnabled = mapIteratorSingleKeyFetchEnabled;
+        return this;
+    }
+
+    RocksDBKeyedStateBackendBuilder<K> setMapIteratorPrefixUpperBoundEnabled(
+            boolean mapIteratorPrefixUpperBoundEnabled) {
+        this.mapIteratorPrefixUpperBoundEnabled = mapIteratorPrefixUpperBoundEnabled;
+        return this;
+    }
+
+    RocksDBKeyedStateBackendBuilder<K> setMapIteratorPackedTinyScan(
+            boolean enabled, int maxEntries, int maxBytes) {
+        checkArgument(maxEntries >= 1 && maxEntries <= 128, "maxEntries must be in [1, 128]");
+        checkArgument(
+                maxBytes >= RocksDBPackedTinyMapScan.HEADER_BYTES && maxBytes <= 64 * 1024,
+                "maxBytes must be in [16, 65536]");
+        this.mapIteratorPackedTinyScanEnabled = enabled;
+        this.mapIteratorPackedTinyScanMaxEntries = maxEntries;
+        this.mapIteratorPackedTinyScanMaxBytes = maxBytes;
+        return this;
+    }
+
+    RocksDBKeyedStateBackendBuilder<K> setMapIteratorPackedTinyScanReuseEnabled(
+            boolean enabled) {
+        this.mapIteratorPackedTinyScanReuseEnabled = enabled;
+        return this;
+    }
+
+    RocksDBKeyedStateBackendBuilder<K> setMapIteratorPackedTinyScanFlatPageEnabled(
+            boolean enabled) {
+        this.mapIteratorPackedTinyScanFlatPageEnabled = enabled;
         return this;
     }
 
@@ -435,7 +489,14 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
                 priorityQueueFactory,
                 ttlCompactFiltersManager,
                 keyContext,
-                writeBatchSize);
+                writeBatchSize,
+                mapIteratorSingleKeyFetchEnabled,
+                mapIteratorPrefixUpperBoundEnabled,
+                mapIteratorPackedTinyScanEnabled,
+                mapIteratorPackedTinyScanReuseEnabled,
+                mapIteratorPackedTinyScanFlatPageEnabled,
+                mapIteratorPackedTinyScanMaxEntries,
+                mapIteratorPackedTinyScanMaxBytes);
     }
 
     private RocksDBRestoreOperation getRocksDBRestoreOperation(

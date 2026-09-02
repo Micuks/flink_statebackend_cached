@@ -242,6 +242,12 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                                                 "state.backend.cachekit.bp-prefetch.sliding-drain-records")
                                         .intType()
                                         .defaultValue(0));
+                boolean cancelPrefetchOnDispatch =
+                        cfg.getBoolean(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.cancel-on-dispatch.enabled")
+                                        .booleanType()
+                                        .defaultValue(false));
                 boolean unalignedCheckpoints =
                         cfg.getBoolean(
                                 org.apache.flink.configuration.ConfigOptions.key(
@@ -271,7 +277,8 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                         asyncPrefetchChunks,
                         asyncPrefetchChunkSize,
                         asyncPrefetchHeadGuardRecords,
-                        asyncPrefetchSlidingDrainRecords);
+                        asyncPrefetchSlidingDrainRecords,
+                        cancelPrefetchOnDispatch);
             }
 
             boolean enabled =

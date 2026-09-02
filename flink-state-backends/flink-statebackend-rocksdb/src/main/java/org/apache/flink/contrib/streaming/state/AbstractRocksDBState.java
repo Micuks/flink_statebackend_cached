@@ -129,22 +129,43 @@ public abstract class AbstractRocksDBState<K, N, V> implements InternalKvState<K
             final TypeSerializer<V> safeValueSerializer)
             throws Exception {
 
+        return backend.db.get(
+                columnFamily,
+                serializeQueryKeyAndNamespace(
+                        serializedKeyAndNamespace, safeKeySerializer, safeNamespaceSerializer));
+    }
+
+    protected final byte[] serializeQueryKeyAndNamespace(
+            byte[] serializedKeyAndNamespace,
+            TypeSerializer<K> safeKeySerializer,
+            TypeSerializer<N> safeNamespaceSerializer)
+            throws IOException {
+
         // TODO make KvStateSerializer key-group aware to save this round trip and key-group
         // computation
         Tuple2<K, N> keyAndNamespace =
                 KvStateSerializer.deserializeKeyAndNamespace(
                         serializedKeyAndNamespace, safeKeySerializer, safeNamespaceSerializer);
 
+        return serializeKeyAndNamespace(
+                keyAndNamespace.f0, keyAndNamespace.f1, safeKeySerializer, safeNamespaceSerializer);
+    }
+
+    protected final byte[] serializeKeyAndNamespace(
+            K key,
+            N namespace,
+            TypeSerializer<K> safeKeySerializer,
+            TypeSerializer<N> safeNamespaceSerializer)
+            throws IOException {
+
         int keyGroup =
-                KeyGroupRangeAssignment.assignToKeyGroup(
-                        keyAndNamespace.f0, backend.getNumberOfKeyGroups());
+                KeyGroupRangeAssignment.assignToKeyGroup(key, backend.getNumberOfKeyGroups());
 
         SerializedCompositeKeyBuilder<K> keyBuilder =
                 new SerializedCompositeKeyBuilder<>(
                         safeKeySerializer, backend.getKeyGroupPrefixBytes(), 32);
-        keyBuilder.setKeyAndKeyGroup(keyAndNamespace.f0, keyGroup);
-        byte[] key = keyBuilder.buildCompositeKeyNamespace(keyAndNamespace.f1, namespaceSerializer);
-        return backend.db.get(columnFamily, key);
+        keyBuilder.setKeyAndKeyGroup(key, keyGroup);
+        return keyBuilder.buildCompositeKeyNamespace(namespace, safeNamespaceSerializer);
     }
 
     <UK> byte[] serializeCurrentKeyWithGroupAndNamespacePlusUserKey(

@@ -60,7 +60,13 @@ under the License.
 		<dependency>
 			<groupId>com.ververica</groupId>
 			<artifactId>frocksdbjni</artifactId>
-			<version>6.20.3-ververica-1.0-cachekit-wholekey1</version>
+			<!--
+				The direct128 runtime extends the ArmPoint dual-authority wrapper with
+				direct MultiGet capability negotiation. Keep the combined artifact on
+				a distinct coordinate so clean builds fail closed instead of mixing an
+				ArmPoint-only wrapper with the direct128 Flink backend classes.
+			-->
+			<version>6.20.3-ververica-1.0-cachekit-direct128-335ecf7ce</version>
 		</dependency>
 
 		<!-- test dependencies -->

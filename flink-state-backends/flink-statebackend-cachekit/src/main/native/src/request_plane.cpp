@@ -227,10 +227,11 @@ bool IsValidBytes(const std::uint8_t* data, std::size_t size) noexcept {
 }
 
 std::size_t RequiredBucketCount(std::size_t capacity_entries) {
-    // Keep the metadata table at or below 50% occupancy: eight entries per
-    // sixteen-slot bucket.
-    std::size_t required = capacity_entries / 8U;
-    if ((capacity_entries % 8U) != 0) {
+    // Keep the metadata table at or below 50% occupancy on either the x86
+    // 64-byte/eight-slot or Kunpeng 128-byte/sixteen-slot layout.
+    const std::size_t entries_per_bucket = kSlotsPerBucket / 2U;
+    std::size_t required = capacity_entries / entries_per_bucket;
+    if ((capacity_entries % entries_per_bucket) != 0) {
         ++required;
     }
     required = std::max<std::size_t>(required, 1U);
@@ -243,6 +244,40 @@ std::size_t RequiredBucketCount(std::size_t capacity_entries) {
         result *= 2U;
     }
     return result;
+}
+
+std::size_t RequiredGroupTableCount(std::size_t max_batch_entries) {
+    if (max_batch_entries > std::numeric_limits<std::size_t>::max() / 2U) {
+        throw std::overflow_error("group table size overflow");
+    }
+    const std::size_t required =
+            std::max<std::size_t>(2U, max_batch_entries * 2U);
+    std::size_t result = 1U;
+    while (result < required) {
+        if (result > std::numeric_limits<std::size_t>::max() / 2U) {
+            throw std::overflow_error("group table size overflow");
+        }
+        result *= 2U;
+    }
+    return result;
+}
+
+std::size_t GroupHash(
+        std::uint32_t fingerprint,
+        std::uint32_t state_id,
+        std::uint64_t generation,
+        std::size_t key_size) noexcept {
+    std::uint64_t value =
+            (static_cast<std::uint64_t>(fingerprint) << 32U) | state_id;
+    value ^= generation + 0x9e3779b97f4a7c15ULL + (value << 6U) + (value >> 2U);
+    value ^= static_cast<std::uint64_t>(key_size) + 0x9e3779b97f4a7c15ULL +
+            (value << 6U) + (value >> 2U);
+    value ^= value >> 30U;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27U;
+    value *= 0x94d049bb133111ebULL;
+    value ^= value >> 31U;
+    return static_cast<std::size_t>(value);
 }
 
 std::uint32_t NormalizeTag(
@@ -284,7 +319,11 @@ struct RequestPlane::Impl {
                       options.capacity_entries + 1U),
               value_arena(
                       options.value_arena_bytes,
-                      options.capacity_entries + 1U) {
+                      options.capacity_entries + 1U),
+              group_table(
+                      RequiredGroupTableCount(options.max_batch_entries), 0U),
+              group_epochs(group_table.size(), 0U),
+              group_fingerprints(options.max_batch_entries, 0U) {
         state_generation_watermarks.reserve(
                 std::min<std::size_t>(options.capacity_entries, 64U));
         free_entry_ids.reserve(options.capacity_entries);
@@ -664,6 +703,7 @@ struct RequestPlane::Impl {
     FillResult FillOne(const FillView& fill) noexcept {
         if (!IsValidBytes(fill.key.data, fill.key.size) ||
             (!fill.negative && !IsValidBytes(fill.value, fill.value_size)) ||
+            (fill.update_only && fill.check_only) ||
             fill.key.generation == kLatestGeneration) {
             return FillResult{
                     FillStatus::kInvalidArgument, ErrorCode::kInvalidArgument};
@@ -711,6 +751,14 @@ struct RequestPlane::Impl {
         std::uint32_t existing_id = 0;
         const bool existing =
                 FindExact(fill.key, tag, nullptr, &existing_id);
+        if (fill.check_only) {
+            return FillResult{
+                    existing ? FillStatus::kUpdated : FillStatus::kNotPresent,
+                    ErrorCode::kOk};
+        }
+        if (fill.update_only && !existing) {
+            return FillResult{FillStatus::kNotPresent, ErrorCode::kOk};
+        }
         if (!fill.negative && fill.value_size > value_arena.capacity()) {
             // The authoritative value no longer matches this exact resident
             // key. Preserve other keys in the state, but never leave the old
@@ -757,6 +805,16 @@ struct RequestPlane::Impl {
     ByteArena value_arena;
     std::unordered_map<std::uint32_t, std::uint64_t>
             state_generation_watermarks;
+    // GroupBatch is serialized by its single-thread-owned RequestPlane. Reuse
+    // this preallocated scratch so mailbox batches do not allocate in the hot path.
+    mutable std::vector<std::uint32_t> group_table;
+    // An 8-bit epoch clears one byte per slot only once every 255 batches. At
+    // the configured 512-entry batch limit this is a few MiB over a 100M job,
+    // instead of clearing a capacity-sized table on every approximately 64-key batch.
+    mutable std::vector<std::uint8_t> group_epochs;
+    mutable std::vector<std::uint32_t> group_fingerprints;
+    mutable std::uint8_t group_epoch = 0;
+    mutable GroupBatchDiagnostics group_diagnostics;
     std::size_t entry_count = 0;
     std::size_t tombstone_count = 0;
     std::uint32_t lru_head = 0;
@@ -784,19 +842,36 @@ std::unique_ptr<RequestPlane> RequestPlane::Create(
                 message);
         return nullptr;
     }
+    Options normalized_options = options;
+    if (normalized_options.max_batch_entries == 0) {
+        normalized_options.max_batch_entries = normalized_options.capacity_entries;
+    }
+    if (normalized_options.max_batch_entries >=
+        static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        SetError(
+                ErrorCode::kOverflow,
+                "max_batch_entries exceeds the 32-bit group-id space",
+                error,
+                message);
+        return nullptr;
+    }
 
     const HostFeatures features = DetectHostFeatures();
     const char* kernel_message = "";
     ErrorCode kernel_error = ErrorCode::kOk;
     const KernelOps* kernel = internal::SelectKernel(
-            options.kernel, features, &kernel_error, &kernel_message);
+            normalized_options.kernel,
+            features,
+            &kernel_error,
+            &kernel_message);
     if (kernel == nullptr) {
         SetError(kernel_error, kernel_message, error, message);
         return nullptr;
     }
 
     try {
-        std::unique_ptr<Impl> impl(new Impl(options, *kernel, features));
+        std::unique_ptr<Impl> impl(
+                new Impl(normalized_options, *kernel, features));
         return std::unique_ptr<RequestPlane>(
                 new RequestPlane(std::move(impl)));
     } catch (const std::overflow_error& exception) {
@@ -848,6 +923,201 @@ ErrorCode RequestPlane::FillBatch(
     return ErrorCode::kOk;
 }
 
+ErrorCode RequestPlane::CompactBatch(
+        const KeyView* keys,
+        std::uint32_t* unique_source_indexes,
+        std::size_t count,
+        std::size_t* unique_count) const noexcept {
+    return GroupBatch(keys, unique_source_indexes, nullptr, count, unique_count);
+}
+
+ErrorCode RequestPlane::GroupBatch(
+        const KeyView* keys,
+        std::uint32_t* unique_source_indexes,
+        std::uint32_t* source_group_indexes,
+        std::size_t count,
+        std::size_t* unique_count) const noexcept {
+    if (unique_count == nullptr) {
+        return ErrorCode::kInvalidArgument;
+    }
+    *unique_count = 0;
+    if ((count != 0 && (keys == nullptr || unique_source_indexes == nullptr)) ||
+        count > std::numeric_limits<std::uint32_t>::max()) {
+        return ErrorCode::kInvalidArgument;
+    }
+    if (count > impl_->options.max_batch_entries) {
+        return ErrorCode::kCapacityExceeded;
+    }
+
+    GroupBatchDiagnostics batch_diagnostics;
+    batch_diagnostics.batches = 1;
+    const auto publish_diagnostics = [&]() noexcept {
+        impl_->group_diagnostics.batches += batch_diagnostics.batches;
+        impl_->group_diagnostics.fingerprint_calls +=
+                batch_diagnostics.fingerprint_calls;
+        impl_->group_diagnostics.probe_steps += batch_diagnostics.probe_steps;
+        impl_->group_diagnostics.exact_comparisons +=
+                batch_diagnostics.exact_comparisons;
+        impl_->group_diagnostics.epoch_resets += batch_diagnostics.epoch_resets;
+    };
+    std::uint8_t next_epoch = static_cast<std::uint8_t>(impl_->group_epoch + 1U);
+    if (next_epoch == 0U) {
+        std::fill(impl_->group_epochs.begin(), impl_->group_epochs.end(), 0U);
+        next_epoch = 1U;
+        ++batch_diagnostics.epoch_resets;
+    }
+    impl_->group_epoch = next_epoch;
+    const std::size_t table_mask = impl_->group_table.size() - 1U;
+    std::size_t written = 0;
+    for (std::size_t index = 0; index < count; ++index) {
+        const KeyView& candidate = keys[index];
+        if (!IsValidBytes(candidate.data, candidate.size)) {
+            publish_diagnostics();
+            return ErrorCode::kInvalidArgument;
+        }
+        const std::uint32_t candidate_fingerprint =
+                impl_->kernel.fingerprint(
+                        candidate.state_id, candidate.data, candidate.size) &
+                impl_->options.fingerprint_mask;
+        ++batch_diagnostics.fingerprint_calls;
+        std::size_t slot = GroupHash(
+                                   candidate_fingerprint,
+                                   candidate.state_id,
+                                   candidate.generation,
+                                   candidate.size) &
+                table_mask;
+        bool resolved = false;
+        for (std::size_t probe = 0; probe < impl_->group_table.size(); ++probe) {
+            ++batch_diagnostics.probe_steps;
+            if (impl_->group_epochs[slot] != impl_->group_epoch) {
+                const std::uint32_t group = static_cast<std::uint32_t>(written);
+                unique_source_indexes[written] = static_cast<std::uint32_t>(index);
+                impl_->group_fingerprints[written] = candidate_fingerprint;
+                impl_->group_table[slot] = group + 1U;
+                impl_->group_epochs[slot] = impl_->group_epoch;
+                ++written;
+                if (source_group_indexes != nullptr) {
+                    source_group_indexes[index] = group;
+                }
+                resolved = true;
+                break;
+            }
+
+            const std::uint32_t encoded_group = impl_->group_table[slot];
+            const std::size_t group = static_cast<std::size_t>(encoded_group - 1U);
+            const KeyView& existing = keys[unique_source_indexes[group]];
+            const bool identity_matches =
+                    impl_->group_fingerprints[group] == candidate_fingerprint &&
+                    existing.state_id == candidate.state_id &&
+                    existing.generation == candidate.generation &&
+                    existing.size == candidate.size;
+            if (identity_matches) {
+                bool exact_match = candidate.size == 0;
+                if (!exact_match) {
+                    ++batch_diagnostics.exact_comparisons;
+                    exact_match = impl_->kernel.equal_bytes(
+                            candidate.data, existing.data, candidate.size);
+                }
+                if (exact_match) {
+                    if (source_group_indexes != nullptr) {
+                        source_group_indexes[index] =
+                                static_cast<std::uint32_t>(group);
+                    }
+                    resolved = true;
+                    break;
+                }
+            }
+            slot = (slot + 1U) & table_mask;
+        }
+        if (!resolved) {
+            publish_diagnostics();
+            return ErrorCode::kCapacityExceeded;
+        }
+    }
+    *unique_count = written;
+    publish_diagnostics();
+    return ErrorCode::kOk;
+}
+
+ErrorCode RequestPlane::GroupTokenBatch(
+        const std::uint32_t* tokens,
+        std::uint32_t* first_source_indexes,
+        std::uint32_t* source_group_indexes,
+        std::uint32_t* group_counts,
+        std::size_t count,
+        std::size_t* group_count) const noexcept {
+    if (group_count == nullptr) {
+        return ErrorCode::kInvalidArgument;
+    }
+    *group_count = 0;
+    if ((count != 0 &&
+         (tokens == nullptr || first_source_indexes == nullptr ||
+          source_group_indexes == nullptr || group_counts == nullptr)) ||
+        count > std::numeric_limits<std::uint32_t>::max()) {
+        return ErrorCode::kInvalidArgument;
+    }
+    if (count > impl_->options.max_batch_entries) {
+        return ErrorCode::kCapacityExceeded;
+    }
+
+    GroupBatchDiagnostics batch_diagnostics;
+    batch_diagnostics.batches = 1;
+    const auto publish_diagnostics = [&]() noexcept {
+        impl_->group_diagnostics.batches += batch_diagnostics.batches;
+        impl_->group_diagnostics.probe_steps += batch_diagnostics.probe_steps;
+        impl_->group_diagnostics.exact_comparisons +=
+                batch_diagnostics.exact_comparisons;
+        impl_->group_diagnostics.epoch_resets += batch_diagnostics.epoch_resets;
+    };
+    std::uint8_t next_epoch = static_cast<std::uint8_t>(impl_->group_epoch + 1U);
+    if (next_epoch == 0U) {
+        std::fill(impl_->group_epochs.begin(), impl_->group_epochs.end(), 0U);
+        next_epoch = 1U;
+        ++batch_diagnostics.epoch_resets;
+    }
+    impl_->group_epoch = next_epoch;
+
+    const std::size_t table_mask = impl_->group_table.size() - 1U;
+    std::size_t written = 0;
+    for (std::size_t index = 0; index < count; ++index) {
+        const std::uint32_t token = tokens[index];
+        std::size_t slot = GroupHash(token, 0U, 0U, sizeof(token)) & table_mask;
+        bool resolved = false;
+        for (std::size_t probe = 0; probe < impl_->group_table.size(); ++probe) {
+            ++batch_diagnostics.probe_steps;
+            if (impl_->group_epochs[slot] != impl_->group_epoch) {
+                const std::uint32_t group = static_cast<std::uint32_t>(written);
+                first_source_indexes[written] = static_cast<std::uint32_t>(index);
+                group_counts[written] = 1U;
+                impl_->group_table[slot] = group + 1U;
+                impl_->group_epochs[slot] = impl_->group_epoch;
+                source_group_indexes[index] = group;
+                ++written;
+                resolved = true;
+                break;
+            }
+
+            const std::size_t group =
+                    static_cast<std::size_t>(impl_->group_table[slot] - 1U);
+            ++batch_diagnostics.exact_comparisons;
+            if (tokens[first_source_indexes[group]] == token) {
+                source_group_indexes[index] = static_cast<std::uint32_t>(group);
+                ++group_counts[group];
+                resolved = true;
+                break;
+            }
+            slot = (slot + 1U) & table_mask;
+        }
+        if (!resolved) {
+            publish_diagnostics();
+            return ErrorCode::kCapacityExceeded;
+        }
+    }
+    *group_count = written;
+    publish_diagnostics();
+    return ErrorCode::kOk;
+}
+
 void RequestPlane::Clear() noexcept {
     impl_->Clear();
 }
@@ -860,12 +1130,20 @@ std::size_t RequestPlane::capacity() const noexcept {
     return impl_->options.capacity_entries;
 }
 
+std::size_t RequestPlane::max_batch_entries() const noexcept {
+    return impl_->options.max_batch_entries;
+}
+
 std::uint64_t RequestPlane::evictions() const noexcept {
     return impl_->eviction_count;
 }
 
 std::uint32_t RequestPlane::min_native_batch_size() const noexcept {
     return impl_->options.min_native_batch_size;
+}
+
+GroupBatchDiagnostics RequestPlane::group_batch_diagnostics() const noexcept {
+    return impl_->group_diagnostics;
 }
 
 KernelKind RequestPlane::kernel_kind() const noexcept {

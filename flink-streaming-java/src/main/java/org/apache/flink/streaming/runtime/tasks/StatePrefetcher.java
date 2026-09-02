@@ -19,6 +19,7 @@
 package org.apache.flink.streaming.runtime.tasks;
 
 import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.runtime.state.BatchKeyGroupingSupport;
 import org.apache.flink.runtime.state.KeyedStateBackend;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.Input;
@@ -26,6 +27,7 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
 
 /**
  * Backpressure-driven state prefetch (key extraction + submission side).
@@ -46,9 +48,9 @@ import java.lang.reflect.Method;
  *   <li><b>No reorder</b> — this class only warms the cache; record dispatch order is the caller's
  *       unchanged arrival-order replay.
  *   <li><b>Stale-safe</b> — key extraction and task submission run on the mailbox thread; CacheKit
- *       performs RocksDB reads on its worker and only publishes speculative staging entries.
- *       The ValueState wrapper checks the captured write generation before promotion and falls
- *       back to the authoritative read after any intervening mutation.
+ *       performs RocksDB reads on its worker and only publishes speculative staging entries. The
+ *       ValueState wrapper checks the captured write generation before promotion and falls back to
+ *       the authoritative read after any intervening mutation.
  *   <li><b>Best-effort</b> — every path is wrapped in try/catch; a failed prefetch never touches
  *       the authoritative read path or the {@code emitRecord} dispatch.
  * </ul>
@@ -66,9 +68,44 @@ public final class StatePrefetcher {
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Cache of optional synchronous local-preagg bulk-prefetch methods per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            IMMEDIATE_PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Cache of optional immediate-prefetch hooks that fuse exact reservation revocation. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            IMMEDIATE_PREFETCH_AFTER_DISPATCH_METHOD_CACHE =
+                    new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Cache of optional exact dispatch-time reservation cancellation methods. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            DISPATCH_CANCEL_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
     /** Cache of optional {@code hasPrefetchableState()} {@link Method} per backend class. */
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             HAS_PREFETCHABLE_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Cache of optional native mailbox-batch capability probes per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            NATIVE_MAILBOX_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Cache of optional native LocalPreagg stable-group planners per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            NATIVE_PREAGG_GROUP_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Cache of optional resident-mutation batch begin hooks per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            NATIVE_MUTATION_BATCH_BEGIN_METHOD_CACHE =
+                    new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Cache of optional resident-mutation batch end hooks per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            NATIVE_MUTATION_BATCH_END_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Cache of resident-mutation batch capability probes per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            NATIVE_MUTATION_BATCH_ENABLED_METHOD_CACHE =
+                    new java.util.concurrent.ConcurrentHashMap<>();
 
     /** Sentinel field used to mark "no stateKeySelector1 available" in the field cache. */
     private static final Field NO_FIELD;
@@ -103,7 +140,23 @@ public final class StatePrefetcher {
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
     public static void prefetch(Input<?> headOperator, StreamRecord<?>[] buf, int n) {
-        if (n <= 1 || headOperator == null) {
+        prefetch(headOperator, buf, 0, n);
+    }
+
+    /**
+     * Best-effort prefetch for a live range in the caller-owned record buffer. The call is
+     * synchronous only through key extraction and backend submission; CacheKit performs the actual
+     * RocksDB reads on its worker. Keeping the range avoids allocating a copied record slice for
+     * every early-lookahead chunk.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public static void prefetch(
+            Input<?> headOperator, StreamRecord<?>[] buf, int fromIndex, int toIndex) {
+        if (headOperator == null
+                || buf == null
+                || fromIndex < 0
+                || toIndex > buf.length
+                || toIndex - fromIndex <= 1) {
             return; // single record gains nothing from a batched prefetch
         }
         try {
@@ -135,25 +188,11 @@ public final class StatePrefetcher {
                 return;
             }
 
-            // LinkedHashSet: dedup same-key records (arrival order preserved) so the backend
-            // never pays a lookup twice for one lookahead window.
-            java.util.Collection keys = new java.util.LinkedHashSet(n);
-            for (int i = 0; i < n; i++) {
-                StreamRecord<?> rec = buf[i];
-                if (rec == null) {
-                    continue;
-                }
-                Object key;
-                try {
-                    key = selector.getKey(rec.getValue());
-                } catch (Throwable t) {
-                    return; // an unkeyed/odd record: bail, the prefetch is optional
-                }
-                if (key != null) {
-                    keys.add(key);
-                }
-            }
-            if (!keys.isEmpty()) {
+            // Native mailbox mode preserves the raw arrival-order key vector so the selected
+            // AArch64 kernel can compact exact duplicates after serialization. Other backends keep
+            // the original LinkedHashSet behavior.
+            java.util.Collection keys = newKeyCollection(ksb, Math.max(2, toIndex - fromIndex));
+            if (extractKeys(selector, buf, fromIndex, toIndex, keys) && !keys.isEmpty()) {
                 prefetchMethod.invoke(ksb, keys);
             }
         } catch (Throwable t) {
@@ -161,13 +200,461 @@ public final class StatePrefetcher {
         }
     }
 
-    public static java.util.concurrent.CompletableFuture<Void> prefetchAsync(
-            Input<?> headOperator, StreamRecord<?>[] buf, int n) {
-        if (n <= 1 || headOperator == null) {
-            return java.util.concurrent.CompletableFuture.completedFuture(null);
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    static boolean extractKeys(
+            KeySelector selector,
+            StreamRecord<?>[] buf,
+            int fromIndex,
+            int toIndex,
+            java.util.Collection keys) {
+        for (int i = fromIndex; i < toIndex; i++) {
+            StreamRecord<?> rec = buf[i];
+            if (rec == null) {
+                continue;
+            }
+            Object key;
+            try {
+                key = selector.getKey(rec.getValue());
+            } catch (Throwable t) {
+                return false; // an unkeyed/odd record: bail, the prefetch is optional
+            }
+            if (key != null) {
+                keys.add(key);
+            }
         }
-        prefetch(headOperator, buf, n);
-        return java.util.concurrent.CompletableFuture.completedFuture(null);
+        return true;
+    }
+
+    /**
+     * Revoke prepared-key prefetch ownership for the exact records selected for dispatch.
+     *
+     * <p>This runs before LocalPreagg or ordinary record replay. It deliberately does not cancel a
+     * worker thread or delete an already-published staging value. Backends without the optional
+     * exact cancellation hook are left unchanged.
+     *
+     * @return number of exact reservations revoked, or {@code -1} when unsupported/failed.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public static int cancelPrefetchForDispatch(
+            Input<?> headOperator, StreamRecord<?>[] buf, int fromIndex, int toIndex) {
+        if (headOperator == null
+                || buf == null
+                || fromIndex < 0
+                || toIndex > buf.length
+                || toIndex <= fromIndex
+                || !(headOperator instanceof AbstractStreamOperator)) {
+            return -1;
+        }
+        try {
+            AbstractStreamOperator<?> op = (AbstractStreamOperator<?>) headOperator;
+            KeyedStateBackend<?> backend = op.getKeyedStateBackend();
+            KeySelector selector = extractStateKeySelector1(op);
+            if (backend == null || selector == null) {
+                return -1;
+            }
+            java.util.LinkedHashSet keys =
+                    new java.util.LinkedHashSet(Math.max(2, toIndex - fromIndex));
+            if (!extractKeys(selector, buf, fromIndex, toIndex, keys) || keys.isEmpty()) {
+                return -1;
+            }
+            return cancelPrefetchForDispatch(backend, keys);
+        } catch (Throwable failure) {
+            return -1;
+        }
+    }
+
+    static int cancelPrefetchForDispatch(
+            KeyedStateBackend<?> backend, java.util.Collection<?> keys) {
+        if (backend == null || keys == null || keys.isEmpty()) {
+            return -1;
+        }
+        try {
+            Method method =
+                    DISPATCH_CANCEL_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(), StatePrefetcher::lookupDispatchCancelMethod);
+            if (method == NO_METHOD) {
+                return -1;
+            }
+            Object result = method.invoke(backend, keys);
+            return result instanceof Number ? ((Number) result).intValue() : -1;
+        } catch (Throwable failure) {
+            return -1;
+        }
+    }
+
+    /**
+     * Revoke exact reservations for a caller-owned, already-deduplicated key set.
+     *
+     * <p>LocalPreagg uses this after grouping, avoiding a second KeySelector pass and a second
+     * LinkedHashSet allocation on the mailbox hot path.
+     */
+    public static int cancelPrefetchKeysForDispatch(
+            Input<?> headOperator, java.util.Collection<?> keys) {
+        if (headOperator == null
+                || keys == null
+                || keys.isEmpty()
+                || !(headOperator instanceof AbstractStreamOperator)) {
+            return -1;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            return cancelPrefetchForDispatch(backend, keys);
+        } catch (Throwable failure) {
+            return -1;
+        }
+    }
+
+    /** Opens an optional native mutation batch for an already-deduplicated dispatch key set. */
+    public static boolean beginNativeResidentMutationBatch(
+            Input<?> headOperator, java.util.Collection<?> keys) {
+        if (!(headOperator instanceof AbstractStreamOperator) || keys == null || keys.isEmpty()) {
+            return false;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            if (!nativeResidentMutationBatchEnabled(backend)) {
+                return false;
+            }
+            Method method =
+                    NATIVE_MUTATION_BATCH_BEGIN_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(),
+                            StatePrefetcher::lookupNativeMutationBatchBeginMethod);
+            if (method == NO_METHOD) {
+                return false;
+            }
+            Object result = method.invoke(backend, keys);
+            return result instanceof Number && ((Number) result).intValue() > 0;
+        } catch (Throwable failure) {
+            return false;
+        }
+    }
+
+    /** Extracts and deduplicates record keys before opening an optional native mutation batch. */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public static boolean beginNativeResidentMutationBatch(
+            Input<?> headOperator, StreamRecord<?>[] buf, int fromIndex, int toIndex) {
+        if (!(headOperator instanceof AbstractStreamOperator)
+                || buf == null
+                || fromIndex < 0
+                || toIndex > buf.length
+                || toIndex <= fromIndex) {
+            return false;
+        }
+        try {
+            AbstractStreamOperator<?> operator = (AbstractStreamOperator<?>) headOperator;
+            if (!nativeResidentMutationBatchEnabled(operator.getKeyedStateBackend())) {
+                return false;
+            }
+            KeySelector selector = extractStateKeySelector1(operator);
+            if (selector == null) {
+                return false;
+            }
+            java.util.LinkedHashSet keys =
+                    new java.util.LinkedHashSet(Math.max(2, toIndex - fromIndex));
+            if (!extractKeys(selector, buf, fromIndex, toIndex, keys) || keys.isEmpty()) {
+                return false;
+            }
+            return beginNativeResidentMutationBatch(headOperator, keys);
+        } catch (Throwable failure) {
+            return false;
+        }
+    }
+
+    /** Ends an optional native mutation batch previously opened for this dispatch. */
+    public static void endNativeResidentMutationBatch(Input<?> headOperator) {
+        if (!(headOperator instanceof AbstractStreamOperator)) {
+            return;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            Method method =
+                    NATIVE_MUTATION_BATCH_END_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(),
+                            StatePrefetcher::lookupNativeMutationBatchEndMethod);
+            if (method != NO_METHOD) {
+                method.invoke(backend);
+            }
+        } catch (Throwable failure) {
+            // Optional performance path: the backend itself fails closed on native errors.
+        }
+    }
+
+    private static Method lookupNativeMutationBatchBeginMethod(Class<?> backendClass) {
+        try {
+            Method method =
+                    backendClass.getMethod(
+                            "beginNativeResidentMutationBatch", java.util.Collection.class);
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
+    }
+
+    private static Method lookupNativeMutationBatchEndMethod(Class<?> backendClass) {
+        try {
+            Method method = backendClass.getMethod("endNativeResidentMutationBatch");
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
+    }
+
+    private static boolean nativeResidentMutationBatchEnabled(KeyedStateBackend<?> backend) {
+        if (backend == null) {
+            return false;
+        }
+        try {
+            Method method =
+                    NATIVE_MUTATION_BATCH_ENABLED_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(),
+                            StatePrefetcher::lookupNativeMutationBatchEnabledMethod);
+            if (method == NO_METHOD) {
+                return false;
+            }
+            Object result = method.invoke(backend);
+            return result instanceof Boolean && (Boolean) result;
+        } catch (Throwable failure) {
+            return false;
+        }
+    }
+
+    private static Method lookupNativeMutationBatchEnabledMethod(Class<?> backendClass) {
+        try {
+            Method method = backendClass.getMethod("nativeResidentMutationBatchEnabled");
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
+    }
+
+    private static Method lookupDispatchCancelMethod(Class<?> backendClass) {
+        Class<?> current = backendClass;
+        while (current != null && current != Object.class) {
+            try {
+                Method method =
+                        current.getDeclaredMethod(
+                                "cancelPrefetchForDispatch", java.util.Collection.class);
+                method.setAccessible(true);
+                return method;
+            } catch (NoSuchMethodException ignored) {
+                current = current.getSuperclass();
+            }
+        }
+        return NO_METHOD;
+    }
+
+    /**
+     * Bulk-load the already grouped keys immediately before local pre-aggregation consumes them.
+     *
+     * <p>Unlike record lookahead, these keys are no longer speculative: {@code LocalPreagg} has
+     * already built its exact group set and will access each key once. CacheKit may therefore use a
+     * blocking RocksDB MultiGet here; other backends simply lack the optional reflective hook.
+     */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public static boolean prefetchKeysImmediately(
+            Input<?> headOperator, java.util.Collection<?> keys) {
+        return prefetchKeysImmediately(headOperator, keys, false);
+    }
+
+    /**
+     * Bulk-load grouped keys, optionally fusing exact reservation revocation into that same scan.
+     */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public static boolean prefetchKeysImmediately(
+            Input<?> headOperator, java.util.Collection<?> keys, boolean cancelPrefetchOnDispatch) {
+        if (headOperator == null
+                || keys == null
+                || keys.isEmpty()
+                || !(headOperator instanceof AbstractStreamOperator)) {
+            return false;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            return prefetchKeysImmediately(backend, keys, cancelPrefetchOnDispatch);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    static boolean prefetchKeysImmediately(
+            KeyedStateBackend<?> backend, java.util.Collection<?> keys) {
+        return prefetchKeysImmediately(backend, keys, false);
+    }
+
+    static boolean prefetchKeysImmediately(
+            KeyedStateBackend<?> backend,
+            java.util.Collection<?> keys,
+            boolean cancelPrefetchOnDispatch) {
+        if (backend == null || keys == null || keys.isEmpty() || !hasPrefetchableState(backend)) {
+            return false;
+        }
+        try {
+            Method method;
+            if (cancelPrefetchOnDispatch) {
+                method =
+                        IMMEDIATE_PREFETCH_AFTER_DISPATCH_METHOD_CACHE.computeIfAbsent(
+                                backend.getClass(),
+                                StatePrefetcher::lookupImmediatePrefetchAfterDispatchMethod);
+                if (method == NO_METHOD) {
+                    // Keep older/foreign backends on the established immediate-prefetch path.
+                    // Preserve the earlier two-call protocol when that backend exposes the exact
+                    // cancellation hook but not the newer fused entry point.
+                    cancelPrefetchForDispatch(backend, keys);
+                    method =
+                            IMMEDIATE_PREFETCH_METHOD_CACHE.computeIfAbsent(
+                                    backend.getClass(),
+                                    StatePrefetcher::lookupImmediatePrefetchMethod);
+                }
+            } else {
+                method =
+                        IMMEDIATE_PREFETCH_METHOD_CACHE.computeIfAbsent(
+                                backend.getClass(), StatePrefetcher::lookupImmediatePrefetchMethod);
+            }
+            if (method == NO_METHOD) {
+                return false;
+            }
+            method.invoke(backend, keys);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** Returns {@code [groupCount, groupId0, ...]} or null for the Java grouping fallback. */
+    public static int[] groupKeysNatively(Input<?> headOperator, java.util.List<?> keys) {
+        if (headOperator == null
+                || keys == null
+                || keys.isEmpty()
+                || !(headOperator instanceof AbstractStreamOperator)) {
+            return null;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            return groupKeysNatively(backend, keys);
+        } catch (Throwable failure) {
+            return null;
+        }
+    }
+
+    static int[] groupKeysNatively(KeyedStateBackend<?> backend, java.util.List<?> keys) {
+        if (backend == null || keys == null || keys.isEmpty()) {
+            return null;
+        }
+        try {
+            Method method =
+                    NATIVE_PREAGG_GROUP_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(), StatePrefetcher::lookupNativePreaggGroupMethod);
+            if (method == NO_METHOD) {
+                return null;
+            }
+            Object result = method.invoke(backend, keys);
+            if (!(result instanceof int[])) {
+                return null;
+            }
+            int[] plan = (int[]) result;
+            return plan.length == keys.size() + 1 ? plan : null;
+        } catch (Throwable failure) {
+            return null;
+        }
+    }
+
+    /**
+     * Groups caller-owned 32-bit hash tokens without reflection or a heap plan copy.
+     *
+     * <p>A negative return value means that the caller must retain its Java grouping path.
+     */
+    public static int groupHashTokensNatively(
+            Input<?> headOperator, ByteBuffer tokens, int count, ByteBuffer packedPlan) {
+        if (headOperator == null
+                || count <= 0
+                || tokens == null
+                || packedPlan == null
+                || !(headOperator instanceof AbstractStreamOperator)) {
+            return -1;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            return groupHashTokensNatively(backend, tokens, count, packedPlan);
+        } catch (Throwable failure) {
+            return -1;
+        }
+    }
+
+    /** Returns the job-scoped backend capability for the reusable indexed batch consumer. */
+    public static boolean indexedBatchFoldEnabled(Input<?> headOperator) {
+        if (!(headOperator instanceof AbstractStreamOperator)) {
+            return false;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            return indexedBatchFoldEnabled(backend);
+        } catch (Throwable failure) {
+            return false;
+        }
+    }
+
+    static boolean indexedBatchFoldEnabled(KeyedStateBackend<?> backend) {
+        return backend instanceof BatchKeyGroupingSupport
+                && ((BatchKeyGroupingSupport) backend).indexedBatchFoldEnabled();
+    }
+
+    static int groupHashTokensNatively(
+            KeyedStateBackend<?> backend, ByteBuffer tokens, int count, ByteBuffer packedPlan) {
+        if (!(backend instanceof BatchKeyGroupingSupport)) {
+            return -1;
+        }
+        BatchKeyGroupingSupport grouping = (BatchKeyGroupingSupport) backend;
+        if (count > grouping.maxGroupingEntries()) {
+            return -1;
+        }
+        try {
+            return grouping.groupHashTokens(tokens, count, packedPlan);
+        } catch (Throwable failure) {
+            return -1;
+        }
+    }
+
+    private static Method lookupNativePreaggGroupMethod(Class<?> backendClass) {
+        try {
+            Method method = backendClass.getMethod("nativePreaggGroupIds", java.util.List.class);
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
+    }
+
+    private static Method lookupImmediatePrefetchMethod(Class<?> backendClass) {
+        try {
+            Method method =
+                    backendClass.getMethod("prefetchForImmediateUse", java.util.Collection.class);
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
+    }
+
+    private static Method lookupImmediatePrefetchAfterDispatchMethod(Class<?> backendClass) {
+        try {
+            Method method =
+                    backendClass.getMethod(
+                            "prefetchForImmediateUseAfterDispatch", java.util.Collection.class);
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
     }
 
     /** Best-effort {@code hasPrefetchableState()} probe; defaults to true when absent. */
@@ -198,6 +685,39 @@ public final class StatePrefetcher {
             }
         }
         return NO_METHOD;
+    }
+
+    private static boolean usesNativeMailboxBatch(KeyedStateBackend<?> backend) {
+        try {
+            Method method =
+                    NATIVE_MAILBOX_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(), StatePrefetcher::lookupNativeMailboxMethod);
+            if (method == NO_METHOD) {
+                return false;
+            }
+            Object result = method.invoke(backend);
+            return result instanceof Boolean && (Boolean) result;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    static java.util.Collection newKeyCollection(
+            KeyedStateBackend<?> backend, int expectedEntries) {
+        return usesNativeMailboxBatch(backend)
+                ? new java.util.ArrayList(expectedEntries)
+                : new java.util.LinkedHashSet(expectedEntries);
+    }
+
+    private static Method lookupNativeMailboxMethod(Class<?> backendClass) {
+        try {
+            Method method = backendClass.getMethod("nativeMailboxBatchEnabled");
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
     }
 
     private static Method findPrefetchMethod(KeyedStateBackend<?> backend) {
