@@ -24,7 +24,7 @@
   - 测试：update/tombstone 走 direct writers；序列化/JNI 失败仍 fail closed，RocksDB 保持 authoritative。
 - [x] **P0-4 去掉 probe/fill 状态读取的逐项 ByteBuffer duplicate。** 结果缓冲区构造时已固定 native byte order，absolute `getInt` 可直接读取。
   - 测试：所有状态/error/offset 读取结果不变；运行 bridge/coordinator 全套单测。
-- [ ] **P0-5 Stage3 token grouping 去掉 native scratch token 全量复制。** `RequestPlane` 从只读 byte buffer 通过 `memcpy` 按项读取未对齐的 native-order token，保留 stable first-seen plan 与 hash collision 精确 token 比较。
+- [x] **P0-5 Stage3 token grouping 去掉 native scratch token 全量复制。** `RequestPlane` 从只读 byte buffer 通过 `memcpy` 按项读取未对齐的 native-order token，保留 stable first-seen plan 与 hash collision 精确 token 比较。
   - 测试：native request-plane 与 JNI codec 测试覆盖空输入、重复 token、碰撞、容量边界、epoch wrap；Java Stage3 测试覆盖 plan 校验与 fallback。
 
 ## P1：完成 P0 后按 profile 决定是否改动

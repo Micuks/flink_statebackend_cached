@@ -1111,13 +1111,16 @@ void TestGroupTokenBatchStablePlanAndCounts() {
     options.kernel = KernelPreference::kScalar;
     std::unique_ptr<RequestPlane> plane = MakePlane(options);
     const std::uint32_t tokens[] = {7U, 8U, 7U, 9U, 8U};
+    std::array<std::uint8_t, sizeof(tokens) + 1U> unaligned_token_bytes{};
+    std::memcpy(
+            unaligned_token_bytes.data() + 1U, tokens, sizeof(tokens));
     std::uint32_t first_sources[5] = {};
     std::uint32_t source_groups[5] = {};
     std::uint32_t group_counts[5] = {};
     std::size_t group_count = 0;
     const GroupBatchDiagnostics before = plane->group_batch_diagnostics();
     CHECK(plane->GroupTokenBatch(
-                  tokens,
+                  unaligned_token_bytes.data() + 1U,
                   first_sources,
                   source_groups,
                   group_counts,
@@ -1147,7 +1150,7 @@ void TestGroupTokenBatchFailsClosedAndSurvivesEpochWrap() {
         std::uint32_t group_counts[4] = {};
         std::size_t group_count = 99;
         CHECK(plane->GroupTokenBatch(
-                      tokens,
+                      reinterpret_cast<const std::uint8_t*>(tokens),
                       first_sources,
                       source_groups,
                       group_counts,
@@ -1167,7 +1170,7 @@ void TestGroupTokenBatchFailsClosedAndSurvivesEpochWrap() {
     std::uint32_t group_counts[5] = {};
     std::size_t group_count = 99;
     CHECK(plane->GroupTokenBatch(
-                  tokens,
+                  reinterpret_cast<const std::uint8_t*>(tokens),
                   first_sources,
                   source_groups,
                   group_counts,

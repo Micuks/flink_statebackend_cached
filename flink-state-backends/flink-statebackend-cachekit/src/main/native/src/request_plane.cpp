@@ -1040,7 +1040,7 @@ ErrorCode RequestPlane::GroupBatch(
 }
 
 ErrorCode RequestPlane::GroupTokenBatch(
-        const std::uint32_t* tokens,
+        const std::uint8_t* token_bytes,
         std::uint32_t* first_source_indexes,
         std::uint32_t* source_group_indexes,
         std::uint32_t* group_counts,
@@ -1051,7 +1051,7 @@ ErrorCode RequestPlane::GroupTokenBatch(
     }
     *group_count = 0;
     if ((count != 0 &&
-         (tokens == nullptr || first_source_indexes == nullptr ||
+         (token_bytes == nullptr || first_source_indexes == nullptr ||
           source_group_indexes == nullptr || group_counts == nullptr)) ||
         count > std::numeric_limits<std::uint32_t>::max()) {
         return ErrorCode::kInvalidArgument;
@@ -1078,9 +1078,17 @@ ErrorCode RequestPlane::GroupTokenBatch(
     impl_->group_epoch = next_epoch;
 
     const std::size_t table_mask = impl_->group_table.size() - 1U;
+    const auto read_token = [token_bytes](std::size_t index) noexcept {
+        std::uint32_t token = 0;
+        std::memcpy(
+                &token,
+                token_bytes + index * sizeof(std::uint32_t),
+                sizeof(token));
+        return token;
+    };
     std::size_t written = 0;
     for (std::size_t index = 0; index < count; ++index) {
-        const std::uint32_t token = tokens[index];
+        const std::uint32_t token = read_token(index);
         std::size_t slot = GroupHash(token, 0U, 0U, sizeof(token)) & table_mask;
         bool resolved = false;
         for (std::size_t probe = 0; probe < impl_->group_table.size(); ++probe) {
@@ -1100,7 +1108,7 @@ ErrorCode RequestPlane::GroupTokenBatch(
             const std::size_t group =
                     static_cast<std::size_t>(impl_->group_table[slot] - 1U);
             ++batch_diagnostics.exact_comparisons;
-            if (tokens[first_source_indexes[group]] == token) {
+            if (read_token(first_source_indexes[group]) == token) {
                 source_group_indexes[index] = static_cast<std::uint32_t>(group);
                 ++group_counts[group];
                 resolved = true;

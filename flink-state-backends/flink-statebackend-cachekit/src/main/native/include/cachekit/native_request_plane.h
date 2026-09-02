@@ -179,7 +179,7 @@ public:
     // bytes.  This is a speculative grouping plan only: callers must still
     // validate exact Java key equality before applying a grouped operation.
     ErrorCode GroupTokenBatch(
-            const std::uint32_t* tokens,
+            const std::uint8_t* token_bytes,
             std::uint32_t* first_source_indexes,
             std::uint32_t* source_group_indexes,
             std::uint32_t* group_counts,
