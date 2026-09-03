@@ -53,6 +53,7 @@ import org.rocksdb.BlockBasedTableConfig;
 import org.rocksdb.BloomFilter;
 import org.rocksdb.ColumnFamilyOptions;
 import org.rocksdb.CompactionStyle;
+import org.rocksdb.CompressionType;
 import org.rocksdb.DBOptions;
 import org.rocksdb.InfoLogLevel;
 import org.rocksdb.util.SizeUnit;
@@ -513,6 +514,7 @@ public class RocksDBStateBackendConfigTest {
             verifyIllegalArgument(RocksDBConfigurableOptions.USE_DYNAMIC_LEVEL_SIZE, "1");
 
             verifyIllegalArgument(RocksDBConfigurableOptions.COMPACTION_STYLE, "LEV");
+            verifyIllegalArgument(RocksDBConfigurableOptions.COMPRESSION_TYPE, "NONE");
             verifyIllegalArgument(RocksDBConfigurableOptions.USE_BLOOM_FILTER, "NO");
             verifyIllegalArgument(RocksDBConfigurableOptions.BLOOM_FILTER_BLOCK_BASED_MODE, "YES");
             verifyIllegalArgument(RocksDBConfigurableOptions.MEMTABLE_BLOOM_RATIO, "-0.1");
@@ -528,6 +530,8 @@ public class RocksDBStateBackendConfigTest {
             configuration.setString(RocksDBConfigurableOptions.LOG_FILE_NUM.key(), "10");
             configuration.setString(RocksDBConfigurableOptions.LOG_MAX_FILE_SIZE.key(), "2MB");
             configuration.setString(RocksDBConfigurableOptions.COMPACTION_STYLE.key(), "level");
+            configuration.setString(
+                    RocksDBConfigurableOptions.COMPRESSION_TYPE.key(), "NO_COMPRESSION");
             configuration.setString(
                     RocksDBConfigurableOptions.USE_DYNAMIC_LEVEL_SIZE.key(), "TRUE");
             configuration.setString(RocksDBConfigurableOptions.TARGET_FILE_SIZE_BASE.key(), "8 mb");
@@ -560,6 +564,7 @@ public class RocksDBStateBackendConfigTest {
 
                 ColumnFamilyOptions columnOptions = optionsContainer.getColumnOptions();
                 assertEquals(CompactionStyle.LEVEL, columnOptions.compactionStyle());
+                assertEquals(CompressionType.NO_COMPRESSION, columnOptions.compressionType());
                 assertTrue(columnOptions.levelCompactionDynamicLevelBytes());
                 assertEquals(8 * SizeUnit.MB, columnOptions.targetFileSizeBase());
                 assertEquals(128 * SizeUnit.MB, columnOptions.maxBytesForLevelBase());

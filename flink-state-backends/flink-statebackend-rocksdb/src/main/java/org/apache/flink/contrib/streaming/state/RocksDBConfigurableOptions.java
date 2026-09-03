@@ -24,6 +24,7 @@ import org.apache.flink.configuration.description.Description;
 import org.apache.flink.util.Preconditions;
 
 import org.rocksdb.CompactionStyle;
+import org.rocksdb.CompressionType;
 import org.rocksdb.InfoLogLevel;
 
 import java.io.File;
@@ -39,6 +40,7 @@ import static org.rocksdb.CompactionStyle.FIFO;
 import static org.rocksdb.CompactionStyle.LEVEL;
 import static org.rocksdb.CompactionStyle.NONE;
 import static org.rocksdb.CompactionStyle.UNIVERSAL;
+import static org.rocksdb.CompressionType.SNAPPY_COMPRESSION;
 import static org.rocksdb.InfoLogLevel.INFO_LEVEL;
 
 /**
@@ -138,6 +140,14 @@ public class RocksDBConfigurableOptions implements Serializable {
                                     UNIVERSAL.name(),
                                     NONE.name(),
                                     LEVEL.name()));
+
+    public static final ConfigOption<CompressionType> COMPRESSION_TYPE =
+            key("state.backend.rocksdb.compression.type")
+                    .enumType(CompressionType.class)
+                    .defaultValue(SNAPPY_COMPRESSION)
+                    .withDescription(
+                            "The compression algorithm for newly generated RocksDB SST files. "
+                                    + "The default preserves RocksDB's SNAPPY_COMPRESSION behavior.");
 
     public static final ConfigOption<Boolean> USE_DYNAMIC_LEVEL_SIZE =
             key("state.backend.rocksdb.compaction.level.use-dynamic-size")
@@ -354,6 +364,7 @@ public class RocksDBConfigurableOptions implements Serializable {
 
                 // configurable ColumnFamilyOptions
                 COMPACTION_STYLE,
+                COMPRESSION_TYPE,
                 USE_DYNAMIC_LEVEL_SIZE,
                 TARGET_FILE_SIZE_BASE,
                 MAX_SIZE_LEVEL_BASE,

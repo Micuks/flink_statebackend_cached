@@ -491,6 +491,12 @@ public final class RocksDBResourceContainer implements AutoCloseable {
         currentOptions.setCompactionStyle(
                 internalGetOption(RocksDBConfigurableOptions.COMPACTION_STYLE));
 
+        currentOptions.setCompressionType(
+                internalGetOption(RocksDBConfigurableOptions.COMPRESSION_TYPE));
+        LOG.info(
+                "Configured RocksDB compression type: {}",
+                currentOptions.compressionType());
+
         currentOptions.setLevelCompactionDynamicLevelBytes(
                 internalGetOption(RocksDBConfigurableOptions.USE_DYNAMIC_LEVEL_SIZE));
 
