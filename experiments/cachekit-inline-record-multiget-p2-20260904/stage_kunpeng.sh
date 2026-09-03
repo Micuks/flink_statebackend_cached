@@ -147,6 +147,16 @@ for path in rewrite_paths:
         raise SystemExit(f"refusing binary rewrite: {path}")
     path.write_bytes(changed)
 
+immediate_compose = root / "variants" / "immediate" / "docker-compose.yml"
+text = immediate_compose.read_text()
+old_mount = f"{target_exp}/variants/control/flink-conf.yaml"
+new_mount = f"{target_exp}/variants/immediate/flink-conf.yaml"
+if text.count(old_mount) != 4:
+    raise SystemExit(
+        f"immediate compose config mount count {text.count(old_mount)}; expected 4"
+    )
+immediate_compose.write_text(text.replace(old_mount, new_mount))
+
 for variant in ("control", "immediate"):
     path = root / "variants" / variant / "flink-conf.yaml"
     text = path.read_text()
