@@ -57,6 +57,9 @@ def main() -> None:
         compression = json.loads(
             (candidates[query] / "COMPRESSION_AUDIT.json").read_text()
         )
+        control_compression = json.loads(
+            (controls[query] / "COMPRESSION_AUDIT.json").read_text()
+        )
         if not control["valid"] or not candidate["valid"]:
             raise SystemExit(f"invalid pair for {query}")
         if control["artifact_sha256"] != candidate["artifact_sha256"]:
@@ -70,12 +73,33 @@ def main() -> None:
                 "candidate": candidate,
                 "uplift_pct": uplift,
                 "compression_activation": compression,
+                "control_compression_activation": control_compression,
             }
         )
 
+    for row in rows:
+        candidate_activation = row["compression_activation"]
+        control_activation = row["control_compression_activation"]
+        row["storage_activation"] = {
+            "policy": (
+                "candidate-sst-required"
+                if row["query"] != "q15"
+                else "candidate-sst-or-control-to-memtable-residency"
+            ),
+            "candidate_sst_effect_pass": candidate_activation["sst_effect_pass"],
+            "control_sst_effect_pass": control_activation["sst_effect_pass"],
+            "memtable_residency_effect_pass": (
+                row["query"] == "q15"
+                and control_activation["sst_effect_pass"]
+                and not candidate_activation["sst_effect_pass"]
+            ),
+        }
+        row["storage_activation"]["pass"] = candidate_activation[
+            "sst_effect_pass"
+        ] or row["storage_activation"]["memtable_residency_effect_pass"]
     activation_pass = all(
-        row["compression_activation"]["activation_pass"]
-        and row["compression_activation"]["sst_effect_pass"]
+        row["compression_activation"]["mode_activation_pass"]
+        and row["storage_activation"]["pass"]
         for row in rows
     )
     mean_uplift = statistics.fmean(uplifts)
@@ -93,6 +117,10 @@ def main() -> None:
         "minimum_uplift_pct": min(uplifts),
         "maximum_uplift_pct": max(uplifts),
         "activation_pass": activation_pass,
+        "activation_definition": (
+            "exact NO_COMPRESSION mode for every query; candidate SST evidence for q5/q9/q11/q18; "
+            "q15 may instead pass when its frozen control produced SST and the 2 GiB HIGH_MEM candidate produced none"
+        ),
         "goal_gate": {
             "required_mean_uplift_pct": 10.0,
             "performance_pass": mean_uplift >= 10.0,

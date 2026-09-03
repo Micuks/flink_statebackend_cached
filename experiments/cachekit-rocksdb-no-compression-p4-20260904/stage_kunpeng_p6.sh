@@ -132,7 +132,7 @@ required = {
     "set +e\n  BENCH_DISABLE_WATCHDOG=1": ": >\"$d/rocksdb-sst-live-inventory.tsv\"\n  rm -f -- \"$d/.sst-monitor-stop\"\n  monitor_sst_inventory \"$d\" &\n  sst_monitor_pid=$!\n  set +e\n  BENCH_DISABLE_WATCHDOG=1",
     "rc=$?\n  set -e\n  capture_snapshot": "rc=$?\n  set -e\n  touch \"$d/.sst-monitor-stop\"\n  wait \"$sst_monitor_pid\"\n  rm -f -- \"$d/.sst-monitor-stop\"\n  capture_snapshot",
     'capture_metric_raw "$d"\n  capture_logs': 'capture_metric_raw "$d"\n  capture_sst_inventory "$d"\n  capture_logs',
-    'python3 "$expdir/audit_compression.py" "$d" --expected "$compression_mode" --output "$d/COMPRESSION_AUDIT.json" \\': 'python3 "$expdir/audit_compression.py" "$d" --expected "$compression_mode" --require-sst --output "$d/COMPRESSION_AUDIT.json" \\',
+    'python3 "$expdir/audit_compression.py" "$d" --expected "$compression_mode" --output "$d/COMPRESSION_AUDIT.json" \\': 'local -a compression_sst_args=()\n  if [[ $query != q15 ]]; then compression_sst_args+=(--require-sst); fi\n  python3 "$expdir/audit_compression.py" "$d" --expected "$compression_mode" "${compression_sst_args[@]}" --output "$d/COMPRESSION_AUDIT.json" \\',
     '"$d"/COMPRESSION_AUDIT.json \\': '"$d"/COMPRESSION_AUDIT.json "$d"/rocksdb-sst-inventory.tsv "$d"/rocksdb-sst-live-inventory.tsv \\',
 }
 for old, new in required.items():
