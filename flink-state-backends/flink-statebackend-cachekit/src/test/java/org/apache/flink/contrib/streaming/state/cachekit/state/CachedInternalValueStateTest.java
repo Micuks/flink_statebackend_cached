@@ -1704,6 +1704,128 @@ class CachedInternalValueStateTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testRecordImmediatePrefetchUsesOnlyMultiGetAndStagesExactValues() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
+        stubPreparedKeySerialization(batchReader);
+        when(batchReader.getSerializedValuesByRocksDBKeys(any(), eq(0), eq(3)))
+                .thenReturn(
+                        Arrays.asList(
+                                KvStateSerializer.serializeValue(11, IntSerializer.INSTANCE),
+                                KvStateSerializer.serializeValue(22, IntSerializer.INSTANCE),
+                                KvStateSerializer.serializeValue(33, IntSerializer.INSTANCE)));
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        assertTrue(state.prefetchRecordKeysForImmediateUse(Arrays.asList("k1", "k2", "k3")));
+        for (int i = 1; i <= 3; i++) {
+            currentKey.set("k" + i);
+            assertEquals(i * 11, state.value());
+        }
+
+        verify(batchReader, times(1)).getSerializedValuesByRocksDBKeys(any(), eq(0), eq(3));
+        verify(batchReader, never()).getSerializedValueByRocksDBKey(any());
+        verify(delegate, never()).value();
+        assertEquals(1, state.getRecordImmediateMultiGetBatchesForTesting());
+        assertEquals(3, state.getRecordImmediateMultiGetKeysForTesting());
+        assertEquals(3, state.getRecordImmediateValuesStagedForTesting());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testRecordImmediatePrefetchSkipsSmallMissSetWithoutPointGets() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, VoidNamespace, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, VoidNamespace, Integer> batchReader =
+                (RocksDBBatchValueReader<String, VoidNamespace, Integer>) delegate;
+        stubPreparedKeySerialization(batchReader);
+        CachedInternalValueState<String, VoidNamespace, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        4);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        assertFalse(state.prefetchRecordKeysForImmediateUse(Arrays.asList("k1", "k2", "k3")));
+
+        verify(batchReader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+        verify(batchReader, never()).getSerializedValueByRocksDBKey(any());
+        assertEquals(1, state.getRecordImmediateSmallBatchSkipsForTesting());
+        assertEquals(0, state.getRecordImmediateMultiGetBatchesForTesting());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testRecordImmediatePrefetchRejectsNamespacedState() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("unused");
+        InternalValueState<String, String, Integer> delegate =
+                mock(
+                        InternalValueState.class,
+                        withSettings().extraInterfaces(RocksDBBatchValueReader.class));
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        RocksDBBatchValueReader<String, String, Integer> batchReader =
+                (RocksDBBatchValueReader<String, String, Integer>) delegate;
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        true,
+                        8,
+                        2);
+        state.setCurrentNamespace("window-1");
+
+        assertFalse(state.prefetchRecordKeysForImmediateUse(Arrays.asList("k1", "k2")));
+        verify(batchReader, never()).getSerializedValuesByRocksDBKeys(any(), anyInt(), anyInt());
+        verify(batchReader, never()).getSerializedValueByRocksDBKey(any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testAsyncMultiGetSupportsNamespacedValueState() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("unused");
         InternalValueState<String, String, Integer> delegate =

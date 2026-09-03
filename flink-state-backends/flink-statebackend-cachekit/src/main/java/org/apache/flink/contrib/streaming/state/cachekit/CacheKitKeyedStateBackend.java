@@ -1426,6 +1426,59 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
         return aggregate;
     }
 
+    /** Aggregates synchronous record-key MultiGet activation counters. */
+    public long[] recordImmediatePrefetchMetrics() {
+        long[] aggregate = new long[5];
+        synchronized (lifecycleLock) {
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                if (!(wrapper instanceof CachedInternalValueState)) {
+                    continue;
+                }
+                long[] stateMetrics =
+                        ((CachedInternalValueState<?, ?, ?>) wrapper)
+                                .recordImmediatePrefetchMetricsSnapshot();
+                for (int i = 0; i < aggregate.length; i++) {
+                    aggregate[i] += stateMetrics[i];
+                }
+            }
+        }
+        return aggregate;
+    }
+
+    /**
+     * Synchronously warms the exact ordinary-replay record keys when their state identity is safe.
+     *
+     * <p>Unlike LocalPreagg's immediate hook, this broadcast accepts only access-observed
+     * VoidNamespace ValueState wrappers. Each wrapper independently rejects sub-threshold miss sets,
+     * so a failed or unprofitable warmup leaves the following authoritative replay untouched.
+     *
+     * @return true only when at least one eligible wrapper issued a RocksDB MultiGet.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public boolean prefetchRecordKeysForImmediateUse(Collection<? extends K> keys) {
+        synchronized (lifecycleLock) {
+            if (closed || disposed || keys == null || keys.isEmpty()) {
+                return false;
+            }
+            boolean handled = false;
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                if (!(wrapper instanceof CachedInternalValueState)) {
+                    continue;
+                }
+                CachedInternalValueState<?, ?, ?> valueState =
+                        (CachedInternalValueState<?, ?, ?>) wrapper;
+                if (!valueState.supportsRecordKeyPrefetch()
+                        || !valueState.consumeImmediatePrefetchAccessObserved()) {
+                    continue;
+                }
+                handled |=
+                        ((CachedInternalValueState) valueState)
+                                .prefetchRecordKeysForImmediateUse(keys);
+            }
+            return handled;
+        }
+    }
+
     /**
      * Synchronously bulk-load keys that local pre-aggregation has already committed to consume.
      *

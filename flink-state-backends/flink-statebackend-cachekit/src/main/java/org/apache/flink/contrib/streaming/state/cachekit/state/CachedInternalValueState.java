@@ -378,6 +378,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long prefetchUnusedStagedOnClose;
     private volatile long prefetchBuildFailures;
     private volatile long prefetchWorkerFailures;
+    private volatile long recordImmediateMultiGetBatches;
+    private volatile long recordImmediateMultiGetKeys;
+    private volatile long recordImmediateValuesStaged;
+    private volatile long recordImmediateSmallBatchSkips;
+    private volatile long recordImmediateFailures;
     private static final java.util.concurrent.atomic.AtomicBoolean
             FIRST_PREFETCH_WORKER_FAILURE_LOGGED = new java.util.concurrent.atomic.AtomicBoolean();
     private volatile long stickyUpdateSameKeyAttempts;
@@ -2474,6 +2479,33 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         };
     }
 
+    /** Snapshot for the synchronous record-key MultiGet activation bridge. */
+    public long[] recordImmediatePrefetchMetricsSnapshot() {
+        return new long[] {
+            recordImmediateMultiGetBatches,
+            recordImmediateMultiGetKeys,
+            recordImmediateValuesStaged,
+            recordImmediateSmallBatchSkips,
+            recordImmediateFailures
+        };
+    }
+
+    long getRecordImmediateMultiGetBatchesForTesting() {
+        return recordImmediateMultiGetBatches;
+    }
+
+    long getRecordImmediateMultiGetKeysForTesting() {
+        return recordImmediateMultiGetKeys;
+    }
+
+    long getRecordImmediateValuesStagedForTesting() {
+        return recordImmediateValuesStaged;
+    }
+
+    long getRecordImmediateSmallBatchSkipsForTesting() {
+        return recordImmediateSmallBatchSkips;
+    }
+
     long getPrefetchKeyScopedInvalidationsForTesting() {
         return prefetchKeyScopedInvalidations;
     }
@@ -3992,6 +4024,129 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         } catch (Throwable t) {
             prefetchWorkerFailures++;
         }
+    }
+
+    /**
+     * Blocking, MultiGet-only warmup for an exact ordinary-replay record batch.
+     *
+     * <p>This deliberately excludes non-void namespaces and never converts a sub-threshold miss set
+     * into synchronous point Gets. The immediately following authoritative {@link #value()} calls
+     * consume successfully staged values or retain their unchanged RocksDB fallback.
+     *
+     * @return true only when at least one RocksDB MultiGet was issued.
+     */
+    @SuppressWarnings("unchecked")
+    public boolean prefetchRecordKeysForImmediateUse(Iterable<? extends K> keys) {
+        if (closed
+                || keys == null
+                || currentNamespace == null
+                || !supportsRecordKeyPrefetch()
+                || !multiGetPrefetchEnabled
+                || !(delegate instanceof RocksDBBatchValueReader<?, ?, ?>)) {
+            return false;
+        }
+        final N namespace = currentNamespace;
+        final long gen = writeGen;
+        final RocksDBBatchValueReader<K, N, V> batchReader =
+                (RocksDBBatchValueReader<K, N, V>) delegate;
+        final java.util.ArrayList<byte[]> rocksDBKeys = new java.util.ArrayList<>();
+        final java.util.ArrayList<KeyNamespaceKey<K, N>> storageKeys =
+                new java.util.ArrayList<>();
+        try {
+            for (K key : keys) {
+                if (key == null || findCachedValueFor(key, namespace) != null) {
+                    continue;
+                }
+                if (hasStagedOrInFlightValue(key, namespace, gen)) {
+                    continue;
+                }
+                KeyNamespaceKey<K, N> storageKey =
+                        new KeyNamespaceKey<>(
+                                key, namespace, keySerializer, namespaceSerializer);
+                storageKeys.add(storageKey);
+                rocksDBKeys.add(
+                        batchReader.serializeBatchKeyAndNamespace(
+                                storageKey.key,
+                                storageKey.namespace,
+                                keySerializer,
+                                namespaceSerializer));
+            }
+        } catch (Throwable failure) {
+            prefetchBuildFailures++;
+            recordImmediateFailures++;
+            return false;
+        }
+        if (rocksDBKeys.size() < multiGetMinBatchSize) {
+            if (!rocksDBKeys.isEmpty()) {
+                recordImmediateSmallBatchSkips++;
+            }
+            return false;
+        }
+
+        prefetchKeysPrepared += rocksDBKeys.size();
+        if (immediateValueSerializer == null) {
+            immediateValueSerializer = delegate.getValueSerializer().duplicate();
+            immediateValueInput = new org.apache.flink.core.memory.DataInputDeserializer();
+        }
+        final V defaultValue = batchReader.getBatchDefaultValue();
+        final long stagedBefore = prefetchValuesStaged;
+        int handledKeys = 0;
+        boolean abort = false;
+        try {
+            for (int start = 0; start < rocksDBKeys.size(); start += multiGetChunkSize) {
+                if (closed || gen != writeGen) {
+                    prefetchStaleAborts++;
+                    break;
+                }
+                int end = Math.min(start + multiGetChunkSize, rocksDBKeys.size());
+                if (end - start < multiGetMinBatchSize) {
+                    recordImmediateSmallBatchSkips++;
+                    break;
+                }
+                java.util.List<byte[]> valueBytes;
+                lifecycleLock.readLock().lock();
+                try {
+                    prefetchMultiGetCalls++;
+                    prefetchMultiGetKeys += end - start;
+                    valueBytes =
+                            batchReader.getSerializedValuesByRocksDBKeys(
+                                    rocksDBKeys, start, end);
+                } finally {
+                    lifecycleLock.readLock().unlock();
+                }
+                handledKeys += end - start;
+                if (closed || gen != writeGen || valueBytes.size() != end - start) {
+                    prefetchStaleAborts++;
+                    break;
+                }
+                for (int i = 0; i < valueBytes.size(); i++) {
+                    byte[] serializedValue = valueBytes.get(i);
+                    V value =
+                            deserializeImmediateValueOrCopyDefault(
+                                    serializedValue, defaultValue);
+                    if (!publishStagedValue(
+                            StagedValue.materialized(
+                                    storageKeys.get(start + i), value, gen),
+                            serializedValue == null)) {
+                        abort = true;
+                        break;
+                    }
+                }
+                if (abort) {
+                    break;
+                }
+            }
+        } catch (Throwable failure) {
+            prefetchWorkerFailures++;
+            recordImmediateFailures++;
+        }
+        if (handledKeys > 0) {
+            recordImmediateMultiGetBatches++;
+            recordImmediateMultiGetKeys += handledKeys;
+            recordImmediateValuesStaged += Math.max(0L, prefetchValuesStaged - stagedBefore);
+            return true;
+        }
+        return false;
     }
 
     private V deserializeImmediateValueOrCopyDefault(byte[] valueBytes, V defaultValue)

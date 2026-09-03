@@ -314,6 +314,124 @@ class StreamRecordBatchOutputTest {
     }
 
     @Test
+    void testImmediateRecordPrefetchRunsBeforeExactlyOnceArrivalOrderReplay() throws Exception {
+        List<String> events = new ArrayList<>();
+        @SuppressWarnings("unchecked")
+        DataOutput<String> wrapped = mock(DataOutput.class);
+        org.mockito.Mockito.doAnswer(
+                        invocation -> {
+                            StreamRecord<String> record = invocation.getArgument(0);
+                            events.add("emit:" + record.getValue());
+                            return null;
+                        })
+                .when(wrapped)
+                .emitRecord(org.mockito.ArgumentMatchers.any());
+        @SuppressWarnings("unchecked")
+        Input<String> input = mock(Input.class);
+        StreamRecordBatchOutput<String> output =
+                new StreamRecordBatchOutput<String>(
+                        wrapped,
+                        input,
+                        true,
+                        false,
+                        2,
+                        0,
+                        null,
+                        true,
+                        () -> false,
+                        true,
+                        true,
+                        2,
+                        0,
+                        0,
+                        false,
+                        false,
+                        2,
+                        TimeUnit.MILLISECONDS.toNanos(1),
+                        false,
+                        true) {
+                    @Override
+                    boolean prefetchRecordsImmediately(StreamRecord<String>[] records, int n) {
+                        events.add("prefetch:" + n);
+                        return true;
+                    }
+                };
+
+        emitValues(output, "first", "second");
+
+        assertEquals(Arrays.asList("prefetch:2", "emit:first", "emit:second"), events);
+        assertTrue(output.isImmediateRecordPrefetchEnabled());
+        assertFalse(output.isReadyGatedPrefetchEnabled());
+        assertEquals(1, output.getImmediateRecordBatchesAttempted());
+        assertEquals(1, output.getImmediateRecordBatchesHandled());
+        assertEquals(2, output.getImmediateRecordRecordsAttempted());
+        assertEquals(2, output.getImmediateRecordRecordsHandled());
+    }
+
+    @Test
+    void testImmediateRecordPrefetchFailureFallsBackAndReadyGateTakesPrecedence() throws Exception {
+        List<String> emitted = new ArrayList<>();
+        @SuppressWarnings("unchecked")
+        Input<String> input = mock(Input.class);
+        StreamRecordBatchOutput<String> fallback =
+                new StreamRecordBatchOutput<String>(
+                        collectingOutput(emitted),
+                        input,
+                        true,
+                        false,
+                        2,
+                        0,
+                        null,
+                        true,
+                        () -> false,
+                        true,
+                        false,
+                        2,
+                        0,
+                        0,
+                        false,
+                        false,
+                        2,
+                        TimeUnit.MILLISECONDS.toNanos(1),
+                        false,
+                        true) {
+                    @Override
+                    boolean prefetchRecordsImmediately(StreamRecord<String>[] records, int n) {
+                        return false;
+                    }
+                };
+        emitValues(fallback, "first", "second");
+        assertEquals(Arrays.asList("first", "second"), emitted);
+        assertEquals(1, fallback.getImmediateRecordBatchesAttempted());
+        assertEquals(0, fallback.getImmediateRecordBatchesHandled());
+
+        StreamRecordBatchOutput<String> readyWins =
+                new StreamRecordBatchOutput<>(
+                        collectingOutput(new ArrayList<>()),
+                        input,
+                        true,
+                        false,
+                        2,
+                        0,
+                        null,
+                        true,
+                        () -> false,
+                        false,
+                        true,
+                        2,
+                        0,
+                        0,
+                        false,
+                        true,
+                        2,
+                        TimeUnit.MILLISECONDS.toNanos(1),
+                        false,
+                        true);
+        assertTrue(readyWins.isReadyGatedPrefetchEnabled());
+        assertFalse(readyWins.isImmediateRecordPrefetchEnabled());
+    }
+
+    @Test
     void testWatermarkFlushesAllPriorRecordsInArrivalOrder() throws Exception {
         @SuppressWarnings("unchecked")
         DataOutput<String> wrapped = mock(DataOutput.class);

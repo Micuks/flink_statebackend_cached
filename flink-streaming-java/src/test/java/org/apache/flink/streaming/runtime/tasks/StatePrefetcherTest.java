@@ -177,6 +177,58 @@ class StatePrefetcherTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void testRecordImmediatePrefetchRequiresPositiveBackendResult() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(RecordImmediatePrefetchHook.class));
+        Collection<Integer> keys = Arrays.asList(1, 2, 3);
+        org.mockito.Mockito.when(
+                        ((RecordImmediatePrefetchHook) backend)
+                                .prefetchRecordKeysForImmediateUse(keys))
+                .thenReturn(true);
+
+        assertTrue(StatePrefetcher.prefetchRecordKeysImmediately(backend, keys));
+        verify((RecordImmediatePrefetchHook) backend).prefetchRecordKeysForImmediateUse(keys);
+
+        KeyedStateBackend<Object> unsupported = mock(KeyedStateBackend.class);
+        assertFalse(StatePrefetcher.prefetchRecordKeysImmediately(unsupported, keys));
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void testRecordImmediatePrefetchExtractsAndDeduplicatesExactRange() throws Exception {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(RecordImmediatePrefetchHook.class));
+        org.mockito.Mockito.when(
+                        ((RecordImmediatePrefetchHook) backend)
+                                .prefetchRecordKeysForImmediateUse(
+                                        org.mockito.ArgumentMatchers.any()))
+                .thenReturn(true);
+        AbstractStreamOperator operator =
+                mock(AbstractStreamOperator.class, withSettings().extraInterfaces(Input.class));
+        org.mockito.Mockito.when(operator.getKeyedStateBackend()).thenReturn(backend);
+        java.lang.reflect.Field selectorField =
+                AbstractStreamOperator.class.getDeclaredField("stateKeySelector1");
+        selectorField.setAccessible(true);
+        selectorField.set(operator, (KeySelector<Integer, Integer>) value -> value % 10);
+        StreamRecord<?>[] records = {
+            new StreamRecord<>(100),
+            new StreamRecord<>(11),
+            new StreamRecord<>(22),
+            new StreamRecord<>(21),
+            new StreamRecord<>(200)
+        };
+
+        assertTrue(StatePrefetcher.prefetchRecordsImmediately((Input<?>) operator, records, 1, 4));
+        verify((RecordImmediatePrefetchHook) backend)
+                .prefetchRecordKeysForImmediateUse(new LinkedHashSet<>(Arrays.asList(1, 2)));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void testImmediatePrefetchAfterDispatchInvokesFusedBackendHook() {
         KeyedStateBackend<Object> backend =
                 mock(
@@ -345,6 +397,10 @@ class StatePrefetcherTest {
 
     public interface ImmediatePrefetchHook {
         void prefetchForImmediateUse(Collection<?> keys);
+    }
+
+    public interface RecordImmediatePrefetchHook {
+        boolean prefetchRecordKeysForImmediateUse(Collection<?> keys);
     }
 
     public interface CompletionPrefetchHook {

@@ -90,6 +90,8 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
     private final boolean cancelPrefetchOnDispatch;
     /** Ordered multi-batch ready gate. Opt-in and disabled under object reuse. */
     private final boolean readyGatedPrefetch;
+    /** Blocking MultiGet for the exact ordinary-replay record batch. */
+    private final boolean immediateRecordPrefetch;
 
     private final int readyGatedMaxInFlight;
     private final long readyGatedTimeoutNanos;
@@ -113,6 +115,10 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
     private long readyForcedFallbacks;
     private long readyRecordsDispatched;
     private long fallbackRecordsDispatched;
+    private long immediateRecordBatchesAttempted;
+    private long immediateRecordBatchesHandled;
+    private long immediateRecordRecordsAttempted;
+    private long immediateRecordRecordsHandled;
 
     private static final ScheduledThreadPoolExecutor READY_TIMEOUT_EXECUTOR;
 
@@ -419,6 +425,51 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
             int readyGatedMaxInFlight,
             long readyGatedTimeoutNanos,
             boolean objectReuseEnabled) {
+        this(
+                wrapped,
+                headOperator,
+                enabled,
+                commutativeKeySort,
+                batchSize,
+                batchTimeoutNanos,
+                numRecordsIn,
+                prefetchMode,
+                backpressured,
+                backpressureGated,
+                asyncPrefetchChunks,
+                asyncPrefetchChunkSize,
+                asyncPrefetchHeadGuardRecords,
+                asyncPrefetchSlidingDrainRecords,
+                cancelPrefetchOnDispatch,
+                readyGatedPrefetch,
+                readyGatedMaxInFlight,
+                readyGatedTimeoutNanos,
+                objectReuseEnabled,
+                false);
+    }
+
+    /** Complete constructor including exact synchronous record-key MultiGet. */
+    public StreamRecordBatchOutput(
+            DataOutput<T> wrapped,
+            Input<T> headOperator,
+            boolean enabled,
+            boolean commutativeKeySort,
+            int batchSize,
+            long batchTimeoutNanos,
+            Counter numRecordsIn,
+            boolean prefetchMode,
+            java.util.function.BooleanSupplier backpressured,
+            boolean backpressureGated,
+            boolean asyncPrefetchChunks,
+            int asyncPrefetchChunkSize,
+            int asyncPrefetchHeadGuardRecords,
+            int asyncPrefetchSlidingDrainRecords,
+            boolean cancelPrefetchOnDispatch,
+            boolean readyGatedPrefetch,
+            int readyGatedMaxInFlight,
+            long readyGatedTimeoutNanos,
+            boolean objectReuseEnabled,
+            boolean immediateRecordPrefetch) {
         this.wrapped = wrapped;
         this.headOperator = headOperator;
         this.enabled = enabled && batchSize > 1;
@@ -431,9 +482,12 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         this.backpressureGated = backpressureGated;
         this.readyGatedPrefetch =
                 readyGatedPrefetch && this.enabled && prefetchMode && !objectReuseEnabled;
+        this.immediateRecordPrefetch =
+                immediateRecordPrefetch && this.enabled && prefetchMode && !this.readyGatedPrefetch;
         this.readyGatedMaxInFlight = Math.max(2, Math.min(4, readyGatedMaxInFlight));
         this.readyGatedTimeoutNanos = Math.max(1L, readyGatedTimeoutNanos);
-        this.asyncPrefetchChunks = asyncPrefetchChunks && !this.readyGatedPrefetch;
+        this.asyncPrefetchChunks =
+                asyncPrefetchChunks && !this.readyGatedPrefetch && !this.immediateRecordPrefetch;
         this.asyncPrefetchChunkSize = Math.max(2, Math.min(1024, asyncPrefetchChunkSize));
         this.asyncPrefetchHeadGuardRecords =
                 Math.max(0, Math.min(this.batchSize - 1, asyncPrefetchHeadGuardRecords));
@@ -744,7 +798,14 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
             cancelPrefetchForDispatch(n);
         }
         if (prefetchMode) {
-            if (!readyGatedPrefetch
+            if (immediateRecordPrefetch) {
+                immediateRecordBatchesAttempted++;
+                immediateRecordRecordsAttempted += n;
+                if (prefetchRecordsImmediately(records, n)) {
+                    immediateRecordBatchesHandled++;
+                    immediateRecordRecordsHandled += n;
+                }
+            } else if (!readyGatedPrefetch
                     && !asyncPrefetchChunks
                     && (!backpressureGated
                             || (backpressured != null && backpressured.getAsBoolean()))) {
@@ -794,6 +855,12 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
     /** Test seam for proving fallback cancellation on a detached ready batch. */
     int cancelPrefetchForDispatch(StreamRecord<T>[] records, int n) {
         return org.apache.flink.streaming.runtime.tasks.StatePrefetcher.cancelPrefetchForDispatch(
+                headOperator, records, 0, n);
+    }
+
+    /** Test seam for proving immediate record prefetch precedes ordinary replay. */
+    boolean prefetchRecordsImmediately(StreamRecord<T>[] records, int n) {
+        return org.apache.flink.streaming.runtime.tasks.StatePrefetcher.prefetchRecordsImmediately(
                 headOperator, records, 0, n);
     }
 
@@ -867,6 +934,26 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
 
     public boolean isReadyGatedPrefetchEnabled() {
         return readyGatedPrefetch;
+    }
+
+    public boolean isImmediateRecordPrefetchEnabled() {
+        return immediateRecordPrefetch;
+    }
+
+    public long getImmediateRecordBatchesAttempted() {
+        return immediateRecordBatchesAttempted;
+    }
+
+    public long getImmediateRecordBatchesHandled() {
+        return immediateRecordBatchesHandled;
+    }
+
+    public long getImmediateRecordRecordsAttempted() {
+        return immediateRecordRecordsAttempted;
+    }
+
+    public long getImmediateRecordRecordsHandled() {
+        return immediateRecordRecordsHandled;
     }
 
     public long getReadyBatchesStarted() {

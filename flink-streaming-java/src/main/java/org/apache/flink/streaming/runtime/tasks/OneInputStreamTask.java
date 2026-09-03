@@ -285,6 +285,12 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                                                 "state.backend.cachekit.bp-prefetch.ready-gated.enabled")
                                         .booleanType()
                                         .defaultValue(false));
+                boolean immediateRecordPrefetch =
+                        cfg.getBoolean(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.immediate-record.enabled")
+                                        .booleanType()
+                                        .defaultValue(false));
                 int readyGatedMaxInFlight =
                         cfg.getInteger(
                                 org.apache.flink.configuration.ConfigOptions.key(
@@ -335,7 +341,38 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                                 readyGatedPrefetch,
                                 readyGatedMaxInFlight,
                                 readyGatedTimeoutUs * 1_000L,
-                                getExecutionConfig().isObjectReuseEnabled());
+                                getExecutionConfig().isObjectReuseEnabled(),
+                                immediateRecordPrefetch);
+                org.apache.flink.metrics.MetricGroup immediateMetrics =
+                        runtimePrefetchMetrics.addGroup("immediateRecord");
+                immediateMetrics.gauge(
+                        "active", () -> batchOutput.isImmediateRecordPrefetchEnabled() ? 1 : 0);
+                immediateMetrics.gauge(
+                        "batchesAttempted", batchOutput::getImmediateRecordBatchesAttempted);
+                immediateMetrics.gauge(
+                        "batchesHandled", batchOutput::getImmediateRecordBatchesHandled);
+                immediateMetrics.gauge(
+                        "recordsAttempted", batchOutput::getImmediateRecordRecordsAttempted);
+                immediateMetrics.gauge(
+                        "recordsHandled", batchOutput::getImmediateRecordRecordsHandled);
+                immediateMetrics.gauge(
+                        "backendMultiGetBatches",
+                        () -> StatePrefetcher.getRecordImmediateBackendMetric(headInput, 0));
+                immediateMetrics.gauge(
+                        "backendMultiGetKeys",
+                        () -> StatePrefetcher.getRecordImmediateBackendMetric(headInput, 1));
+                immediateMetrics.gauge(
+                        "backendValuesStaged",
+                        () -> StatePrefetcher.getRecordImmediateBackendMetric(headInput, 2));
+                immediateMetrics.gauge(
+                        "backendSmallBatchSkips",
+                        () -> StatePrefetcher.getRecordImmediateBackendMetric(headInput, 3));
+                immediateMetrics.gauge(
+                        "backendFailures",
+                        () -> StatePrefetcher.getRecordImmediateBackendMetric(headInput, 4));
+                immediateMetrics.gauge(
+                        "stagedValuesConsumed",
+                        () -> StatePrefetcher.getReadyGatedBackendMetric(headInput, 3));
                 org.apache.flink.metrics.MetricGroup readyMetrics =
                         runtimePrefetchMetrics.addGroup("readyGate");
                 readyMetrics.gauge(

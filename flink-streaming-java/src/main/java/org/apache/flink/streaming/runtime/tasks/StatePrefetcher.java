@@ -102,6 +102,14 @@ public final class StatePrefetcher {
             IMMEDIATE_PREFETCH_AFTER_DISPATCH_METHOD_CACHE =
                     new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Cache of synchronous, record-key-safe immediate-prefetch hooks per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            RECORD_IMMEDIATE_PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Cache of record-immediate backend metric snapshots per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            RECORD_IMMEDIATE_METRICS_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
     /** Cache of optional exact dispatch-time reservation cancellation methods. */
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             DISPATCH_CANCEL_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
@@ -321,6 +329,35 @@ public final class StatePrefetcher {
             Method method =
                     READY_METRICS_METHOD_CACHE.computeIfAbsent(
                             backend.getClass(), StatePrefetcher::lookupReadyMetricsMethod);
+            if (method == NO_METHOD) {
+                return 0L;
+            }
+            Object result = method.invoke(backend);
+            if (!(result instanceof long[])) {
+                return 0L;
+            }
+            long[] metrics = (long[]) result;
+            return metricIndex < metrics.length ? metrics[metricIndex] : 0L;
+        } catch (Throwable failure) {
+            return 0L;
+        }
+    }
+
+    /** Reads one counter from the optional CacheKit record-immediate metric snapshot. */
+    public static long getRecordImmediateBackendMetric(Input<?> headOperator, int metricIndex) {
+        if (!(headOperator instanceof AbstractStreamOperator) || metricIndex < 0) {
+            return 0L;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            if (backend == null) {
+                return 0L;
+            }
+            Method method =
+                    RECORD_IMMEDIATE_METRICS_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(),
+                            StatePrefetcher::lookupRecordImmediateMetricsMethod);
             if (method == NO_METHOD) {
                 return 0L;
             }
@@ -675,6 +712,66 @@ public final class StatePrefetcher {
         return prefetchKeysImmediately(backend, keys, false);
     }
 
+    /**
+     * Synchronously bulk-loads the exact keys of an ordinary arrival-order replay batch.
+     *
+     * <p>The backend hook is distinct from LocalPreagg immediate prefetch: it must reject
+     * namespaced state and sub-MultiGet miss sets because a record key alone does not identify a
+     * future window/session namespace and a synchronous point-read loop cannot amortize dispatch.
+     * Unsupported hooks and every reflection/key-extraction failure fail closed to ordinary replay.
+     */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public static boolean prefetchRecordsImmediately(
+            Input<?> headOperator, StreamRecord<?>[] buf, int fromIndex, int toIndex) {
+        if (headOperator == null
+                || buf == null
+                || fromIndex < 0
+                || toIndex > buf.length
+                || toIndex - fromIndex <= 1
+                || !(headOperator instanceof AbstractStreamOperator)) {
+            return false;
+        }
+        try {
+            AbstractStreamOperator<?> operator = (AbstractStreamOperator<?>) headOperator;
+            KeyedStateBackend<?> backend = operator.getKeyedStateBackend();
+            if (backend == null || !hasPrefetchableState(backend)) {
+                return false;
+            }
+            KeySelector selector = extractStateKeySelector1(operator);
+            if (selector == null) {
+                return false;
+            }
+            java.util.LinkedHashSet keys =
+                    new java.util.LinkedHashSet(Math.max(2, toIndex - fromIndex));
+            if (!extractKeys(selector, buf, fromIndex, toIndex, keys) || keys.isEmpty()) {
+                return false;
+            }
+            return prefetchRecordKeysImmediately(backend, keys);
+        } catch (Throwable failure) {
+            return false;
+        }
+    }
+
+    static boolean prefetchRecordKeysImmediately(
+            KeyedStateBackend<?> backend, java.util.Collection<?> keys) {
+        if (backend == null || keys == null || keys.isEmpty() || !hasPrefetchableState(backend)) {
+            return false;
+        }
+        try {
+            Method method =
+                    RECORD_IMMEDIATE_PREFETCH_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(),
+                            StatePrefetcher::lookupRecordImmediatePrefetchMethod);
+            if (method == NO_METHOD) {
+                return false;
+            }
+            Object result = method.invoke(backend, keys);
+            return result instanceof Boolean && (Boolean) result;
+        } catch (Throwable failure) {
+            return false;
+        }
+    }
+
     static boolean prefetchKeysImmediately(
             KeyedStateBackend<?> backend,
             java.util.Collection<?> keys,
@@ -844,6 +941,18 @@ public final class StatePrefetcher {
         }
     }
 
+    private static Method lookupRecordImmediatePrefetchMethod(Class<?> backendClass) {
+        try {
+            Method method =
+                    backendClass.getMethod(
+                            "prefetchRecordKeysForImmediateUse", java.util.Collection.class);
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException ignored) {
+            return NO_METHOD;
+        }
+    }
+
     /** Best-effort {@code hasPrefetchableState()} probe; defaults to true when absent. */
     private static boolean hasPrefetchableState(KeyedStateBackend<?> backend) {
         try {
@@ -962,6 +1071,20 @@ public final class StatePrefetcher {
         while (current != null && current != Object.class) {
             try {
                 Method method = current.getDeclaredMethod("readyGatedPrefetchMetrics");
+                method.setAccessible(true);
+                return method;
+            } catch (NoSuchMethodException ignored) {
+                current = current.getSuperclass();
+            }
+        }
+        return NO_METHOD;
+    }
+
+    private static Method lookupRecordImmediateMetricsMethod(Class<?> backendClass) {
+        Class<?> current = backendClass;
+        while (current != null && current != Object.class) {
+            try {
+                Method method = current.getDeclaredMethod("recordImmediatePrefetchMetrics");
                 method.setAccessible(true);
                 return method;
             } catch (NoSuchMethodException ignored) {
