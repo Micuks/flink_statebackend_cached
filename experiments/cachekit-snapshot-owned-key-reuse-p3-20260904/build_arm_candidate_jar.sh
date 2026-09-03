@@ -16,8 +16,14 @@ p2_runtime=$1
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo=$(git -C "$script_dir" rev-parse --show-toplevel)
 branch_head=$(git -C "$repo" rev-parse HEAD)
-[[ $branch_head == "$expected_source" ]] || {
-  echo "branch head mismatch: expected $expected_source, got $branch_head" >&2
+git -C "$repo" merge-base --is-ancestor "$expected_source" "$branch_head" || {
+  echo "expected source is not an ancestor of branch head: $branch_head" >&2
+  exit 65
+}
+git -C "$repo" diff --quiet "$expected_source" "$branch_head" -- \
+  flink-streaming-java flink-state-backends/flink-statebackend-cachekit \
+  flink-state-backends/flink-statebackend-rocksdb flink-table/flink-table-runtime || {
+  echo "runtime source differs from expected commit $expected_source" >&2
   exit 65
 }
 [[ -z $(git -C "$repo" status --porcelain --untracked-files=all) ]] || {
