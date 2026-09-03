@@ -31,6 +31,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -41,6 +42,74 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.withSettings;
 
 class StatePrefetcherTest {
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testCompletionPrefetchInvokesOnlyCompletionBearingHook() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(CompletionPrefetchHook.class));
+        Collection<Integer> keys = Arrays.asList(1, 2, 3);
+        CompletableFuture<Boolean> completion = new CompletableFuture<>();
+        org.mockito.Mockito.when(
+                        ((CompletionPrefetchHook) backend).prefetchWithCompletion(keys))
+                .thenReturn(completion);
+
+        CompletableFuture<Boolean> result =
+                StatePrefetcher.prefetchKeysWithCompletion(backend, keys);
+
+        assertFalse(result.isDone());
+        completion.complete(true);
+        assertTrue(result.join());
+        verify((CompletionPrefetchHook) backend).prefetchWithCompletion(keys);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testCompletionPrefetchFailsClosedWhenUnsupportedOrInvocationFails() {
+        Collection<Integer> keys = Arrays.asList(1, 2, 3);
+        KeyedStateBackend<Object> unsupported = mock(KeyedStateBackend.class);
+        assertFalse(StatePrefetcher.prefetchKeysWithCompletion(unsupported, keys).join());
+
+        KeyedStateBackend<Object> failing =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(CompletionPrefetchHook.class));
+        org.mockito.Mockito.when(
+                        ((CompletionPrefetchHook) failing).prefetchWithCompletion(keys))
+                .thenThrow(new IllegalStateException("reflection target failed"));
+        assertFalse(StatePrefetcher.prefetchKeysWithCompletion(failing, keys).join());
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void testCompletionPrefetchFailsClosedWhenSelectorFails() throws Exception {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(CompletionPrefetchHook.class));
+        AbstractStreamOperator operator =
+                mock(AbstractStreamOperator.class, withSettings().extraInterfaces(Input.class));
+        org.mockito.Mockito.when(operator.getKeyedStateBackend()).thenReturn(backend);
+        java.lang.reflect.Field selectorField =
+                AbstractStreamOperator.class.getDeclaredField("stateKeySelector1");
+        selectorField.setAccessible(true);
+        selectorField.set(
+                operator,
+                (KeySelector<Integer, Integer>)
+                        value -> {
+                            throw new IllegalArgumentException("bad key");
+                        });
+        StreamRecord<?>[] records = {new StreamRecord<>(1), new StreamRecord<>(2)};
+
+        assertFalse(
+                StatePrefetcher.prefetchWithCompletion(
+                                (Input<?>) operator, records, 0, records.length)
+                        .join());
+        verify((CompletionPrefetchHook) backend, org.mockito.Mockito.never())
+                .prefetchWithCompletion(org.mockito.ArgumentMatchers.any());
+    }
 
     @Test
     void testExtractKeysReadsOnlyRequestedRangeAndPreservesOrder() {
@@ -261,6 +330,10 @@ class StatePrefetcherTest {
 
     public interface ImmediatePrefetchHook {
         void prefetchForImmediateUse(Collection<?> keys);
+    }
+
+    public interface CompletionPrefetchHook {
+        CompletableFuture<Boolean> prefetchWithCompletion(Collection<?> keys);
     }
 
     public interface ImmediatePrefetchAfterDispatchHook {

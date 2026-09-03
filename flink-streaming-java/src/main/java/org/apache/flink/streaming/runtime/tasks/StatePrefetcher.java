@@ -28,6 +28,8 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -82,6 +84,10 @@ public final class StatePrefetcher {
     /** Cache of optional {@code prefetch(Collection)} {@link Method} per backend class. */
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Cache of optional completion-bearing prefetch methods per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            COMPLETION_PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
     /** Cache of optional synchronous local-preagg bulk-prefetch methods per backend class. */
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
@@ -232,6 +238,69 @@ public final class StatePrefetcher {
         } catch (Throwable t) {
             FAILURES.incrementAndGet();
             // best-effort: prefetch must never affect the authoritative dispatch path.
+        }
+    }
+
+    /**
+     * Starts a completion-bearing prefetch for a future ordered dispatch batch.
+     *
+     * <p>The returned future resolves to true only when the backend explicitly proves the batch
+     * ready. Unsupported backends, invalid input, missing state/selectors, extraction failure, and
+     * malformed reflective results resolve to false. A backend future's exceptional completion is
+     * preserved so the caller can count an authoritative fallback without blocking the mailbox.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public static CompletableFuture<Boolean> prefetchWithCompletion(
+            Input<?> headOperator, StreamRecord<?>[] buf, int fromIndex, int toIndex) {
+        if (headOperator == null
+                || buf == null
+                || fromIndex < 0
+                || toIndex > buf.length
+                || toIndex - fromIndex <= 1
+                || !(headOperator instanceof AbstractStreamOperator)) {
+            return CompletableFuture.completedFuture(false);
+        }
+        try {
+            AbstractStreamOperator<?> operator = (AbstractStreamOperator<?>) headOperator;
+            KeyedStateBackend<?> backend = operator.getKeyedStateBackend();
+            if (backend == null
+                    || findCompletionPrefetchMethod(backend) == null
+                    || !hasPrefetchableState(backend)) {
+                return CompletableFuture.completedFuture(false);
+            }
+            KeySelector selector = extractStateKeySelector1(operator);
+            if (selector == null) {
+                return CompletableFuture.completedFuture(false);
+            }
+            java.util.Collection keys =
+                    newKeyCollection(backend, Math.max(2, toIndex - fromIndex));
+            if (!extractKeys(selector, buf, fromIndex, toIndex, keys) || keys.isEmpty()) {
+                return CompletableFuture.completedFuture(false);
+            }
+            return prefetchKeysWithCompletion(backend, keys);
+        } catch (Throwable failure) {
+            return CompletableFuture.completedFuture(false);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    static CompletableFuture<Boolean> prefetchKeysWithCompletion(
+            KeyedStateBackend<?> backend, java.util.Collection<?> keys) {
+        if (backend == null || keys == null || keys.isEmpty()) {
+            return CompletableFuture.completedFuture(false);
+        }
+        try {
+            Method method = findCompletionPrefetchMethod(backend);
+            if (method == null) {
+                return CompletableFuture.completedFuture(false);
+            }
+            Object result = method.invoke(backend, keys);
+            if (!(result instanceof CompletionStage)) {
+                return CompletableFuture.completedFuture(false);
+            }
+            return ((CompletionStage<Boolean>) result).toCompletableFuture();
+        } catch (Throwable failure) {
+            return CompletableFuture.completedFuture(false);
         }
     }
 
@@ -817,6 +886,16 @@ public final class StatePrefetcher {
         return method == NO_METHOD ? null : method;
     }
 
+    private static Method findCompletionPrefetchMethod(KeyedStateBackend<?> backend) {
+        if (backend == null) {
+            return null;
+        }
+        Method method =
+                COMPLETION_PREFETCH_METHOD_CACHE.computeIfAbsent(
+                        backend.getClass(), StatePrefetcher::lookupCompletionPrefetchMethod);
+        return method == NO_METHOD ? null : method;
+    }
+
     private static Method lookupPrefetchMethod(Class<?> backendClass) {
         Class<?> c = backendClass;
         while (c != null && c != Object.class) {
@@ -826,6 +905,22 @@ public final class StatePrefetcher {
                 return method;
             } catch (NoSuchMethodException ignored) {
                 c = c.getSuperclass();
+            }
+        }
+        return NO_METHOD;
+    }
+
+    private static Method lookupCompletionPrefetchMethod(Class<?> backendClass) {
+        Class<?> current = backendClass;
+        while (current != null && current != Object.class) {
+            try {
+                Method method =
+                        current.getDeclaredMethod(
+                                "prefetchWithCompletion", java.util.Collection.class);
+                method.setAccessible(true);
+                return method;
+            } catch (NoSuchMethodException ignored) {
+                current = current.getSuperclass();
             }
         }
         return NO_METHOD;
