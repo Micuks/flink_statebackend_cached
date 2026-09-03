@@ -1,0 +1,31 @@
+{
+  "architecture": "x86_64",
+  "artifact_sha256": "58676b125fe20a5e7f9994e4531f06f8f076e1b3fc150ee1f222fabbe4e20602",
+  "artifact_size_bytes": 3104528,
+  "base_source_commit": "7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000",
+  "checkpointing": "disabled by absence of execution.checkpointing.interval",
+  "events": 100000000,
+  "frozen_overlay_commit": "bbd39affde9278d44b9f78d201849bf929249d54",
+  "object_reuse": false,
+  "phase": "q9-ready-depth-two-canary",
+  "platform": "x86",
+  "primary_control": "control",
+  "queries": [
+    "q9"
+  ],
+  "rounds": [
+    1
+  ],
+  "schema": "cachekit-ready-gated-prefetch-p1-v1",
+  "slots": 16,
+  "source_commit": "5a9d1e656715a403afac72ee1a516876ddbfb7f1",
+  "taskmanagers": 8,
+  "variant_config_sha256": {
+    "control": "369d3e623c8e54aa72f491d2f5fd81377a65921b4f36387b85cf94c36d121993",
+    "ready-d2": "eee26e898a886e2e24abb66f30f4c4c886130d56ef2d749ff8c3eef8b5dc2094"
+  },
+  "variants": [
+    "control",
+    "ready-d2"
+  ]
+}
