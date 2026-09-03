@@ -128,6 +128,8 @@ for line in config.read_text().splitlines():
 assert 'execution.checkpointing.interval' not in values
 assert values['pipeline.object-reuse']=='false'
 assert values['state.backend.cachekit.bp-prefetch.distance']=='64'
+assert values['state.backend.cachekit.bp-prefetch.multiget.chunk-size']=='64'
+assert values['state.backend.cachekit.bp-prefetch.multiget.min-batch-size']=='8'
 assert values['state.backend.cachekit.map.cache.max-entries']=='0'
 assert values['state.backend.cachekit.native.request-plane.enabled']=='false'
 assert values['state.backend.cachekit.native.value-cache.enabled']=='false'

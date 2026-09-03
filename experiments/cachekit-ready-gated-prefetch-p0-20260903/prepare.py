@@ -57,7 +57,7 @@ COMMON_EXPECTED = {
     "state.backend.cachekit.bp-prefetch.async.enabled": "true",
     "state.backend.cachekit.bp-prefetch.multiget.enabled": "true",
     "state.backend.cachekit.bp-prefetch.multiget.chunk-size": "64",
-    "state.backend.cachekit.bp-prefetch.multiget.min-batch-size": "64",
+    "state.backend.cachekit.bp-prefetch.multiget.min-batch-size": "8",
     "state.backend.cachekit.mailbox-batch.enabled": "true",
     "state.backend.cachekit.local-preagg.enabled": "true",
     "state.backend.cachekit.list-state.cow": "false",
@@ -134,6 +134,7 @@ def variant_updates(shape) -> Dict[str, str]:
     enabled, chunk, guard, drain, cancel = shape
     return {
         "pipeline.object-reuse": "false",
+        "state.backend.cachekit.bp-prefetch.multiget.min-batch-size": "8",
         "state.backend.cachekit.bp-prefetch.async-chunks.enabled": str(enabled).lower(),
         "state.backend.cachekit.bp-prefetch.async-chunks.size": str(chunk),
         "state.backend.cachekit.bp-prefetch.head-guard-records": str(guard),

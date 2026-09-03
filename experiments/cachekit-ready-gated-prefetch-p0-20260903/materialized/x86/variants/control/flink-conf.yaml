@@ -61,7 +61,7 @@ state.backend.cachekit.bp-prefetch.commutative-key-sort: false
 state.backend.cachekit.bp-prefetch.async.enabled: true
 state.backend.cachekit.bp-prefetch.multiget.enabled: true
 state.backend.cachekit.bp-prefetch.multiget.chunk-size: 64
-state.backend.cachekit.bp-prefetch.multiget.min-batch-size: 64
+state.backend.cachekit.bp-prefetch.multiget.min-batch-size: 8
 state.backend.cachekit.bp-prefetch.async-chunks.enabled: false
 state.backend.cachekit.bp-prefetch.async-chunks.size: 16
 state.backend.cachekit.bp-prefetch.staging.max-entries: 8192

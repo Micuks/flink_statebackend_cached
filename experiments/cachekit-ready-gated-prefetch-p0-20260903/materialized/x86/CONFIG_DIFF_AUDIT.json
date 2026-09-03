@@ -51,7 +51,7 @@
     "state.backend.cachekit.bp-prefetch.enabled": "true",
     "state.backend.cachekit.bp-prefetch.multiget.chunk-size": "64",
     "state.backend.cachekit.bp-prefetch.multiget.enabled": "true",
-    "state.backend.cachekit.bp-prefetch.multiget.min-batch-size": "64",
+    "state.backend.cachekit.bp-prefetch.multiget.min-batch-size": "8",
     "state.backend.cachekit.list-state.cow": "false",
     "state.backend.cachekit.list-state.ryw": "false",
     "state.backend.cachekit.local-preagg.enabled": "true",
