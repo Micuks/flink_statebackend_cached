@@ -1,0 +1,151 @@
+version: '2.4'
+x-flink-common:
+  image: sha256:67e8eea1f0abde89fe118a12455cd52fa8c1f9935eee3ab7d0b00af14ec84d5a
+  environment:
+    JOB_MANAGER_RPC_ADDRESS: jobmanager
+    NEXMARK_SQL_SUBMIT_TIMEOUT_SEC: '180'
+  volumes:
+  - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/variants/control/flink-conf.yaml:/opt/flink-1.16.3/conf/flink-conf.yaml:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-dist-1.16.3.jar:/opt/flink-1.16.3/lib/flink-dist-1.16.3.jar:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:/opt/flink-1.16.3/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-table-runtime-1.16.3.jar:/opt/flink-1.16.3/lib/flink-table-runtime-1.16.3.jar:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/cachekit-batchable-keyed-function-bridge.jar:/opt/flink-1.16.3/lib/cachekit-batchable-keyed-function-bridge.jar:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/nexmark-flink-0.3-SNAPSHOT.jar:/opt/flink-1.16.3/lib/nexmark-flink-0.3-SNAPSHOT.jar:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-alg-falcon.jar:/opt/flink-1.16.3/lib/flink-alg-falcon.jar:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/librocksdb.so.6:/usr/local/lib/librocksdb.so.6:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/libcachekit_native_request_plane_jni.so:/opt/cachekit-native/libcachekit_native_request_plane_jni.so:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/side_input.txt:/opt/flink-1.16.3/data/side_input.txt:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/nexmark-flink:/opt/nexmark:ro
+  - nexmark-logs:/opt/nexmark/log
+  - nexmark-diagnostics:/opt/nexmark/diagnostics
+  - nexmark-data:/opt/nexmark/data
+  - /tmp/ckkp5a9n4:/cachekit-rocksdb
+  - flink-logs:/opt/flink-1.16.3/log
+  - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-table-planner-loader-1.16.3.jar:/opt/flink-1.16.3/lib/flink-table-planner-loader-1.16.3.jar:ro
+  networks:
+  - flink-net
+services:
+  jobmanager:
+    image: sha256:67e8eea1f0abde89fe118a12455cd52fa8c1f9935eee3ab7d0b00af14ec84d5a
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: jobmanager
+      NEXMARK_SQL_SUBMIT_TIMEOUT_SEC: '180'
+      ROLE: jobmanager
+    volumes:
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/variants/control/flink-conf.yaml:/opt/flink-1.16.3/conf/flink-conf.yaml:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-dist-1.16.3.jar:/opt/flink-1.16.3/lib/flink-dist-1.16.3.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:/opt/flink-1.16.3/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-table-runtime-1.16.3.jar:/opt/flink-1.16.3/lib/flink-table-runtime-1.16.3.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/cachekit-batchable-keyed-function-bridge.jar:/opt/flink-1.16.3/lib/cachekit-batchable-keyed-function-bridge.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/nexmark-flink-0.3-SNAPSHOT.jar:/opt/flink-1.16.3/lib/nexmark-flink-0.3-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-alg-falcon.jar:/opt/flink-1.16.3/lib/flink-alg-falcon.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/librocksdb.so.6:/usr/local/lib/librocksdb.so.6:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/libcachekit_native_request_plane_jni.so:/opt/cachekit-native/libcachekit_native_request_plane_jni.so:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/side_input.txt:/opt/flink-1.16.3/data/side_input.txt:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/nexmark-flink:/opt/nexmark:ro
+    - nexmark-logs:/opt/nexmark/log
+    - nexmark-diagnostics:/opt/nexmark/diagnostics
+    - nexmark-data:/opt/nexmark/data
+    - /tmp/ckkp5a9n4:/cachekit-rocksdb
+    - flink-logs:/opt/flink-1.16.3/log
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-table-planner-loader-1.16.3.jar:/opt/flink-1.16.3/lib/flink-table-planner-loader-1.16.3.jar:ro
+    networks:
+    - flink-net
+    hostname: jobmanager
+    cpuset: '54'
+    ports:
+    - 10798:8081
+    command: jobmanager
+  taskmanager1:
+    image: sha256:67e8eea1f0abde89fe118a12455cd52fa8c1f9935eee3ab7d0b00af14ec84d5a
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: jobmanager
+      NEXMARK_SQL_SUBMIT_TIMEOUT_SEC: '180'
+      ROLE: taskmanager
+      TASKMANAGERS_PER_CONTAINER: '4'
+      CACHEKIT_ROCKSDB_ARM_POINT_MEMTABLE: 'off'
+    volumes:
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/variants/control/flink-conf.yaml:/opt/flink-1.16.3/conf/flink-conf.yaml:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-dist-1.16.3.jar:/opt/flink-1.16.3/lib/flink-dist-1.16.3.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:/opt/flink-1.16.3/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-table-runtime-1.16.3.jar:/opt/flink-1.16.3/lib/flink-table-runtime-1.16.3.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/cachekit-batchable-keyed-function-bridge.jar:/opt/flink-1.16.3/lib/cachekit-batchable-keyed-function-bridge.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/nexmark-flink-0.3-SNAPSHOT.jar:/opt/flink-1.16.3/lib/nexmark-flink-0.3-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-alg-falcon.jar:/opt/flink-1.16.3/lib/flink-alg-falcon.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/librocksdb.so.6:/usr/local/lib/librocksdb.so.6:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/libcachekit_native_request_plane_jni.so:/opt/cachekit-native/libcachekit_native_request_plane_jni.so:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/side_input.txt:/opt/flink-1.16.3/data/side_input.txt:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/nexmark-flink:/opt/nexmark:ro
+    - nexmark-logs:/opt/nexmark/log
+    - nexmark-diagnostics:/opt/nexmark/diagnostics
+    - nexmark-data:/opt/nexmark/data
+    - /tmp/ckkp5a9n4:/cachekit-rocksdb
+    - flink-logs:/opt/flink-1.16.3/log
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-table-planner-loader-1.16.3.jar:/opt/flink-1.16.3/lib/flink-table-planner-loader-1.16.3.jar:ro
+    networks:
+    - flink-net
+    hostname: taskmanager1
+    cpuset: 38,40,42,44,46,48,50,52
+    command: taskmanager
+    depends_on:
+    - jobmanager
+  taskmanager2:
+    image: sha256:67e8eea1f0abde89fe118a12455cd52fa8c1f9935eee3ab7d0b00af14ec84d5a
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: jobmanager
+      NEXMARK_SQL_SUBMIT_TIMEOUT_SEC: '180'
+      ROLE: taskmanager
+      TASKMANAGERS_PER_CONTAINER: '4'
+      CACHEKIT_ROCKSDB_ARM_POINT_MEMTABLE: 'off'
+    volumes:
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/variants/control/flink-conf.yaml:/opt/flink-1.16.3/conf/flink-conf.yaml:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-dist-1.16.3.jar:/opt/flink-1.16.3/lib/flink-dist-1.16.3.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:/opt/flink-1.16.3/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-table-runtime-1.16.3.jar:/opt/flink-1.16.3/lib/flink-table-runtime-1.16.3.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/cachekit-batchable-keyed-function-bridge.jar:/opt/flink-1.16.3/lib/cachekit-batchable-keyed-function-bridge.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/nexmark-flink-0.3-SNAPSHOT.jar:/opt/flink-1.16.3/lib/nexmark-flink-0.3-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-alg-falcon.jar:/opt/flink-1.16.3/lib/flink-alg-falcon.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/librocksdb.so.6:/usr/local/lib/librocksdb.so.6:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/libcachekit_native_request_plane_jni.so:/opt/cachekit-native/libcachekit_native_request_plane_jni.so:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/side_input.txt:/opt/flink-1.16.3/data/side_input.txt:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/nexmark-flink:/opt/nexmark:ro
+    - nexmark-logs:/opt/nexmark/log
+    - nexmark-diagnostics:/opt/nexmark/diagnostics
+    - nexmark-data:/opt/nexmark/data
+    - /tmp/ckkp5a9n4:/cachekit-rocksdb
+    - flink-logs:/opt/flink-1.16.3/log
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-table-planner-loader-1.16.3.jar:/opt/flink-1.16.3/lib/flink-table-planner-loader-1.16.3.jar:ro
+    networks:
+    - flink-net
+    hostname: taskmanager2
+    cpuset: 56,58,60,62,64,66,68,70
+    command: taskmanager
+    depends_on:
+    - jobmanager
+  prometheus:
+    image: sha256:0f95eae4bad46a173c41fbf5edae4cc556f4649589b313ca3dcbf4e9e47c8146
+    cpuset: '72'
+    ports:
+    - 11845:9090
+    volumes:
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/prometheus-2x4.yml:/etc/prometheus/prometheus.yml:ro,z
+    - /home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904/inputs/runtime/flink-table-planner-loader-1.16.3.jar:/opt/flink-1.16.3/lib/flink-table-planner-loader-1.16.3.jar:ro
+    depends_on:
+    - pushgateway
+    networks:
+    - flink-net
+  pushgateway:
+    image: sha256:edcb2e0c46b35b94f07b6ccbf8a4816433a656a112444dd4d85f81b488a364ea
+    cpuset: '74'
+    ports:
+    - 11846:9091
+    networks:
+    - flink-net
+    volumes: []
+networks:
+  flink-net: {}
+volumes:
+  flink-logs: {}
+  nexmark-logs: {}
+  nexmark-diagnostics: {}
+  nexmark-data: {}

@@ -1,0 +1,38 @@
+{
+  "architecture": "x86_64",
+  "artifact_build": {
+    "non_overlay_entries_identical_to_p1": true,
+    "p1_x86_runtime_sha256": "58676b125fe20a5e7f9994e4531f06f8f076e1b3fc150ee1f222fabbe4e20602",
+    "rocksdb_overlay_source_commit": "a95bcc56d2207a5ac6cd3ba2e62459bc5d409ce4"
+  },
+  "artifact_sha256": "66f1bac9c25c6e8a777b2ca370e2b21621cccc57e020d869db2fd7c245c6a46b",
+  "artifact_size_bytes": 3104671,
+  "base_source_commit": "7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000",
+  "checkpointing": "disabled by absence of execution.checkpointing.interval",
+  "claim_boundary": "same-host paired quick validation on idle cloud x86; storage differs from Kunpeng and is not used for cross-host uplift",
+  "events": 100000000,
+  "execution_environment": "idle-host-quick-validation",
+  "frozen_overlay_commit": "bbd39affde9278d44b9f78d201849bf929249d54",
+  "object_reuse": false,
+  "phase": "q9-rocksdb-no-compression-paired-screen",
+  "platform": "x86",
+  "primary_control": "control",
+  "queries": [
+    "q9"
+  ],
+  "rounds": [
+    1
+  ],
+  "schema": "cachekit-rocksdb-no-compression-p4-screen-v1",
+  "slots": 16,
+  "source_commit": "a95bcc56d2207a5ac6cd3ba2e62459bc5d409ce4",
+  "taskmanagers": 8,
+  "variant_config_sha256": {
+    "control": "bb53fc1846f372ab76bab6626b9eb738a89dbdcc97791b8684c25ed880538932",
+    "no-compression": "da1238ceb8c3ff57cb0bcf583e53a66e61ef576e4c3982c911ed683d1859d09e"
+  },
+  "variants": [
+    "control",
+    "no-compression"
+  ]
+}
