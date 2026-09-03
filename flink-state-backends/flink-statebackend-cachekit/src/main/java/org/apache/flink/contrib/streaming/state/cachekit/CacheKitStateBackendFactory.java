@@ -197,6 +197,15 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                                         + "1 preserves EMPTY/SINGLE behavior; 2-16 enables bounded point-get "
                                                         + "replay in original iteration order. Native snapshots remain EMPTY/SINGLE.");
 
+    public static final ConfigOption<Boolean> MAP_SNAPSHOT_OWNED_KEY_REUSE_ENABLED =
+            ConfigOptions.key("state.backend.cachekit.map.snapshot.owned-key-reuse.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Reuse snapshot-owned internal user keys and defer the defensive "
+                                    + "entry-key copy until getKey(). The default preserves the "
+                                    + "original eager-copy path.");
+
     public static final ConfigOption<Boolean> DIAGNOSTICS_ENABLED =
             ConfigOptions.key("state.backend.cachekit.diagnostics.enabled")
                         .booleanType()
@@ -949,7 +958,8 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
 				config.get(MAP_SNAPSHOT_CACHE_NATIVE_ENABLED),
 				config.get(MAP_SNAPSHOT_CACHE_NATIVE_CLASSIFIER_ENABLED),
 				config.get(MAP_SNAPSHOT_CACHE_NATIVE_REMOVE_HINT_ENABLED),
-				config.get(MAP_SNAPSHOT_CACHE_NATIVE_LIBRARY_PATH));
+				config.get(MAP_SNAPSHOT_CACHE_NATIVE_LIBRARY_PATH),
+				config.get(MAP_SNAPSHOT_OWNED_KEY_REUSE_ENABLED));
 	}
 
         static NativeRequestPlaneOptions nativeRequestPlaneOptions(ReadableConfig config) {

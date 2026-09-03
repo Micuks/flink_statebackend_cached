@@ -1389,6 +1389,7 @@ class CachedInternalMapStateTest {
         entries.put(original, 7);
         when(delegate.entries()).thenReturn(entries.entrySet());
         when(delegate.get(any(byte[].class))).thenReturn(7);
+        MapSnapshotCacheMetrics metrics = MapSnapshotCacheMetrics.forTesting();
         CachedInternalMapState<String, VoidNamespace, byte[], Integer> state =
                 new CachedInternalMapState<>(
                         delegate,
@@ -1406,22 +1407,37 @@ class CachedInternalMapStateTest {
                         1,
                         false,
                         100,
-                        MapSnapshotCacheMetrics.forTesting(),
+                        metrics,
                         null,
                         0,
                         false,
                         0,
                         false,
-                        2);
+                        2,
+                        false,
+                        8192,
+                        0.02,
+                        262144,
+                        new NativeMapSnapshotOptions(false, false, false, "", true));
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 
         for (Map.Entry<byte[], Integer> ignored : state.entries()) {
             // Backfill a copied SINGLE key.
         }
+        assertEquals(1, metrics.ownedKeyReuseActiveStates());
+        assertEquals(1, metrics.ownedInternalKeysReused());
+        assertEquals(1, metrics.internalKeyCopiesAvoided());
+        assertEquals(1, metrics.exposedKeyCopiesDeferred());
+        assertEquals(0, metrics.exposedKeyCopiesMaterialized());
         Iterator<Map.Entry<byte[], Integer>> iterator = state.entries().iterator();
         Map.Entry<byte[], Integer> entry = iterator.next();
         entry.getKey()[0] = 99;
         iterator.remove();
+
+        assertEquals(2, metrics.ownedInternalKeysReused());
+        assertTrue(metrics.internalKeyCopiesAvoided() >= 2);
+        assertEquals(2, metrics.exposedKeyCopiesDeferred());
+        assertEquals(1, metrics.exposedKeyCopiesMaterialized());
 
         verify(delegate)
                 .remove(

@@ -47,7 +47,21 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(options.classifierEnabled());
         assertTrue(options.removeHintEnabled());
         assertEquals("/tmp/libcachekit_snapshot_jni.so", options.libraryPath());
+        assertFalse(options.ownedKeyReuseEnabled());
         assertFalse(CacheKitStateBackendFactory.nativeRequestPlaneOptions(config).enabled());
+    }
+
+    @Test
+    void testSnapshotOwnedKeyReuseIsExplicit() {
+        Configuration config = new Configuration();
+        assertFalse(
+                CacheKitStateBackendFactory.nativeMapSnapshotOptions(config)
+                        .ownedKeyReuseEnabled());
+
+        config.set(CacheKitStateBackendFactory.MAP_SNAPSHOT_OWNED_KEY_REUSE_ENABLED, true);
+        assertTrue(
+                CacheKitStateBackendFactory.nativeMapSnapshotOptions(config)
+                        .ownedKeyReuseEnabled());
     }
 
     @Test

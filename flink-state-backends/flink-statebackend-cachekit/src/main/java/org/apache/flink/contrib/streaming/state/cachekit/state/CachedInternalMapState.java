@@ -186,6 +186,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private final CachePolicy<KeyNamespace<K, N>, MapSnapshot<UK>> mapSnapshotCache;
     private final boolean mapSnapshotCacheEnabled;
     private final int mapSnapshotSmallMaxEntries;
+    private final boolean snapshotOwnedKeyReuseEnabled;
     private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
     /** Reusable probe key for snapshot cache lookups (avoids allocation per lookup). */
     private final KeyNamespace<K, N> snapshotProbe = new KeyNamespace<>(null, null);
@@ -527,6 +528,11 @@ public final class CachedInternalMapState<K, N, UK, UV>
         this.nativeMapSnapshotEnabled = nativeMapSnapshotEnabled;
         this.nativeSnapshotStateId = nativeSnapshotStateId;
         Objects.requireNonNull(standaloneNativeSnapshotOptions, "standaloneNativeSnapshotOptions");
+        this.snapshotOwnedKeyReuseEnabled =
+                standaloneNativeSnapshotOptions.ownedKeyReuseEnabled();
+        if (snapshotOwnedKeyReuseEnabled) {
+            mapSnapshotCacheMetrics.recordOwnedKeyReuseActiveState();
+        }
         if (nativeMapSnapshotEnabled && standaloneNativeSnapshotOptions.enabled()) {
             throw new IllegalArgumentException(
                     "The request-plane and standalone native MapSnapshot caches cannot both be enabled.");
@@ -2880,7 +2886,12 @@ public final class CachedInternalMapState<K, N, UK, UV>
             K stateKey, N namespace, List<UK> userKeys, List<UV> values) {
         final List<UK> internalUserKeys = new ArrayList<>(userKeys.size());
         for (UK userKey : userKeys) {
-            internalUserKeys.add(copyUserKey(userKey));
+            if (snapshotOwnedKeyReuseEnabled) {
+                internalUserKeys.add(userKey);
+                mapSnapshotCacheMetrics.recordInternalKeyCopyAvoided();
+            } else {
+                internalUserKeys.add(copyUserKey(userKey));
+            }
         }
         final List<UV> currentValues = new ArrayList<>(values);
         final boolean[] removed = new boolean[internalUserKeys.size()];
@@ -2914,7 +2925,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 lastSlot = slot;
                 removable = true;
                 return new SnapshotMapEntry(
-                        stateKey, namespace, userKey, value, currentValues, slot);
+                        stateKey,
+                        namespace,
+                        userKey,
+                        value,
+                        currentValues,
+                        slot,
+                        snapshotOwnedKeyReuseEnabled);
             }
 
             @Override
@@ -2942,13 +2959,14 @@ public final class CachedInternalMapState<K, N, UK, UV>
         private final K stateKey;
         private final N namespace;
         private final UK internalUserKey;
-        private final UK exposedUserKey;
         private final List<UV> sharedValues;
         private final int sharedSlot;
+        private UK exposedUserKey;
+        private boolean exposedUserKeyInitialized;
         private UV value;
 
         private SnapshotMapEntry(K stateKey, N namespace, UK userKey, UV value) {
-            this(stateKey, namespace, userKey, value, null, -1);
+            this(stateKey, namespace, userKey, value, null, -1, false);
         }
 
         private SnapshotMapEntry(
@@ -2957,11 +2975,21 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 UK userKey,
                 UV value,
                 List<UV> sharedValues,
-                int sharedSlot) {
+                int sharedSlot,
+                boolean ownedInternalUserKey) {
             this.stateKey = stateKey;
             this.namespace = namespace;
-            this.internalUserKey = copyUserKey(userKey);
-            this.exposedUserKey = copyUserKey(internalUserKey);
+            if (ownedInternalUserKey) {
+                this.internalUserKey = userKey;
+                this.exposedUserKey = null;
+                this.exposedUserKeyInitialized = false;
+                mapSnapshotCacheMetrics.recordOwnedInternalKeyReused();
+                mapSnapshotCacheMetrics.recordExposedKeyCopyDeferred();
+            } else {
+                this.internalUserKey = copyUserKey(userKey);
+                this.exposedUserKey = copyUserKey(internalUserKey);
+                this.exposedUserKeyInitialized = true;
+            }
             this.sharedValues = sharedValues;
             this.sharedSlot = sharedSlot;
             this.value = value;
@@ -2969,6 +2997,11 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
         @Override
         public UK getKey() {
+            if (!exposedUserKeyInitialized) {
+                exposedUserKey = copyUserKey(internalUserKey);
+                exposedUserKeyInitialized = true;
+                mapSnapshotCacheMetrics.recordExposedKeyCopyMaterialized();
+            }
             return exposedUserKey;
         }
 
@@ -3127,17 +3160,36 @@ public final class CachedInternalMapState<K, N, UK, UV>
         @Override
         public Map.Entry<UK, UV> next() {
             Map.Entry<UK, UV> entry = delegateIterator.next();
+            UK entryUserKey = entry.getKey();
+            UK stableUserKey =
+                    snapshotOwnedKeyReuseEnabled ? copyUserKey(entryUserKey) : entryUserKey;
             if (cacheEntries) {
                 cacheEntry(currentKey, namespace, entry);
             }
             iteratedCount++;
             if (iteratedCount <= mapSnapshotSmallMaxEntries) {
-                snapshotUserKeys.add(copyUserKey(entry.getKey()));
+                snapshotUserKeys.add(
+                        snapshotOwnedKeyReuseEnabled
+                                ? stableUserKey
+                                : copyUserKey(entryUserKey));
+                if (snapshotOwnedKeyReuseEnabled) {
+                    mapSnapshotCacheMetrics.recordInternalKeyCopyAvoided();
+                }
             } else if (!snapshotUserKeys.isEmpty()) {
                 snapshotUserKeys.clear();
             }
-            lastUserKey = entry.getKey();
-            return new SnapshotMapEntry(currentKey, namespace, entry.getKey(), entry.getValue());
+            lastUserKey = stableUserKey;
+            return snapshotOwnedKeyReuseEnabled
+                    ? new SnapshotMapEntry(
+                            currentKey,
+                            namespace,
+                            stableUserKey,
+                            entry.getValue(),
+                            null,
+                            -1,
+                            true)
+                    : new SnapshotMapEntry(
+                            currentKey, namespace, entryUserKey, entry.getValue());
         }
 
         @Override
