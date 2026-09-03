@@ -4,17 +4,17 @@ set -euo pipefail
 host=root@173.154.10.2
 control_path=/tmp/cachekit-kp-ssh-20260903.sock
 source_exp=/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-kunpeng-20260904
-target_exp=/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective4-100m-kunpeng-20260904
+target_exp=/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective4-r2-100m-kunpeng-20260904
 source_project=ckkp5a9n4
-target_project=ckkp5a9e4
+target_project=ckkp5a9f4
 source_scratch=/tmp/ckkp5a9n4
-target_scratch=/tmp/ckkp5a9e4
+target_scratch=/tmp/ckkp5a9f4
 source_rest_port=10798
-target_rest_port=10800
+target_rest_port=10802
 source_prom_port=11845
-target_prom_port=11847
+target_prom_port=11849
 source_push_port=11846
-target_push_port=11848
+target_push_port=11850
 artifact_sha=3c52ba5be2c2f903f348a991659036fa60a44bc161d4a3efb150b00cbd49c723
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
