@@ -87,10 +87,10 @@ def main() -> None:
                 else "candidate-sst-or-control-to-memtable-residency"
             ),
             "candidate_sst_effect_pass": candidate_activation["sst_effect_pass"],
-            "control_sst_effect_pass": control_activation["sst_effect_pass"],
+            "control_sst_effect_pass": control_activation.get("sst_effect_pass"),
             "memtable_residency_effect_pass": (
                 row["query"] == "q15"
-                and control_activation["sst_effect_pass"]
+                and control_activation.get("sst_effect_pass") is True
                 and not candidate_activation["sst_effect_pass"]
             ),
         }

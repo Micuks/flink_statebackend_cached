@@ -1,0 +1,271 @@
+{
+  "activation_pass": true,
+  "evidence": [
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 444,
+      "line_sha256": "f00ddb5f74c42ee9680c755b7d0e5b28955ccad296ddc2df4ddf39d0564227c3",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 447,
+      "line_sha256": "a8d7b856ac432378b3419b8ed81b0e901f44636ed02cf758455ee5ef062b9df3",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 898,
+      "line_sha256": "6a46170caa3204769add45814b352a4704bafe56f918d9a4e4499fb31bebfaa2",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 900,
+      "line_sha256": "6a46170caa3204769add45814b352a4704bafe56f918d9a4e4499fb31bebfaa2",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 904,
+      "line_sha256": "503a31173353481c90d389627e3f7da52f8d38660208970716890ad31f83e398",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 907,
+      "line_sha256": "fa288ec6dbfbcd0e19c9a888cbc24317a893a25397d112fac7590e0037918053",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 910,
+      "line_sha256": "47070b4c5798d6616766fb8d34fb433e356a9385412b0def691bf4f6c82337ed",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 1652,
+      "line_sha256": "cf1f815922e8b1c1ead713605d0d4f685aa33c7e346fbcd1182b68377dade2aa",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 4357,
+      "line_sha256": "5b74b73a0ec8b1f223bee8882f3371cf2779bee5abe2ab8f4ebc820f08fc49b4",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 4360,
+      "line_sha256": "9b031e7c95510840aa3b6189666cb5e8febb0c7379fa0024b061eb8149a41e60",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 4887,
+      "line_sha256": "5cee27eeba693bab518ac5fbdd79d5eb84c5ef1a6de75f93b72c0fed96a71a5f",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 4894,
+      "line_sha256": "72a982ff70714d63f14e632dbebd92668d3e1d19eae7657bf592ece0f1404e56",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 4897,
+      "line_sha256": "3059601e768abbf5202d11514964152a5301d3bdff7686af5bb6341ca9286af2",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 4900,
+      "line_sha256": "7808087091730cd9a3d5a8201a23afeee08c6eb4f6bcaa507882a9f6c4f8a88c",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 4910,
+      "line_sha256": "cdc2776aa8fc5e832bc42f06c4f4988748de9c75f0f4ca85056b742bac638c26",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 4916,
+      "line_sha256": "76a43e94584c5bc675bb198781b9ed3865f446bb1288b898943cc64d0a6a8eea",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 4923,
+      "line_sha256": "7d1c97c209bb304d5c3954bb2d566f5f509325d91b926398366976605a8d1e7f",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 4926,
+      "line_sha256": "4d9f5018063e84455566755fdc8c31e39779ae32efa6df63b733d66011afd0b6",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 4929,
+      "line_sha256": "0cd4731b71b12fe0bf06cded824bf319520e4f2c63c80561ddbe71b9e53491fe",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager1_1.log",
+      "line_number": 4932,
+      "line_sha256": "524ccf6882d040a7361d691a14bdace9f92e6f16fa0b033322f87d50ca88b484",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 444,
+      "line_sha256": "d6690984ec4061e003a2d6dcf5320006d3c30dbb4c94230e5e7933d1039c941a",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 447,
+      "line_sha256": "b6321c40078a7edec56ebb5b213b8b2e62f4f4d4d7e66083325d689e2d594576",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 898,
+      "line_sha256": "0c81d424b3e4ad4f524f5547bbe0685a0ff6fd1ce7b092d018c978b5ccdf4412",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 901,
+      "line_sha256": "59e2ecf40b6e941497a8371226f632d04318930f0eae044763eb29a4f55949c2",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 904,
+      "line_sha256": "b1e4523628e87c6c09245d5a0cdad12f595c40ded3c58857f4e134921dbbae18",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 907,
+      "line_sha256": "b30c8549cc316001d2a9d7d8f17458463d866ad9b152e3786405588a6c356e7a",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 910,
+      "line_sha256": "5778846a284b2d01e662037a609ff3f8cb64d8ff3d6d7c7ccd7dadb5457eae72",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 913,
+      "line_sha256": "ca19342cd66c147ee7c6837f95986ca7a4528f8e5b0392755cd5bfa5fd9a8232",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 4357,
+      "line_sha256": "5ec02f118b6f00f2d461536c5758338b3fda24f2ace5ad44928a9ca3d75bb236",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 4360,
+      "line_sha256": "92f87a7664497a32645a1bb71b8dac724b23e0026758951c2757325638161da9",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 4885,
+      "line_sha256": "9df53349f9ab48d0d7b1cd8f883b588f4cc692a7ec0114615bdbf486de5dfc00",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 4890,
+      "line_sha256": "257cf8b4616503e4465ae1c0116eae69dda86db09a0395b402bd2887bc5d8c37",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 4893,
+      "line_sha256": "0a739c8729acaaa859c14fdd303f7bcd2484438be3b08175ff7cef9463572739",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 4896,
+      "line_sha256": "61c561657b001b1f66d02d150faf13ca1b067c2afc75ed67b14cc5200c0a16b2",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 4910,
+      "line_sha256": "86eefe13511f07d6ff92ac6b89f67289521791fabf45ff05a69fcc1aa63a6668",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 4915,
+      "line_sha256": "16a87fa0f0f8bfe397926c4b23717be56c13d7a9284e73ba7c741d8e8eac140b",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 4918,
+      "line_sha256": "692e2a18d727c8ecc2e57a01b9bdc3644fc4e175dd859e3abc25c417f41419e4",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 4921,
+      "line_sha256": "44882080f1d2ba9cb48b58840952f1b2655ea08640196202e06f3a64f11bbd1b",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 4924,
+      "line_sha256": "526d872c6d83bf9301d5f6ec744d8d73864b5c8d146cb1cfaa1f1e07d1e0ea0a",
+      "mode": "NO_COMPRESSION"
+    },
+    {
+      "file": "ckkp5a9h6_taskmanager2_1.log",
+      "line_number": 4927,
+      "line_sha256": "29dfbc5583d7ccc4a1b666980f0aea83344542123285cddc2a3346ff300315aa",
+      "mode": "NO_COMPRESSION"
+    }
+  ],
+  "expected_mode": "NO_COMPRESSION",
+  "leg_dir": "/home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/results/raw/003-r1-q11-highmem",
+  "mode_activation_pass": true,
+  "observed_counts": {
+    "NO_COMPRESSION": 40
+  },
+  "observed_counts_by_file": {
+    "ckkp5a9h6_taskmanager1_1.log": {
+      "NO_COMPRESSION": 20
+    },
+    "ckkp5a9h6_taskmanager2_1.log": {
+      "NO_COMPRESSION": 20
+    }
+  },
+  "schema": "cachekit-rocksdb-compression-activation-v1",
+  "sst_effect_pass": true,
+  "sst_file_count": 64,
+  "sst_inventory_required": true,
+  "sst_inventory_selected": "rocksdb-sst-live-inventory.tsv",
+  "sst_inventory_sources": [
+    "rocksdb-sst-inventory.tsv",
+    "rocksdb-sst-live-inventory.tsv"
+  ],
+  "sst_total_bytes": 438888296,
+  "taskmanager_log_count": 2,
+  "unexpected_modes": []
+}

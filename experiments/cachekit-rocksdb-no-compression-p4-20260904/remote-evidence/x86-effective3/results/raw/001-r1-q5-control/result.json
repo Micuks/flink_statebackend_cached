@@ -1,0 +1,172 @@
+{
+  "allocated_tm_logical_cpus": 16,
+  "artifact_sha256": "66f1bac9c25c6e8a777b2ca370e2b21621cccc57e020d869db2fd7c245c6a46b",
+  "claim_boundary": "same-host paired cloud-x86 expansion; only legs with actual SST files are effective and results are not mixed with Kunpeng",
+  "config_sha256": "bb53fc1846f372ab76bab6626b9eb738a89dbdcc97791b8684c25ed880538932",
+  "execution_environment": "idle-host-effective-query-expansion",
+  "measurement": {
+    "cores": 12.09,
+    "cpu_metric_samples": [
+      {
+        "cores": 15.76,
+        "tms": 8
+      },
+      {
+        "cores": 15.75,
+        "tms": 8
+      },
+      {
+        "cores": 15.89,
+        "tms": 8
+      },
+      {
+        "cores": 15.85,
+        "tms": 8
+      },
+      {
+        "cores": 15.79,
+        "tms": 8
+      },
+      {
+        "cores": 11.89,
+        "tms": 8
+      },
+      {
+        "cores": 10.25,
+        "tms": 8
+      },
+      {
+        "cores": 8.21,
+        "tms": 8
+      },
+      {
+        "cores": 9.15,
+        "tms": 8
+      },
+      {
+        "cores": 9.61,
+        "tms": 8
+      },
+      {
+        "cores": 10.03,
+        "tms": 8
+      },
+      {
+        "cores": 10.22,
+        "tms": 8
+      },
+      {
+        "cores": 11.46,
+        "tms": 8
+      },
+      {
+        "cores": 11.63,
+        "tms": 8
+      },
+      {
+        "cores": 9.87,
+        "tms": 8
+      }
+    ],
+    "events": 100000000,
+    "host": "x86",
+    "job_status": {
+      "cpu_metric_cores_median": 11.46,
+      "cpu_metric_cores_time_average": 12.09,
+      "cpu_metric_log": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective3-100m-x86-20260904/results/raw/001-r1-q5-control/query.log",
+      "cpu_metric_sample_count": 15,
+      "expected_cpu_metric_tms": 8,
+      "measurement_integrity_valid": true,
+      "observed_cpu_metric_tms": [
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8
+      ],
+      "real_job_completed": true,
+      "real_job_failed": false,
+      "real_job_started": true,
+      "warmup_completed": true,
+      "warmup_failed": false,
+      "warmup_started": true
+    },
+    "measurement_staging": {
+      "file_count": 72,
+      "manifest": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective3-100m-x86-20260904/inputs/measurement-integrity.SHA256SUMS",
+      "taskmanager_containers": [
+        "b645266730b6",
+        "f907d68749aa"
+      ]
+    },
+    "measurement_state": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective3-100m-x86-20260904/results/raw/001-r1-q5-control/measurement-state.json",
+    "metric_log": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective3-100m-x86-20260904/results/raw/001-r1-q5-control/query.log",
+    "plan_index": 1,
+    "query": "q5",
+    "raw_throughput_kps": 1160.0,
+    "schema": "cachekit-golden-runner-result-v1",
+    "throughput_kps_core": 95.83,
+    "variant": "candidate",
+    "variant_files": {
+      "config": {
+        "path": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective3-100m-x86-20260904/variants/control/flink-conf.yaml",
+        "sha256": "bb53fc1846f372ab76bab6626b9eb738a89dbdcc97791b8684c25ed880538932"
+      },
+      "runtime_bundle": {
+        "artifacts": [
+          {
+            "actual_sha256": "fe1749a708927d16d07323662eb63e59ab997633107d8200846671fce33fe875",
+            "actual_size_bytes": 85137876,
+            "container_filename": "flink-dist-1.16.3.jar",
+            "covers_modules": [
+              "flink-statebackend-rocksdb"
+            ],
+            "outer_hash_key": "flink_dist_sha256",
+            "path": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective3-100m-x86-20260904/inputs/runtime/flink-dist-1.16.3.jar",
+            "role": "flink_dist",
+            "sha256": "fe1749a708927d16d07323662eb63e59ab997633107d8200846671fce33fe875",
+            "size_bytes": 85137876
+          },
+          {
+            "actual_sha256": "66f1bac9c25c6e8a777b2ca370e2b21621cccc57e020d869db2fd7c245c6a46b",
+            "actual_size_bytes": 3104671,
+            "container_filename": "flink-statebackend-cachekit-1.16-SNAPSHOT.jar",
+            "covers_modules": [
+              "flink-statebackend-cachekit",
+              "flink-streaming-java"
+            ],
+            "outer_hash_key": "cachekit_module_sha256",
+            "path": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective3-100m-x86-20260904/inputs/artifacts/opt/flink-statebackend-cachekit-1.16-SNAPSHOT.jar",
+            "role": "cachekit_module",
+            "sha256": "66f1bac9c25c6e8a777b2ca370e2b21621cccc57e020d869db2fd7c245c6a46b",
+            "size_bytes": 3104671
+          }
+        ],
+        "manifest": {
+          "path": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective3-100m-x86-20260904/inputs/artifacts/opt/RUNTIME_BUNDLE.json",
+          "sha256": "10cc9fcd9ee10bc3e668668a6db4631fc5a22d80bf5f771a5b691dc434d78802"
+        },
+        "source_commit": "a95bcc56d2207a5ac6cd3ba2e62459bc5d409ce4"
+      }
+    },
+    "wall_seconds": 86.299
+  },
+  "numa_binding": null,
+  "platform": "x86",
+  "query": "q5",
+  "round": 1,
+  "schema": "cachekit-rocksdb-no-compression-p4-leg-v1",
+  "source_commit": "a95bcc56d2207a5ac6cd3ba2e62459bc5d409ce4",
+  "valid": true,
+  "variant": "control"
+}

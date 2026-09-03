@@ -1,0 +1,197 @@
+{
+  "allocated_tm_logical_cpus": 16,
+  "artifact_sha256": "3c52ba5be2c2f903f348a991659036fa60a44bc161d4a3efb150b00cbd49c723",
+  "claim_boundary": "same-host paired Kunpeng expansion on NUMA node 0; only legs with actual SST files are effective",
+  "config_sha256": "02eaf92daf8a799e975266a4d8d497c64ff91b6b80ca92cf10870cb53eb73833",
+  "execution_environment": "idle-host-numa-isolated-effective-query-expansion",
+  "measurement": {
+    "cores": 12.46,
+    "cpu_metric_samples": [
+      {
+        "cores": 15.72,
+        "tms": 8
+      },
+      {
+        "cores": 15.79,
+        "tms": 8
+      },
+      {
+        "cores": 15.8,
+        "tms": 8
+      },
+      {
+        "cores": 15.86,
+        "tms": 8
+      },
+      {
+        "cores": 15.84,
+        "tms": 8
+      },
+      {
+        "cores": 15.85,
+        "tms": 8
+      },
+      {
+        "cores": 14.84,
+        "tms": 8
+      },
+      {
+        "cores": 11.52,
+        "tms": 8
+      },
+      {
+        "cores": 9.89,
+        "tms": 8
+      },
+      {
+        "cores": 8.92,
+        "tms": 8
+      },
+      {
+        "cores": 9.75,
+        "tms": 8
+      },
+      {
+        "cores": 9.53,
+        "tms": 8
+      },
+      {
+        "cores": 9.36,
+        "tms": 8
+      },
+      {
+        "cores": 11.38,
+        "tms": 8
+      },
+      {
+        "cores": 10.58,
+        "tms": 8
+      },
+      {
+        "cores": 12.04,
+        "tms": 8
+      },
+      {
+        "cores": 11.48,
+        "tms": 8
+      },
+      {
+        "cores": 11.87,
+        "tms": 8
+      },
+      {
+        "cores": 10.71,
+        "tms": 8
+      }
+    ],
+    "events": 100000000,
+    "host": "kunpeng",
+    "job_status": {
+      "cpu_metric_cores_median": 11.52,
+      "cpu_metric_cores_time_average": 12.46,
+      "cpu_metric_log": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective4-r2-100m-kunpeng-20260904/results/raw/001-r1-q5-control/query.log",
+      "cpu_metric_sample_count": 19,
+      "expected_cpu_metric_tms": 8,
+      "measurement_integrity_valid": true,
+      "observed_cpu_metric_tms": [
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8
+      ],
+      "real_job_completed": true,
+      "real_job_failed": false,
+      "real_job_started": true,
+      "warmup_completed": true,
+      "warmup_failed": false,
+      "warmup_started": true
+    },
+    "measurement_staging": {
+      "file_count": 72,
+      "manifest": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective4-r2-100m-kunpeng-20260904/inputs/measurement-integrity.SHA256SUMS",
+      "taskmanager_containers": [
+        "406d20924892",
+        "c867b44470ce"
+      ]
+    },
+    "measurement_state": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective4-r2-100m-kunpeng-20260904/results/raw/001-r1-q5-control/measurement-state.json",
+    "metric_log": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective4-r2-100m-kunpeng-20260904/results/raw/001-r1-q5-control/query.log",
+    "plan_index": 1,
+    "query": "q5",
+    "raw_throughput_kps": 976.8,
+    "schema": "cachekit-golden-runner-result-v1",
+    "throughput_kps_core": 78.39,
+    "variant": "candidate",
+    "variant_files": {
+      "config": {
+        "path": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective4-r2-100m-kunpeng-20260904/variants/control/flink-conf.yaml",
+        "sha256": "02eaf92daf8a799e975266a4d8d497c64ff91b6b80ca92cf10870cb53eb73833"
+      },
+      "runtime_bundle": {
+        "artifacts": [
+          {
+            "actual_sha256": "6a3f6831327ca761438c3b3c69f3176de39c3c82783e3ce0ca271986c327bec4",
+            "actual_size_bytes": 84779382,
+            "container_filename": "flink-dist-1.16.3.jar",
+            "covers_modules": [
+              "flink-statebackend-rocksdb"
+            ],
+            "outer_hash_key": "flink_dist_sha256",
+            "path": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective4-r2-100m-kunpeng-20260904/inputs/runtime/flink-dist-1.16.3.jar",
+            "role": "flink_dist",
+            "sha256": "6a3f6831327ca761438c3b3c69f3176de39c3c82783e3ce0ca271986c327bec4",
+            "size_bytes": 84779382
+          },
+          {
+            "actual_sha256": "3c52ba5be2c2f903f348a991659036fa60a44bc161d4a3efb150b00cbd49c723",
+            "actual_size_bytes": 3108355,
+            "container_filename": "flink-statebackend-cachekit-1.16-SNAPSHOT.jar",
+            "covers_modules": [
+              "flink-statebackend-cachekit",
+              "flink-streaming-java"
+            ],
+            "outer_hash_key": "cachekit_module_sha256",
+            "path": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective4-r2-100m-kunpeng-20260904/inputs/runtime/flink-statebackend-cachekit-1.16-SNAPSHOT.jar",
+            "role": "cachekit_module",
+            "sha256": "3c52ba5be2c2f903f348a991659036fa60a44bc161d4a3efb150b00cbd49c723",
+            "size_bytes": 3108355
+          }
+        ],
+        "manifest": {
+          "path": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective4-r2-100m-kunpeng-20260904/inputs/runtime/RUNTIME_BUNDLE.json",
+          "sha256": "acddabc0cd99ffd3f3b3759b92f2117f7eae0c70359805ca8af266369032902e"
+        },
+        "source_commit": "a95bcc56d2207a5ac6cd3ba2e62459bc5d409ce4"
+      }
+    },
+    "wall_seconds": 102.375
+  },
+  "numa_binding": {
+    "allocated_cpus": "38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74",
+    "container_cpuset_mems": "0",
+    "node": 0,
+    "node_cpulist": "0-79"
+  },
+  "platform": "kunpeng",
+  "query": "q5",
+  "round": 1,
+  "schema": "cachekit-rocksdb-no-compression-p4-leg-v1",
+  "source_commit": "a95bcc56d2207a5ac6cd3ba2e62459bc5d409ce4",
+  "valid": true,
+  "variant": "control"
+}

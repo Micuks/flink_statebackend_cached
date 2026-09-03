@@ -1,0 +1,8 @@
+866cb7700c0b7f863c66cd160f667a10f417f86a72ee4ec6fce4543a5b06282e  /home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/results/raw/001-r1-q5-highmem/measurement-result.json
+b667dbaeef5744ac741f1d360d6ac1c583b3ab6da4065317ea86c993bc1d6c67  /home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/results/raw/001-r1-q5-highmem/result.json
+407447c4ab629944a1b916bc9e4cdbd4f6d31c3f206560b9b91e45fa16b006c6  /home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/results/raw/001-r1-q5-highmem/flink-conf.yaml
+6053c1c4cc1b0c248b72b79d9a7fe33c6574c5260132b629c0227362a0c1d2a6  /home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/results/raw/001-r1-q5-highmem/snapshot-key-reuse-prometheus.json
+ebdc35d24e7473ca1d81679b2c451480971989c227acc2b6197fdbaccdf379e9  /home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/results/raw/001-r1-q5-highmem/VALUE_PREFETCH_AUDIT.json
+f4f5432509cc6ebde0b95d4a429a7588d1a34ae2bc50756b6e7a51cccf9af0cc  /home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/results/raw/001-r1-q5-highmem/COMPRESSION_AUDIT.json
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/results/raw/001-r1-q5-highmem/rocksdb-sst-inventory.tsv
+67e82f3fe08aa413f6ec3768579456dc969dd0c618ffd53d71729887bb096cef  /home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/results/raw/001-r1-q5-highmem/rocksdb-sst-live-inventory.tsv

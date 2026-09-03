@@ -1,0 +1,16 @@
+{
+  "activation_pass": true,
+  "candidate_leg": "/home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/results/raw/004-r1-q15-highmem",
+  "candidate_measurement_valid": true,
+  "candidate_mode_activation_pass": true,
+  "candidate_sst_file_count": 0,
+  "control_leg": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-effective4-r2-100m-kunpeng-20260904/results/raw/005-r1-q15-control",
+  "control_sst_effect_pass": true,
+  "control_sst_file_count": 20,
+  "fixed_per_slot": "2048m",
+  "new_runner_sha256": "41c75a2f7c6b77af9f43f817dca09d1da931a50e659b1094c03787e008ff3680",
+  "old_runner_sha256": "296e323c9af501fdb15cf8a4400664981596504fd10461d1e93eab7aa9803738",
+  "predefined_options": "SPINNING_DISK_OPTIMIZED_HIGH_MEM",
+  "query": "q15",
+  "schema": "cachekit-p6-q15-memtable-residency-activation-v1"
+}

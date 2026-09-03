@@ -1,0 +1,172 @@
+{
+  "cores": 12.04,
+  "cpu_metric_samples": [
+    {
+      "cores": 15.72,
+      "tms": 8
+    },
+    {
+      "cores": 15.77,
+      "tms": 8
+    },
+    {
+      "cores": 15.77,
+      "tms": 8
+    },
+    {
+      "cores": 15.83,
+      "tms": 8
+    },
+    {
+      "cores": 15.79,
+      "tms": 8
+    },
+    {
+      "cores": 15.81,
+      "tms": 8
+    },
+    {
+      "cores": 14.73,
+      "tms": 8
+    },
+    {
+      "cores": 12.03,
+      "tms": 8
+    },
+    {
+      "cores": 8.51,
+      "tms": 8
+    },
+    {
+      "cores": 8.34,
+      "tms": 8
+    },
+    {
+      "cores": 8.53,
+      "tms": 8
+    },
+    {
+      "cores": 8.47,
+      "tms": 8
+    },
+    {
+      "cores": 9.01,
+      "tms": 8
+    },
+    {
+      "cores": 10.46,
+      "tms": 8
+    },
+    {
+      "cores": 10.12,
+      "tms": 8
+    },
+    {
+      "cores": 9.89,
+      "tms": 8
+    },
+    {
+      "cores": 9.95,
+      "tms": 8
+    },
+    {
+      "cores": 11.95,
+      "tms": 8
+    }
+  ],
+  "events": 100000000,
+  "host": "kunpeng",
+  "job_status": {
+    "cpu_metric_cores_median": 11.205,
+    "cpu_metric_cores_time_average": 12.04,
+    "cpu_metric_log": "/home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/results/raw/001-r1-q5-highmem/query.log",
+    "cpu_metric_sample_count": 18,
+    "expected_cpu_metric_tms": 8,
+    "measurement_integrity_valid": true,
+    "observed_cpu_metric_tms": [
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8
+    ],
+    "real_job_completed": true,
+    "real_job_failed": false,
+    "real_job_started": true,
+    "warmup_completed": true,
+    "warmup_failed": false,
+    "warmup_started": true
+  },
+  "measurement_staging": {
+    "file_count": 72,
+    "manifest": "/home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/inputs/measurement-integrity.SHA256SUMS",
+    "taskmanager_containers": [
+      "ab9ce54aaa07",
+      "eb048d84c89a"
+    ]
+  },
+  "measurement_state": "/home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/results/raw/001-r1-q5-highmem/measurement-state.json",
+  "metric_log": "/home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/results/raw/001-r1-q5-highmem/query.log",
+  "plan_index": 1,
+  "query": "q5",
+  "raw_throughput_kps": 1010.0,
+  "schema": "cachekit-golden-runner-result-v1",
+  "throughput_kps_core": 83.99,
+  "variant": "candidate",
+  "variant_files": {
+    "config": {
+      "path": "/home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/variants/highmem/flink-conf.yaml",
+      "sha256": "407447c4ab629944a1b916bc9e4cdbd4f6d31c3f206560b9b91e45fa16b006c6"
+    },
+    "runtime_bundle": {
+      "artifacts": [
+        {
+          "actual_sha256": "6a3f6831327ca761438c3b3c69f3176de39c3c82783e3ce0ca271986c327bec4",
+          "actual_size_bytes": 84779382,
+          "container_filename": "flink-dist-1.16.3.jar",
+          "covers_modules": [
+            "flink-statebackend-rocksdb"
+          ],
+          "outer_hash_key": "flink_dist_sha256",
+          "path": "/home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/inputs/runtime/flink-dist-1.16.3.jar",
+          "role": "flink_dist",
+          "sha256": "6a3f6831327ca761438c3b3c69f3176de39c3c82783e3ce0ca271986c327bec4",
+          "size_bytes": 84779382
+        },
+        {
+          "actual_sha256": "3c52ba5be2c2f903f348a991659036fa60a44bc161d4a3efb150b00cbd49c723",
+          "actual_size_bytes": 3108355,
+          "container_filename": "flink-statebackend-cachekit-1.16-SNAPSHOT.jar",
+          "covers_modules": [
+            "flink-statebackend-cachekit",
+            "flink-streaming-java"
+          ],
+          "outer_hash_key": "cachekit_module_sha256",
+          "path": "/home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/inputs/runtime/flink-statebackend-cachekit-1.16-SNAPSHOT.jar",
+          "role": "cachekit_module",
+          "sha256": "3c52ba5be2c2f903f348a991659036fa60a44bc161d4a3efb150b00cbd49c723",
+          "size_bytes": 3108355
+        }
+      ],
+      "manifest": {
+        "path": "/home/wuql/flink-cluster/experiments/cachekit-p6-highmem-effective5-100m-kunpeng-20260904/inputs/runtime/RUNTIME_BUNDLE.json",
+        "sha256": "e78dcfeb3b374d19d61840a332bbe4d6e5fd60fc3bceb54627dc88836f4e08b0"
+      },
+      "source_commit": "a95bcc56d2207a5ac6cd3ba2e62459bc5d409ce4"
+    }
+  },
+  "wall_seconds": 98.899
+}

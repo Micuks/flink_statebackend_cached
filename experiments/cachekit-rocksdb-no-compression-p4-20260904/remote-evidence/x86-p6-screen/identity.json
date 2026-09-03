@@ -1,0 +1,38 @@
+{
+  "architecture": "x86_64",
+  "artifact_build": {
+    "non_overlay_entries_identical_to_p1": true,
+    "p1_x86_runtime_sha256": "58676b125fe20a5e7f9994e4531f06f8f076e1b3fc150ee1f222fabbe4e20602",
+    "rocksdb_overlay_source_commit": "a95bcc56d2207a5ac6cd3ba2e62459bc5d409ce4"
+  },
+  "artifact_sha256": "66f1bac9c25c6e8a777b2ca370e2b21621cccc57e020d869db2fd7c245c6a46b",
+  "artifact_size_bytes": 3104671,
+  "base_source_commit": "7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000",
+  "checkpointing": "disabled by absence of execution.checkpointing.interval",
+  "claim_boundary": "same x86 host and artifact; frozen P4 q9 control; screen only until paired confirmation",
+  "events": 100000000,
+  "execution_environment": "idle-host-candidate-only-with-frozen-control",
+  "frozen_overlay_commit": "bbd39affde9278d44b9f78d201849bf929249d54",
+  "object_reuse": false,
+  "phase": "x86-q9-lsm-screen-candidate-only",
+  "platform": "x86",
+  "primary_control": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-no-compression-p4-q9-100m-x86-20260904/results/raw/001-r1-q9-control",
+  "queries": [
+    "q9"
+  ],
+  "rounds": [
+    1
+  ],
+  "schema": "cachekit-rocksdb-p6-lsm-screen-q9-v1",
+  "slots": 16,
+  "source_commit": "a95bcc56d2207a5ac6cd3ba2e62459bc5d409ce4",
+  "taskmanagers": 8,
+  "variant_config_sha256": {
+    "highmem": "e64f185ea28f7334f565baf1c5ca53a664635b50628ed4cd12d46ee7646ca02d",
+    "large-lsm": "dbba6311f427085f536595a4aa1ea390ba857e0f6f30b4f0ecce62f5b11594be"
+  },
+  "variants": [
+    "highmem",
+    "large-lsm"
+  ]
+}

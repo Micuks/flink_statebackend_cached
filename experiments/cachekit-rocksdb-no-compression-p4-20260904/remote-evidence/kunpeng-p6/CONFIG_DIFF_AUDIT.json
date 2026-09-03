@@ -1,0 +1,24 @@
+{
+  "actual_differences": {
+    "state.backend.rocksdb.compression.type": {
+      "control": "SNAPPY_COMPRESSION",
+      "highmem": "NO_COMPRESSION"
+    },
+    "state.backend.rocksdb.memory.fixed-per-slot": {
+      "control": "1024m",
+      "highmem": "2048m"
+    },
+    "state.backend.rocksdb.predefined-options": {
+      "control": null,
+      "highmem": "SPINNING_DISK_OPTIMIZED_HIGH_MEM"
+    }
+  },
+  "allowed_difference_keys": [
+    "state.backend.rocksdb.compression.type",
+    "state.backend.rocksdb.memory.fixed-per-slot",
+    "state.backend.rocksdb.predefined-options"
+  ],
+  "schema": "cachekit-p6-highmem-config-diff-v1",
+  "unexpected_difference_keys": [],
+  "valid": true
+}

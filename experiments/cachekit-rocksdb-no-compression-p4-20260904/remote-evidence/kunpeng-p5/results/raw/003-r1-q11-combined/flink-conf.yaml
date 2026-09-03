@@ -1,0 +1,146 @@
+# Generated P5 global candidate variant: combined
+# Source: a95bcc56d2207a5ac6cd3ba2e62459bc5d409ce4
+# Generated native ablation variant: java
+# Source: bbd39affde9278d44b9f78d201849bf929249d54
+jobmanager.rpc.address: jobmanager
+jobmanager.bind-host: 0.0.0.0
+jobmanager.rpc.port: 6123
+rest.bind-address: 0.0.0.0
+rest.port: 8081
+taskmanager.bind-host: 0.0.0.0
+taskmanager.numberOfTaskSlots: 2
+parallelism.default: 16
+jobmanager.memory.process.size: 8g
+taskmanager.memory.process.size: 8g
+io.tmp.dirs: /cachekit-rocksdb/tmp
+
+env.java.opts: -XX:NewRatio=3 -XX:ParallelGCThreads=4
+env.java.opts.jobmanager: -Xlog:gc*:$FLINK_LOG_DIR/jobmanager-gc.log:time -XX:+UseG1GC
+env.java.opts.taskmanager: -Xlog:gc*:$FLINK_LOG_DIR/taskmanager-gc-%p.log:time -XX:+UseG1GC
+
+state.backend: org.apache.flink.contrib.streaming.state.cachekit.CacheKitStateBackendFactory
+state.checkpoints.dir: file:///cachekit-rocksdb/checkpoints
+state.backend.incremental: true
+state.backend.local-recovery: true
+state.backend.rocksdb.memory.managed: true
+state.backend.rocksdb.memory.fixed-per-slot: 1024m
+state.backend.rocksdb.localdir: /cachekit-rocksdb/rocksdb
+
+# P4 whole-key miss rejection; these are the only treatment fields.
+state.backend.rocksdb.use-bloom-filter: true
+state.backend.rocksdb.bloom-filter.bits-per-key: 10.0
+state.backend.rocksdb.bloom-filter.block-based-mode: false
+state.backend.rocksdb.memtable-bloom.ratio: 0.1
+state.backend.rocksdb.memtable-bloom.whole-key: true
+execution.checkpointing.mode: EXACTLY_ONCE
+execution.checkpointing.tolerable-failed-checkpoints: 0
+execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+execution.checkpointing.checkpoints-after-tasks-finish.enabled: false
+
+# ValueState cache.  Deliberately no D1 namespace gate.
+state.backend.cachekit.value.cache.max-entries: 8000
+state.backend.cachekit.value.cache.policy: LRU
+state.backend.cachekit.value.cache.lru.overflow: 1024
+state.backend.cachekit.value.bypass.enabled: false
+state.backend.cachekit.value.hit-rate.threshold: 0.03
+state.backend.cachekit.value.hit-rate.window: 5000
+
+# WUTB: MapState snapshot cache only; point and presence caches remain off.
+state.backend.cachekit.map.cache.max-entries: 0
+state.backend.cachekit.map.snapshot.cache.max-entries: 8000
+state.backend.cachekit.map.snapshot.small.max-entries: 2
+state.backend.cachekit.map.presence.cache.max-entries: 0
+state.backend.cachekit.map.iteration.cache-fill.enabled: false
+state.backend.cachekit.map.bypass.enabled: false
+
+# WUQL treatment plumbing. These common settings deliberately expose the
+# speculative async path; only the three treatment booleans differ by variant.
+state.backend.cachekit.bp-prefetch.enabled: true
+state.backend.cachekit.bp-prefetch.distance: 64
+state.backend.cachekit.bp-prefetch.backpressure-gated: false
+state.backend.cachekit.bp-prefetch.commutative-key-sort: false
+state.backend.cachekit.bp-prefetch.async.enabled: true
+state.backend.cachekit.bp-prefetch.multiget.enabled: true
+state.backend.cachekit.bp-prefetch.multiget.chunk-size: 64
+state.backend.cachekit.bp-prefetch.multiget.min-batch-size: 8
+state.backend.cachekit.bp-prefetch.async-chunks.enabled: true
+state.backend.cachekit.bp-prefetch.async-chunks.size: 16
+state.backend.cachekit.bp-prefetch.staging.max-entries: 8192
+state.backend.cachekit.value.sticky-update-in-place.enabled: true
+state.backend.cachekit.value.lazy-staging.enabled: true
+state.backend.cachekit.value.lazy-staging.max-retained-bytes: 67108864
+state.backend.cachekit.mailbox-batch.enabled: true
+state.backend.cachekit.mailbox-batch.size: 4096
+state.backend.cachekit.mailbox-batch.timeout-us: 0
+state.backend.cachekit.mailbox-batch.commutative-key-sort: false
+state.backend.cachekit.local-preagg.enabled: true
+
+state.backend.cachekit.diagnostics.enabled: true
+
+# Chen: ListState COW/RYW and priority queue optimization.
+state.backend.cachekit.list-state.cow: false
+state.backend.cachekit.list-state.ryw: false
+state.backend.cachekit.list-state.cleared-keys.capacity: 200000
+state.backend.cachekit.priority-queue.opt: false
+
+table.exec.mini-batch.enabled: false
+table.optimizer.distinct-agg.split.enabled: true
+
+metrics.reporters: prom
+metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+metrics.reporter.prom.port: 9249-9252
+
+# Native request-plane infrastructure is enabled only to host the ValueState
+# point cache. Every other native component remains disabled.
+state.backend.cachekit.native.request-plane.enabled: false
+state.backend.cachekit.native.request-plane.library: /opt/cachekit-native/libcachekit_native_request_plane_jni.so
+state.backend.cachekit.native.request-plane.kernel: auto
+state.backend.cachekit.native.request-plane.capacity-entries: 8192
+state.backend.cachekit.native.request-plane.key-arena-bytes: 2097152
+state.backend.cachekit.native.request-plane.value-arena-bytes: 8388608
+state.backend.cachekit.native.request-plane.batch-entries: 512
+state.backend.cachekit.native.request-plane.batch-key-arena-bytes: 262144
+state.backend.cachekit.native.request-plane.batch-value-arena-bytes: 1048576
+state.backend.cachekit.native.request-plane.min-batch-size: 4
+state.backend.cachekit.native.request-plane.batch-slots: 1
+state.backend.cachekit.native.request-plane.aarch64-only: true
+state.backend.cachekit.native.request-plane.write-through-mutations: false
+state.backend.cachekit.native.value-cache.enabled: false
+state.backend.cachekit.native.value-cache.read-activated-write-through.enabled: false
+state.backend.cachekit.native.value-cache.resident-mutation-batch.enabled: false
+state.backend.cachekit.native.map-cache.enabled: false
+state.backend.cachekit.native.map-snapshot.enabled: false
+state.backend.cachekit.native.local-preagg.enabled: false
+state.backend.cachekit.native.local-preagg.indexed-fold.enabled: false
+state.backend.cachekit.native.mailbox-batch.enabled: false
+state.backend.cachekit.native.prefetch.enabled: false
+state.backend.cachekit.native.fastlocal.runtime-dispatch.enabled: false
+
+# Stage-native experiment identity (generated).
+state.backend.rocksdb.memtable.arm-point.enabled: false
+state.backend.rocksdb.memtable.arm-point.map-flat-authority: false
+state.backend.rocksdb.memtable.arm-point.map-keyhead-point-index.enabled: false
+state.backend.cachekit.map.snapshot.cache.native.enabled: false
+state.backend.cachekit.map.snapshot.cache.native.remove-hint.enabled: false
+state.backend.cachekit.native.map-distinct-batch-prefetch.enabled: false
+
+# Native ablation gates (generated).
+state.backend.cachekit.map.snapshot.cache.native.classifier.enabled: false
+
+# Ready-gated prefetch controls (generated).
+pipeline.object-reuse: false
+state.backend.cachekit.bp-prefetch.head-guard-records: 0
+state.backend.cachekit.bp-prefetch.sliding-drain-records: 0
+state.backend.cachekit.bp-prefetch.cancel-on-dispatch.enabled: false
+state.backend.cachekit.bp-prefetch.ready-gated.enabled: false
+state.backend.cachekit.bp-prefetch.ready-gated.max-in-flight-batches: 2
+state.backend.cachekit.bp-prefetch.ready-gated.timeout-us: 5000
+
+# P2 exact synchronous record-key MultiGet.
+state.backend.cachekit.bp-prefetch.immediate-record.enabled: false
+
+# P3 snapshot-owned internal-key reuse and lazy exposed-key copy.
+state.backend.cachekit.map.snapshot.owned-key-reuse.enabled: true
+
+# P4 RocksDB SST compression mode.
+state.backend.rocksdb.compression.type: NO_COMPRESSION

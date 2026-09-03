@@ -1,0 +1,29 @@
+{
+  "actual_differences": {
+    "state.backend.cachekit.map.snapshot.cache.max-entries": {
+      "combined": "8000",
+      "control": "2000"
+    },
+    "state.backend.cachekit.map.snapshot.owned-key-reuse.enabled": {
+      "combined": "true",
+      "control": "false"
+    },
+    "state.backend.cachekit.map.snapshot.small.max-entries": {
+      "combined": "2",
+      "control": null
+    },
+    "state.backend.rocksdb.compression.type": {
+      "combined": "NO_COMPRESSION",
+      "control": "SNAPPY_COMPRESSION"
+    }
+  },
+  "allowed_difference_keys": [
+    "state.backend.cachekit.map.snapshot.cache.max-entries",
+    "state.backend.cachekit.map.snapshot.owned-key-reuse.enabled",
+    "state.backend.cachekit.map.snapshot.small.max-entries",
+    "state.backend.rocksdb.compression.type"
+  ],
+  "schema": "cachekit-p5-global-candidate-config-diff-v1",
+  "unexpected_difference_keys": [],
+  "valid": true
+}

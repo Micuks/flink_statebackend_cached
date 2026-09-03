@@ -1,0 +1,14 @@
+{
+  "actual_differences": {
+    "state.backend.rocksdb.compression.type": {
+      "control": "SNAPPY_COMPRESSION",
+      "no-compression": "NO_COMPRESSION"
+    }
+  },
+  "allowed_difference_keys": [
+    "state.backend.rocksdb.compression.type"
+  ],
+  "schema": "cachekit-rocksdb-no-compression-p4-config-diff-v1",
+  "unexpected_difference_keys": [],
+  "valid": true
+}

@@ -1,0 +1,197 @@
+{
+  "allocated_tm_logical_cpus": 16,
+  "artifact_sha256": "3c52ba5be2c2f903f348a991659036fa60a44bc161d4a3efb150b00cbd49c723",
+  "claim_boundary": "same Kunpeng host and artifact; q9 control reused from P4 q9 and other controls reused from P4 effective4",
+  "config_sha256": "d9797cc74e4b1eb2bcfd4cee2ab8bb1559f60d51f1f5d567c6852c414fe6e93f",
+  "execution_environment": "idle-host-numa-isolated-candidate-only-with-frozen-controls",
+  "measurement": {
+    "cores": 12.18,
+    "cpu_metric_samples": [
+      {
+        "cores": 15.71,
+        "tms": 8
+      },
+      {
+        "cores": 15.74,
+        "tms": 8
+      },
+      {
+        "cores": 15.81,
+        "tms": 8
+      },
+      {
+        "cores": 15.8,
+        "tms": 8
+      },
+      {
+        "cores": 15.89,
+        "tms": 8
+      },
+      {
+        "cores": 15.85,
+        "tms": 8
+      },
+      {
+        "cores": 15.76,
+        "tms": 8
+      },
+      {
+        "cores": 11.74,
+        "tms": 8
+      },
+      {
+        "cores": 9.03,
+        "tms": 8
+      },
+      {
+        "cores": 7.99,
+        "tms": 8
+      },
+      {
+        "cores": 9.0,
+        "tms": 8
+      },
+      {
+        "cores": 8.59,
+        "tms": 8
+      },
+      {
+        "cores": 8.57,
+        "tms": 8
+      },
+      {
+        "cores": 9.42,
+        "tms": 8
+      },
+      {
+        "cores": 9.82,
+        "tms": 8
+      },
+      {
+        "cores": 10.28,
+        "tms": 8
+      },
+      {
+        "cores": 12.0,
+        "tms": 8
+      },
+      {
+        "cores": 11.11,
+        "tms": 8
+      },
+      {
+        "cores": 13.3,
+        "tms": 8
+      }
+    ],
+    "events": 100000000,
+    "host": "kunpeng",
+    "job_status": {
+      "cpu_metric_cores_median": 11.74,
+      "cpu_metric_cores_time_average": 12.18,
+      "cpu_metric_log": "/home/wuql/flink-cluster/experiments/cachekit-p5-global-candidate-effective5-100m-kunpeng-20260904/results/raw/001-r1-q5-combined/query.log",
+      "cpu_metric_sample_count": 19,
+      "expected_cpu_metric_tms": 8,
+      "measurement_integrity_valid": true,
+      "observed_cpu_metric_tms": [
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8
+      ],
+      "real_job_completed": true,
+      "real_job_failed": false,
+      "real_job_started": true,
+      "warmup_completed": true,
+      "warmup_failed": false,
+      "warmup_started": true
+    },
+    "measurement_staging": {
+      "file_count": 72,
+      "manifest": "/home/wuql/flink-cluster/experiments/cachekit-p5-global-candidate-effective5-100m-kunpeng-20260904/inputs/measurement-integrity.SHA256SUMS",
+      "taskmanager_containers": [
+        "85339f38e15e",
+        "cb04ce643e22"
+      ]
+    },
+    "measurement_state": "/home/wuql/flink-cluster/experiments/cachekit-p5-global-candidate-effective5-100m-kunpeng-20260904/results/raw/001-r1-q5-combined/measurement-state.json",
+    "metric_log": "/home/wuql/flink-cluster/experiments/cachekit-p5-global-candidate-effective5-100m-kunpeng-20260904/results/raw/001-r1-q5-combined/query.log",
+    "plan_index": 1,
+    "query": "q5",
+    "raw_throughput_kps": 984.2,
+    "schema": "cachekit-golden-runner-result-v1",
+    "throughput_kps_core": 80.81,
+    "variant": "candidate",
+    "variant_files": {
+      "config": {
+        "path": "/home/wuql/flink-cluster/experiments/cachekit-p5-global-candidate-effective5-100m-kunpeng-20260904/variants/combined/flink-conf.yaml",
+        "sha256": "d9797cc74e4b1eb2bcfd4cee2ab8bb1559f60d51f1f5d567c6852c414fe6e93f"
+      },
+      "runtime_bundle": {
+        "artifacts": [
+          {
+            "actual_sha256": "6a3f6831327ca761438c3b3c69f3176de39c3c82783e3ce0ca271986c327bec4",
+            "actual_size_bytes": 84779382,
+            "container_filename": "flink-dist-1.16.3.jar",
+            "covers_modules": [
+              "flink-statebackend-rocksdb"
+            ],
+            "outer_hash_key": "flink_dist_sha256",
+            "path": "/home/wuql/flink-cluster/experiments/cachekit-p5-global-candidate-effective5-100m-kunpeng-20260904/inputs/runtime/flink-dist-1.16.3.jar",
+            "role": "flink_dist",
+            "sha256": "6a3f6831327ca761438c3b3c69f3176de39c3c82783e3ce0ca271986c327bec4",
+            "size_bytes": 84779382
+          },
+          {
+            "actual_sha256": "3c52ba5be2c2f903f348a991659036fa60a44bc161d4a3efb150b00cbd49c723",
+            "actual_size_bytes": 3108355,
+            "container_filename": "flink-statebackend-cachekit-1.16-SNAPSHOT.jar",
+            "covers_modules": [
+              "flink-statebackend-cachekit",
+              "flink-streaming-java"
+            ],
+            "outer_hash_key": "cachekit_module_sha256",
+            "path": "/home/wuql/flink-cluster/experiments/cachekit-p5-global-candidate-effective5-100m-kunpeng-20260904/inputs/runtime/flink-statebackend-cachekit-1.16-SNAPSHOT.jar",
+            "role": "cachekit_module",
+            "sha256": "3c52ba5be2c2f903f348a991659036fa60a44bc161d4a3efb150b00cbd49c723",
+            "size_bytes": 3108355
+          }
+        ],
+        "manifest": {
+          "path": "/home/wuql/flink-cluster/experiments/cachekit-p5-global-candidate-effective5-100m-kunpeng-20260904/inputs/runtime/RUNTIME_BUNDLE.json",
+          "sha256": "1df29d39e4007a356806aa458610cc9cbb10a5b49cacb8d6eada2a574644a7b1"
+        },
+        "source_commit": "a95bcc56d2207a5ac6cd3ba2e62459bc5d409ce4"
+      }
+    },
+    "wall_seconds": 101.605
+  },
+  "numa_binding": {
+    "allocated_cpus": "38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74",
+    "container_cpuset_mems": "0",
+    "node": 0,
+    "node_cpulist": "0-79"
+  },
+  "platform": "kunpeng",
+  "query": "q5",
+  "round": 1,
+  "schema": "cachekit-rocksdb-no-compression-p4-leg-v1",
+  "source_commit": "a95bcc56d2207a5ac6cd3ba2e62459bc5d409ce4",
+  "valid": true,
+  "variant": "combined"
+}

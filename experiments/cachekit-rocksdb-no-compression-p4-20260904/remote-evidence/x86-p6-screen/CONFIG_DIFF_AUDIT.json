@@ -1,0 +1,75 @@
+{
+  "highmem": {
+    "differences": {
+      "state.backend.rocksdb.compression.type": {
+        "candidate": "NO_COMPRESSION",
+        "control": "SNAPPY_COMPRESSION"
+      },
+      "state.backend.rocksdb.memory.fixed-per-slot": {
+        "candidate": "2048m",
+        "control": "1024m"
+      },
+      "state.backend.rocksdb.predefined-options": {
+        "candidate": "SPINNING_DISK_OPTIMIZED_HIGH_MEM",
+        "control": null
+      }
+    },
+    "expected_difference_keys": [
+      "state.backend.rocksdb.compression.type",
+      "state.backend.rocksdb.memory.fixed-per-slot",
+      "state.backend.rocksdb.predefined-options"
+    ],
+    "missing_difference_keys": [],
+    "unexpected_difference_keys": [],
+    "valid": true
+  },
+  "large-lsm": {
+    "differences": {
+      "state.backend.rocksdb.compaction.level.max-size-level-base": {
+        "candidate": "1g",
+        "control": null
+      },
+      "state.backend.rocksdb.compaction.level.target-file-size-base": {
+        "candidate": "256m",
+        "control": null
+      },
+      "state.backend.rocksdb.compaction.level.use-dynamic-size": {
+        "candidate": "true",
+        "control": null
+      },
+      "state.backend.rocksdb.compression.type": {
+        "candidate": "NO_COMPRESSION",
+        "control": "SNAPPY_COMPRESSION"
+      },
+      "state.backend.rocksdb.memory.fixed-per-slot": {
+        "candidate": "2048m",
+        "control": "1024m"
+      },
+      "state.backend.rocksdb.thread.num": {
+        "candidate": "4",
+        "control": null
+      },
+      "state.backend.rocksdb.writebuffer.count": {
+        "candidate": "4",
+        "control": null
+      },
+      "state.backend.rocksdb.writebuffer.number-to-merge": {
+        "candidate": "3",
+        "control": null
+      }
+    },
+    "expected_difference_keys": [
+      "state.backend.rocksdb.compaction.level.max-size-level-base",
+      "state.backend.rocksdb.compaction.level.target-file-size-base",
+      "state.backend.rocksdb.compaction.level.use-dynamic-size",
+      "state.backend.rocksdb.compression.type",
+      "state.backend.rocksdb.memory.fixed-per-slot",
+      "state.backend.rocksdb.thread.num",
+      "state.backend.rocksdb.writebuffer.count",
+      "state.backend.rocksdb.writebuffer.number-to-merge"
+    ],
+    "missing_difference_keys": [],
+    "unexpected_difference_keys": [],
+    "valid": true
+  }
+}
