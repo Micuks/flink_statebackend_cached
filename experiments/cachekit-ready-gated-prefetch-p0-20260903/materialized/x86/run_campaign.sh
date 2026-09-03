@@ -9,7 +9,7 @@ prom=http://127.0.0.1:11721
 scratch=/tmp/ckx867a9p0
 runtime_manifest=$expdir/inputs/artifacts/opt/RUNTIME_BUNDLE.json
 source_commit=7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000
-artifact_sha=16204de9848c9f3e2f55a04071fc0947d752d96134f396d08a0ae5dc69752254
+artifact_sha=e6bcbb6ea5a7e39158bc5ccff67a0e59b9d7d6b8d7eaf205bbb52b0ce8b7938f
 events=100000000
 read -r -a queries <<<"${QUERIES_TEXT:-q9}"
 read -r -a variants <<<"${VARIANTS_TEXT:-control c16-g8-d16 c16-g16-d16 c32-g8-d16 c32-g16-d16 c32-g16-d32}"

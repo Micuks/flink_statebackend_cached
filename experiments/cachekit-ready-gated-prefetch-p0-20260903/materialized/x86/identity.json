@@ -1,7 +1,7 @@
 {
   "architecture": "x86_64",
-  "artifact_sha256": "16204de9848c9f3e2f55a04071fc0947d752d96134f396d08a0ae5dc69752254",
-  "artifact_size_bytes": 3089627,
+  "artifact_sha256": "e6bcbb6ea5a7e39158bc5ccff67a0e59b9d7d6b8d7eaf205bbb52b0ce8b7938f",
+  "artifact_size_bytes": 3089321,
   "checkpointing": "disabled by absence of execution.checkpointing.interval",
   "events": 100000000,
   "frozen_overlay_commit": "bbd39affde9278d44b9f78d201849bf929249d54",

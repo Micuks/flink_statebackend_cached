@@ -106,6 +106,13 @@ done
 
 (cd "$overlay" && jar uf "$candidate" .)
 unzip -t "$candidate" >/dev/null
+while IFS= read -r -d '' overlay_file; do
+  relative=${overlay_file#"$overlay"/}
+  cmp -s "$overlay_file" <(unzip -p "$candidate" "$relative") || {
+    echo "final jar overlay mismatch: $relative" >&2
+    exit 72
+  }
+done < <(find "$overlay" -type f -name '*.class' -print0)
 
 candidate_sha=$(sha256sum "$candidate" | awk '{print $1}')
 manifest=$repo/flink-state-backends/flink-statebackend-cachekit/target/CANDIDATE_BUILD.txt
