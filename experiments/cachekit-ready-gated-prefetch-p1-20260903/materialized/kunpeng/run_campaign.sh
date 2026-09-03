@@ -10,6 +10,9 @@ scratch=/tmp/ckkp5a9p1
 runtime_manifest=$expdir/inputs/runtime/RUNTIME_BUNDLE.json
 source_commit=5a9d1e656715a403afac72ee1a516876ddbfb7f1
 artifact_sha=97487e04d293f154b8856e43decf2573fabaaf35e36077ea635a1f55d0f59dfc
+allow_disjoint_foreign=true
+target_cpuset=38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74
+target_cpuset_mems=0
 events=100000000
 queries=(q9)
 variants=(control ready-d2)
@@ -19,7 +22,7 @@ export GOLDEN_HOST=kunpeng
 export GOLDEN_CONTAINER_FLINK_HOME=/opt/flink-1.16.3
 export COMPOSE_PROJECT_NAME=$project
 export GOLDEN_COMPOSE_COMMAND_JSON="[\"$compose\",\"--project-name\",\"$project\"]"
-export GOLDEN_CONTAINER_CPUSET_MEMS_JSON='{"ckkp5a9p1_jobmanager_1":"1","ckkp5a9p1_taskmanager1_1":"1","ckkp5a9p1_taskmanager2_1":"1","ckkp5a9p1_prometheus_1":"1","ckkp5a9p1_pushgateway_1":"1"}'
+export GOLDEN_CONTAINER_CPUSET_MEMS_JSON='{"ckkp5a9p1_jobmanager_1":"0","ckkp5a9p1_taskmanager1_1":"0","ckkp5a9p1_taskmanager2_1":"0","ckkp5a9p1_prometheus_1":"0","ckkp5a9p1_pushgateway_1":"0"}'
 
 mkdir -p "$expdir"/{logs,results/raw,results/failed,final} "$scratch"
 owner=$scratch/.cachekit-ready-gated-owner
@@ -45,13 +48,33 @@ cleanup() {
 trap cleanup EXIT
 
 fail_on_foreign_containers() {
-  local id owner_project foreign=0
+  local id owner_project owner_cpus foreign=0
   while read -r id; do
     [[ -n $id ]] || continue
     owner_project=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$id" 2>/dev/null || true)
     if [[ $owner_project != "$project" ]]; then
-      docker inspect -f 'foreign_container={{.Name}} image={{.Config.Image}} project={{index .Config.Labels "com.docker.compose.project"}}' "$id" >&2
-      foreign=1
+      owner_cpus=$(docker inspect -f '{{.HostConfig.CpusetCpus}}' "$id" 2>/dev/null || true)
+      if [[ $allow_disjoint_foreign == true && -n $owner_cpus ]] &&
+          ! python3 - "$owner_cpus" "$target_cpuset" <<'PY'
+import sys
+
+
+def expand(spec):
+    result = set()
+    for part in spec.split(','):
+        bounds = [int(value) for value in part.split('-', 1)]
+        result.update(range(bounds[0], bounds[-1] + 1))
+    return result
+
+
+raise SystemExit(0 if expand(sys.argv[1]) & expand(sys.argv[2]) else 1)
+PY
+      then
+        docker inspect -f 'allowed_disjoint_container={{.Name}} cpus={{.HostConfig.CpusetCpus}}' "$id" >&2
+      else
+        docker inspect -f 'foreign_container={{.Name}} image={{.Config.Image}} project={{index .Config.Labels "com.docker.compose.project"}} cpus={{.HostConfig.CpusetCpus}}' "$id" >&2
+        foreign=1
+      fi
     fi
   done < <(docker ps -q)
   (( foreign == 0 )) || return 1
@@ -72,6 +95,32 @@ PY
     sleep 3
   done
   return 1
+}
+
+start_cluster() {
+  local cf=$1 id actual_mems
+  local -a ids
+  if [[ -z $target_cpuset_mems ]]; then
+    "$compose" --project-name "$project" -f "$cf" up -d
+    return
+  fi
+  "$compose" --project-name "$project" -f "$cf" up --no-start
+  mapfile -t ids < <(
+    docker ps -aq --filter "label=com.docker.compose.project=$project"
+  )
+  (( ${#ids[@]} == 5 )) || {
+    echo "expected five stopped campaign containers, found ${#ids[@]}" >&2
+    return 1
+  }
+  docker update --cpuset-mems "$target_cpuset_mems" "${ids[@]}"
+  for id in "${ids[@]}"; do
+    actual_mems=$(docker inspect -f '{{.HostConfig.CpusetMems}}' "$id")
+    [[ $actual_mems == "$target_cpuset_mems" ]] || {
+      echo "container memory-node bind mismatch: id=$id mems=$actual_mems" >&2
+      return 1
+    }
+  done
+  "$compose" --project-name "$project" -f "$cf" start
 }
 
 capture_logs() {
@@ -158,6 +207,9 @@ result={
  'source_commit':source,'artifact_sha256':artifact,'platform':'kunpeng','query':query,
  'round':rnd,'variant':variant,'allocated_tm_logical_cpus':16,
  'config_sha256':config_sha,'measurement':m,
+ 'execution_environment':identity.get('execution_environment','idle-host'),
+ 'numa_binding':identity.get('numa_binding'),
+ 'claim_boundary':identity.get('claim_boundary'),
 }
 (d/'result.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
 PY
@@ -177,7 +229,11 @@ run_leg() {
   log "START $leg"
   cleanup
   fail_on_foreign_containers || { log "FATAL foreign containers before $leg"; exit 71; }
-  "$compose" --project-name "$project" -f "$cf" up -d >"$d/cluster-start.log" 2>&1
+  if ! start_cluster "$cf" >"$d/cluster-start.log" 2>&1; then
+    capture_logs "$d" "$cf"
+    log "FATAL cluster start $leg"
+    return 72
+  fi
   if ! wait_cluster; then capture_logs "$d" "$cf"; log "FATAL cluster readiness $leg"; exit 72; fi
   python3 "$expdir/inputs/check_cpu_metric_ownership.py" \
     --compose "$cf" --project-name "$project" --expdir "$expdir" \

@@ -10,8 +10,16 @@
   "artifact_size_bytes": 3104905,
   "base_source_commit": "7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000",
   "checkpointing": "disabled by absence of execution.checkpointing.interval",
+  "claim_boundary": "same-host paired quick validation under disjoint NUMA CPU binding; not idle-host final performance evidence",
   "events": 100000000,
+  "execution_environment": "numa-isolated-colocated-quick-validation",
   "frozen_overlay_commit": "bbd39affde9278d44b9f78d201849bf929249d54",
+  "numa_binding": {
+    "allocated_cpus": "38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74",
+    "container_cpuset_mems": "0",
+    "node": 0,
+    "node_cpulist": "0-79"
+  },
   "object_reuse": false,
   "phase": "q9-ready-depth-two-canary",
   "platform": "kunpeng",

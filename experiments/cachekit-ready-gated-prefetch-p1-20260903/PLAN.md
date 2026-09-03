@@ -36,7 +36,7 @@ Both set max in-flight batches to 2 and timeout to 5000 us.
 Run one breadth-first q9 round in order `control`, `ready-d2`. Each leg must
 prove real job start/completion, warmup completion, positive throughput and CPU,
 eight-TM CPU coverage, `cores <= 16.05`, exact config/artifact hashes, and clean
-logs. Host preflight rejects any foreign running container.
+logs. The x86 host preflight rejects any foreign running container.
 The harness has no query, variant, or round environment override; these arrays
 are fixed to the identity above.
 
@@ -48,7 +48,8 @@ drops. Prometheus and close-time ValueState counters are retained separately.
 ## Dual-host quick-validation amendment (2026-09-03)
 
 Run the same paired q9 control/`ready-d2` canary independently on cloud x86 and
-Kunpeng when each host is truly idle. Each host keeps its own same-artifact
+Kunpeng when each host is eligible under the host-specific isolation gate. Each
+host keeps its own same-artifact
 control as the primary denominator. Same-host prior Java/RocksDB baselines may
 be reused as secondary quick-validation references, but results are never
 pooled across hosts or storage media.
@@ -60,8 +61,22 @@ other 1,592 file entries to match the x86-built Java candidate. The frozen
 Kunpeng candidate SHA-256 is
 `97487e04d293f154b8856e43decf2573fabaaf35e36077ea635a1f55d0f59dfc`.
 Its inputs and RocksDB runtime are reused from the same-host 2026-09-03
-campaign; that source campaign need not complete, but the launch guard still
-requires no running container or benchmark process.
+campaign; that source campaign need not complete. The initial launch guard
+required a wholly idle host and was narrowed by the NUMA amendment below.
+
+The user subsequently authorized execution on an idle NUMA cluster even while
+another host-local job is active. On Kunpeng, P1 therefore binds every service
+to NUMA node 0 memory and CPUs 38--74, while the observed foreign campaign is
+CPU-bound to NUMA node 2 CPUs 160--206. The harness rechecks CPU-set disjointness
+before the campaign and before every leg. Because the host's Compose version
+does not accept `cpuset_mems`, the harness uses `up --no-start` to create the
+network, volumes, and stopped containers, applies and verifies Docker cgroup
+memory-node 0 binding, and only then starts them.
+Because the foreign containers permit
+memory on nodes 0--3 and `/tmp` is a host-wide tmpfs, this is explicitly
+co-located quick-validation evidence, not idle-host final performance evidence.
+Cloud x86 has only two NUMA nodes and the active parent spans both, so this
+exception does not make that host eligible.
 
 ## Advancement boundary
 

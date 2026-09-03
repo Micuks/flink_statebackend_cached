@@ -266,6 +266,9 @@ def main() -> None:
             '"ckx865a9p1_prometheus_1":"1",'
             '"ckx865a9p1_pushgateway_1":"1"}'
         ),
+        "@ALLOW_DISJOINT_FOREIGN@": "false",
+        "@TARGET_CPUSET@": "0-31",
+        "@TARGET_CPUSET_MEMS@": "",
     }
     for old, new in replacements.items():
         harness = harness.replace(old, new)

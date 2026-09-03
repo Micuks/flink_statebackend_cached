@@ -89,11 +89,18 @@ def main() -> None:
             ("/variants/java/", f"/variants/{variant}/"),
             (SOURCE_SCRATCH, TARGET_SCRATCH),
             (SOURCE_PROJECT, TARGET_PROJECT),
+            ("118,120,122,124,126,128,130,132", "38,40,42,44,46,48,50,52"),
+            ("136,138,140,142,144,146,148,150", "56,58,60,62,64,66,68,70"),
+            ("134", "54"),
+            ("152", "72"),
+            ("154", "74"),
             ("10088:8081", "10789:8081"),
             ("11121:9090", "11823:9090"),
             ("11122:9091", "11824:9091"),
         ]
         compose = rewrite_strings(base_compose, replacements)
+        for service in compose["services"].values():
+            assert "cpuset" in service
         rendered = yaml.safe_dump(compose, sort_keys=False)
         for stale in (SOURCE_EXPDIR, SOURCE_SCRATCH, SOURCE_PROJECT):
             assert stale not in rendered, stale
@@ -136,6 +143,19 @@ def main() -> None:
         "checkpointing": "disabled by absence of execution.checkpointing.interval",
         "object_reuse": False,
         "primary_control": "control",
+        "execution_environment": "numa-isolated-colocated-quick-validation",
+        "numa_binding": {
+            "node": 0,
+            "node_cpulist": "0-79",
+            "allocated_cpus": (
+                "38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74"
+            ),
+            "container_cpuset_mems": "0",
+        },
+        "claim_boundary": (
+            "same-host paired quick validation under disjoint NUMA CPU binding; "
+            "not idle-host final performance evidence"
+        ),
         "artifact_sha256": artifact_hash,
         "artifact_size_bytes": args.artifact.stat().st_size,
         "arm_native_origin": {
@@ -195,12 +215,15 @@ def main() -> None:
         "@GOLDEN_HOST@": "kunpeng",
         "@CONTAINER_FLINK_HOME@": "/opt/flink-1.16.3",
         "@CPUSET_MEMS_JSON@": (
-            '{"ckkp5a9p1_jobmanager_1":"1",'
-            '"ckkp5a9p1_taskmanager1_1":"1",'
-            '"ckkp5a9p1_taskmanager2_1":"1",'
-            '"ckkp5a9p1_prometheus_1":"1",'
-            '"ckkp5a9p1_pushgateway_1":"1"}'
+            '{"ckkp5a9p1_jobmanager_1":"0",'
+            '"ckkp5a9p1_taskmanager1_1":"0",'
+            '"ckkp5a9p1_taskmanager2_1":"0",'
+            '"ckkp5a9p1_prometheus_1":"0",'
+            '"ckkp5a9p1_pushgateway_1":"0"}'
         ),
+        "@ALLOW_DISJOINT_FOREIGN@": "true",
+        "@TARGET_CPUSET@": "38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74",
+        "@TARGET_CPUSET_MEMS@": "0",
     }
     for old, new in replacements.items():
         harness = harness.replace(old, new)
