@@ -2,16 +2,17 @@
 set -euo pipefail
 
 expected_source=a95bcc56d2207a5ac6cd3ba2e62459bc5d409ce4
-expected_p3_runtime_sha=0a1981cbd3591b4c99dbd5d7d3a32170ab6c630fa1dcdb4faa16005b9acf5f49
+expected_p3_arm_runtime_sha=0a1981cbd3591b4c99dbd5d7d3a32170ab6c630fa1dcdb4faa16005b9acf5f49
+expected_p1_x86_runtime_sha=58676b125fe20a5e7f9994e4531f06f8f076e1b3fc150ee1f222fabbe4e20602
 
 usage() {
-  echo "usage: $0 /absolute/path/to/p3-aarch64-runtime.jar" >&2
+  echo "usage: $0 /absolute/path/to/{p3-aarch64|p1-x86}-runtime.jar" >&2
   exit 64
 }
 
 [[ $# -eq 1 ]] || usage
-p3_runtime=$1
-[[ $p3_runtime = /* && -f $p3_runtime ]] || usage
+base_runtime=$1
+[[ $base_runtime = /* && -f $base_runtime ]] || usage
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo=$(git -C "$script_dir" rev-parse --show-toplevel)
@@ -31,11 +32,21 @@ git -C "$repo" diff --quiet || {
   exit 66
 }
 
-p3_runtime_sha=$(sha256sum "$p3_runtime" | awk '{print $1}')
-[[ $p3_runtime_sha == "$expected_p3_runtime_sha" ]] || {
-  echo "P3 runtime mismatch: expected $expected_p3_runtime_sha, got $p3_runtime_sha" >&2
-  exit 67
-}
+base_runtime_sha=$(sha256sum "$base_runtime" | awk '{print $1}')
+case $base_runtime_sha in
+  "$expected_p3_arm_runtime_sha")
+    base_label=p3-aarch64
+    candidate_name=flink-statebackend-cachekit-1.16-SNAPSHOT-p4-aarch64.jar
+    ;;
+  "$expected_p1_x86_runtime_sha")
+    base_label=p1-x86
+    candidate_name=flink-statebackend-cachekit-1.16-SNAPSHOT-p4-x86.jar
+    ;;
+  *)
+    echo "unsupported frozen base runtime: $base_runtime_sha" >&2
+    exit 67
+    ;;
+esac
 
 common_maven=(
   -DskipITs
@@ -49,8 +60,8 @@ cd "$repo"
   -Dtest=RocksDBStateBackendConfigTest test
 
 classes=$repo/flink-state-backends/flink-statebackend-rocksdb/target/classes
-candidate=$repo/flink-state-backends/flink-statebackend-cachekit/target/flink-statebackend-cachekit-1.16-SNAPSHOT-p4-aarch64.jar
-cp "$p3_runtime" "$candidate"
+candidate=$repo/flink-state-backends/flink-statebackend-cachekit/target/$candidate_name
+cp "$base_runtime" "$candidate"
 
 overlay=$(mktemp -d /tmp/cachekit-p4-overlay.XXXXXX)
 cleanup() {
@@ -80,7 +91,7 @@ unzip -t "$candidate" >/dev/null
 base_entries=$overlay/base.entries
 candidate_entries=$overlay/candidate.entries
 overlay_entries=$overlay/overlay.entries
-unzip -Z1 "$p3_runtime" | LC_ALL=C sort -u >"$base_entries"
+unzip -Z1 "$base_runtime" | LC_ALL=C sort -u >"$base_entries"
 unzip -Z1 "$candidate" | LC_ALL=C sort -u >"$candidate_entries"
 find "$overlay/org" -type f -name '*.class' -printf '%P\n' | \
   sed 's#^#org/#' | LC_ALL=C sort -u >"$overlay_entries"
@@ -97,7 +108,7 @@ while IFS= read -r entry; do
       exit 70
     }
   else
-    cmp -s <(unzip -p "$p3_runtime" "$entry") <(unzip -p "$candidate" "$entry") || {
+    cmp -s <(unzip -p "$base_runtime" "$entry") <(unzip -p "$candidate" "$entry") || {
       echo "non-overlay entry changed: $entry" >&2
       exit 71
     }
@@ -110,7 +121,8 @@ manifest=$candidate.BUILD.txt
 {
   echo "source_commit=$expected_source"
   echo "branch_head=$branch_head"
-  echo "p3_runtime_sha256=$p3_runtime_sha"
+  echo "base_runtime_label=$base_label"
+  echo "base_runtime_sha256=$base_runtime_sha"
   echo "candidate_sha256=$candidate_sha"
   echo "candidate_path=$candidate"
   echo "rocksdb_overlay_class_count=$class_count"
