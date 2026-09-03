@@ -30,6 +30,49 @@ def read_collapsed(paths):
     return total, leaf, inclusive
 
 
+def classify_thread(frame):
+    if frame.startswith("[Rank["):
+        return "rank"
+    if "cachekit-bp-prefetch" in frame:
+        return "prefetch-worker"
+    if frame.startswith("[Source:"):
+        return "source"
+    if frame.startswith("[Join["):
+        return "join"
+    if frame.startswith("[GC") or frame.startswith("[G1"):
+        return "gc"
+    return "other"
+
+
+def read_scopes(paths):
+    scopes = collections.defaultdict(
+        lambda: {
+            "total": 0,
+            "leaf": collections.Counter(),
+            "inclusive": collections.Counter(),
+        }
+    )
+    for path in paths:
+        for line in path.read_text(errors="replace").splitlines():
+            stack, separator, raw_weight = line.rpartition(" ")
+            if not separator:
+                continue
+            try:
+                weight = int(raw_weight)
+            except ValueError:
+                continue
+            frames = [frame for frame in stack.split(";") if frame]
+            if not frames or weight <= 0:
+                continue
+            role = classify_thread(frames[0])
+            scope = scopes[role]
+            scope["total"] += weight
+            scope["leaf"][frames[-1]] += weight
+            for frame in set(frames):
+                scope["inclusive"][frame] += weight
+    return scopes
+
+
 def ranked(counter, total, limit=50):
     return [
         {"frame": frame, "weight": weight, "share_pct": 100.0 * weight / total}
@@ -81,6 +124,18 @@ def main():
                 "files": [str(path) for path in paths],
                 "top_leaf": ranked(leaf, total),
                 "top_inclusive": ranked(inclusive, total),
+                "thread_scopes": {
+                    role: {
+                        "total_weight": scope["total"],
+                        "share_of_all_pct": 100.0 * scope["total"] / total,
+                        "top_leaf": ranked(scope["leaf"], scope["total"], 100),
+                        "top_inclusive": ranked(
+                            scope["inclusive"], scope["total"], 100
+                        ),
+                    }
+                    for role, scope in sorted(read_scopes(paths).items())
+                    if scope["total"] > 0
+                },
             }
             for variant, (total, leaf, inclusive, paths) in aggregates.items()
         }
@@ -106,6 +161,23 @@ def main():
             for row in result["events"][event][variant]["top_inclusive"][:25]:
                 lines.append(f"| `{row['frame']}` | {row['share_pct']:.2f}% |")
             lines.append("")
+            for role in ("rank", "prefetch-worker"):
+                scope = result["events"][event][variant]["thread_scopes"].get(role)
+                if not scope:
+                    continue
+                lines.extend(
+                    [
+                        f"### {variant} {role} scope",
+                        "",
+                        f"Share of all samples: {scope['share_of_all_pct']:.2f}%.",
+                        "",
+                        "| Frame | Share within scope |",
+                        "| --- | ---: |",
+                    ]
+                )
+                for row in scope["top_inclusive"][:30]:
+                    lines.append(f"| `{row['frame']}` | {row['share_pct']:.2f}% |")
+                lines.append("")
         lines.extend(
             [
                 "### Largest candidate-minus-control inclusive deltas",

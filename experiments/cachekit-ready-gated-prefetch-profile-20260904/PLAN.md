@@ -47,6 +47,13 @@ The benchmark remains diagnostic-only and runs to completion; attempt 3 uses
 the procfs plus namespace-entry path above. Capability checks on attempt 2 show
 that CPU perf events are denied while wall-clock and allocation events work.
 
+Attempt 3 captured the control pair, then exposed one final phase ambiguity:
+the Compose log volume survives until teardown, so sample count alone briefly
+made the still-running control containers look ready for the second leg. The
+attachment now also requires both TaskManager containers to mount the expected
+variant's exact `flink-conf.yaml`; already checksummed control profiles are
+reused when the corrected supervisor resumes.
+
 ## Decision use
 
 Use the profiles to choose one bounded implementation change. Re-run focused

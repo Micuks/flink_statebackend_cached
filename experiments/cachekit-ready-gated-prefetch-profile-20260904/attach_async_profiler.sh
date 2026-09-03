@@ -25,7 +25,12 @@ log() {
 
 wait_for_measurement() {
   local leg=$1 d=$exp/results/raw/$leg deadline=$((SECONDS + 900))
-  local volume=${project}_nexmark-logs mountpoint samples
+  local variant volume=${project}_nexmark-logs mountpoint samples service
+  case $leg in
+    001-r1-q9-control) variant=control ;;
+    002-r1-q9-ready-d2) variant=ready-d2 ;;
+    *) log "ERROR unknown leg $leg"; return 1 ;;
+  esac
   while ((SECONDS < deadline)); do
     if [[ -f $d/LEG_COMPLETE ]]; then
       log "ERROR $leg completed before profiler attachment"
@@ -37,7 +42,14 @@ wait_for_measurement() {
       if ((samples >= 3)) &&
          docker ps --format '{{.Names}}' | grep -qx "${project}_taskmanager1_1" &&
          docker ps --format '{{.Names}}' | grep -qx "${project}_taskmanager2_1"; then
-        log "MEASUREMENT_READY leg=$leg metric_samples=$samples"
+        for service in taskmanager1 taskmanager2; do
+          if ! docker inspect -f '{{range .Mounts}}{{println .Source}}{{end}}' \
+            "${project}_${service}_1" | \
+            grep -Fxq "$exp/variants/$variant/flink-conf.yaml"; then
+            continue 2
+          fi
+        done
+        log "MEASUREMENT_READY leg=$leg variant=$variant metric_samples=$samples"
         return 0
       fi
     fi
@@ -118,15 +130,35 @@ profile_one() {
     -f "/tmp/${leg}-${service}-alloc.collapsed" "$pid"
   docker cp "$container:/tmp/${leg}-${service}-alloc.collapsed" "$out/alloc.collapsed"
   test -s "$out/alloc.collapsed"
-  sha256sum "$out/target.txt" "$out/cpu-event.txt" "$out/cpu-check.txt" \
-    "$out/cpu.collapsed" \
-    "$out/alloc-check.txt" "$out/alloc.collapsed" \
-    >"$out/PROFILE.SHA256SUMS"
+  local checksum_inputs=(
+    "$out/target.txt"
+    "$out/cpu-event.txt"
+    "$out/cpu-check.txt"
+    "$out/cpu.collapsed"
+    "$out/alloc-check.txt"
+    "$out/alloc.collapsed"
+  )
+  [[ ! -f $out/wall-check.txt ]] || checksum_inputs+=("$out/wall-check.txt")
+  sha256sum "${checksum_inputs[@]}" >"$out/PROFILE.SHA256SUMS"
   log "OK alloc leg=$leg service=$service"
+}
+
+profile_complete() {
+  local leg=$1 service out
+  for service in taskmanager1 taskmanager2; do
+    out=$exp/profiles/$leg/$service
+    [[ -s $out/cpu.collapsed && -s $out/alloc.collapsed && \
+       -f $out/PROFILE.SHA256SUMS ]] || return 1
+    sha256sum -c "$out/PROFILE.SHA256SUMS" >/dev/null || return 1
+  done
 }
 
 profile_leg() {
   local leg=$1 p1 p2 rc=0
+  if profile_complete "$leg"; then
+    log "SKIP completed profiles leg=$leg"
+    return 0
+  fi
   wait_for_measurement "$leg"
   profile_one "$leg" taskmanager1 & p1=$!
   profile_one "$leg" taskmanager2 & p2=$!
