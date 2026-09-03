@@ -198,6 +198,7 @@ run_leg() {
   cleanup
 }
 
+(cd "$expdir" && sha256sum -c inputs/ARTIFACTS.SHA256SUMS)
 fail_on_foreign_containers || { log "FATAL foreign containers at campaign preflight"; exit 71; }
 idx=0
 for round in "${rounds[@]}"; do

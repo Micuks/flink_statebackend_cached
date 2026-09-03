@@ -69,6 +69,16 @@ for artifact in data['artifacts']:
         artifact['sha256']=actual
         artifact['size_bytes']=jar.stat().st_size
 manifest.write_text(json.dumps(data,indent=2,sort_keys=True)+'\n')
+artifact_paths=[
+ target/'inputs/runtime/flink-dist-1.16.3.jar',
+ jar,
+ target/'inputs/artifacts/opt/libcachekit_native_request_plane_jni.so',
+]
+checksum_lines=[]
+for path in artifact_paths:
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    checksum_lines.append(f"{digest}  {path.relative_to(target)}")
+(target/'inputs/ARTIFACTS.SHA256SUMS').write_text('\n'.join(checksum_lines)+'\n')
 provenance={
  'schema':'cachekit-ready-gated-prefetch-p0-staging-v1',
  'source_commit':commit,
@@ -80,6 +90,9 @@ provenance={
 (target/'P0_STAGING.json').write_text(json.dumps(provenance,indent=2,sort_keys=True)+'\n')
 identity=json.loads((target/'identity.json').read_text())
 assert identity['source_commit']==commit and identity['artifact_sha256']==actual
+for line in (target/'inputs/ARTIFACTS.SHA256SUMS').read_text().splitlines():
+    digest,relative=line.split('  ',1)
+    assert hashlib.sha256((target/relative).read_bytes()).hexdigest()==digest
 for variant in identity['variants']:
     assert (target/'variants'/variant/'flink-conf.yaml').is_file()
     assert (target/'variants'/variant/'docker-compose.yml').is_file()
