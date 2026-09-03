@@ -27,13 +27,16 @@ ssh -o BatchMode=yes "$host" bash -s -- "$source_exp" "$target_exp" <<'REMOTE'
 set -euo pipefail
 source_exp=$1
 target_exp=$2
-p=$(cat "$source_exp/R1.pid" 2>/dev/null || true)
-if [[ -n $p ]] && kill -0 "$p" 2>/dev/null; then
-  echo "source activation campaign still running: $p" >&2
-  exit 70
-fi
-[[ -f $source_exp/R1_COMPLETE ]] || {
-  echo "source activation campaign lacks R1_COMPLETE" >&2
+p=''
+for pid_file in R1.pid R2_R3.pid; do
+  p=$(cat "$source_exp/$pid_file" 2>/dev/null || true)
+  if [[ -n $p ]] && kill -0 "$p" 2>/dev/null; then
+    echo "source campaign still running: $pid_file pid=$p" >&2
+    exit 70
+  fi
+done
+[[ -f $source_exp/R3_COMPLETE ]] || {
+  echo "source campaign lacks R3_COMPLETE" >&2
   exit 71
 }
 [[ -z $(docker ps -q) ]] || {
