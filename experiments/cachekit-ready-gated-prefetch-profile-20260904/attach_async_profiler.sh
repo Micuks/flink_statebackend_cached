@@ -51,31 +51,57 @@ profile_one() {
   local leg=$1 service=$2
   local container=${project}_${service}_1
   local out=$exp/profiles/$leg/$service
-  local container_id cpuset pid cpu_event=cpu
+  local container_id init_pid cpuset pid cpu_event=cpu
   mkdir -p "$out"
   container_id=$(docker inspect -f '{{.Id}}' "$container")
+  init_pid=$(docker inspect -f '{{.State.Pid}}' "$container")
   cpuset=$(docker inspect -f '{{.HostConfig.CpusetCpus}}' "$container")
   [[ $(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$container") == "$project" ]]
 
   docker cp "$profiler/." "$container:/tmp/cachekit-async-profiler-$leg"
-  pid=$(docker exec "$container" sh -c \
-    "ps -eo pid=,pcpu=,args= | awk '/org.apache.flink.runtime.taskexecutor.TaskManagerRunner/ {print \$1,\$2}' | sort -k2,2nr | awk 'NR==1 {print \$1}'")
+  # procps can stall while walking the many JVM threads in these containers. Read only the
+  # process-level procfs records and rank TaskManager JVMs by accumulated user+system ticks.
+  pid=$(nsenter -t "$init_pid" -m -p -- sh -c '
+    for proc in /proc/[0-9]*; do
+      pid=${proc##*/}
+      comm=$(cat "$proc/comm" 2>/dev/null) || continue
+      [ "$comm" = java ] || continue
+      cmd=$(tr "\000" " " <"$proc/cmdline" 2>/dev/null) || continue
+      case "$cmd" in
+        *org.apache.flink.runtime.taskexecutor.TaskManagerRunner*)
+          stat=$(cat "$proc/stat" 2>/dev/null) || continue
+          set -- $stat
+          ticks=$((${14} + ${15}))
+          printf "%s %s\n" "$ticks" "$pid"
+          ;;
+      esac
+    done | sort -k1,1nr | sed -n "1s/^[^ ]* //p"
+  ')
   [[ $pid =~ ^[0-9]+$ ]]
   {
     printf 'leg=%s\nservice=%s\ncontainer=%s\ncontainer_id=%s\ncpuset=%s\ntarget_pid=%s\n' \
       "$leg" "$service" "$container" "$container_id" "$cpuset" "$pid"
-    docker exec "$container" ps -eo pid=,ppid=,pcpu=,etimes=,args=
+    printf 'container_init_host_pid=%s\n' "$init_pid"
+    nsenter -t "$init_pid" -m -p -- sh -c '
+      printf "comm="; cat "/proc/$1/comm"
+      printf "cmdline="; tr "\000" " " <"/proc/$1/cmdline"; printf "\n"
+      printf "stat="; cat "/proc/$1/stat"
+      printf "status:\n"; cat "/proc/$1/status"
+    ' _ "$pid"
   } >"$out/target.txt"
 
-  if ! docker exec "$container" "/tmp/cachekit-async-profiler-$leg/bin/asprof" \
+  if ! timeout 30 nsenter -t "$init_pid" -m -p -- \
+    "/tmp/cachekit-async-profiler-$leg/bin/asprof" \
     check -e cpu "$pid" >"$out/cpu-check.txt" 2>&1; then
     cpu_event=wall
-    docker exec "$container" "/tmp/cachekit-async-profiler-$leg/bin/asprof" \
+    timeout 30 nsenter -t "$init_pid" -m -p -- \
+      "/tmp/cachekit-async-profiler-$leg/bin/asprof" \
       check -e wall "$pid" >"$out/wall-check.txt" 2>&1
   fi
   printf 'event=%s\n' "$cpu_event" >"$out/cpu-event.txt"
   log "START $cpu_event leg=$leg service=$service pid=$pid cpuset=$cpuset"
-  docker exec "$container" "/tmp/cachekit-async-profiler-$leg/bin/asprof" \
+  timeout 90 nsenter -t "$init_pid" -m -p -- \
+    "/tmp/cachekit-async-profiler-$leg/bin/asprof" \
     -d 60 -e "$cpu_event" -i 5000000 -t -o collapsed \
     -f "/tmp/${leg}-${service}-cpu.collapsed" "$pid"
   docker cp "$container:/tmp/${leg}-${service}-cpu.collapsed" "$out/cpu.collapsed"
@@ -83,9 +109,11 @@ profile_one() {
   log "OK cpu leg=$leg service=$service"
 
   log "START alloc leg=$leg service=$service pid=$pid"
-  docker exec "$container" "/tmp/cachekit-async-profiler-$leg/bin/asprof" \
+  timeout 30 nsenter -t "$init_pid" -m -p -- \
+    "/tmp/cachekit-async-profiler-$leg/bin/asprof" \
     check -e alloc "$pid" >"$out/alloc-check.txt" 2>&1
-  docker exec "$container" "/tmp/cachekit-async-profiler-$leg/bin/asprof" \
+  timeout 75 nsenter -t "$init_pid" -m -p -- \
+    "/tmp/cachekit-async-profiler-$leg/bin/asprof" \
     -d 45 -e alloc -t -o collapsed \
     -f "/tmp/${leg}-${service}-alloc.collapsed" "$pid"
   docker cp "$container:/tmp/${leg}-${service}-alloc.collapsed" "$out/alloc.collapsed"

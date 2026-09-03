@@ -35,7 +35,17 @@ Attempt 1 used the redirected runner log as its phase signal. Python block
 buffering kept that file empty until the leg ended, so no profiler was attached
 and the attempt is diagnostic infrastructure failure only. Attempt 2 instead
 waits for at least three live `Current Cores=` samples in the owned Compose
-project's `nexmark-logs` volume.
+project's `nexmark-logs` volume. Target selection reads process-level procfs
+records because procps can stall while enumerating the containers' many JVM
+threads. Profiler commands enter the owned container's mount and PID namespaces
+directly; on this host, Docker exec itself can remain stuck after the
+in-container command has exited.
+
+Attempt 2 validated the live phase signal but its first attachment used procps
+through Docker exec and did not reach the profiler before control completed.
+The benchmark remains diagnostic-only and runs to completion; attempt 3 uses
+the procfs plus namespace-entry path above. Capability checks on attempt 2 show
+that CPU perf events are denied while wall-clock and allocation events work.
 
 ## Decision use
 
