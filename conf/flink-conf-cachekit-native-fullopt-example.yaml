@@ -34,6 +34,13 @@ state.backend.cachekit.native.request-plane.min-batch-size: 4
 state.backend.cachekit.native.request-plane.batch-slots: 1
 state.backend.cachekit.native.request-plane.aarch64-only: true
 state.backend.cachekit.native.value-cache.enabled: true
+# Explicitly enable the adaptive bypass validated by the 100M R1 single-switch campaign.
+# These values match the validated defaults and keep the example experiment-reproducible.
+state.backend.cachekit.native.value-cache.adaptive-bypass.enabled: true
+state.backend.cachekit.native.value-cache.adaptive-bypass.window-probes: 4096
+state.backend.cachekit.native.value-cache.adaptive-bypass.zero-windows: 2
+state.backend.cachekit.native.value-cache.adaptive-bypass.resample-interval-probes: 4096
+state.backend.cachekit.native.value-cache.adaptive-bypass.sample-slots: 64
 state.backend.cachekit.native.value-cache.read-activated-write-through.enabled: false
 state.backend.cachekit.native.value-cache.resident-mutation-batch.enabled: false
 state.backend.cachekit.native.map-cache.enabled: false
