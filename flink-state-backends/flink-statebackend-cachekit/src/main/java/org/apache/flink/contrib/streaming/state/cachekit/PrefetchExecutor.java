@@ -16,9 +16,12 @@
 package org.apache.flink.contrib.streaming.state.cachekit;
 
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Shared single-thread executor for backpressure-driven async state prefetch.
@@ -88,6 +91,24 @@ public final class PrefetchExecutor {
     }
 
     /**
+     * Non-blocking submission whose future is completed only after the worker task has returned.
+     *
+     * <p>Unlike {@link #trySubmit(Runnable)}, this method makes executor rejection, queue eviction,
+     * and worker failure observable to a ready gate. The wrapper forwards a drop notification to
+     * the state-owned task first, so every reservation is released before the future wakes the
+     * mailbox.
+     */
+    public static CompletableFuture<Void> submitWithCompletion(Runnable task) {
+        CompletionTask completionTask = new CompletionTask(task);
+        try {
+            EXECUTOR.execute(completionTask);
+        } catch (Throwable failure) {
+            completionTask.onRejected(failure);
+        }
+        return completionTask.completion;
+    }
+
+    /**
      * Removes one exact task from the shared queue and runs its drop callback.
      *
      * <p>This is deliberately identity based: {@link ThreadPoolExecutor#remove(Runnable)} uses the
@@ -111,6 +132,58 @@ public final class PrefetchExecutor {
             } catch (Throwable ignored) {
                 // Diagnostics and reservation cleanup must never reach the mailbox thread.
             }
+        }
+    }
+
+    /** Package-private so the executor's terminal races can be tested without filling its queue. */
+    static final class CompletionTask implements DropAwareTask {
+        private final Runnable delegate;
+        private final CompletableFuture<Void> completion = new CompletableFuture<>();
+        // 0=pending, 1=running, 2=terminal. A queue drop can only win from pending.
+        private final AtomicInteger state = new AtomicInteger();
+
+        CompletionTask(Runnable delegate) {
+            if (delegate == null) {
+                throw new NullPointerException("prefetch task");
+            }
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void run() {
+            if (!state.compareAndSet(0, 1)) {
+                return;
+            }
+            try {
+                delegate.run();
+                completion.complete(null);
+            } catch (Throwable failure) {
+                completion.completeExceptionally(failure);
+            } finally {
+                state.set(2);
+            }
+        }
+
+        @Override
+        public void onDrop() {
+            if (!state.compareAndSet(0, 2)) {
+                return;
+            }
+            notifyDropped(delegate);
+            completion.completeExceptionally(
+                    new RejectedExecutionException("prefetch task was dropped before execution"));
+        }
+
+        private void onRejected(Throwable failure) {
+            if (!state.compareAndSet(0, 2)) {
+                return;
+            }
+            notifyDropped(delegate);
+            completion.completeExceptionally(failure);
+        }
+
+        CompletableFuture<Void> completionForTesting() {
+            return completion;
         }
     }
 }

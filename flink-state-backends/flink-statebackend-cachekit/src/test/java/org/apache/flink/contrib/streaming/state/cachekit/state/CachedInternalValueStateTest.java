@@ -62,6 +62,90 @@ import static org.mockito.Mockito.inOrder;
 class CachedInternalValueStateTest {
 
     @Test
+    void testCompletionPrefetchReportsPublishedStaging() throws Exception {
+        InternalValueState<String, String, Integer> delegate = mock(InternalValueState.class);
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.getSerializedValue(any(), any(), any(), any()))
+                .thenReturn(KvStateSerializer.serializeValue(17, IntSerializer.INSTANCE));
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        () -> "unused",
+                        ignored -> {},
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        false);
+        state.setCurrentNamespace("window");
+
+        assertTrue(
+                state.prefetchWithCompletion(Collections.singletonList("key"))
+                        .get(10, TimeUnit.SECONDS));
+        assertEquals(1, state.getStagingSizeForTesting());
+        state.close();
+    }
+
+    @Test
+    void testCompletionPrefetchFailsClosedAfterWorkerFallback() throws Exception {
+        InternalValueState<String, String, Integer> delegate = mock(InternalValueState.class);
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.getSerializedValue(any(), any(), any(), any()))
+                .thenThrow(new IOException("read failed"));
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        () -> "unused",
+                        ignored -> {},
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        false);
+        state.setCurrentNamespace("window");
+
+        assertFalse(
+                state.prefetchWithCompletion(Collections.singletonList("key"))
+                        .get(10, TimeUnit.SECONDS));
+        assertEquals(1, state.getPrefetchWorkerFailuresForTesting());
+        state.close();
+    }
+
+    @Test
+    void testCompletionPrefetchDoesNotClaimReadyWithoutWorkerWork() throws Exception {
+        InternalValueState<String, String, Integer> delegate = mock(InternalValueState.class);
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        () -> "unused",
+                        ignored -> {},
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        false);
+        state.setCurrentNamespace("window");
+
+        assertFalse(
+                state.prefetchWithCompletion(Collections.emptyList())
+                        .get(10, TimeUnit.SECONDS));
+        state.close();
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void testStickyInPlaceUpdatePreservesArbitraryNamespaceAndLifecycleSemantics()
             throws Exception {

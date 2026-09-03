@@ -32,6 +32,7 @@ import org.apache.flink.runtime.state.heap.InternalKeyContextImpl;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
+import org.apache.flink.queryablestate.client.state.serialization.KvStateSerializer;
 
 import org.junit.jupiter.api.Test;
 
@@ -41,6 +42,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Arrays;
+import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -50,10 +53,59 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CacheKitKeyedStateBackendLifecycleTest {
+
+    @Test
+    void testCompletionPrefetchDoesNotReportReadyWithoutEligibleState() throws Exception {
+        CacheKitKeyedStateBackend<String> cacheKit = newCacheKitBackend(mockDelegate());
+
+        assertFalse(
+                cacheKit.prefetchWithCompletion(Collections.singletonList("key"))
+                        .get(10, TimeUnit.SECONDS));
+        cacheKit.close();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testCompletionPrefetchAggregatesAllEligibleValueStates() throws Exception {
+        AbstractKeyedStateBackend<String> delegate = mockDelegate();
+        InternalValueState<String, VoidNamespace, Integer> first = mock(InternalValueState.class);
+        InternalValueState<String, VoidNamespace, Integer> second = mock(InternalValueState.class);
+        for (InternalValueState<String, VoidNamespace, Integer> state :
+                Arrays.asList(first, second)) {
+            when(state.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+            when(state.getNamespaceSerializer()).thenReturn(VoidNamespaceSerializer.INSTANCE);
+            when(state.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+            when(state.getSerializedValue(any(), any(), any(), any()))
+                    .thenReturn(KvStateSerializer.serializeValue(23, IntSerializer.INSTANCE));
+        }
+        doReturn(first, second).when(delegate).getOrCreateKeyedState(any(), any());
+
+        CacheKitKeyedStateBackend<String> cacheKit = newCacheKitBackend(delegate);
+        InternalValueState<String, VoidNamespace, Integer> firstCached =
+                (InternalValueState<String, VoidNamespace, Integer>)
+                        cacheKit.getOrCreateKeyedState(
+                                VoidNamespaceSerializer.INSTANCE,
+                                new ValueStateDescriptor<>("first", IntSerializer.INSTANCE));
+        InternalValueState<String, VoidNamespace, Integer> secondCached =
+                (InternalValueState<String, VoidNamespace, Integer>)
+                        cacheKit.getOrCreateKeyedState(
+                                VoidNamespaceSerializer.INSTANCE,
+                                new ValueStateDescriptor<>("second", IntSerializer.INSTANCE));
+        firstCached.setCurrentNamespace(VoidNamespace.INSTANCE);
+        secondCached.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        assertTrue(
+                cacheKit.prefetchWithCompletion(Collections.singletonList("key"))
+                        .get(10, TimeUnit.SECONDS));
+        verify(first, times(1)).getSerializedValue(any(), any(), any(), any());
+        verify(second, times(1)).getSerializedValue(any(), any(), any(), any());
+        cacheKit.close();
+    }
 
     @Test
     void testNativePreaggHashTokenUsesJavaEqualityContract() {

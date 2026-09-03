@@ -23,6 +23,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RunnableFuture;
@@ -1346,6 +1347,59 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
             } finally {
                 setCurrentKey(previousKey);
             }
+        }
+    }
+
+    /**
+     * Starts completion-bearing async ValueState prefetch for a ready-gated record batch.
+     *
+     * <p>The boolean result is true only when every eligible ValueState wrapper built worker work,
+     * all of that work completed, and every wrapper still validates the captured state generation.
+     * A false result tells the mailbox to dispatch authoritatively. An exceptional result denotes
+     * executor rejection/drop or an uncaught worker failure. The method is intentionally separate
+     * from {@link #prefetch(Collection)} so the established best-effort path is unchanged.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public CompletableFuture<Boolean> prefetchWithCompletion(Collection<? extends K> keys) {
+        synchronized (lifecycleLock) {
+            if (closed
+                    || disposed
+                    || !BP_PREFETCH_ASYNC
+                    || keys == null
+                    || keys.isEmpty()
+                    || wrappersByDelegateIdentity.isEmpty()) {
+                return CompletableFuture.completedFuture(false);
+            }
+
+            List<CompletableFuture<Boolean>> completions = new ArrayList<>();
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                if (!(wrapper instanceof CachedInternalValueState)) {
+                    continue;
+                }
+                CachedInternalValueState<?, ?, ?> valueState =
+                        (CachedInternalValueState<?, ?, ?>) wrapper;
+                if (!valueState.shouldReceiveRecordKeyPrefetch(
+                        nativePrefetchAccessGuidedStateEnabled)) {
+                    continue;
+                }
+                completions.add(
+                        ((CachedInternalValueState) valueState).prefetchWithCompletion(keys));
+            }
+            if (completions.isEmpty()) {
+                return CompletableFuture.completedFuture(false);
+            }
+
+            CompletableFuture<?>[] all = completions.toArray(new CompletableFuture<?>[0]);
+            return CompletableFuture.allOf(all)
+                    .thenApply(
+                            ignored -> {
+                                for (CompletableFuture<Boolean> completion : completions) {
+                                    if (!completion.join()) {
+                                        return false;
+                                    }
+                                }
+                                return true;
+                            });
         }
     }
 

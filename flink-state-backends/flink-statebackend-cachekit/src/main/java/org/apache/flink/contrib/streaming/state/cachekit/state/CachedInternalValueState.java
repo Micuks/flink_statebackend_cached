@@ -2456,6 +2456,10 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return prefetchStagingAdmissionDrops;
     }
 
+    long getPrefetchWorkerFailuresForTesting() {
+        return prefetchWorkerFailures;
+    }
+
     long getPrefetchKeyScopedInvalidationsForTesting() {
         return prefetchKeyScopedInvalidations;
     }
@@ -3040,6 +3044,46 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 reservations,
                 reservation,
                 () -> fetchIntoStaging(serialized, defaultValue, gen));
+    }
+
+    /**
+     * Builds and submits one speculative batch with a completion result suitable for an ordered
+     * mailbox ready gate.
+     *
+     * <p>A {@code false} result is deliberately conservative: it means the state could not prove
+     * that this batch completed against the same generation without a worker-side fallback. The
+     * caller must dispatch the records normally, allowing the authoritative state path to resolve
+     * every miss. Queue rejection and an uncaught worker failure complete the future
+     * exceptionally. The legacy {@link #buildAsyncPrefetchTask(Iterable)} contract is unchanged.
+     */
+    public java.util.concurrent.CompletableFuture<Boolean> prefetchWithCompletion(
+            Iterable<? extends K> keys) {
+        final long generation = writeGen;
+        final Runnable task = buildAsyncPrefetchTask(keys);
+        if (task == null) {
+            return java.util.concurrent.CompletableFuture.completedFuture(false);
+        }
+
+        // Capture after construction: build-time fallbacks already return null, while these
+        // counters now describe only work performed after the task was handed to the executor.
+        final long workerFailures = prefetchWorkerFailures;
+        final long staleAborts = prefetchStaleAborts;
+        final long stagingAdmissionDrops = prefetchStagingAdmissionDrops;
+        final long smallBatchDrops = prefetchSmallBatchDrops;
+        final long adaptiveAdmissionSkips = prefetchAdaptiveAdmissionSkips;
+        final long discardedAfterRead = prefetchWorkerDiscardedAfterRead;
+        return PrefetchExecutor.submitWithCompletion(task)
+                .thenApply(
+                        ignored ->
+                                !closed
+                                        && generation == writeGen
+                                        && workerFailures == prefetchWorkerFailures
+                                        && staleAborts == prefetchStaleAborts
+                                        && stagingAdmissionDrops == prefetchStagingAdmissionDrops
+                                        && smallBatchDrops == prefetchSmallBatchDrops
+                                        && adaptiveAdmissionSkips == prefetchAdaptiveAdmissionSkips
+                                        && discardedAfterRead
+                                                == prefetchWorkerDiscardedAfterRead);
     }
 
     /**
