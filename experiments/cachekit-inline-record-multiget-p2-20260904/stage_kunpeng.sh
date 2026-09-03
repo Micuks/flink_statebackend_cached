@@ -133,19 +133,19 @@ replacements = [(value.encode(), replacement.encode()) for value, replacement in
     ("11837", prom_port),
     ("11838", push_port),
 )]
-for path in root.rglob("*"):
-    if not path.is_file():
-        continue
-    if path.suffix in {".jar", ".so"}:
-        continue
+rewrite_paths = (
+    root / "run_campaign.sh",
+    root / "variants" / "control" / "docker-compose.yml",
+    root / "variants" / "immediate" / "docker-compose.yml",
+)
+for path in rewrite_paths:
     data = path.read_bytes()
     changed = data
     for old, new in replacements:
         changed = changed.replace(old, new)
-    if changed != data:
-        if b"\0" in data:
-            raise SystemExit(f"refusing binary rewrite: {path}")
-        path.write_bytes(changed)
+    if b"\0" in data:
+        raise SystemExit(f"refusing binary rewrite: {path}")
+    path.write_bytes(changed)
 
 for variant in ("control", "immediate"):
     path = root / "variants" / variant / "flink-conf.yaml"
