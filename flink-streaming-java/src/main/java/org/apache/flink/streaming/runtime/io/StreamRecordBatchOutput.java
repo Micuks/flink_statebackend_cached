@@ -611,7 +611,15 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         firstAppendNanos = 0L;
         asyncPrefetchScheduledUntil = 0;
 
-        CompletableFuture<Boolean> completion = startReadyPrefetch(records, n);
+        CompletableFuture<Boolean> completion;
+        try {
+            completion = startReadyPrefetch(records, n);
+            if (completion == null) {
+                completion = failedReadyPrefetch(new NullPointerException("prefetch completion"));
+            }
+        } catch (Throwable failure) {
+            completion = failedReadyPrefetch(failure);
+        }
         ReadyBatch<T> batch =
                 new ReadyBatch<>(
                         nextReadyBatchSequence++, records, n, readyGatedTimeoutNanos, completion);
@@ -634,6 +642,12 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         }
         return org.apache.flink.streaming.runtime.tasks.StatePrefetcher.prefetchWithCompletion(
                 headOperator, records, 0, n);
+    }
+
+    private static CompletableFuture<Boolean> failedReadyPrefetch(Throwable failure) {
+        CompletableFuture<Boolean> completion = new CompletableFuture<>();
+        completion.completeExceptionally(failure);
+        return completion;
     }
 
     /** Dispatch exactly one ring head, falling back immediately when forced or not proven ready. */

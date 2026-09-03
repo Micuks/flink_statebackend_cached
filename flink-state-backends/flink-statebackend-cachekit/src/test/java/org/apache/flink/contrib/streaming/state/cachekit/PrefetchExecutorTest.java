@@ -17,7 +17,10 @@ package org.apache.flink.contrib.streaming.state.cachekit;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -25,6 +28,37 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PrefetchExecutorTest {
+
+    @Test
+    void cancelIfQueuedFindsCompletionWrapperByDelegateIdentity() throws Exception {
+        CountDownLatch workerStarted = new CountDownLatch(1);
+        CountDownLatch releaseWorker = new CountDownLatch(1);
+        PrefetchExecutor.trySubmit(
+                () -> {
+                    workerStarted.countDown();
+                    try {
+                        releaseWorker.await();
+                    } catch (InterruptedException failure) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+        try {
+            assertTrue(workerStarted.await(10, TimeUnit.SECONDS));
+            PrefetchExecutor.DropAwareTask delegate =
+                    new PrefetchExecutor.DropAwareTask() {
+                        @Override
+                        public void run() {}
+
+                        @Override
+                        public void onDrop() {}
+                    };
+            CompletableFuture<Void> completion = PrefetchExecutor.submitWithCompletion(delegate);
+            assertTrue(PrefetchExecutor.cancelIfQueued(delegate));
+            assertThrows(CompletionException.class, completion::join);
+        } finally {
+            releaseWorker.countDown();
+        }
+    }
 
     @Test
     void completionTaskCompletesOnlyAfterDelegateReturns() {

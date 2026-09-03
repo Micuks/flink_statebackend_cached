@@ -141,6 +141,30 @@ class StreamRecordBatchOutputTest {
     }
 
     @Test
+    void testReadyGateSynchronousStartFailureFallsBackWithoutLosingRecords() throws Exception {
+        List<String> emitted = new ArrayList<>();
+        TestingReadyOutput output =
+                new TestingReadyOutput(
+                        collectingOutput(emitted),
+                        Collections.singletonList(CompletableFuture.completedFuture(true)),
+                        TimeUnit.SECONDS.toNanos(10),
+                        false) {
+                    @Override
+                    CompletableFuture<Boolean> startReadyPrefetch(
+                            StreamRecord<String>[] records, int n) {
+                        throw new IllegalStateException("synchronous start failure");
+                    }
+                };
+
+        emitValues(output, "r0", "r1");
+        output.drainReadyBatches();
+
+        assertEquals(Arrays.asList("r0", "r1"), emitted);
+        assertEquals(1, output.getReadyFailureFallbacks());
+        assertEquals(1, output.cancelledBatches);
+    }
+
+    @Test
     void testReadyGateTimeoutWakesAndFallsBackWithoutBlockingMailbox() throws Exception {
         List<String> emitted = new ArrayList<>();
         CompletableFuture<Boolean> never = new CompletableFuture<>();
@@ -445,7 +469,7 @@ class StreamRecordBatchOutputTest {
         }
     }
 
-    private static final class TestingReadyOutput extends StreamRecordBatchOutput<String> {
+    private static class TestingReadyOutput extends StreamRecordBatchOutput<String> {
         private final Deque<CompletableFuture<Boolean>> completions;
         private int cancelledBatches;
         private int prefetchCalls;

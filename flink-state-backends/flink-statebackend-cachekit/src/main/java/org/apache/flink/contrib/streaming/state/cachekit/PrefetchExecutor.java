@@ -118,11 +118,26 @@ public final class PrefetchExecutor {
      * delays native-plane teardown.
      */
     public static boolean cancelIfQueued(Runnable task) {
-        if (task == null || !EXECUTOR.remove(task)) {
+        Runnable queuedTask = findQueuedTask(task);
+        if (queuedTask == null || !EXECUTOR.remove(queuedTask)) {
             return false;
         }
-        notifyDropped(task);
+        notifyDropped(queuedTask);
         return true;
+    }
+
+    private static Runnable findQueuedTask(Runnable task) {
+        if (task == null) {
+            return null;
+        }
+        for (Runnable queued : EXECUTOR.getQueue()) {
+            if (queued == task
+                    || (queued instanceof CompletionTask
+                            && ((CompletionTask) queued).wraps(task))) {
+                return queued;
+            }
+        }
+        return null;
     }
 
     private static void notifyDropped(Runnable task) {
@@ -184,6 +199,10 @@ public final class PrefetchExecutor {
 
         CompletableFuture<Void> completionForTesting() {
             return completion;
+        }
+
+        private boolean wraps(Runnable task) {
+            return delegate == task;
         }
     }
 }
