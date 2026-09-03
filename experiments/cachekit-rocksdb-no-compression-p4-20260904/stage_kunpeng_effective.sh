@@ -103,6 +103,16 @@ for old, new in required.items():
     text = text.replace(old, new)
 runner.write_text(text)
 
+runtime_path = root / "inputs" / "runtime" / "RUNTIME_BUNDLE.json"
+runtime = json.loads(runtime_path.read_text())
+for artifact in runtime["artifacts"]:
+    artifact["path"] = artifact["path"].replace(source_exp, target_exp)
+runtime_payload = json.dumps(runtime, indent=2, sort_keys=True) + "\n"
+runtime_path.write_text(runtime_payload)
+(runtime_path.parent / "RUNTIME_BUNDLE.sha256").write_text(
+    hashlib.sha256(runtime_payload.encode()).hexdigest() + "  RUNTIME_BUNDLE.json\n"
+)
+
 identity_path = root / "identity.json"
 identity = json.loads(identity_path.read_text())
 identity.update({
