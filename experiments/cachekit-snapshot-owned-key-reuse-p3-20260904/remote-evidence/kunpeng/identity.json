@@ -1,0 +1,55 @@
+{
+  "architecture": "aarch64",
+  "arm_native_origin": {
+    "native_entry": "META-INF/native/libcachekit_snapshot_jni.so",
+    "native_entry_sha256": "6765775306c7ed00b1606de5340f0ba18ae5adc8fe242b49b336f79f96749fe2",
+    "source_artifact_sha256": "35092a30d3ac979477a4445c5ead455258ab8a6a5278c815ad29a4301a3a7efd",
+    "source_experiment": "/home/wuql/flink-cluster/experiments/cachekit-native-stage123-javafullopt-15q-100m-r1-r3-kunpeng-20260903"
+  },
+  "artifact_build": {
+    "embedded_arm_native_sha256": "6765775306c7ed00b1606de5340f0ba18ae5adc8fe242b49b336f79f96749fe2",
+    "non_cachekit_entries_identical_to_p2": true,
+    "p2_runtime_sha256": "164411a963b78ccd508524c9ca4e1a0d50b497830394a59c016ed3ef644fd741"
+  },
+  "artifact_sha256": "0a1981cbd3591b4c99dbd5d7d3a32170ab6c630fa1dcdb4faa16005b9acf5f49",
+  "artifact_size_bytes": 3108212,
+  "base_source_commit": "7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000",
+  "checkpointing": "disabled by absence of execution.checkpointing.interval",
+  "claim_boundary": "same-host paired quick validation on idle Kunpeng NUMA node 0 with fixed CPU and memory binding",
+  "events": 100000000,
+  "execution_environment": "idle-host-numa-isolated-quick-validation",
+  "frozen_overlay_commit": "bbd39affde9278d44b9f78d201849bf929249d54",
+  "numa_binding": {
+    "allocated_cpus": "38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74",
+    "container_cpuset_mems": "0",
+    "node": 0,
+    "node_cpulist": "0-79"
+  },
+  "object_reuse": false,
+  "phase": "q9-snapshot-owned-key-reuse-paired-screen",
+  "platform": "kunpeng",
+  "primary_control": "control",
+  "queries": [
+    "q9"
+  ],
+  "rounds": [
+    1
+  ],
+  "schema": "cachekit-snapshot-owned-key-reuse-p3-screen-v1",
+  "slots": 16,
+  "source_commit": "18cfb52bdb6e740d9ae716da0a03761481e885e2",
+  "taskmanagers": 8,
+  "template_provenance": {
+    "base_compose_sha256": "c6c96ca9f485292637d22123aebc1cffb06610586873c06f5d0f7b181e9f15a7",
+    "base_config_sha256": "8b6b83826aa849b402d24e88c34ed60e9160890cbf461a5f20678a4bc5f78388",
+    "source_experiment": "/home/wuql/flink-cluster/experiments/cachekit-native-stage123-javafullopt-15q-100m-r1-r3-kunpeng-20260903"
+  },
+  "variant_config_sha256": {
+    "control": "f613865e9421539955c22ef0111512309db0ac89445218d368635f8c4e9c56cb",
+    "reuse": "ff05fdc3f0a9fdbb94d7c4e1bda2a5af5d7e201ce19055e238696a775708e60e"
+  },
+  "variants": [
+    "control",
+    "reuse"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "actual_differences": {
+    "state.backend.cachekit.map.snapshot.owned-key-reuse.enabled": {
+      "control": "false",
+      "reuse": "true"
+    }
+  },
+  "allowed_difference_keys": [
+    "state.backend.cachekit.map.snapshot.owned-key-reuse.enabled"
+  ],
+  "schema": "cachekit-snapshot-owned-key-reuse-p3-config-diff-v1",
+  "unexpected_difference_keys": [],
+  "valid": true
+}
