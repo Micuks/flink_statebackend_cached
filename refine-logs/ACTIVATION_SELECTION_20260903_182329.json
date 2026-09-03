@@ -1,0 +1,51 @@
+{
+  "schema": "cachekit-ready-gated-prefetch-activation-selection-v1",
+  "generated_at": "2026-09-03T18:23:29+08:00",
+  "selection_source_commit": "bbd39affde9278d44b9f78d201849bf929249d54",
+  "target_source_commit": "7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000",
+  "selected_canaries": [
+    "q9"
+  ],
+  "selection_rule": "valid Java-control leg with tasksBuilt > 0 and tasksExecuted > 0",
+  "evidence": {
+    "q9": {
+      "leg": "013-r1-q9-java",
+      "valid": true,
+      "async_lookahead_active": true,
+      "states_with_access": 8,
+      "tasks_built": 247355,
+      "tasks_executed": 247355,
+      "keys_prepared": 1570117,
+      "staged": 0,
+      "promoted": 0,
+      "live_read_raced_in_flight": 1081170,
+      "live_read_cancellations": 1078984,
+      "small_batch_drops": 80614,
+      "small_batch_keys_dropped": 490168
+    },
+    "q16": {
+      "leg": "053-r1-q16-java",
+      "valid": true,
+      "async_lookahead_active": false,
+      "states_with_access": 16,
+      "tasks_built": 0,
+      "tasks_executed": 0,
+      "keys_prepared": 23314404,
+      "staged": 23314404,
+      "promoted": 22968831,
+      "live_read_raced_in_flight": 0
+    },
+    "q17": {
+      "leg": "057-r1-q17-java",
+      "valid": true,
+      "async_lookahead_active": false,
+      "states_with_access": 8,
+      "tasks_built": 0,
+      "tasks_executed": 0,
+      "keys_prepared": 1574908,
+      "staged": 1574908,
+      "promoted": 1569492,
+      "live_read_raced_in_flight": 0
+    }
+  }
+}
