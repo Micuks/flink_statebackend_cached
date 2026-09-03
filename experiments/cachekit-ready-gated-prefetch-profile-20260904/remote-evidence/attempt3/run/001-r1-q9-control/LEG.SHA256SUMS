@@ -1,0 +1,6 @@
+2a3385ff8404081045f61ee0ec3b46aa58f57063efef4141aed250c9f2ac70ec  /home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p1-profile-q9-100m-kunpeng-20260904-a3/results/raw/001-r1-q9-control/measurement-result.json
+8fa55d86e8322bb921716598993217904a6dfe0667df4b80f2e84f54c4c60349  /home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p1-profile-q9-100m-kunpeng-20260904-a3/results/raw/001-r1-q9-control/result.json
+454140d6d33c70d51aacaa9042ab0e9379771bb7989c0f70cbe35011b604df04  /home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p1-profile-q9-100m-kunpeng-20260904-a3/results/raw/001-r1-q9-control/flink-conf.yaml
+0465c593249760aa0b1f9bebd031c8a3633cdf23ef012415c172fa9981472b27  /home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p1-profile-q9-100m-kunpeng-20260904-a3/results/raw/001-r1-q9-control/ready-gate-prometheus.json
+aae491ced5e7afc45b32227295a8dcbb0bdd867fad9c50ff425f6dd7de24b5ac  /home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p1-profile-q9-100m-kunpeng-20260904-a3/results/raw/001-r1-q9-control/VALUE_PREFETCH_AUDIT.json
+f5251bbfb4a07643601b7556661571a53d7692f7fb62db23167739865ad6333e  /home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p1-profile-q9-100m-kunpeng-20260904-a3/results/raw/001-r1-q9-control/READY_GATE_AUDIT.json

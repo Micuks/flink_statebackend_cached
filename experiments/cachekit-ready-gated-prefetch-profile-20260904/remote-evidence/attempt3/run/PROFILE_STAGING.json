@@ -1,0 +1,28 @@
+{
+  "artifact_sha256": "97487e04d293f154b8856e43decf2573fabaaf35e36077ea635a1f55d0f59dfc",
+  "compose_project": "ckkp5a9p3",
+  "diagnostic_only": true,
+  "ports": {
+    "prometheus": 11835,
+    "pushgateway": 11836,
+    "rest": 10793
+  },
+  "profile_attempt": 3,
+  "queries": [
+    "q9"
+  ],
+  "rewritten_text_files": [
+    "inputs/runtime/RUNTIME_BUNDLE.json",
+    "run_campaign.sh",
+    "variants/control/docker-compose.yml",
+    "variants/ready-d2/docker-compose.yml"
+  ],
+  "schema": "cachekit-ready-gated-prefetch-profile-staging-v1",
+  "source_commit": "5a9d1e656715a403afac72ee1a516876ddbfb7f1",
+  "source_experiment": "/home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p1-q9-100m-kunpeng-20260903",
+  "target_experiment": "/home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p1-profile-q9-100m-kunpeng-20260904-a3",
+  "variants": [
+    "control",
+    "ready-d2"
+  ]
+}
