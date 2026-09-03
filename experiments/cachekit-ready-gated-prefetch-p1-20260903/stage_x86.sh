@@ -66,9 +66,16 @@ data=json.loads(manifest.read_text())
 data['source_commit']=commit
 for artifact in data['artifacts']:
     artifact['path']=artifact['path'].replace(str(source),str(target))
+    if artifact['role']=='flink_dist':
+        artifact['covers_modules']=['flink-statebackend-rocksdb']
     if artifact['role']=='cachekit_module':
         artifact['sha256']=actual
         artifact['size_bytes']=jar.stat().st_size
+        artifact['covers_modules']=[
+            'flink-statebackend-cachekit',
+            'flink-streaming-java',
+        ]
+        artifact['authoritative_streaming_overlay']=True
 manifest.write_text(json.dumps(data,indent=2,sort_keys=True)+'\n')
 artifact_paths=[
  target/'inputs/runtime/flink-dist-1.16.3.jar',
@@ -99,6 +106,12 @@ for variant in identity['variants']:
     assert (target/'variants'/variant/'docker-compose.yml').is_file()
 print(json.dumps(provenance,sort_keys=True))
 PY
+
+ssh -o BatchMode=yes "$host" python3 \
+  "$target_exp/inputs/runner-scripts/runtime_bundle.py" \
+  --manifest "$target_exp/inputs/artifacts/opt/RUNTIME_BUNDLE.json" \
+  --expdir "$target_exp" --expected-source-commit "$source_commit" \
+  --output "$target_exp/P1_RUNTIME_BUNDLE_AUDIT.json"
 
 if [[ ${LAUNCH:-0} == 1 ]]; then
   ssh -o BatchMode=yes "$host" bash -s -- "$target_exp" <<'REMOTE'

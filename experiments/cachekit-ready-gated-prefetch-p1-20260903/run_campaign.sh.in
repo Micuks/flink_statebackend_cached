@@ -11,9 +11,9 @@ runtime_manifest=$expdir/inputs/artifacts/opt/RUNTIME_BUNDLE.json
 source_commit=5a9d1e656715a403afac72ee1a516876ddbfb7f1
 artifact_sha=@ARTIFACT_SHA@
 events=100000000
-read -r -a queries <<<"${QUERIES_TEXT:-q9}"
-read -r -a variants <<<"${VARIANTS_TEXT:-control ready-d2}"
-read -r -a rounds <<<"${ROUNDS_TEXT:-1}"
+queries=(q9)
+variants=(control ready-d2)
+rounds=(1)
 
 export GOLDEN_HOST=x86
 export GOLDEN_CONTAINER_FLINK_HOME=/opt/flink

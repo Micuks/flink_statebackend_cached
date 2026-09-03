@@ -37,6 +37,8 @@ Run one breadth-first q9 round in order `control`, `ready-d2`. Each leg must
 prove real job start/completion, warmup completion, positive throughput and CPU,
 eight-TM CPU coverage, `cores <= 16.05`, exact config/artifact hashes, and clean
 logs. Host preflight rejects any foreign running container.
+The harness has no query, variant, or round environment override; these arrays
+are fixed to the identity above.
 
 The candidate activation gate additionally requires positive batches, positive
 completion-before-dispatch, maximum in-flight depth at least 2, positive staged
