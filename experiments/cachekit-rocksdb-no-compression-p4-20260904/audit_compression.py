@@ -18,6 +18,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("leg_dir", type=Path)
     parser.add_argument("--expected", required=True)
+    parser.add_argument("--require-sst", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -44,8 +45,20 @@ def main() -> None:
                 }
             )
 
+    inventory_path = args.leg_dir / "rocksdb-sst-inventory.tsv"
+    sst_sizes = []
+    if inventory_path.is_file():
+        for line in inventory_path.read_text().splitlines():
+            size, _, _path = line.partition("\t")
+            if size:
+                sst_sizes.append(int(size))
+
     unexpected = sorted(mode for mode in counts if mode != args.expected)
-    activation_pass = counts[args.expected] > 0 and not unexpected
+    mode_activation_pass = counts[args.expected] > 0 and not unexpected
+    sst_effect_pass = bool(sst_sizes)
+    activation_pass = mode_activation_pass and (
+        sst_effect_pass if args.require_sst else True
+    )
     result = {
         "schema": "cachekit-rocksdb-compression-activation-v1",
         "leg_dir": str(args.leg_dir),
@@ -56,6 +69,11 @@ def main() -> None:
             name: dict(sorted(values.items())) for name, values in sorted(by_file.items())
         },
         "unexpected_modes": unexpected,
+        "mode_activation_pass": mode_activation_pass,
+        "sst_inventory_required": args.require_sst,
+        "sst_file_count": len(sst_sizes),
+        "sst_total_bytes": sum(sst_sizes),
+        "sst_effect_pass": sst_effect_pass,
         "activation_pass": activation_pass,
         "evidence": evidence,
     }
