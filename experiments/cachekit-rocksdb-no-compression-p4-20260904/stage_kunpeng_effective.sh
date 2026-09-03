@@ -92,10 +92,13 @@ runner = root / "run_campaign.sh"
 text = runner.read_text()
 required = {
     "queries=(q9)": "queries=(q5 q11 q15 q18)",
-    "capture_metric_raw() {": "capture_sst_inventory() {\n  local d=$1\n  find \"$scratch\" -type f -name '*.sst' -printf '%s\\t%P\\n' | LC_ALL=C sort -k2 >\"$d/rocksdb-sst-inventory.tsv\"\n}\n\ncapture_metric_raw() {",
+    "capture_metric_raw() {": "capture_sst_inventory() {\n  local d=$1\n  find \"$scratch\" -type f -name '*.sst' -printf '%s\\t%P\\n' | LC_ALL=C sort -k2 >\"$d/rocksdb-sst-inventory.tsv\"\n}\n\nmonitor_sst_inventory() {\n  local d=$1 snapshot\n  snapshot=$(mktemp \"$d/.rocksdb-sst-live.XXXXXX\")\n  while [[ ! -f $d/.sst-monitor-stop ]]; do\n    find \"$scratch\" -type f -name '*.sst' -printf '%s\\t%P\\n' | LC_ALL=C sort -k2 >\"$snapshot\"\n    if [[ -s $snapshot ]]; then cp \"$snapshot\" \"$d/rocksdb-sst-live-inventory.tsv\"; fi\n    sleep 10\n  done\n  rm -f -- \"$snapshot\"\n}\n\ncapture_metric_raw() {",
+    "local query=$1 round=$2 idx=$3 variant=$4 leg d config cf rc compression_mode": "local query=$1 round=$2 idx=$3 variant=$4 leg d config cf rc compression_mode sst_monitor_pid",
+    "set +e\n  BENCH_DISABLE_WATCHDOG=1": ": >\"$d/rocksdb-sst-live-inventory.tsv\"\n  rm -f -- \"$d/.sst-monitor-stop\"\n  monitor_sst_inventory \"$d\" &\n  sst_monitor_pid=$!\n  set +e\n  BENCH_DISABLE_WATCHDOG=1",
+    "rc=$?\n  set -e\n  capture_snapshot": "rc=$?\n  set -e\n  touch \"$d/.sst-monitor-stop\"\n  wait \"$sst_monitor_pid\"\n  rm -f -- \"$d/.sst-monitor-stop\"\n  capture_snapshot",
     'capture_metric_raw "$d"\n  capture_logs': 'capture_metric_raw "$d"\n  capture_sst_inventory "$d"\n  capture_logs',
     'python3 "$expdir/audit_compression.py" "$d" --expected "$compression_mode" --output "$d/COMPRESSION_AUDIT.json" \\': 'python3 "$expdir/audit_compression.py" "$d" --expected "$compression_mode" --require-sst --output "$d/COMPRESSION_AUDIT.json" \\',
-    '"$d"/COMPRESSION_AUDIT.json \\': '"$d"/COMPRESSION_AUDIT.json "$d"/rocksdb-sst-inventory.tsv \\',
+    '"$d"/COMPRESSION_AUDIT.json \\': '"$d"/COMPRESSION_AUDIT.json "$d"/rocksdb-sst-inventory.tsv "$d"/rocksdb-sst-live-inventory.tsv \\',
 }
 for old, new in required.items():
     if text.count(old) != 1:

@@ -45,13 +45,28 @@ def main() -> None:
                 }
             )
 
-    inventory_path = args.leg_dir / "rocksdb-sst-inventory.tsv"
-    sst_sizes = []
-    if inventory_path.is_file():
+    inventory_paths = [
+        args.leg_dir / "rocksdb-sst-inventory.tsv",
+        args.leg_dir / "rocksdb-sst-live-inventory.tsv",
+    ]
+    inventory_sources = []
+    inventories = {}
+    for inventory_path in inventory_paths:
+        if not inventory_path.is_file():
+            continue
+        inventory_sources.append(inventory_path.name)
+        sizes = []
         for line in inventory_path.read_text().splitlines():
             size, _, _path = line.partition("\t")
             if size:
-                sst_sizes.append(int(size))
+                sizes.append(int(size))
+        inventories[inventory_path.name] = sizes
+    selected_inventory = max(
+        inventories,
+        key=lambda name: (sum(inventories[name]), len(inventories[name])),
+        default=None,
+    )
+    sst_sizes = inventories.get(selected_inventory, [])
 
     unexpected = sorted(mode for mode in counts if mode != args.expected)
     mode_activation_pass = counts[args.expected] > 0 and not unexpected
@@ -71,6 +86,8 @@ def main() -> None:
         "unexpected_modes": unexpected,
         "mode_activation_pass": mode_activation_pass,
         "sst_inventory_required": args.require_sst,
+        "sst_inventory_sources": inventory_sources,
+        "sst_inventory_selected": selected_inventory,
         "sst_file_count": len(sst_sizes),
         "sst_total_bytes": sum(sst_sizes),
         "sst_effect_pass": sst_effect_pass,
