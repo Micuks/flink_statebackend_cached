@@ -299,14 +299,6 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                         .withDescription(
                                                         "Prepared-key bytes in the key-only mailbox compaction scratch slot.");
 
-        public static final ConfigOption<Boolean> NATIVE_REQUEST_PLANE_AARCH64_ONLY =
-                        ConfigOptions.key("state.backend.cachekit.native.request-plane.aarch64-only")
-                                        .booleanType()
-                                        .defaultValue(true)
-                                        .withDescription(
-                                                        "Fail closed when the native request plane is enabled on a non-AArch64 host. "
-                                                                        + "Set false only for an explicit portable x86 comparison.");
-
         public static final ConfigOption<Boolean> NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS =
             ConfigOptions.key("state.backend.cachekit.native.request-plane.write-through-mutations")
                                         .booleanType()
@@ -970,7 +962,7 @@ public class CacheKitStateBackendFactory implements StateBackendFactory<CacheKit
                                 config.get(NATIVE_REQUEST_PLANE_BATCH_VALUE_ARENA_BYTES),
                                 config.get(NATIVE_REQUEST_PLANE_MIN_BATCH_SIZE),
                                 config.get(NATIVE_REQUEST_PLANE_BATCH_SLOTS),
-                                config.get(NATIVE_REQUEST_PLANE_AARCH64_ONLY),
+                                true,
                                 config.get(NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS),
                                 config.get(NATIVE_VALUE_CACHE_ENABLED),
                                 config.get(NATIVE_MAP_CACHE_ENABLED),

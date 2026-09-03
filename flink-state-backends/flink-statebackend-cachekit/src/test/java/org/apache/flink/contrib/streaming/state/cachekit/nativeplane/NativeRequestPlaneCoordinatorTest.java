@@ -138,8 +138,9 @@ class NativeRequestPlaneCoordinatorTest {
     }
 
     @Test
-    void testAarch64OnlyPolicyRejectsPortableScalarPlaneAndClosesIt() {
+    void testNonAarch64PlaneIsRejectedEvenWithLegacyFalseOptionAndClosed() {
         FakePlane plane = new FakePlane();
+        plane.featureBits = 0;
 
         assertThrows(
                 IllegalStateException.class,
@@ -147,7 +148,7 @@ class NativeRequestPlaneCoordinatorTest {
                         NativeRequestPlaneCoordinator.forTesting(
                                 new NativeRequestPlaneOptions(
                                         true, "", "auto", 16, 1024, 1024, 4, 1024, 1024, 1, 1,
-                                        true),
+                                        false),
                                 plane));
 
         assertEquals(1, plane.closeCalls);
@@ -261,7 +262,7 @@ class NativeRequestPlaneCoordinatorTest {
         FakePlane plane = new FakePlane();
         NativeRequestPlaneCoordinator coordinator =
                 NativeRequestPlaneCoordinator.forTesting(options(1), plane);
-        assertEquals("x86_64", coordinator.detectedFeatures());
+        assertEquals("aarch64", coordinator.detectedFeatures());
 
         try (NativeRequestPlaneCoordinator.BatchSlot slot = coordinator.tryAcquireBatchSlot()) {
             assertNotNull(slot);
@@ -732,7 +733,7 @@ class NativeRequestPlaneCoordinatorTest {
         private boolean failSelectedKernel;
         private int closeCalls;
         private long probeGeneration;
-        private long featureBits;
+        private long featureBits = NativeRequestPlaneBridge.FEATURE_AARCH64;
         private int[] compactIndexes;
         private byte[] fillKey;
         private byte[] fillValue;

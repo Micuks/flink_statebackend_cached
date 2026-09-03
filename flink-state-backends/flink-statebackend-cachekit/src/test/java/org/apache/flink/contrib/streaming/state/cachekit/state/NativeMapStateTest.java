@@ -629,7 +629,7 @@ class NativeMapStateTest {
 
         @Override
         public long detectedFeatureBits() {
-            return 0;
+            return NativeRequestPlaneBridge.FEATURE_AARCH64;
         }
 
         @Override

@@ -58,7 +58,7 @@ CacheKit 将性能优化划分为三个正交的原生阶段（Stage），各阶
 | `libcachekit_native_request_plane_jni.so` | Stage 1 与 Stage 3 共享的高性能 C++ 请求平面 JNI 动态库。 | 各节点统一的绝对路径（如 `/opt/cachekit/native/`）并在配置中指定 |
 
 > [!WARNING]
-> 原生动态库与底层 CPU 指令集强相关。请在与目标 TaskManager **相同架构**（x86-64 或 AArch64/鲲鹏）的机器与工具链上编译，切勿跨架构部署。
+> 原生实现仅支持 Linux AArch64/鲲鹏。必须在 AArch64 工具链上编译并部署到 AArch64 TaskManager；非 ARM 架构会在 CMake 配置或 JNI 启动阶段直接失败。
 
 ### 编译环境要求
 - Linux 操作系统
@@ -182,13 +182,15 @@ jar tf "$FLINK_HOME/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar" \
 - **Q1: 启动时抛出 `UnsatisfiedLinkError: ... libcachekit_native_request_plane_jni.so: cannot open shared object file`**
   - **排查**：检查 `state.backend.cachekit.native.request-plane.library` 是否配置了**正确的绝对路径**；检查该文件在每个 TaskManager 节点上是否存在且具备读取/执行权限（`chmod 0755`）。
 - **Q2: 提示动态库 ELF 格式或架构不匹配（wrong ELF class）**
-  - **排查**：编译机器与运行机器的 CPU 架构不一致（例如在 x86 机器上编译了 `.so` 拷贝到了鲲鹏 AArch64 机器）。请在同构环境下重新执行 CMake 编译。
+  - **排查**：确认 `.so` 使用 AArch64 工具链构建，并且所有 TaskManager 都运行在 Linux AArch64/鲲鹏节点；不再支持为其他架构构建原生库。
 - **Q3: 为什么修改了配置参数后，指标没有变化？**
   - **排查**：必须完全重启 TaskManager 进程，确保 JVM 加载了全新的类与配置。
 
 ---
 
-## 5. 实测基准性能（2026-09-02，100M R1）
+## 5. 历史实测基准性能（2026-09-02，100M R1）
+
+> 本节保留 ARM-only 收口之前的冻结实验记录，仅用于结果追溯；其中非 ARM 行不代表当前代码仍支持该平台。
 
 双机实验使用同一提交 `694a257d37476668846e1e7e719163f4bddd899f`、同一 JAR、100M
 events、checkpoint 关闭、8 TM/16 slots。`Adaptive / Aligned` 是只改变 native ValueState

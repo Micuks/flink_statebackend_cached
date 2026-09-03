@@ -22,29 +22,27 @@ option(CACHEKIT_NATIVE_BUILD_BENCHMARKS "Build native request-plane microbenchma
 option(CACHEKIT_NATIVE_BUILD_JNI "Build the opt-in JNI bridge" OFF)
 option(CACHEKIT_NATIVE_ENABLE_SANITIZERS "Enable ASan and UBSan" OFF)
 
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" CACHEKIT_SYSTEM_PROCESSOR)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
+   NOT CACHEKIT_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    message(FATAL_ERROR
+        "CacheKit native request plane supports only Linux AArch64/Kunpeng")
+endif()
+
 set(CACHEKIT_NATIVE_SOURCES
     src/c_api.cpp
     src/kernels_scalar.cpp
+    src/kernels_aarch64_neon_crc.cpp
+    src/kernels_aarch64_sve256.cpp
     src/request_plane.cpp
     src/runtime_features.cpp)
 
-string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" CACHEKIT_SYSTEM_PROCESSOR)
-if(CACHEKIT_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-    list(APPEND CACHEKIT_NATIVE_SOURCES
-         src/kernels_aarch64_neon_crc.cpp
-         src/kernels_aarch64_sve256.cpp)
-    set_source_files_properties(
-        src/kernels_aarch64_neon_crc.cpp
-        PROPERTIES COMPILE_OPTIONS "-march=armv8-a+crc")
-    set_source_files_properties(
-        src/kernels_aarch64_sve256.cpp
-        PROPERTIES COMPILE_OPTIONS "-march=armv8.2-a+sve+crc;-msve-vector-bits=256")
-endif()
-if(CACHEKIT_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
-    list(APPEND CACHEKIT_NATIVE_SOURCES src/kernels_x86_sse42.cpp)
-    set_source_files_properties(
-        src/kernels_x86_sse42.cpp PROPERTIES COMPILE_OPTIONS "-msse4.2")
-endif()
+set_source_files_properties(
+    src/kernels_aarch64_neon_crc.cpp
+    PROPERTIES COMPILE_OPTIONS "-march=armv8-a+crc")
+set_source_files_properties(
+    src/kernels_aarch64_sve256.cpp
+    PROPERTIES COMPILE_OPTIONS "-march=armv8.2-a+sve+crc;-msve-vector-bits=256")
 
 add_library(cachekit_native_request_plane STATIC ${CACHEKIT_NATIVE_SOURCES})
 target_compile_features(cachekit_native_request_plane PUBLIC cxx_std_17)
@@ -60,14 +58,8 @@ if(CACHEKIT_NATIVE_BUILD_JNI)
         cachekit_native_request_plane PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
-if(CACHEKIT_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-    target_compile_definitions(
-        cachekit_native_request_plane PRIVATE CACHEKIT_NATIVE_AARCH64_KERNELS=1)
-endif()
-if(CACHEKIT_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
-    target_compile_definitions(
-        cachekit_native_request_plane PRIVATE CACHEKIT_NATIVE_X86_KERNELS=1)
-endif()
+target_compile_definitions(
+    cachekit_native_request_plane PRIVATE CACHEKIT_NATIVE_AARCH64_KERNELS=1)
 
 if(CACHEKIT_NATIVE_ENABLE_SANITIZERS)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -148,15 +140,9 @@ if(CACHEKIT_NATIVE_BUILD_TESTS)
         PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     target_link_libraries(
         cachekit_native_request_plane_test PRIVATE cachekit_native_request_plane)
-    if(CACHEKIT_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-        target_compile_definitions(
-            cachekit_native_request_plane_test
-            PRIVATE CACHEKIT_NATIVE_AARCH64_KERNELS=1)
-    endif()
-    if(CACHEKIT_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
-        target_compile_definitions(
-            cachekit_native_request_plane_test PRIVATE CACHEKIT_NATIVE_X86_KERNELS=1)
-    endif()
+    target_compile_definitions(
+        cachekit_native_request_plane_test
+        PRIVATE CACHEKIT_NATIVE_AARCH64_KERNELS=1)
     if(CACHEKIT_NATIVE_ENABLE_SANITIZERS AND
        CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(

@@ -157,14 +157,13 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
         this.selectedKernel =
                 Objects.requireNonNull(plane.selectedKernel(), "plane.selectedKernel()");
         this.detectedFeatureBits = plane.detectedFeatureBits();
-        if (options.aarch64Only()
-                && (detectedFeatureBits & NativeRequestPlaneBridge.FEATURE_AARCH64) == 0) {
+        if ((detectedFeatureBits & NativeRequestPlaneBridge.FEATURE_AARCH64) == 0) {
             throw new IllegalStateException(
-                    "Native request plane is AArch64-only by policy, but the loaded JNI library "
+                    "Native request plane requires Linux AArch64/Kunpeng, "
+                            + "but the loaded JNI library "
                             + "reported host features "
                             + detectedFeatureBitsHex()
-                            + ". Set state.backend.cachekit.native.request-plane.aarch64-only=false "
-                            + "only for an explicit portable x86 comparison.");
+                            + ".");
         }
     }
 
@@ -827,11 +826,7 @@ public final class NativeRequestPlaneCoordinator implements AutoCloseable {
     /** Stable human-readable decode paired with {@link #detectedFeatureBitsHex()}. */
     public String detectedFeatures() {
         StringBuilder decoded = new StringBuilder();
-        appendFeature(
-                decoded,
-                (detectedFeatureBits & NativeRequestPlaneBridge.FEATURE_AARCH64) != 0
-                        ? "aarch64"
-                        : "x86_64");
+        appendFeature(decoded, "aarch64");
         if ((detectedFeatureBits & NativeRequestPlaneBridge.FEATURE_NEON) != 0) {
             appendFeature(decoded, "neon");
         }

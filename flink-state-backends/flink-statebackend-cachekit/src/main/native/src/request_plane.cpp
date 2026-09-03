@@ -227,8 +227,8 @@ bool IsValidBytes(const std::uint8_t* data, std::size_t size) noexcept {
 }
 
 std::size_t RequiredBucketCount(std::size_t capacity_entries) {
-    // Keep the metadata table at or below 50% occupancy on either the x86
-    // 64-byte/eight-slot or Kunpeng 128-byte/sixteen-slot layout.
+    // Keep the metadata table at or below 50% occupancy on the Kunpeng
+    // 128-byte/sixteen-slot layout.
     const std::size_t entries_per_bucket = kSlotsPerBucket / 2U;
     std::size_t required = capacity_entries / entries_per_bucket;
     if ((capacity_entries % entries_per_bucket) != 0) {

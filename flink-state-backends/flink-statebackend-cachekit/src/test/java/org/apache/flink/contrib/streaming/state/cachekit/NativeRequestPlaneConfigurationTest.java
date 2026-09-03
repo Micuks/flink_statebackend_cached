@@ -191,7 +191,6 @@ class NativeRequestPlaneConfigurationTest {
         config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_BATCH_ENTRIES, 17);
         config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_MIN_BATCH_SIZE, 5);
         config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_BATCH_SLOTS, 3);
-        config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_AARCH64_ONLY, false);
         config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_WRITE_THROUGH_MUTATIONS, true);
         config.set(
                 CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH, true);
@@ -244,7 +243,7 @@ class NativeRequestPlaneConfigurationTest {
         assertEquals(17, options.batchEntries());
         assertEquals(5, options.minBatchSize());
         assertEquals(3, options.batchSlots());
-        assertFalse(options.aarch64Only());
+        assertTrue(options.aarch64Only());
         assertTrue(options.writeThroughMutations());
         assertTrue(options.readActivatedWriteThrough());
         assertTrue(options.valueCacheEnabled());

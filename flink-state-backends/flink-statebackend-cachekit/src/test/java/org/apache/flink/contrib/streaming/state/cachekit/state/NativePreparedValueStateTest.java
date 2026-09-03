@@ -4724,7 +4724,8 @@ class NativePreparedValueStateTest {
 
         @Override
         public long detectedFeatureBits() {
-            return NativeRequestPlaneBridge.FEATURE_SVE
+            return NativeRequestPlaneBridge.FEATURE_AARCH64
+                    | NativeRequestPlaneBridge.FEATURE_SVE
                     | NativeRequestPlaneBridge.FEATURE_SVE_VL256;
         }
 

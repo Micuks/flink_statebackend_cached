@@ -50,23 +50,17 @@ class NativeRequestPlaneBridgeTest {
 
     @Test
     @EnabledIfSystemProperty(named = NativeRequestPlaneBridge.LIBRARY_PATH_PROPERTY, matches = ".+")
-    void testAutoKernelKeepsPlaneEnabledWithAuditableScalarX86Fallback() {
+    void testAutoKernelKeepsArmPlaneEnabledWithAuditableFallback() {
         try (NativeRequestPlaneBridge bridge =
                 NativeRequestPlaneBridge.open(
                         true, 16, 1024, 1024, NativeRequestPlaneBridge.KERNEL_AUTO)) {
             String selectedKernel = bridge.selectedKernel();
             assertTrue(
                     selectedKernel.equals("scalar-crc32c")
-                            || selectedKernel.equals("x86-sse4.2-crc32c")
                             || selectedKernel.equals("aarch64-neon-crc32c")
                             || selectedKernel.equals("aarch64-sve256-hybrid-crc32c"));
-            String architecture =
-                    System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT);
-            if (architecture.equals("amd64") || architecture.equals("x86_64")) {
-                assertTrue(
-                        selectedKernel.equals("x86-sse4.2-crc32c")
-                                || selectedKernel.equals("scalar-crc32c"));
-            }
+            assertTrue(
+                    (bridge.detectedFeatureBits() & NativeRequestPlaneBridge.FEATURE_AARCH64) != 0);
         }
     }
 

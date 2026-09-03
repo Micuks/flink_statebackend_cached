@@ -28,13 +28,8 @@ namespace cachekit {
 namespace native {
 namespace internal {
 
-#if defined(__aarch64__)
 constexpr std::size_t kCacheLineBytes = 128;
 constexpr std::size_t kSlotsPerBucket = 16;
-#else
-constexpr std::size_t kCacheLineBytes = 64;
-constexpr std::size_t kSlotsPerBucket = 8;
-#endif
 constexpr std::uint32_t kEmptyTag = 0;
 constexpr std::uint32_t kTombstoneTag = 1;
 
@@ -63,9 +58,6 @@ const KernelOps& ScalarKernel() noexcept;
 #if defined(CACHEKIT_NATIVE_AARCH64_KERNELS)
 const KernelOps& NeonCrcKernel() noexcept;
 const KernelOps& Sve256Kernel() noexcept;
-#endif
-#if defined(CACHEKIT_NATIVE_X86_KERNELS)
-const KernelOps& Sse42CrcKernel() noexcept;
 #endif
 
 const KernelOps* SelectKernel(

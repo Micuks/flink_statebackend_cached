@@ -1,5 +1,7 @@
 # CacheKit Stage 1 / Stage 3 native 性能修复 TODO
 
+> 历史归档：本文记录 ARM-only 收口之前的双平台实验，不代表当前 native 实现继续支持非 ARM 平台。
+
 基线提交：`6511742619fe2a26ce2f86453396a974f5d8e673`
 
 目标分支：`wuql/cachekit/dev`

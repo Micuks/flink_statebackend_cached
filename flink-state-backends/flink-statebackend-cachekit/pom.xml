@@ -290,10 +290,11 @@ under the License.
 
 	<profiles>
 		<profile>
-			<id>cachekit-native-linux</id>
+			<id>cachekit-native-linux-aarch64</id>
 			<activation>
 				<os>
 					<name>Linux</name>
+					<arch>aarch64</arch>
 				</os>
 			</activation>
 			<build>

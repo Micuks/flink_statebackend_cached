@@ -1142,7 +1142,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
         this.batchValueArenaBytes = batchValueArenaBytes;
         this.minBatchSize = minBatchSize;
         this.batchSlots = batchSlots;
-        this.aarch64Only = aarch64Only;
+        this.aarch64Only = true;
         this.writeThroughMutations = writeThroughMutations;
         if (readActivatedWriteThrough && (!writeThroughMutations || !valueCacheEnabled)) {
             throw new IllegalArgumentException(
@@ -1329,8 +1329,8 @@ public final class NativeRequestPlaneOptions implements Serializable {
     /**
      * Whether an explicitly enabled request plane must fail closed on a non-AArch64 host.
      *
-     * <p>This defaults to true so the production ARM-native path cannot silently turn into the
-     * portable scalar kernel on x86. Cross-platform experiments may set it to false explicitly.
+     * <p>This is always true. The constructor argument is retained for internal compatibility but
+     * cannot relax the AArch64/Kunpeng-only policy.
      */
     public boolean aarch64Only() {
         return aarch64Only;
@@ -1523,7 +1523,7 @@ public final class NativeRequestPlaneOptions implements Serializable {
         this.batchValueArenaBytes = source.batchValueArenaBytes;
         this.minBatchSize = source.minBatchSize;
         this.batchSlots = source.batchSlots;
-        this.aarch64Only = source.aarch64Only;
+        this.aarch64Only = true;
         this.writeThroughMutations = source.writeThroughMutations;
         this.readActivatedWriteThrough = source.readActivatedWriteThrough;
         this.residentMutationBatchEnabled = source.residentMutationBatchEnabled;

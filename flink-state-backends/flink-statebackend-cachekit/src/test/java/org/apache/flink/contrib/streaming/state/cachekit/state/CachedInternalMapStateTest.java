@@ -47,6 +47,7 @@ import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicyType;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.PresenceCacheImplementation;
 import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlane;
+import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneBridge;
 import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneCoordinator;
 import org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneOptions;
 import org.apache.flink.core.memory.DataOutputSerializer;
@@ -349,6 +350,8 @@ class CachedInternalMapStateTest {
 
         NativeRequestPlane plane = mock(NativeRequestPlane.class);
         when(plane.selectedKernel()).thenReturn("test");
+        when(plane.detectedFeatureBits())
+                .thenReturn(NativeRequestPlaneBridge.FEATURE_AARCH64);
         NativeRequestPlaneCoordinator coordinator =
                 NativeRequestPlaneCoordinator.forTesting(directArenaOptions(), plane);
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =

@@ -3,6 +3,13 @@ project(cachekit_snapshot_native LANGUAGES CXX)
 
 option(CACHEKIT_FORCE_FNV_HASH "Force the portable FNV hash for A/B benchmarks" OFF)
 
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" CACHEKIT_SYSTEM_PROCESSOR)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
+   NOT CACHEKIT_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    message(FATAL_ERROR
+        "CacheKit native snapshot cache supports only Linux AArch64/Kunpeng")
+endif()
+
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -17,14 +24,9 @@ if(CACHEKIT_FORCE_FNV_HASH)
     target_compile_definitions(cachekit_snapshot_core PRIVATE CACHEKIT_FORCE_FNV_HASH=1)
 endif()
 
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-    target_compile_definitions(cachekit_snapshot_core PUBLIC
-        CACHEKIT_ENABLE_KUNPENG_SNAPSHOT=1)
-    target_compile_options(cachekit_snapshot_core PRIVATE -march=armv8.2-a -mtune=tsv110)
-else()
-    target_compile_definitions(cachekit_snapshot_core PUBLIC
-        CACHEKIT_ENABLE_KUNPENG_SNAPSHOT=0)
-endif()
+target_compile_definitions(cachekit_snapshot_core PUBLIC
+    CACHEKIT_ENABLE_KUNPENG_SNAPSHOT=1)
+target_compile_options(cachekit_snapshot_core PRIVATE -march=armv8.2-a -mtune=tsv110)
 
 find_package(JNI REQUIRED)
 add_library(cachekit_snapshot_jni SHARED src/snapshot_jni.cc)

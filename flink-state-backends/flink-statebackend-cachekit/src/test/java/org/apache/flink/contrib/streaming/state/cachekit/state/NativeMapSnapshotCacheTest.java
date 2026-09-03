@@ -40,8 +40,7 @@ class NativeMapSnapshotCacheTest {
     void testOnlyLinuxArm64IsACandidatePlatform() {
         assertTrue(NativeMapSnapshotCache.isCandidatePlatform("Linux", "aarch64"));
         assertTrue(NativeMapSnapshotCache.isCandidatePlatform("linux", "arm64"));
-        assertFalse(NativeMapSnapshotCache.isCandidatePlatform("Linux", "amd64"));
-        assertFalse(NativeMapSnapshotCache.isCandidatePlatform("Linux", "x86_64"));
+        assertFalse(NativeMapSnapshotCache.isCandidatePlatform("Linux", "ppc64le"));
         assertFalse(NativeMapSnapshotCache.isCandidatePlatform("Windows", "aarch64"));
     }
 
@@ -59,8 +58,8 @@ class NativeMapSnapshotCacheTest {
                                 + "CPU part\t: 0xd02\n"));
         assertFalse(
                 NativeMapSnapshotCache.isKunpengCrc32CpuInfo(
-                        "flags\t: sse4_2 crc32\n"
-                                + "vendor_id\t: GenuineIntel\n"));
+                        "Features\t: fp asimd crc32\n"
+                                + "CPU implementer\t: 0x41\n"));
     }
 
     @Test
