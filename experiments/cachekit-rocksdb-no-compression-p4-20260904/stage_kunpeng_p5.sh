@@ -123,6 +123,7 @@ text = runner.read_text()
 required = {
     "queries=(q9)": "queries=(q5 q9 q11 q15 q18)",
     "variants=(control no-compression)": "variants=(combined)",
+    "local cf=$expdir/variants/control/docker-compose.yml": "local cf=$expdir/variants/combined/docker-compose.yml",
     "assert values['state.backend.cachekit.map.snapshot.owned-key-reuse.enabled']=='false'": "assert values['state.backend.cachekit.map.snapshot.owned-key-reuse.enabled']=='true'\nassert values['state.backend.cachekit.map.snapshot.cache.max-entries']=='8000'\nassert values['state.backend.cachekit.map.snapshot.small.max-entries']=='2'",
     "assert values['state.backend.rocksdb.compression.type']==('NO_COMPRESSION' if variant=='no-compression' else 'SNAPPY_COMPRESSION')": "assert values['state.backend.rocksdb.compression.type']=='NO_COMPRESSION'",
     "if [[ $variant == no-compression ]]; then compression_mode=NO_COMPRESSION; else compression_mode=SNAPPY_COMPRESSION; fi": "compression_mode=NO_COMPRESSION",
