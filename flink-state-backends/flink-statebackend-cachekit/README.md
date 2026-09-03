@@ -230,6 +230,16 @@ native request-plane、native Value/Map cache、native LocalPreAgg/Mailbox/Prefe
 | **[Stage 3]** `state.backend.cachekit.bp-prefetch.enabled` | `false` | `true` | 是否开启背压感知的状态批量预取 |
 | **[Stage 3]** `state.backend.cachekit.bp-prefetch.async.enabled` | `false` | `true` | 预取是否采用真正异步线程池执行 |
 | **[Stage 3]** `state.backend.cachekit.bp-prefetch.multiget.enabled` | `false` | `true` | 预取时是否合并为 RocksDB MultiGet 批查询 |
+| **[P1 实验]** `state.backend.cachekit.bp-prefetch.ready-gated.enabled` | `false` | `false` | 开启严格有序的 completion-gated 多批 ring；未通过 Nexmark 门槛前保持关闭 |
+| **[P1 实验]** `state.backend.cachekit.bp-prefetch.ready-gated.max-in-flight-batches` | `2` | `2` | ring 中最多保留的批数，运行时限制为 2 到 4 |
+| **[P1 实验]** `state.backend.cachekit.bp-prefetch.ready-gated.timeout-us` | `5000` | `5000` | head batch 等待 completion 的上限；超时后取消预约并走权威状态读取 |
+
+P1 ready gate 在 object reuse 或 unaligned checkpoint 开启时自动 fail closed。它仅暂停默认
+input action，mailbox mail 仍可运行；watermark、status、latency marker、checkpoint、end/close
+都会按到达顺序 fence 并释放旧批。`cachekit.runtimePrefetch.readyGate` 指标组暴露 ready/fallback、
+ring 深度与 full 时长、保留 records/reference bytes，以及 backend queue/service、staged、consumed、
+discarded 和 authoritative-read-avoided 计数。reference bytes 按每个数组引用 8 字节保守估算，不包含 record
+对象图。
 
 ## 7. 合并与性能修复的验证结果
 

@@ -79,6 +79,11 @@ class StreamRecordBatchOutputTest {
         assertEquals(Collections.nCopies(4, mailboxThread), dispatchThreads);
         assertEquals(2, output.readyBeforeDispatchForTesting());
         assertEquals(0, output.dispatchBeforeReadyFallbacksForTesting());
+        assertEquals(2, output.getReadyBatchesStarted());
+        assertEquals(4, output.getReadyRecordsDispatched());
+        assertEquals(0, output.getFallbackRecordsDispatched());
+        assertEquals(4, output.getMaxRetainedReadyRecords());
+        assertEquals(4L * Long.BYTES, output.getMaxRetainedReadyReferenceBytes());
         assertFalse(output.isInputBlocked());
         assertEquals(0, output.size());
     }
@@ -129,6 +134,10 @@ class StreamRecordBatchOutputTest {
         assertEquals(2, output.cancelledBatches);
         assertEquals(2, output.dispatchBeforeReadyFallbacksForTesting());
         assertEquals(0, output.readyBeforeDispatchForTesting());
+        assertEquals(1, output.getReadyFailureFallbacks());
+        assertEquals(1, output.getReadyNotProvenFallbacks());
+        assertEquals(0, output.getReadyTimeoutFallbacks());
+        assertEquals(4, output.getFallbackRecordsDispatched());
     }
 
     @Test
@@ -149,6 +158,7 @@ class StreamRecordBatchOutputTest {
         assertEquals(Arrays.asList("r0", "r1"), emitted);
         assertEquals(1, output.cancelledBatches);
         assertEquals(1, output.dispatchBeforeReadyFallbacksForTesting());
+        assertEquals(1, output.getReadyTimeoutFallbacks());
         assertFalse(never.isDone(), "fallback must not run worker completion on the mailbox");
     }
 
@@ -178,6 +188,7 @@ class StreamRecordBatchOutputTest {
 
         assertEquals(Arrays.asList("r0", "r1", "r2", "watermark:99"), events);
         assertEquals(2, output.cancelledBatches);
+        assertEquals(2, output.getReadyForcedFallbacks());
         assertEquals(0, output.size());
     }
 

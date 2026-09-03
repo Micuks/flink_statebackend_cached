@@ -279,6 +279,26 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                                                 "state.backend.cachekit.bp-prefetch.cancel-on-dispatch.enabled")
                                         .booleanType()
                                         .defaultValue(false));
+                boolean readyGatedPrefetch =
+                        cfg.getBoolean(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.ready-gated.enabled")
+                                        .booleanType()
+                                        .defaultValue(false));
+                int readyGatedMaxInFlight =
+                        cfg.getInteger(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.ready-gated.max-in-flight-batches")
+                                        .intType()
+                                        .defaultValue(2));
+                readyGatedMaxInFlight = Math.max(2, Math.min(4, readyGatedMaxInFlight));
+                long readyGatedTimeoutUs =
+                        cfg.getLong(
+                                org.apache.flink.configuration.ConfigOptions.key(
+                                                "state.backend.cachekit.bp-prefetch.ready-gated.timeout-us")
+                                        .longType()
+                                        .defaultValue(5_000L));
+                readyGatedTimeoutUs = Math.max(1L, Math.min(1_000_000L, readyGatedTimeoutUs));
                 boolean unalignedCheckpoints =
                         cfg.getBoolean(
                                 org.apache.flink.configuration.ConfigOptions.key(
@@ -289,27 +309,86 @@ public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamO
                 // an explicit snapshot serializer, fail closed to the original whole-batch flush.
                 if (unalignedCheckpoints) {
                     asyncPrefetchSlidingDrainRecords = 0;
+                    readyGatedPrefetch = false;
                 }
                 @SuppressWarnings("unchecked")
                 Input<IN> headInput = (Input<IN>) mainOperator;
                 java.util.function.BooleanSupplier bp =
                         () -> recordWriter != null && !recordWriter.isAvailable();
-                return new StreamRecordBatchOutput<>(
-                        output,
-                        headInput,
-                        true,
-                        bpPrefetchKeySort,
-                        distance,
-                        0L,
-                        numRecordsIn,
-                        true,
-                        bp,
-                        backpressureGated,
-                        asyncPrefetchChunks,
-                        asyncPrefetchChunkSize,
-                        asyncPrefetchHeadGuardRecords,
-                        asyncPrefetchSlidingDrainRecords,
-                        cancelPrefetchOnDispatch);
+                StreamRecordBatchOutput<IN> batchOutput =
+                        new StreamRecordBatchOutput<>(
+                                output,
+                                headInput,
+                                true,
+                                bpPrefetchKeySort,
+                                distance,
+                                0L,
+                                numRecordsIn,
+                                true,
+                                bp,
+                                backpressureGated,
+                                asyncPrefetchChunks,
+                                asyncPrefetchChunkSize,
+                                asyncPrefetchHeadGuardRecords,
+                                asyncPrefetchSlidingDrainRecords,
+                                cancelPrefetchOnDispatch,
+                                readyGatedPrefetch,
+                                readyGatedMaxInFlight,
+                                readyGatedTimeoutUs * 1_000L,
+                                getExecutionConfig().isObjectReuseEnabled());
+                org.apache.flink.metrics.MetricGroup readyMetrics =
+                        runtimePrefetchMetrics.addGroup("readyGate");
+                readyMetrics.gauge(
+                        "active", () -> batchOutput.isReadyGatedPrefetchEnabled() ? 1 : 0);
+                readyMetrics.gauge("batchesStarted", batchOutput::getReadyBatchesStarted);
+                readyMetrics.gauge("readyBeforeDispatch", batchOutput::getReadyBeforeDispatch);
+                readyMetrics.gauge("prefetchWaitNanos", batchOutput::getPrefetchWaitNanos);
+                readyMetrics.gauge(
+                        "dispatchBeforeReadyFallbacks",
+                        batchOutput::getDispatchBeforeReadyFallbacks);
+                readyMetrics.gauge("timeoutFallbacks", batchOutput::getReadyTimeoutFallbacks);
+                readyMetrics.gauge("failureFallbacks", batchOutput::getReadyFailureFallbacks);
+                readyMetrics.gauge("notProvenFallbacks", batchOutput::getReadyNotProvenFallbacks);
+                readyMetrics.gauge("forcedFallbacks", batchOutput::getReadyForcedFallbacks);
+                readyMetrics.gauge(
+                        "readyRecordsDispatched", batchOutput::getReadyRecordsDispatched);
+                readyMetrics.gauge(
+                        "fallbackRecordsDispatched", batchOutput::getFallbackRecordsDispatched);
+                readyMetrics.gauge("inFlightDepth", batchOutput::getInFlightDepth);
+                readyMetrics.gauge("maxInFlightDepth", batchOutput::getMaxObservedInFlightDepth);
+                readyMetrics.gauge("ringFullNanos", batchOutput::getRingFullNanos);
+                readyMetrics.gauge("retainedRecords", batchOutput::getRetainedReadyRecords);
+                readyMetrics.gauge(
+                        "retainedReferenceBytes", batchOutput::getRetainedReadyReferenceBytes);
+                readyMetrics.gauge("maxRetainedRecords", batchOutput::getMaxRetainedReadyRecords);
+                readyMetrics.gauge(
+                        "maxRetainedReferenceBytes",
+                        batchOutput::getMaxRetainedReadyReferenceBytes);
+                readyMetrics.gauge(
+                        "workerQueueNanos",
+                        () -> StatePrefetcher.getReadyGatedBackendMetric(headInput, 0));
+                readyMetrics.gauge(
+                        "workerServiceNanos",
+                        () -> StatePrefetcher.getReadyGatedBackendMetric(headInput, 1));
+                readyMetrics.gauge(
+                        "valuesStaged",
+                        () -> StatePrefetcher.getReadyGatedBackendMetric(headInput, 2));
+                readyMetrics.gauge(
+                        "stagedValuesConsumed",
+                        () -> StatePrefetcher.getReadyGatedBackendMetric(headInput, 3));
+                readyMetrics.gauge(
+                        "stagedValuesDiscarded",
+                        () -> StatePrefetcher.getReadyGatedBackendMetric(headInput, 4));
+                readyMetrics.gauge(
+                        "authoritativeReadsAvoided",
+                        () -> StatePrefetcher.getReadyGatedBackendMetric(headInput, 5));
+                readyMetrics.gauge(
+                        "workerDiscardedAfterRead",
+                        () -> StatePrefetcher.getReadyGatedBackendMetric(headInput, 6));
+                readyMetrics.gauge(
+                        "stagingAdmissionDrops",
+                        () -> StatePrefetcher.getReadyGatedBackendMetric(headInput, 7));
+                return batchOutput;
             }
 
             boolean enabled =

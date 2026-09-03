@@ -104,6 +104,9 @@ class CacheKitKeyedStateBackendLifecycleTest {
                         .get(10, TimeUnit.SECONDS));
         verify(first, times(1)).getSerializedValue(any(), any(), any(), any());
         verify(second, times(1)).getSerializedValue(any(), any(), any(), any());
+        long[] metrics = cacheKit.readyGatedPrefetchMetrics();
+        assertEquals(2L, metrics[2]);
+        assertEquals(0L, metrics[3]);
         cacheKit.close();
     }
 

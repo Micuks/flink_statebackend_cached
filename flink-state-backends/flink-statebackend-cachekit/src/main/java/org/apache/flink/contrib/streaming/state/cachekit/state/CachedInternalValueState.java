@@ -2460,6 +2460,20 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         return prefetchWorkerFailures;
     }
 
+    /** Snapshot used by the optional ready-gate runtime metric bridge. */
+    public long[] readyGatedPrefetchMetricsSnapshot() {
+        return new long[] {
+            prefetchWorkerQueueNanos,
+            prefetchWorkerRunNanos,
+            prefetchValuesStaged,
+            prefetchValuesPromoted,
+            prefetchUnusedStagedOnClose + prefetchKeyScopedStagedRemoved,
+            prefetchValuesPromoted,
+            prefetchWorkerDiscardedAfterRead,
+            prefetchStagingAdmissionDrops
+        };
+    }
+
     long getPrefetchKeyScopedInvalidationsForTesting() {
         return prefetchKeyScopedInvalidations;
     }

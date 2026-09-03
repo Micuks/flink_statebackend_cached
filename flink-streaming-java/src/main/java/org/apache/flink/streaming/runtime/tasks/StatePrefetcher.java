@@ -89,6 +89,10 @@ public final class StatePrefetcher {
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             COMPLETION_PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Cache of optional ready-gate metric snapshots per backend class. */
+    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
+            READY_METRICS_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
     /** Cache of optional synchronous local-preagg bulk-prefetch methods per backend class. */
     private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Method>
             IMMEDIATE_PREFETCH_METHOD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
@@ -300,6 +304,34 @@ public final class StatePrefetcher {
             return ((CompletionStage<Boolean>) result).toCompletableFuture();
         } catch (Throwable failure) {
             return CompletableFuture.completedFuture(false);
+        }
+    }
+
+    /** Reads one counter from the optional CacheKit ready-gate metric snapshot. */
+    public static long getReadyGatedBackendMetric(Input<?> headOperator, int metricIndex) {
+        if (!(headOperator instanceof AbstractStreamOperator) || metricIndex < 0) {
+            return 0L;
+        }
+        try {
+            KeyedStateBackend<?> backend =
+                    ((AbstractStreamOperator<?>) headOperator).getKeyedStateBackend();
+            if (backend == null) {
+                return 0L;
+            }
+            Method method =
+                    READY_METRICS_METHOD_CACHE.computeIfAbsent(
+                            backend.getClass(), StatePrefetcher::lookupReadyMetricsMethod);
+            if (method == NO_METHOD) {
+                return 0L;
+            }
+            Object result = method.invoke(backend);
+            if (!(result instanceof long[])) {
+                return 0L;
+            }
+            long[] metrics = (long[]) result;
+            return metricIndex < metrics.length ? metrics[metricIndex] : 0L;
+        } catch (Throwable failure) {
+            return 0L;
         }
     }
 
@@ -916,6 +948,20 @@ public final class StatePrefetcher {
                 Method method =
                         current.getDeclaredMethod(
                                 "prefetchWithCompletion", java.util.Collection.class);
+                method.setAccessible(true);
+                return method;
+            } catch (NoSuchMethodException ignored) {
+                current = current.getSuperclass();
+            }
+        }
+        return NO_METHOD;
+    }
+
+    private static Method lookupReadyMetricsMethod(Class<?> backendClass) {
+        Class<?> current = backendClass;
+        while (current != null && current != Object.class) {
+            try {
+                Method method = current.getDeclaredMethod("readyGatedPrefetchMetrics");
                 method.setAccessible(true);
                 return method;
             } catch (NoSuchMethodException ignored) {

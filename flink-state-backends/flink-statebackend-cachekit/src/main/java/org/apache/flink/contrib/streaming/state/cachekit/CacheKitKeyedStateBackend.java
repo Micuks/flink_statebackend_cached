@@ -1404,6 +1404,29 @@ public class CacheKitKeyedStateBackend<K> extends AbstractKeyedStateBackend<K>
     }
 
     /**
+     * Aggregates completion-path counters without exposing CacheKit classes to the streaming
+     * runtime. Indices are queue nanos, service nanos, staged, consumed, discarded,
+     * authoritative reads avoided, worker discards after read, and staging admission drops.
+     */
+    public long[] readyGatedPrefetchMetrics() {
+        long[] aggregate = new long[8];
+        synchronized (lifecycleLock) {
+            for (Object wrapper : wrappersByDelegateIdentity.values()) {
+                if (!(wrapper instanceof CachedInternalValueState)) {
+                    continue;
+                }
+                long[] stateMetrics =
+                        ((CachedInternalValueState<?, ?, ?>) wrapper)
+                                .readyGatedPrefetchMetricsSnapshot();
+                for (int i = 0; i < aggregate.length; i++) {
+                    aggregate[i] += stateMetrics[i];
+                }
+            }
+        }
+        return aggregate;
+    }
+
+    /**
      * Synchronously bulk-load keys that local pre-aggregation has already committed to consume.
      *
      * <p>This is intentionally separate from speculative record lookahead. It only touches

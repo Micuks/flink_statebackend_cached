@@ -103,6 +103,16 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
     private long ringFullNanos;
     private long maxObservedInFlightDepth;
     private long retainedReadyRecords;
+    private long retainedReadyReferenceBytes;
+    private long maxRetainedReadyRecords;
+    private long maxRetainedReadyReferenceBytes;
+    private long readyBatchesStarted;
+    private long readyTimeoutFallbacks;
+    private long readyFailureFallbacks;
+    private long readyNotProvenFallbacks;
+    private long readyForcedFallbacks;
+    private long readyRecordsDispatched;
+    private long fallbackRecordsDispatched;
 
     private static final ScheduledThreadPoolExecutor READY_TIMEOUT_EXECUTOR;
 
@@ -606,7 +616,12 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 new ReadyBatch<>(
                         nextReadyBatchSequence++, records, n, readyGatedTimeoutNanos, completion);
         readyBatches.addLast(batch);
+        readyBatchesStarted++;
         retainedReadyRecords += n;
+        retainedReadyReferenceBytes += (long) n * Long.BYTES;
+        maxRetainedReadyRecords = Math.max(maxRetainedReadyRecords, retainedReadyRecords);
+        maxRetainedReadyReferenceBytes =
+                Math.max(maxRetainedReadyReferenceBytes, retainedReadyReferenceBytes);
         maxObservedInFlightDepth = Math.max(maxObservedInFlightDepth, readyBatches.size());
         if (readyBatches.size() >= readyGatedMaxInFlight && ringFullSinceNanos == 0L) {
             ringFullSinceNanos = System.nanoTime();
@@ -635,9 +650,20 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         head.phase = ReadyBatchPhase.DISPATCHING;
         if (provenReady) {
             readyBeforeDispatch++;
+            readyRecordsDispatched += head.count;
             prefetchWaitNanos += Math.max(0L, now - head.sealedNanos);
         } else {
             dispatchBeforeReadyFallbacks++;
+            fallbackRecordsDispatched += head.count;
+            if (force) {
+                readyForcedFallbacks++;
+            } else if (!head.completionObserved) {
+                readyTimeoutFallbacks++;
+            } else if (head.failure != null) {
+                readyFailureFallbacks++;
+            } else {
+                readyNotProvenFallbacks++;
+            }
             cancelPrefetchForDispatch(head.records, head.count);
         }
         CollapseProbe.observe(headOperator, head.records, head.count);
@@ -649,6 +675,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                 throw new IllegalStateException("ready-gated prefetch ring order changed");
             }
             retainedReadyRecords -= head.count;
+            retainedReadyReferenceBytes -= (long) head.count * Long.BYTES;
             head.release();
             if (ringFullSinceNanos != 0L && readyBatches.size() < readyGatedMaxInFlight) {
                 ringFullNanos += Math.max(0L, System.nanoTime() - ringFullSinceNanos);
@@ -824,32 +851,108 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         return batchTimeoutNanos;
     }
 
+    public boolean isReadyGatedPrefetchEnabled() {
+        return readyGatedPrefetch;
+    }
+
+    public long getReadyBatchesStarted() {
+        return readyBatchesStarted;
+    }
+
+    public long getReadyBeforeDispatch() {
+        return readyBeforeDispatch;
+    }
+
+    public long getPrefetchWaitNanos() {
+        return prefetchWaitNanos;
+    }
+
+    public long getDispatchBeforeReadyFallbacks() {
+        return dispatchBeforeReadyFallbacks;
+    }
+
+    public long getReadyTimeoutFallbacks() {
+        return readyTimeoutFallbacks;
+    }
+
+    public long getReadyFailureFallbacks() {
+        return readyFailureFallbacks;
+    }
+
+    public long getReadyNotProvenFallbacks() {
+        return readyNotProvenFallbacks;
+    }
+
+    public long getReadyForcedFallbacks() {
+        return readyForcedFallbacks;
+    }
+
+    public long getReadyRecordsDispatched() {
+        return readyRecordsDispatched;
+    }
+
+    public long getFallbackRecordsDispatched() {
+        return fallbackRecordsDispatched;
+    }
+
+    public int getInFlightDepth() {
+        return readyBatches.size();
+    }
+
+    public long getMaxObservedInFlightDepth() {
+        return maxObservedInFlightDepth;
+    }
+
+    public long getRingFullNanos() {
+        return ringFullNanos
+                + (ringFullSinceNanos == 0L
+                        ? 0L
+                        : Math.max(0L, System.nanoTime() - ringFullSinceNanos));
+    }
+
+    public long getRetainedReadyRecords() {
+        return retainedReadyRecords;
+    }
+
+    /** Conservative 8-byte-per-reference estimate, excluding retained record object graphs. */
+    public long getRetainedReadyReferenceBytes() {
+        return retainedReadyReferenceBytes;
+    }
+
+    public long getMaxRetainedReadyRecords() {
+        return maxRetainedReadyRecords;
+    }
+
+    public long getMaxRetainedReadyReferenceBytes() {
+        return maxRetainedReadyReferenceBytes;
+    }
+
     int asyncPrefetchScheduledUntilForTesting() {
         return asyncPrefetchScheduledUntil;
     }
 
     boolean readyGatedPrefetchEnabledForTesting() {
-        return readyGatedPrefetch;
+        return isReadyGatedPrefetchEnabled();
     }
 
     long readyBeforeDispatchForTesting() {
-        return readyBeforeDispatch;
+        return getReadyBeforeDispatch();
     }
 
     long dispatchBeforeReadyFallbacksForTesting() {
-        return dispatchBeforeReadyFallbacks;
+        return getDispatchBeforeReadyFallbacks();
     }
 
     long maxObservedInFlightDepthForTesting() {
-        return maxObservedInFlightDepth;
+        return getMaxObservedInFlightDepth();
     }
 
     long prefetchWaitNanosForTesting() {
-        return prefetchWaitNanos;
+        return getPrefetchWaitNanos();
     }
 
     long ringFullNanosForTesting() {
-        return ringFullNanos;
+        return getRingFullNanos();
     }
 
     long headSequenceForTesting() {

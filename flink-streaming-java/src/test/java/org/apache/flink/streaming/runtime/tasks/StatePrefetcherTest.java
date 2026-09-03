@@ -82,6 +82,23 @@ class StatePrefetcherTest {
 
     @Test
     @SuppressWarnings({"unchecked", "rawtypes"})
+    void testReadyGateMetricBridgeReadsOptionalBackendSnapshot() {
+        KeyedStateBackend<Object> backend =
+                mock(
+                        KeyedStateBackend.class,
+                        withSettings().extraInterfaces(ReadyMetricsHook.class));
+        org.mockito.Mockito.when(((ReadyMetricsHook) backend).readyGatedPrefetchMetrics())
+                .thenReturn(new long[] {11L, 22L, 33L});
+        AbstractStreamOperator operator =
+                mock(AbstractStreamOperator.class, withSettings().extraInterfaces(Input.class));
+        org.mockito.Mockito.when(operator.getKeyedStateBackend()).thenReturn(backend);
+
+        assertEquals(22L, StatePrefetcher.getReadyGatedBackendMetric((Input<?>) operator, 1));
+        assertEquals(0L, StatePrefetcher.getReadyGatedBackendMetric((Input<?>) operator, 9));
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
     void testCompletionPrefetchFailsClosedWhenSelectorFails() throws Exception {
         KeyedStateBackend<Object> backend =
                 mock(
@@ -332,6 +349,10 @@ class StatePrefetcherTest {
 
     public interface CompletionPrefetchHook {
         CompletableFuture<Boolean> prefetchWithCompletion(Collection<?> keys);
+    }
+
+    public interface ReadyMetricsHook {
+        long[] readyGatedPrefetchMetrics();
     }
 
     public interface ImmediatePrefetchAfterDispatchHook {
