@@ -272,8 +272,7 @@ public final class StatePrefetcher {
             if (selector == null) {
                 return CompletableFuture.completedFuture(false);
             }
-            java.util.Collection keys =
-                    newKeyCollection(backend, Math.max(2, toIndex - fromIndex));
+            java.util.Collection keys = newKeyCollection(backend, Math.max(2, toIndex - fromIndex));
             if (!extractKeys(selector, buf, fromIndex, toIndex, keys) || keys.isEmpty()) {
                 return CompletableFuture.completedFuture(false);
             }

@@ -27,6 +27,13 @@ import org.apache.flink.streaming.runtime.streamrecord.LatencyMarker;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.watermarkstatus.WatermarkStatus;
 
+import java.util.ArrayDeque;
+import java.util.Arrays;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
 /**
  * Buffering wrapper around a {@link DataOutput} that accumulates stream records up to a
  * configurable {@code batchSize} (or until {@code batchTimeoutNanos} has elapsed) and then
@@ -81,6 +88,37 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
     private final int asyncPrefetchSlidingDrainRecords;
     /** Revoke still-speculative prepared-key ownership for records selected for dispatch. */
     private final boolean cancelPrefetchOnDispatch;
+    /** Ordered multi-batch ready gate. Opt-in and disabled under object reuse. */
+    private final boolean readyGatedPrefetch;
+
+    private final int readyGatedMaxInFlight;
+    private final long readyGatedTimeoutNanos;
+    private final ArrayDeque<ReadyBatch<T>> readyBatches = new ArrayDeque<>();
+
+    private long nextReadyBatchSequence;
+    private long readyBeforeDispatch;
+    private long prefetchWaitNanos;
+    private long dispatchBeforeReadyFallbacks;
+    private long ringFullSinceNanos;
+    private long ringFullNanos;
+    private long maxObservedInFlightDepth;
+    private long retainedReadyRecords;
+
+    private static final ScheduledThreadPoolExecutor READY_TIMEOUT_EXECUTOR;
+
+    static {
+        READY_TIMEOUT_EXECUTOR =
+                new ScheduledThreadPoolExecutor(
+                        1,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "cachekit-ready-prefetch-timeout");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
+        READY_TIMEOUT_EXECUTOR.setRemoveOnCancelPolicy(true);
+        READY_TIMEOUT_EXECUTOR.setKeepAliveTime(60L, TimeUnit.SECONDS);
+        READY_TIMEOUT_EXECUTOR.allowCoreThreadTimeOut(true);
+    }
 
     // Reusable record buffer. Sized at construction.
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -89,6 +127,59 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
     private int count;
     private long firstAppendNanos;
     private int asyncPrefetchScheduledUntil;
+
+    private enum ReadyBatchPhase {
+        PREFETCHING,
+        READY,
+        DISPATCHING
+    }
+
+    private static final class ReadyBatch<T> {
+        private final long sequence;
+        private final StreamRecord<T>[] records;
+        private final int count;
+        private final long sealedNanos;
+        private final long deadlineNanos;
+        private final CompletableFuture<Void> wakeUp = new CompletableFuture<>();
+        private final ScheduledFuture<?> timeout;
+        private volatile ReadyBatchPhase phase = ReadyBatchPhase.PREFETCHING;
+        private volatile boolean completionObserved;
+        private volatile boolean ready;
+        private volatile Throwable failure;
+
+        private ReadyBatch(
+                long sequence,
+                StreamRecord<T>[] records,
+                int count,
+                long timeoutNanos,
+                CompletableFuture<Boolean> completion) {
+            this.sequence = sequence;
+            this.records = records;
+            this.count = count;
+            this.sealedNanos = System.nanoTime();
+            this.deadlineNanos = sealedNanos + timeoutNanos;
+            this.timeout =
+                    READY_TIMEOUT_EXECUTOR.schedule(
+                            () -> wakeUp.complete(null), timeoutNanos, TimeUnit.NANOSECONDS);
+            completion.whenComplete(
+                    (result, error) -> {
+                        failure = error;
+                        ready = error == null && Boolean.TRUE.equals(result);
+                        completionObserved = true;
+                        phase = ReadyBatchPhase.READY;
+                        wakeUp.complete(null);
+                    });
+        }
+
+        private boolean timedOut(long nowNanos) {
+            return !completionObserved && nowNanos >= deadlineNanos;
+        }
+
+        private void release() {
+            timeout.cancel(false);
+            Arrays.fill(records, null);
+        }
+    }
 
     public StreamRecordBatchOutput(
             DataOutput<T> wrapped,
@@ -275,6 +366,49 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
             int asyncPrefetchHeadGuardRecords,
             int asyncPrefetchSlidingDrainRecords,
             boolean cancelPrefetchOnDispatch) {
+        this(
+                wrapped,
+                headOperator,
+                enabled,
+                commutativeKeySort,
+                batchSize,
+                batchTimeoutNanos,
+                numRecordsIn,
+                prefetchMode,
+                backpressured,
+                backpressureGated,
+                asyncPrefetchChunks,
+                asyncPrefetchChunkSize,
+                asyncPrefetchHeadGuardRecords,
+                asyncPrefetchSlidingDrainRecords,
+                cancelPrefetchOnDispatch,
+                false,
+                2,
+                TimeUnit.MILLISECONDS.toNanos(1),
+                false);
+    }
+
+    /** Complete constructor including the bounded ordered ready gate. */
+    public StreamRecordBatchOutput(
+            DataOutput<T> wrapped,
+            Input<T> headOperator,
+            boolean enabled,
+            boolean commutativeKeySort,
+            int batchSize,
+            long batchTimeoutNanos,
+            Counter numRecordsIn,
+            boolean prefetchMode,
+            java.util.function.BooleanSupplier backpressured,
+            boolean backpressureGated,
+            boolean asyncPrefetchChunks,
+            int asyncPrefetchChunkSize,
+            int asyncPrefetchHeadGuardRecords,
+            int asyncPrefetchSlidingDrainRecords,
+            boolean cancelPrefetchOnDispatch,
+            boolean readyGatedPrefetch,
+            int readyGatedMaxInFlight,
+            long readyGatedTimeoutNanos,
+            boolean objectReuseEnabled) {
         this.wrapped = wrapped;
         this.headOperator = headOperator;
         this.enabled = enabled && batchSize > 1;
@@ -285,7 +419,11 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         this.prefetchMode = prefetchMode;
         this.backpressured = backpressured;
         this.backpressureGated = backpressureGated;
-        this.asyncPrefetchChunks = asyncPrefetchChunks;
+        this.readyGatedPrefetch =
+                readyGatedPrefetch && this.enabled && prefetchMode && !objectReuseEnabled;
+        this.readyGatedMaxInFlight = Math.max(2, Math.min(4, readyGatedMaxInFlight));
+        this.readyGatedTimeoutNanos = Math.max(1L, readyGatedTimeoutNanos);
+        this.asyncPrefetchChunks = asyncPrefetchChunks && !this.readyGatedPrefetch;
         this.asyncPrefetchChunkSize = Math.max(2, Math.min(1024, asyncPrefetchChunkSize));
         this.asyncPrefetchHeadGuardRecords =
                 Math.max(0, Math.min(this.batchSize - 1, asyncPrefetchHeadGuardRecords));
@@ -305,6 +443,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
                         ? (BatchProcessingOperator<T, ?>) headOperator
                         : null;
         this.asyncPrefetchScheduledUntil = 0;
+        this.nextReadyBatchSequence = 0L;
     }
 
     // ------------------------------------------------------------------------
@@ -320,7 +459,9 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
         }
         append(record);
         if (count >= batchSize) {
-            if (asyncPrefetchSlidingDrainRecords > 0) {
+            if (readyGatedPrefetch) {
+                sealReadyBatch();
+            } else if (asyncPrefetchSlidingDrainRecords > 0) {
                 drainSlidingHead();
             } else {
                 flushBatch();
@@ -331,7 +472,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
     @Override
     public void emitWatermark(Watermark watermark) throws Exception {
         // Watermark must observe all preceding records.
-        if (count > 0) {
+        if (size() > 0) {
             flushBatch();
         }
         wrapped.emitWatermark(watermark);
@@ -339,7 +480,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
 
     @Override
     public void emitWatermarkStatus(WatermarkStatus watermarkStatus) throws Exception {
-        if (count > 0) {
+        if (size() > 0) {
             flushBatch();
         }
         wrapped.emitWatermarkStatus(watermarkStatus);
@@ -347,7 +488,7 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
 
     @Override
     public void emitLatencyMarker(LatencyMarker latencyMarker) throws Exception {
-        if (count > 0) {
+        if (size() > 0) {
             flushBatch();
         }
         wrapped.emitLatencyMarker(latencyMarker);
@@ -379,11 +520,21 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
 
     @Override
     public int size() {
-        return count;
+        return readyGatedPrefetch ? count + (int) retainedReadyRecords : count;
     }
 
     @Override
     public void flushBatch() throws Exception {
+        if (readyGatedPrefetch) {
+            if (count > 0) {
+                sealReadyBatch();
+            }
+            drainReadyBatches();
+            while (!readyBatches.isEmpty()) {
+                dispatchReadyHead(true);
+            }
+            return;
+        }
         if (count == 0) {
             return;
         }
@@ -401,6 +552,108 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
             dispatchPrefix(n);
         } finally {
             discardPrefix(n);
+        }
+    }
+
+    @Override
+    public void drainReadyBatches() throws Exception {
+        if (!readyGatedPrefetch) {
+            return;
+        }
+        while (!readyBatches.isEmpty()) {
+            ReadyBatch<T> head = readyBatches.peekFirst();
+            if (!head.completionObserved && !head.timedOut(System.nanoTime())) {
+                return;
+            }
+            dispatchReadyHead(false);
+        }
+    }
+
+    @Override
+    public boolean isInputBlocked() {
+        return readyGatedPrefetch && readyBatches.size() >= readyGatedMaxInFlight;
+    }
+
+    @Override
+    public CompletableFuture<?> getAvailableFuture(CompletableFuture<?> inputAvailable) {
+        if (!readyGatedPrefetch || readyBatches.isEmpty()) {
+            return inputAvailable;
+        }
+        CompletableFuture<?> headReady = readyBatches.peekFirst().wakeUp;
+        if (isInputBlocked()) {
+            return headReady;
+        }
+        return CompletableFuture.anyOf(inputAvailable, headReady);
+    }
+
+    /** Move the current filling buffer into the ordered in-flight ring. */
+    private void sealReadyBatch() {
+        if (count == 0) {
+            return;
+        }
+        if (readyBatches.size() >= readyGatedMaxInFlight) {
+            throw new IllegalStateException("ready-gated prefetch ring exceeded its bound");
+        }
+        final int n = count;
+        StreamRecord<T>[] records = Arrays.copyOf(buf, n);
+        Arrays.fill(buf, 0, n, null);
+        count = 0;
+        firstAppendNanos = 0L;
+        asyncPrefetchScheduledUntil = 0;
+
+        CompletableFuture<Boolean> completion = startReadyPrefetch(records, n);
+        ReadyBatch<T> batch =
+                new ReadyBatch<>(
+                        nextReadyBatchSequence++, records, n, readyGatedTimeoutNanos, completion);
+        readyBatches.addLast(batch);
+        retainedReadyRecords += n;
+        maxObservedInFlightDepth = Math.max(maxObservedInFlightDepth, readyBatches.size());
+        if (readyBatches.size() >= readyGatedMaxInFlight && ringFullSinceNanos == 0L) {
+            ringFullSinceNanos = System.nanoTime();
+        }
+    }
+
+    CompletableFuture<Boolean> startReadyPrefetch(StreamRecord<T>[] records, int n) {
+        if (backpressureGated && (backpressured == null || !backpressured.getAsBoolean())) {
+            return CompletableFuture.completedFuture(false);
+        }
+        return org.apache.flink.streaming.runtime.tasks.StatePrefetcher.prefetchWithCompletion(
+                headOperator, records, 0, n);
+    }
+
+    /** Dispatch exactly one ring head, falling back immediately when forced or not proven ready. */
+    private void dispatchReadyHead(boolean force) throws Exception {
+        ReadyBatch<T> head = readyBatches.peekFirst();
+        if (head == null) {
+            return;
+        }
+        long now = System.nanoTime();
+        boolean provenReady = head.completionObserved && head.ready && head.failure == null;
+        if (!force && !provenReady && !head.completionObserved && !head.timedOut(now)) {
+            return;
+        }
+        head.phase = ReadyBatchPhase.DISPATCHING;
+        if (provenReady) {
+            readyBeforeDispatch++;
+            prefetchWaitNanos += Math.max(0L, now - head.sealedNanos);
+        } else {
+            dispatchBeforeReadyFallbacks++;
+            cancelPrefetchForDispatch(head.records, head.count);
+        }
+        CollapseProbe.observe(headOperator, head.records, head.count);
+        try {
+            dispatchRecords(head.records, head.count, false);
+        } finally {
+            ReadyBatch<T> removed = readyBatches.removeFirst();
+            if (removed != head) {
+                throw new IllegalStateException("ready-gated prefetch ring order changed");
+            }
+            retainedReadyRecords -= head.count;
+            head.release();
+            if (ringFullSinceNanos != 0L && readyBatches.size() < readyGatedMaxInFlight) {
+                ringFullNanos += Math.max(0L, System.nanoTime() - ringFullSinceNanos);
+                ringFullSinceNanos = 0L;
+            }
         }
     }
 
@@ -424,50 +677,64 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
 
     /** Dispatch a prefix without changing buffer ownership or queue indices. */
     private void dispatchPrefix(int n) throws Exception {
+        dispatchRecords(buf, n, true);
+    }
+
+    /** Dispatch caller-owned records without changing their buffer or ring ownership. */
+    private void dispatchRecords(
+            StreamRecord<T>[] records, int n, boolean applyConfiguredCancellation)
+            throws Exception {
         // Selection is the exact point where a lookahead key stops being speculative. Revoke only
         // the matching prepared-MultiGet reservation before LocalPreagg or ordinary per-record
         // execution can race the worker. Already-published staging remains usable; unsupported
         // backends fail closed inside StatePrefetcher.
-        if (LocalPreagg.dispatch(headOperator, buf, n, numRecordsIn, cancelPrefetchOnDispatch)) {
+        if (!readyGatedPrefetch
+                && LocalPreagg.dispatch(
+                        headOperator,
+                        records,
+                        n,
+                        numRecordsIn,
+                        cancelPrefetchOnDispatch && applyConfiguredCancellation)) {
             return;
         }
         // LocalPreagg reuses its already-deduplicated group keys for cancellation. Only the
         // ordinary replay path still needs to extract keys from the record prefix here.
-        if (cancelPrefetchOnDispatch) {
+        if (cancelPrefetchOnDispatch && applyConfiguredCancellation) {
             cancelPrefetchForDispatch(n);
         }
         if (prefetchMode) {
-            if (!asyncPrefetchChunks
+            if (!readyGatedPrefetch
+                    && !asyncPrefetchChunks
                     && (!backpressureGated
                             || (backpressured != null && backpressured.getAsBoolean()))) {
                 org.apache.flink.streaming.runtime.tasks.StatePrefetcher.prefetch(
-                        headOperator, buf, n);
+                        headOperator, records, n);
             }
         }
         boolean nativeMutationBatchStarted =
                 org.apache.flink.streaming.runtime.tasks.StatePrefetcher
-                        .beginNativeResidentMutationBatch(headOperator, buf, 0, n);
+                        .beginNativeResidentMutationBatch(headOperator, records, 0, n);
         try {
             if (prefetchMode) {
-                if (commutativeKeySort) {
+                if (commutativeKeySort && !readyGatedPrefetch) {
                     org.apache.flink.streaming.runtime.tasks.BatchedKeyedOperatorAdapter
-                            .dispatchSorted(headOperator, buf, n, numRecordsIn);
+                            .dispatchSorted(headOperator, records, n, numRecordsIn);
                 } else {
                     for (int i = 0; i < n; i++) {
-                        wrapped.emitRecord(buf[i]);
+                        wrapped.emitRecord(records[i]);
                     }
                 }
             } else if (batchOperator != null) {
                 if (numRecordsIn != null) {
                     numRecordsIn.inc(n);
                 }
-                batchOperator.processElementBatch(buf, n);
+                batchOperator.processElementBatch(records, n);
             } else if (commutativeKeySort) {
                 org.apache.flink.streaming.runtime.tasks.BatchedKeyedOperatorAdapter.dispatchSorted(
-                        headOperator, buf, n, numRecordsIn);
+                        headOperator, records, n, numRecordsIn);
             } else {
                 for (int i = 0; i < n; i++) {
-                    wrapped.emitRecord(buf[i]);
+                    wrapped.emitRecord(records[i]);
                 }
             }
         } finally {
@@ -480,8 +747,13 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
 
     /** Test seam for proving that revocation precedes any state-consuming dispatch path. */
     int cancelPrefetchForDispatch(int n) {
+        return cancelPrefetchForDispatch(buf, n);
+    }
+
+    /** Test seam for proving fallback cancellation on a detached ready batch. */
+    int cancelPrefetchForDispatch(StreamRecord<T>[] records, int n) {
         return org.apache.flink.streaming.runtime.tasks.StatePrefetcher.cancelPrefetchForDispatch(
-                headOperator, buf, 0, n);
+                headOperator, records, 0, n);
     }
 
     /** Remove a dispatched prefix while preserving arrival order and scheduled-tail ownership. */
@@ -554,5 +826,33 @@ public class StreamRecordBatchOutput<T> implements DataOutput<T>, BatchOutput<T>
 
     int asyncPrefetchScheduledUntilForTesting() {
         return asyncPrefetchScheduledUntil;
+    }
+
+    boolean readyGatedPrefetchEnabledForTesting() {
+        return readyGatedPrefetch;
+    }
+
+    long readyBeforeDispatchForTesting() {
+        return readyBeforeDispatch;
+    }
+
+    long dispatchBeforeReadyFallbacksForTesting() {
+        return dispatchBeforeReadyFallbacks;
+    }
+
+    long maxObservedInFlightDepthForTesting() {
+        return maxObservedInFlightDepth;
+    }
+
+    long prefetchWaitNanosForTesting() {
+        return prefetchWaitNanos;
+    }
+
+    long ringFullNanosForTesting() {
+        return ringFullNanos;
+    }
+
+    long headSequenceForTesting() {
+        return readyBatches.isEmpty() ? -1L : readyBatches.peekFirst().sequence;
     }
 }

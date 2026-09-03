@@ -52,8 +52,7 @@ class StatePrefetcherTest {
                         withSettings().extraInterfaces(CompletionPrefetchHook.class));
         Collection<Integer> keys = Arrays.asList(1, 2, 3);
         CompletableFuture<Boolean> completion = new CompletableFuture<>();
-        org.mockito.Mockito.when(
-                        ((CompletionPrefetchHook) backend).prefetchWithCompletion(keys))
+        org.mockito.Mockito.when(((CompletionPrefetchHook) backend).prefetchWithCompletion(keys))
                 .thenReturn(completion);
 
         CompletableFuture<Boolean> result =
@@ -76,8 +75,7 @@ class StatePrefetcherTest {
                 mock(
                         KeyedStateBackend.class,
                         withSettings().extraInterfaces(CompletionPrefetchHook.class));
-        org.mockito.Mockito.when(
-                        ((CompletionPrefetchHook) failing).prefetchWithCompletion(keys))
+        org.mockito.Mockito.when(((CompletionPrefetchHook) failing).prefetchWithCompletion(keys))
                 .thenThrow(new IllegalStateException("reflection target failed"));
         assertFalse(StatePrefetcher.prefetchKeysWithCompletion(failing, keys).join());
     }

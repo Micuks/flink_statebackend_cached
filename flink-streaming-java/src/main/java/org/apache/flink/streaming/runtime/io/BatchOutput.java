@@ -20,6 +20,8 @@ package org.apache.flink.streaming.runtime.io;
 
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
  * Mailbox-level batch buffer used by the CacheKit batching path.
  *
@@ -49,4 +51,23 @@ public interface BatchOutput<T> {
      * return, the buffer is empty and ready for reuse.
      */
     void flushBatch() throws Exception;
+
+    /**
+     * Dispatches every completed head batch without waiting. Implementations must preserve arrival
+     * order and may leave an incomplete head buffered.
+     */
+    default void drainReadyBatches() throws Exception {}
+
+    /** Returns true when bounded retained state requires default input processing to pause. */
+    default boolean isInputBlocked() {
+        return false;
+    }
+
+    /**
+     * Combines input readiness with any retained-batch completion signal. A blocked output must not
+     * return the input future because consuming another record could exceed its retention bound.
+     */
+    default CompletableFuture<?> getAvailableFuture(CompletableFuture<?> inputAvailable) {
+        return inputAvailable;
+    }
 }

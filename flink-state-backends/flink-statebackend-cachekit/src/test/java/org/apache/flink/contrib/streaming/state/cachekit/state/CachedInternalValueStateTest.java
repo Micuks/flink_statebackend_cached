@@ -120,6 +120,50 @@ class CachedInternalValueStateTest {
     }
 
     @Test
+    void testCompletionPrefetchFailsClosedAfterGenerationChanges() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("mailbox-write");
+        CountDownLatch workerEntered = new CountDownLatch(1);
+        CountDownLatch releaseWorker = new CountDownLatch(1);
+        InternalValueState<String, String, Integer> delegate = mock(InternalValueState.class);
+        when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getNamespaceSerializer()).thenReturn(StringSerializer.INSTANCE);
+        when(delegate.getValueSerializer()).thenReturn(IntSerializer.INSTANCE);
+        when(delegate.getSerializedValue(any(), any(), any(), any()))
+                .thenAnswer(
+                        ignored -> {
+                            workerEntered.countDown();
+                            assertTrue(releaseWorker.await(10, TimeUnit.SECONDS));
+                            return KvStateSerializer.serializeValue(17, IntSerializer.INSTANCE);
+                        });
+        CachedInternalValueState<String, String, Integer> state =
+                new CachedInternalValueState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        100,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.05,
+                        1000,
+                        false);
+        state.setCurrentNamespace("window");
+
+        java.util.concurrent.CompletableFuture<Boolean> completion =
+                state.prefetchWithCompletion(Collections.singletonList("prefetched"));
+        assertTrue(workerEntered.await(10, TimeUnit.SECONDS));
+        java.lang.reflect.Field writeGeneration =
+                CachedInternalValueState.class.getDeclaredField("writeGen");
+        writeGeneration.setAccessible(true);
+        writeGeneration.setLong(state, 1L);
+        releaseWorker.countDown();
+
+        assertFalse(completion.get(10, TimeUnit.SECONDS));
+        assertEquals(0, state.getStagingSizeForTesting());
+        state.close();
+    }
+
+    @Test
     void testCompletionPrefetchDoesNotClaimReadyWithoutWorkerWork() throws Exception {
         InternalValueState<String, String, Integer> delegate = mock(InternalValueState.class);
         when(delegate.getKeySerializer()).thenReturn(StringSerializer.INSTANCE);

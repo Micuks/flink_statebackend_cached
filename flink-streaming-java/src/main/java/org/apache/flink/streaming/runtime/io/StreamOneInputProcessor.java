@@ -58,11 +58,21 @@ public final class StreamOneInputProcessor<IN> implements StreamInputProcessor {
 
     @Override
     public CompletableFuture<?> getAvailableFuture() {
-        return input.getAvailableFuture();
+        CompletableFuture<?> inputAvailable = input.getAvailableFuture();
+        return output instanceof BatchOutput
+                ? ((BatchOutput<?>) output).getAvailableFuture(inputAvailable)
+                : inputAvailable;
     }
 
     @Override
     public DataInputStatus processInput() throws Exception {
+        if (output instanceof BatchOutput) {
+            BatchOutput<?> batchOutput = (BatchOutput<?>) output;
+            batchOutput.drainReadyBatches();
+            if (batchOutput.isInputBlocked()) {
+                return DataInputStatus.NOTHING_AVAILABLE;
+            }
+        }
         DataInputStatus status = input.emitNext(output);
 
         if (status == DataInputStatus.END_OF_DATA) {
