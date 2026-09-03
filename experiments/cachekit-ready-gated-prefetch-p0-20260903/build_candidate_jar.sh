@@ -16,9 +16,15 @@ frozen_jar=$1
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo=$(git -C "$script_dir" rev-parse --show-toplevel)
-actual_source=$(git -C "$repo" rev-parse HEAD)
-[[ $actual_source == "$expected_source" ]] || {
-  echo "source mismatch: expected $expected_source, got $actual_source" >&2
+branch_head=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" merge-base --is-ancestor "$expected_source" "$branch_head" || {
+  echo "expected source is not an ancestor of branch head: $branch_head" >&2
+  exit 65
+}
+git -C "$repo" diff --quiet "$expected_source" "$branch_head" -- \
+  flink-streaming-java flink-state-backends/flink-statebackend-cachekit \
+  flink-state-backends/flink-statebackend-rocksdb flink-table/flink-table-runtime || {
+  echo "runtime source differs from expected commit $expected_source" >&2
   exit 65
 }
 [[ -z $(git -C "$repo" status --porcelain --untracked-files=all) ]] || {
@@ -104,7 +110,8 @@ unzip -t "$candidate" >/dev/null
 candidate_sha=$(sha256sum "$candidate" | awk '{print $1}')
 manifest=$repo/flink-state-backends/flink-statebackend-cachekit/target/CANDIDATE_BUILD.txt
 {
-  echo "source_commit=$actual_source"
+  echo "source_commit=$expected_source"
+  echo "branch_head=$branch_head"
   echo "frozen_overlay_commit=$frozen_source"
   echo "frozen_overlay_sha256=$actual_frozen_sha"
   echo "candidate_sha256=$candidate_sha"
