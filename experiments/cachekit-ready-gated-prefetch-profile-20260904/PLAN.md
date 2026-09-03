@@ -22,12 +22,20 @@ hosts, despite staging and consuming millions of ValueState values?
 After each leg's runner enters the real measurement window, select the highest
 CPU `TaskManagerRunner` JVM in each TaskManager container and collect:
 
-- 60 seconds CPU at 5 ms sampling interval, thread-separated, collapsed output.
+- 60 seconds CPU at 5 ms sampling interval, thread-separated, collapsed output;
+  if the container cannot access perf events, record that check and use wall-clock
+  sampling at the same interval.
 - 45 seconds allocation sampling, thread-separated, collapsed output.
 
 The profiler is copied into the owned campaign containers and every output is
 copied to the host experiment directory before Compose cleanup. No profiler is
 attached to a foreign container or process.
+
+Attempt 1 used the redirected runner log as its phase signal. Python block
+buffering kept that file empty until the leg ended, so no profiler was attached
+and the attempt is diagnostic infrastructure failure only. Attempt 2 instead
+waits for at least three live `Current Cores=` samples in the owned Compose
+project's `nexmark-logs` volume.
 
 ## Decision use
 

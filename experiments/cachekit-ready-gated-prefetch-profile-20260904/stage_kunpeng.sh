@@ -4,18 +4,28 @@ set -euo pipefail
 host=root@173.154.10.2
 control_path=/tmp/cachekit-kp-ssh-20260903.sock
 source_exp=/home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p1-q9-100m-kunpeng-20260903
-target_exp=/home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p1-profile-q9-100m-kunpeng-20260904
+profile_attempt=${PROFILE_ATTEMPT:-2}
+[[ $profile_attempt =~ ^[2-9]$ ]] || {
+  echo "PROFILE_ATTEMPT must be an integer from 2 through 9" >&2
+  exit 64
+}
+target_exp=/home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p1-profile-q9-100m-kunpeng-20260904-a${profile_attempt}
 source_project=ckkp5a9p1
-target_project=ckkp5a9pr
+target_project=ckkp5a9p${profile_attempt}
 source_scratch=/tmp/ckkp5a9p1
-target_scratch=/tmp/ckkp5a9pr
+target_scratch=/tmp/ckkp5a9p${profile_attempt}
+target_rest_port=$((10790 + profile_attempt))
+target_prom_port=$((11831 + (profile_attempt - 1) * 2))
+target_push_port=$((target_prom_port + 1))
 target_cpuset=38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74
 
 ssh_cmd=(ssh -S "$control_path" -o BatchMode=yes "$host")
 
 "${ssh_cmd[@]}" bash -s -- \
   "$source_exp" "$target_exp" "$source_project" "$target_project" \
-  "$source_scratch" "$target_scratch" "$target_cpuset" <<'REMOTE'
+  "$source_scratch" "$target_scratch" "$target_cpuset" \
+  "$target_rest_port" "$target_prom_port" "$target_push_port" \
+  "$profile_attempt" <<'REMOTE'
 set -euo pipefail
 source_exp=$1
 target_exp=$2
@@ -24,6 +34,10 @@ target_project=$4
 source_scratch=$5
 target_scratch=$6
 target_cpuset=$7
+target_rest_port=$8
+target_prom_port=$9
+target_push_port=${10}
+profile_attempt=${11}
 
 [[ -f $source_exp/CAMPAIGN_COMPLETE ]]
 [[ -f $source_exp/final/HOST_RESULT_COMPLETE ]]
@@ -75,7 +89,8 @@ cp "$source_exp/identity.json" "$source_exp/CONFIG_DIFF_AUDIT.json" \
   "$source_exp/summarize.py" "$source_exp/run_campaign.sh" "$target_exp/"
 
 python3 - "$target_exp" "$source_exp" "$target_exp" \
-  "$source_project" "$target_project" "$source_scratch" "$target_scratch" <<'PY'
+  "$source_project" "$target_project" "$source_scratch" "$target_scratch" \
+  "$target_rest_port" "$target_prom_port" "$target_push_port" "$profile_attempt" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -86,9 +101,9 @@ replacements = [(value.encode(), replacement.encode()) for value, replacement in
     (sys.argv[2], sys.argv[3]),
     (sys.argv[4], sys.argv[5]),
     (sys.argv[6], sys.argv[7]),
-    ("10789", "10791"),
-    ("11823", "11831"),
-    ("11824", "11832"),
+    ("10789", sys.argv[8]),
+    ("11823", sys.argv[9]),
+    ("11824", sys.argv[10]),
 )]
 rewritten = []
 for path in root.rglob("*"):
@@ -126,6 +141,12 @@ profile = {
     "source_commit": identity["source_commit"],
     "queries": identity["queries"],
     "variants": identity["variants"],
+    "profile_attempt": int(sys.argv[11]),
+    "ports": {
+        "rest": int(sys.argv[8]),
+        "prometheus": int(sys.argv[9]),
+        "pushgateway": int(sys.argv[10]),
+    },
     "rewritten_text_files": sorted(rewritten),
 }
 (root / "PROFILE_STAGING.json").write_text(
