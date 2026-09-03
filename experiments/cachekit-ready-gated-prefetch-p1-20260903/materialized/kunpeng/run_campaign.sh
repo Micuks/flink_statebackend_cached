@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-expdir=@EXPDIR@
-project=@PROJECT@
-compose=@COMPOSE@
-rest=@REST@
-prom=@PROM@
-scratch=@SCRATCH@
-runtime_manifest=@RUNTIME_MANIFEST@
+expdir=/home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p1-q9-100m-kunpeng-20260903
+project=ckkp5a9p1
+compose=/home/wuql/bin/docker-compose
+rest=http://127.0.0.1:10789
+prom=http://127.0.0.1:11823
+scratch=/tmp/ckkp5a9p1
+runtime_manifest=$expdir/inputs/runtime/RUNTIME_BUNDLE.json
 source_commit=5a9d1e656715a403afac72ee1a516876ddbfb7f1
-artifact_sha=@ARTIFACT_SHA@
+artifact_sha=97487e04d293f154b8856e43decf2573fabaaf35e36077ea635a1f55d0f59dfc
 events=100000000
 queries=(q9)
 variants=(control ready-d2)
 rounds=(1)
 
-export GOLDEN_HOST=@GOLDEN_HOST@
-export GOLDEN_CONTAINER_FLINK_HOME=@CONTAINER_FLINK_HOME@
+export GOLDEN_HOST=kunpeng
+export GOLDEN_CONTAINER_FLINK_HOME=/opt/flink-1.16.3
 export COMPOSE_PROJECT_NAME=$project
 export GOLDEN_COMPOSE_COMMAND_JSON="[\"$compose\",\"--project-name\",\"$project\"]"
-export GOLDEN_CONTAINER_CPUSET_MEMS_JSON='@CPUSET_MEMS_JSON@'
+export GOLDEN_CONTAINER_CPUSET_MEMS_JSON='{"ckkp5a9p1_jobmanager_1":"1","ckkp5a9p1_taskmanager1_1":"1","ckkp5a9p1_taskmanager2_1":"1","ckkp5a9p1_prometheus_1":"1","ckkp5a9p1_pushgateway_1":"1"}'
 
 mkdir -p "$expdir"/{logs,results/raw,results/failed,final} "$scratch"
 owner=$scratch/.cachekit-ready-gated-owner
@@ -155,7 +155,7 @@ for forbidden in ('UnsatisfiedLinkError','OutOfMemoryError','Fatal error','Nativ
 assert '[CACHEKIT VALUE PREFETCH]' in logs
 result={
  'schema':'cachekit-ready-gated-prefetch-p1-leg-v1','valid':True,
- 'source_commit':source,'artifact_sha256':artifact,'platform':'@PLATFORM@','query':query,
+ 'source_commit':source,'artifact_sha256':artifact,'platform':'kunpeng','query':query,
  'round':rnd,'variant':variant,'allocated_tm_logical_cpus':16,
  'config_sha256':config_sha,'measurement':m,
 }

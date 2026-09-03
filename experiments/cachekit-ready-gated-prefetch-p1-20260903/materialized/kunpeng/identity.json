@@ -1,0 +1,42 @@
+{
+  "architecture": "aarch64",
+  "arm_native_origin": {
+    "native_entry": "META-INF/native/libcachekit_snapshot_jni.so",
+    "native_entry_sha256": "6765775306c7ed00b1606de5340f0ba18ae5adc8fe242b49b336f79f96749fe2",
+    "source_artifact_sha256": "35092a30d3ac979477a4445c5ead455258ab8a6a5278c815ad29a4301a3a7efd",
+    "source_experiment": "/home/wuql/flink-cluster/experiments/cachekit-native-stage123-javafullopt-15q-100m-r1-r3-kunpeng-20260903"
+  },
+  "artifact_sha256": "97487e04d293f154b8856e43decf2573fabaaf35e36077ea635a1f55d0f59dfc",
+  "artifact_size_bytes": 3104905,
+  "base_source_commit": "7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000",
+  "checkpointing": "disabled by absence of execution.checkpointing.interval",
+  "events": 100000000,
+  "frozen_overlay_commit": "bbd39affde9278d44b9f78d201849bf929249d54",
+  "object_reuse": false,
+  "phase": "q9-ready-depth-two-canary",
+  "platform": "kunpeng",
+  "primary_control": "control",
+  "queries": [
+    "q9"
+  ],
+  "rounds": [
+    1
+  ],
+  "schema": "cachekit-ready-gated-prefetch-p1-v1",
+  "slots": 16,
+  "source_commit": "5a9d1e656715a403afac72ee1a516876ddbfb7f1",
+  "taskmanagers": 8,
+  "template_provenance": {
+    "base_compose_sha256": "c6c96ca9f485292637d22123aebc1cffb06610586873c06f5d0f7b181e9f15a7",
+    "base_config_sha256": "8b6b83826aa849b402d24e88c34ed60e9160890cbf461a5f20678a4bc5f78388",
+    "source_experiment": "/home/wuql/flink-cluster/experiments/cachekit-native-stage123-javafullopt-15q-100m-r1-r3-kunpeng-20260903"
+  },
+  "variant_config_sha256": {
+    "control": "454140d6d33c70d51aacaa9042ab0e9379771bb7989c0f70cbe35011b604df04",
+    "ready-d2": "c1748ed8607216e55b52d408f844fb619491eb1839ecbe154a79b7c334652290"
+  },
+  "variants": [
+    "control",
+    "ready-d2"
+  ]
+}

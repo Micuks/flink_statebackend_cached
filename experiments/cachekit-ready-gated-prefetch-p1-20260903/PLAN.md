@@ -45,6 +45,24 @@ completion-before-dispatch, maximum in-flight depth at least 2, positive staged
 and consumed values, zero worker failure fallback, and zero staging admission
 drops. Prometheus and close-time ValueState counters are retained separately.
 
+## Dual-host quick-validation amendment (2026-09-03)
+
+Run the same paired q9 control/`ready-d2` canary independently on cloud x86 and
+Kunpeng when each host is truly idle. Each host keeps its own same-artifact
+control as the primary denominator. Same-host prior Java/RocksDB baselines may
+be reused as secondary quick-validation references, but results are never
+pooled across hosts or storage media.
+
+The Kunpeng artifact is the P1 Java candidate with only
+`META-INF/native/libcachekit_snapshot_jni.so` replaced by the audited AArch64
+entry from the same-day Kunpeng base JAR. Entry-by-entry validation requires all
+other 1,592 file entries to match the x86-built Java candidate. The frozen
+Kunpeng candidate SHA-256 is
+`97487e04d293f154b8856e43decf2573fabaaf35e36077ea635a1f55d0f59dfc`.
+Its inputs and RocksDB runtime are reused from the same-host 2026-09-03
+campaign; that source campaign need not complete, but the launch guard still
+requires no running container or benchmark process.
+
 ## Advancement boundary
 
 Advance only if both activation passes and q9 K/s/core uplift is at least

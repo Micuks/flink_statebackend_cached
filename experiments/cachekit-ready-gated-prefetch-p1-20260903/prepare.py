@@ -250,6 +250,22 @@ def main() -> None:
     replacements = {
         "@EXPDIR@": args.remote_expdir,
         "@ARTIFACT_SHA@": artifact_hash,
+        "@PROJECT@": NEW_PROJECT,
+        "@COMPOSE@": "/home/wuql/bin/docker-compose",
+        "@REST@": "http://127.0.0.1:10788",
+        "@PROM@": "http://127.0.0.1:11821",
+        "@SCRATCH@": NEW_SCRATCH,
+        "@RUNTIME_MANIFEST@": "$expdir/inputs/artifacts/opt/RUNTIME_BUNDLE.json",
+        "@PLATFORM@": "x86",
+        "@GOLDEN_HOST@": "x86",
+        "@CONTAINER_FLINK_HOME@": "/opt/flink",
+        "@CPUSET_MEMS_JSON@": (
+            '{"ckx865a9p1_jobmanager_1":"0",'
+            '"ckx865a9p1_taskmanager1_1":"0",'
+            '"ckx865a9p1_taskmanager2_1":"1",'
+            '"ckx865a9p1_prometheus_1":"1",'
+            '"ckx865a9p1_pushgateway_1":"1"}'
+        ),
     }
     for old, new in replacements.items():
         harness = harness.replace(old, new)
