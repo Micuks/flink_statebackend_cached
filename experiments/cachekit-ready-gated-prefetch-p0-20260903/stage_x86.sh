@@ -32,8 +32,8 @@ if [[ -n $p ]] && kill -0 "$p" 2>/dev/null; then
   echo "source activation campaign still running: $p" >&2
   exit 70
 fi
-[[ -f $source_exp/CAMPAIGN_COMPLETE ]] || {
-  echo "source activation campaign lacks CAMPAIGN_COMPLETE" >&2
+[[ -f $source_exp/R1_COMPLETE ]] || {
+  echo "source activation campaign lacks R1_COMPLETE" >&2
   exit 71
 }
 [[ -z $(docker ps -q) ]] || {
