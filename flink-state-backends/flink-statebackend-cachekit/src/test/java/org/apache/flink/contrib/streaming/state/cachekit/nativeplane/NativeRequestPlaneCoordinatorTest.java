@@ -578,10 +578,11 @@ class NativeRequestPlaneCoordinatorTest {
             throws Exception {
         FakePlane plane = new FakePlane();
         NativeRequestPlaneCoordinator coordinator =
-                NativeRequestPlaneCoordinator.forTesting(options(1), plane);
+                NativeRequestPlaneCoordinator.forTesting(residentMutationBatchOptions(1), plane);
         byte[] singleKey = new byte[] {7, 8, 9};
         byte[] batchKey = new byte[] {10, 11, 12};
 
+        assertTrue(coordinator.residentKeyHintEnabledForTesting());
         assertFalse(coordinator.mightContainResidentKey(71, singleKey));
         assertEquals(
                 NativeRequestPlaneBridge.FILL_INSERTED,
@@ -599,6 +600,22 @@ class NativeRequestPlaneCoordinatorTest {
             assertEquals(1, coordinator.fill(slot));
         }
         assertTrue(coordinator.mightContainResidentKey(71, batchKey));
+        coordinator.close();
+    }
+
+    @Test
+    void testResidentHintIsNotAllocatedWhenResidentMutationBatchIsDisabled() throws Exception {
+        FakePlane plane = new FakePlane();
+        NativeRequestPlaneCoordinator coordinator =
+                NativeRequestPlaneCoordinator.forTesting(options(1), plane);
+        byte[] key = new byte[] {7, 8, 9};
+
+        assertFalse(coordinator.residentKeyHintEnabledForTesting());
+        assertTrue(coordinator.mightContainResidentKey(71, key));
+        assertEquals(
+                NativeRequestPlaneBridge.FILL_INSERTED,
+                coordinator.updateExactKey(71, 1L, key, new byte[] {1}));
+        assertTrue(coordinator.mightContainResidentKey(71, key));
         coordinator.close();
     }
 
@@ -634,6 +651,38 @@ class NativeRequestPlaneCoordinatorTest {
                 8192,
                 0.02,
                 262144);
+    }
+
+    private static NativeRequestPlaneOptions residentMutationBatchOptions(int slots) {
+        return new NativeRequestPlaneOptions(
+                true,
+                "",
+                "auto",
+                16,
+                1024,
+                1024,
+                4,
+                1024,
+                1024,
+                1,
+                slots,
+                false,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                8192,
+                0.02,
+                262144,
+                false,
+                true,
+                true);
     }
 
     private static NativeRequestPlaneOptions optionsWithCompactionScratch(int slots) {

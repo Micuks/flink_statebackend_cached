@@ -15,6 +15,7 @@
 package org.apache.flink.contrib.streaming.state.cachekit.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.contrib.streaming.state.PositionedDataOutputView;
 import org.apache.flink.contrib.streaming.state.RocksDBBatchValueReader;
 import org.apache.flink.contrib.streaming.state.cachekit.PrefetchExecutor;
 import org.apache.flink.contrib.streaming.state.cachekit.cache.CachePolicy;
@@ -64,6 +65,12 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private final NativeRequestPlaneCoordinator nativeRequestPlaneCoordinator;
     private final int nativeStateId;
     private final NativeRequestPlaneCoordinator.ValueReadActivation nativeValueReadActivation;
+    private final boolean nativePointAdaptiveBypassEnabled;
+    private final int nativePointAdaptiveWindowProbes;
+    private final int nativePointAdaptiveZeroWindows;
+    private final int nativePointAdaptiveResampleIntervalProbes;
+    private final int nativePointAdaptiveSampleSlots;
+    private final long[] nativePointAdaptiveFingerprintSamples;
 
     private final TypeSerializer<K> keySerializer;
     private final TypeSerializer<N> namespaceSerializer;
@@ -386,6 +393,33 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
     private volatile long nativeFillKeys;
     private volatile long nativeFillRejected;
     private volatile long nativeFallbackBatches;
+    // Mailbox-thread-confined adaptive point-probe state and audit counters. Async prefetch tasks
+    // never read or update these fields.
+    private NativePointAdaptiveMode nativePointAdaptiveMode = NativePointAdaptiveMode.ACTIVE;
+    private long nativePointAdaptiveWindowProbeCount;
+    private long nativePointAdaptiveWindowPositiveHits;
+    private long nativePointAdaptiveWindowNegativeHits;
+    private int nativePointAdaptiveConsecutiveZeroWindows;
+    private long nativePointAdaptiveBypassProgress;
+    private long nativePointAdaptiveEligibleLookups;
+    private long nativePointAdaptiveEvaluatedWindows;
+    private long nativePointAdaptiveZeroHitWindows;
+    private long nativePointAdaptiveActiveToBypassTransitions;
+    private long nativePointAdaptiveTargetedRecoveryTransitions;
+    private long nativePointAdaptiveBypassedProbes;
+    private long nativePointAdaptiveBypassedFills;
+    private long nativePointAdaptiveTrialProbes;
+    private long nativePointAdaptiveTrialPositiveHits;
+    private long nativePointAdaptiveTrialNegativeHits;
+    private long nativePointAdaptiveTrialMisses;
+    private long nativePointAdaptiveTrialSlotDeferrals;
+    private long nativePointAdaptiveSamplesRecorded;
+    private long nativePointAdaptiveSampleReplacements;
+    private long nativePointAdaptiveTargetedProbes;
+    private long nativePointAdaptiveTargetedPositiveHits;
+    private long nativePointAdaptiveTargetedNegativeHits;
+    private long nativePointAdaptiveTargetedMisses;
+    private long nativePointAdaptiveTargetedSlotDeferrals;
     private volatile long nativeMailboxCompactBatches;
     private volatile long nativeMailboxCompactScratchBatches;
     private volatile long nativeMailboxCompactInputKeys;
@@ -1076,6 +1110,35 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                                         .readActivatedWriteThrough()
                         ? nativeRequestPlaneCoordinator.valueReadActivation(nativeStateId)
                         : null;
+        this.nativePointAdaptiveBypassEnabled =
+                nativeRequestPlaneCoordinator != null
+                        && nativeRequestPlaneCoordinator
+                                .options()
+                                .valuePointAdaptiveBypassEnabled();
+        this.nativePointAdaptiveWindowProbes =
+                nativeRequestPlaneCoordinator == null
+                        ? 4096
+                        : nativeRequestPlaneCoordinator.options().valuePointAdaptiveWindowProbes();
+        this.nativePointAdaptiveZeroWindows =
+                nativeRequestPlaneCoordinator == null
+                        ? 2
+                        : nativeRequestPlaneCoordinator.options().valuePointAdaptiveZeroWindows();
+        this.nativePointAdaptiveResampleIntervalProbes =
+                nativeRequestPlaneCoordinator == null
+                        ? 4096
+                        : nativeRequestPlaneCoordinator
+                                .options()
+                                .valuePointAdaptiveResampleIntervalProbes();
+        this.nativePointAdaptiveSampleSlots =
+                nativeRequestPlaneCoordinator == null
+                        ? 64
+                        : nativeRequestPlaneCoordinator
+                                .options()
+                                .valuePointAdaptiveSampleSlots();
+        this.nativePointAdaptiveFingerprintSamples =
+                nativePointAdaptiveBypassEnabled
+                        ? new long[nativePointAdaptiveSampleSlots]
+                        : null;
         this.adaptiveNativeProbeController =
                 NATIVE_ADAPTIVE_PROBE_BYPASS_ENABLED
                                 && nativeRequestPlaneCoordinator != null
@@ -1295,7 +1358,7 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // measured without implicitly enabling VCache.
         NativePointCacheResult<V> nativePoint =
                 probeNativeValueCache(currentKey, currentNamespace);
-        if (nativePoint.hit) {
+        if (nativePoint.isHit()) {
             KeyNamespaceKey<K, N> storageKey =
                     new KeyNamespaceKey<>(
                             currentKey, currentNamespace, keySerializer, namespaceSerializer);
@@ -1309,7 +1372,11 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         // 5. Miss -> Load from Delegate
         V loaded = delegate.value();
         recordAccess(false); // Miss
-        fillNativeValueCache(currentKey, currentNamespace, loaded);
+        if (nativePoint.shouldFillAfterDelegateRead()) {
+            fillNativeValueCache(currentKey, currentNamespace, loaded);
+        } else if (nativePoint.adaptiveFillSuppressed()) {
+            nativePointAdaptiveBypassedFills++;
+        }
 
         // 6. Update L1 (Clean)
         // Even if bypassing (sampled), we populate L1 to allow hit rate recovery
@@ -1330,37 +1397,49 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 || key == null
                 || namespace == null
                 || !(delegate instanceof RocksDBBatchValueReader<?, ?, ?>)) {
-            return NativePointCacheResult.miss();
+            return NativePointCacheResult.delegateAndFill();
         }
         if (nativeResidentMutationBatchActive) {
             setLookupKey(key, namespace);
             if (nativeResidentBatchDirtyKeys.contains(lookupKey)) {
-                return NativePointCacheResult.miss();
+                return NativePointCacheResult.delegateAndFill();
             }
         }
         // A fallback delegate read can still fill the native cache. Activate before acquiring a
         // bounded slot so temporary slot exhaustion cannot create an entry while mutation
         // write-through remains dormant.
         activateNativeValueRead();
+        int adaptiveFingerprint =
+                nativePointAdaptiveBypassEnabled
+                                && nativePointAdaptiveMode == NativePointAdaptiveMode.BYPASS
+                        ? CacheKeyHash.hash(key, namespace)
+                        : 0;
+        NativePointProbePermit adaptivePermit =
+                selectNativePointProbePermit(adaptiveFingerprint);
+        if (adaptivePermit == NativePointProbePermit.SKIP) {
+            return NativePointCacheResult.adaptiveBypass();
+        }
         NativeRequestPlaneCoordinator.BatchSlot slot =
                 nativeRequestPlaneCoordinator.tryAcquireBatchSlot();
         if (slot == null) {
             nativeFallbackBatches++;
-            return NativePointCacheResult.miss();
+            if (adaptivePermit == NativePointProbePermit.TRIAL) {
+                nativePointAdaptiveTrialSlotDeferrals++;
+                return NativePointCacheResult.adaptiveBypass();
+            }
+            if (adaptivePermit == NativePointProbePermit.TARGETED) {
+                nativePointAdaptiveTargetedSlotDeferrals++;
+                return NativePointCacheResult.adaptiveBypass();
+            }
+            return NativePointCacheResult.delegateAndFill();
         }
         try (NativeRequestPlaneCoordinator.BatchSlot ignored = slot) {
             RocksDBBatchValueReader<K, N, V> batchReader =
                     (RocksDBBatchValueReader<K, N, V>) delegate;
-            byte[] preparedKey =
-                    batchReader.serializeBatchKeyAndNamespace(
-                            key,
-                            namespace,
-                            nativeMutationKeySerializer,
-                            nativeMutationNamespaceSerializer);
             slot.prepareLatest(
                     nativeStateId,
                     nativeWriteEpoch.get(),
-                    java.util.Collections.singletonList(preparedKey));
+                    output -> serializeNativeKey(batchReader, key, namespace, output));
             int processed = nativeRequestPlaneCoordinator.probe(slot);
             if (processed != 1 || slot.probeError(0) != NativeRequestPlaneBridge.ERROR_OK) {
                 throw new IllegalStateException(
@@ -1373,17 +1452,27 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                 V value = deserializeNativeProbeValue(slot, 0, true);
                 nativeHits++;
                 nativeHitBytesDirect += slot.probeValueLength(0);
+                recordNativePointAdaptiveProbe(status, adaptivePermit, adaptiveFingerprint);
                 return NativePointCacheResult.hit(value);
             }
             if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
-                nativeNegativeHits++;
                 V defaultValue = batchReader.getBatchDefaultValue();
-                return NativePointCacheResult.hit(
-                        deserializeImmediateValueOrCopyDefault(null, defaultValue));
+                if (immediateValueSerializer == null) {
+                    immediateValueSerializer = delegate.getValueSerializer().duplicate();
+                }
+                V value = deserializeImmediateValueOrCopyDefault(null, defaultValue);
+                nativeNegativeHits++;
+                recordNativePointAdaptiveProbe(status, adaptivePermit, adaptiveFingerprint);
+                return NativePointCacheResult.hit(value);
             }
             if (status == NativeRequestPlaneBridge.PROBE_MISS) {
                 nativeMisses++;
-                return NativePointCacheResult.miss();
+                boolean suppressFill =
+                        recordNativePointAdaptiveProbe(
+                                status, adaptivePermit, adaptiveFingerprint);
+                return suppressFill
+                        ? NativePointCacheResult.adaptiveBypass()
+                        : NativePointCacheResult.delegateAndFill();
             }
             throw new IllegalStateException(
                     "Native ValueState point probe returned status=" + status + ".");
@@ -1391,8 +1480,158 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeRuntimeFailures++;
             nativeFallbackBatches++;
             nativeRequestPlaneCoordinator.disable(failure);
-            return NativePointCacheResult.miss();
+            return adaptivePermit == NativePointProbePermit.TRIAL
+                            || adaptivePermit == NativePointProbePermit.TARGETED
+                    ? NativePointCacheResult.adaptiveBypass()
+                    : NativePointCacheResult.delegateAndFill();
         }
+    }
+
+    private NativePointProbePermit selectNativePointProbePermit(int fingerprint) {
+        if (!nativePointAdaptiveBypassEnabled) {
+            return NativePointProbePermit.NORMAL;
+        }
+        nativePointAdaptiveEligibleLookups++;
+        if (nativePointAdaptiveMode == NativePointAdaptiveMode.ACTIVE) {
+            return NativePointProbePermit.NORMAL;
+        }
+        if (consumeNativePointAdaptiveFingerprintSample(fingerprint)) {
+            // A targeted attempt also restarts the periodic backoff. This prevents an immediately
+            // adjacent periodic trial when a sampled key happens to return at the interval edge.
+            nativePointAdaptiveBypassProgress = 0L;
+            return NativePointProbePermit.TARGETED;
+        }
+        if (nativePointAdaptiveBypassProgress < nativePointAdaptiveResampleIntervalProbes) {
+            nativePointAdaptiveBypassProgress++;
+        }
+        if (nativePointAdaptiveBypassProgress < nativePointAdaptiveResampleIntervalProbes) {
+            nativePointAdaptiveBypassedProbes++;
+            return NativePointProbePermit.SKIP;
+        }
+        // Consume the periodic attempt before acquiring a slot. A slot deferral therefore starts
+        // a complete new backoff interval instead of retrying on every following lookup.
+        nativePointAdaptiveBypassProgress = 0L;
+        return NativePointProbePermit.TRIAL;
+    }
+
+    private boolean recordNativePointAdaptiveProbe(
+            int status, NativePointProbePermit adaptivePermit, int fingerprint) {
+        if (!nativePointAdaptiveBypassEnabled) {
+            return false;
+        }
+        if (adaptivePermit == NativePointProbePermit.TRIAL) {
+            nativePointAdaptiveTrialProbes++;
+            if (status == NativeRequestPlaneBridge.PROBE_HIT) {
+                nativePointAdaptiveTrialPositiveHits++;
+                recoverNativePointAdaptiveProbe(false);
+            } else if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
+                nativePointAdaptiveTrialNegativeHits++;
+                recoverNativePointAdaptiveProbe(false);
+            } else {
+                nativePointAdaptiveTrialMisses++;
+                recordNativePointAdaptiveFingerprintSample(fingerprint);
+            }
+            return false;
+        }
+        if (adaptivePermit == NativePointProbePermit.TARGETED) {
+            nativePointAdaptiveTargetedProbes++;
+            if (status == NativeRequestPlaneBridge.PROBE_HIT) {
+                nativePointAdaptiveTargetedPositiveHits++;
+                recoverNativePointAdaptiveProbe(true);
+                return false;
+            }
+            if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
+                nativePointAdaptiveTargetedNegativeHits++;
+                recoverNativePointAdaptiveProbe(true);
+                return false;
+            }
+            nativePointAdaptiveTargetedMisses++;
+            return true;
+        }
+
+        nativePointAdaptiveWindowProbeCount++;
+        if (status == NativeRequestPlaneBridge.PROBE_HIT) {
+            nativePointAdaptiveWindowPositiveHits++;
+        } else if (status == NativeRequestPlaneBridge.PROBE_NEGATIVE) {
+            nativePointAdaptiveWindowNegativeHits++;
+        }
+        if (nativePointAdaptiveWindowProbeCount < nativePointAdaptiveWindowProbes) {
+            return false;
+        }
+
+        nativePointAdaptiveEvaluatedWindows++;
+        boolean zeroUsefulHits =
+                nativePointAdaptiveWindowPositiveHits == 0L
+                        && nativePointAdaptiveWindowNegativeHits == 0L;
+        if (zeroUsefulHits) {
+            nativePointAdaptiveZeroHitWindows++;
+            nativePointAdaptiveConsecutiveZeroWindows++;
+        } else {
+            nativePointAdaptiveConsecutiveZeroWindows = 0;
+        }
+        resetNativePointAdaptiveWindow();
+        if (zeroUsefulHits
+                && nativePointAdaptiveConsecutiveZeroWindows >= nativePointAdaptiveZeroWindows) {
+            nativePointAdaptiveMode = NativePointAdaptiveMode.BYPASS;
+            nativePointAdaptiveBypassProgress = 0L;
+            clearNativePointAdaptiveFingerprintSamples();
+            nativePointAdaptiveActiveToBypassTransitions++;
+            return true;
+        }
+        return false;
+    }
+
+    private void recoverNativePointAdaptiveProbe(boolean targeted) {
+        nativePointAdaptiveMode = NativePointAdaptiveMode.ACTIVE;
+        nativePointAdaptiveConsecutiveZeroWindows = 0;
+        resetNativePointAdaptiveWindow();
+        nativePointAdaptiveBypassProgress = 0L;
+        clearNativePointAdaptiveFingerprintSamples();
+        if (targeted) {
+            nativePointAdaptiveTargetedRecoveryTransitions++;
+        }
+    }
+
+    private void recordNativePointAdaptiveFingerprintSample(int fingerprint) {
+        long encoded = encodeNativePointAdaptiveFingerprint(fingerprint);
+        int slot = nativePointAdaptiveFingerprintSlot(fingerprint);
+        long previous = nativePointAdaptiveFingerprintSamples[slot];
+        if (previous != 0L && previous != encoded) {
+            nativePointAdaptiveSampleReplacements++;
+        }
+        nativePointAdaptiveFingerprintSamples[slot] = encoded;
+        nativePointAdaptiveSamplesRecorded++;
+    }
+
+    private boolean consumeNativePointAdaptiveFingerprintSample(int fingerprint) {
+        int slot = nativePointAdaptiveFingerprintSlot(fingerprint);
+        long encoded = encodeNativePointAdaptiveFingerprint(fingerprint);
+        if (nativePointAdaptiveFingerprintSamples[slot] != encoded) {
+            return false;
+        }
+        // Consume before acquiring a native slot. A slot deferral or miss cannot hot-retry this
+        // sampled fingerprint on the next lookup.
+        nativePointAdaptiveFingerprintSamples[slot] = 0L;
+        return true;
+    }
+
+    private int nativePointAdaptiveFingerprintSlot(int fingerprint) {
+        int spread = fingerprint ^ (fingerprint >>> 16);
+        return spread & (nativePointAdaptiveSampleSlots - 1);
+    }
+
+    private static long encodeNativePointAdaptiveFingerprint(int fingerprint) {
+        return (fingerprint & 0xffff_ffffL) | (1L << 32);
+    }
+
+    private void clearNativePointAdaptiveFingerprintSamples() {
+        java.util.Arrays.fill(nativePointAdaptiveFingerprintSamples, 0L);
+    }
+
+    private void resetNativePointAdaptiveWindow() {
+        nativePointAdaptiveWindowProbeCount = 0L;
+        nativePointAdaptiveWindowPositiveHits = 0L;
+        nativePointAdaptiveWindowNegativeHits = 0L;
     }
 
     @SuppressWarnings("unchecked")
@@ -1411,23 +1650,16 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         try {
             RocksDBBatchValueReader<K, N, V> batchReader =
                     (RocksDBBatchValueReader<K, N, V>) delegate;
-            byte[] preparedKey =
-                    batchReader.serializeBatchKeyAndNamespace(
-                            key,
-                            namespace,
-                            nativeMutationKeySerializer,
-                            nativeMutationNamespaceSerializer);
-            byte[] serializedValue =
-                    loaded == null
-                            ? null
-                            : KvStateSerializer.serializeValue(
-                                    loaded, nativeMutationValueSerializer);
             int status =
                     nativeRequestPlaneCoordinator.updateExactKey(
                             nativeStateId,
                             nativeWriteEpoch.get(),
-                            preparedKey,
-                            serializedValue);
+                            output -> serializeNativeKey(batchReader, key, namespace, output),
+                            loaded == null
+                                    ? null
+                                    : output ->
+                                            nativeMutationValueSerializer.serialize(
+                                                    loaded, output));
             if (status == NativeRequestPlaneBridge.FILL_INSERTED
                     || status == NativeRequestPlaneBridge.FILL_UPDATED) {
                 nativeFillBatches++;
@@ -1999,6 +2231,44 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                     nativeRequestPlaneCoordinator == null
                             ? 0
                             : nativeRequestPlaneCoordinator.leaseMisses());
+            if (nativePointAdaptiveBypassEnabled
+                    || nativePointAdaptiveActiveToBypassTransitions > 0L) {
+                LOG.info(
+                        "[CACHEKIT VALUE POINT ADAPTIVE] enabled={} mode={} windowProbes={} "
+                                + "zeroWindows={} resampleInterval={} sampleSlots={} "
+                                + "eligibleLookups={} "
+                                + "evaluatedWindows={} zeroHitWindows={} activeToBypassTransitions={} "
+                                + "targetedRecoveryTransitions={} bypassedProbes={} bypassedFills={} "
+                                + "trialProbes={} trialPositiveHits={} trialNegativeHits={} "
+                                + "trialMisses={} trialSlotDeferrals={} samplesRecorded={} "
+                                + "sampleReplacements={} targetedProbes={} targetedPositiveHits={} "
+                                + "targetedNegativeHits={} targetedMisses={} targetedSlotDeferrals={}",
+                        nativePointAdaptiveBypassEnabled,
+                        nativePointAdaptiveMode,
+                        nativePointAdaptiveWindowProbes,
+                        nativePointAdaptiveZeroWindows,
+                        nativePointAdaptiveResampleIntervalProbes,
+                        nativePointAdaptiveSampleSlots,
+                        nativePointAdaptiveEligibleLookups,
+                        nativePointAdaptiveEvaluatedWindows,
+                        nativePointAdaptiveZeroHitWindows,
+                        nativePointAdaptiveActiveToBypassTransitions,
+                        nativePointAdaptiveTargetedRecoveryTransitions,
+                        nativePointAdaptiveBypassedProbes,
+                        nativePointAdaptiveBypassedFills,
+                        nativePointAdaptiveTrialProbes,
+                        nativePointAdaptiveTrialPositiveHits,
+                        nativePointAdaptiveTrialNegativeHits,
+                        nativePointAdaptiveTrialMisses,
+                        nativePointAdaptiveTrialSlotDeferrals,
+                        nativePointAdaptiveSamplesRecorded,
+                        nativePointAdaptiveSampleReplacements,
+                        nativePointAdaptiveTargetedProbes,
+                        nativePointAdaptiveTargetedPositiveHits,
+                        nativePointAdaptiveTargetedNegativeHits,
+                        nativePointAdaptiveTargetedMisses,
+                        nativePointAdaptiveTargetedSlotDeferrals);
+            }
             if ((nativeRequestPlaneCoordinator != null
                             && nativeRequestPlaneCoordinator
                                     .options()
@@ -2306,6 +2576,82 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
 
     long getNativeFallbackBatchesForTesting() {
         return nativeFallbackBatches;
+    }
+
+    boolean isNativePointAdaptiveBypassingForTesting() {
+        return nativePointAdaptiveMode == NativePointAdaptiveMode.BYPASS;
+    }
+
+    long getNativePointAdaptiveEvaluatedWindowsForTesting() {
+        return nativePointAdaptiveEvaluatedWindows;
+    }
+
+    long getNativePointAdaptiveZeroHitWindowsForTesting() {
+        return nativePointAdaptiveZeroHitWindows;
+    }
+
+    long getNativePointAdaptiveActiveToBypassTransitionsForTesting() {
+        return nativePointAdaptiveActiveToBypassTransitions;
+    }
+
+    long getNativePointAdaptiveTargetedRecoveryTransitionsForTesting() {
+        return nativePointAdaptiveTargetedRecoveryTransitions;
+    }
+
+    long getNativePointAdaptiveBypassedProbesForTesting() {
+        return nativePointAdaptiveBypassedProbes;
+    }
+
+    long getNativePointAdaptiveBypassedFillsForTesting() {
+        return nativePointAdaptiveBypassedFills;
+    }
+
+    long getNativePointAdaptiveTrialProbesForTesting() {
+        return nativePointAdaptiveTrialProbes;
+    }
+
+    long getNativePointAdaptiveTrialPositiveHitsForTesting() {
+        return nativePointAdaptiveTrialPositiveHits;
+    }
+
+    long getNativePointAdaptiveTrialNegativeHitsForTesting() {
+        return nativePointAdaptiveTrialNegativeHits;
+    }
+
+    long getNativePointAdaptiveTrialMissesForTesting() {
+        return nativePointAdaptiveTrialMisses;
+    }
+
+    long getNativePointAdaptiveTrialSlotDeferralsForTesting() {
+        return nativePointAdaptiveTrialSlotDeferrals;
+    }
+
+    long getNativePointAdaptiveSamplesRecordedForTesting() {
+        return nativePointAdaptiveSamplesRecorded;
+    }
+
+    long getNativePointAdaptiveSampleReplacementsForTesting() {
+        return nativePointAdaptiveSampleReplacements;
+    }
+
+    long getNativePointAdaptiveTargetedProbesForTesting() {
+        return nativePointAdaptiveTargetedProbes;
+    }
+
+    long getNativePointAdaptiveTargetedPositiveHitsForTesting() {
+        return nativePointAdaptiveTargetedPositiveHits;
+    }
+
+    long getNativePointAdaptiveTargetedNegativeHitsForTesting() {
+        return nativePointAdaptiveTargetedNegativeHits;
+    }
+
+    long getNativePointAdaptiveTargetedMissesForTesting() {
+        return nativePointAdaptiveTargetedMisses;
+    }
+
+    long getNativePointAdaptiveTargetedSlotDeferralsForTesting() {
+        return nativePointAdaptiveTargetedSlotDeferrals;
     }
 
     long getNativeMailboxCompactBatchesForTesting() {
@@ -5655,40 +6001,23 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
                         nativeRequestPlaneCoordinator.updateExactKeyIfPresent(
                                 nativeStateId,
                                 nativeEpoch,
-                                output -> {
-                                    try {
-                                        batchReader.serializeBatchKeyAndNamespace(
-                                                key,
-                                                namespace,
-                                                nativeMutationKeySerializer,
-                                                nativeMutationNamespaceSerializer,
-                                                output);
-                                    } catch (IOException failure) {
-                                        throw failure;
-                                    } catch (Exception failure) {
-                                        throw new IOException(
-                                                "Failed to serialize a native mutation key.",
-                                                failure);
-                                    }
-                                },
+                                output -> serializeNativeKey(batchReader, key, namespace, output),
                                 value == null
                                         ? null
                                         : output ->
                                                 nativeMutationValueSerializer.serialize(
                                                         value, output));
             } else {
-                byte[] preparedKey =
-                        batchReader.serializeBatchKeyAndNamespace(
-                                key,
-                                namespace,
-                                nativeMutationKeySerializer,
-                                nativeMutationNamespaceSerializer);
-                byte[] serializedValue =
-                        KvStateSerializer.serializeValue(
-                                value, nativeMutationValueSerializer);
                 status =
                         nativeRequestPlaneCoordinator.updateExactKey(
-                                nativeStateId, nativeEpoch, preparedKey, serializedValue);
+                                nativeStateId,
+                                nativeEpoch,
+                                output -> serializeNativeKey(batchReader, key, namespace, output),
+                                value == null
+                                        ? null
+                                        : output ->
+                                                nativeMutationValueSerializer.serialize(
+                                                        value, output));
             }
             if (status == NativeRequestPlaneBridge.FILL_REJECTED_STALE_GENERATION) {
                 nativeMutationSuperseded++;
@@ -5704,6 +6033,26 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
             nativeRequestPlaneCoordinator.disable(failure);
             nativeMutationFailures++;
             nativeRuntimeFailures++;
+        }
+    }
+
+    private void serializeNativeKey(
+            RocksDBBatchValueReader<K, N, V> batchReader,
+            K key,
+            N namespace,
+            PositionedDataOutputView output)
+            throws IOException {
+        try {
+            batchReader.serializeBatchKeyAndNamespace(
+                    key,
+                    namespace,
+                    nativeMutationKeySerializer,
+                    nativeMutationNamespaceSerializer,
+                    output);
+        } catch (IOException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw new IOException("Failed to serialize a native ValueState key.", failure);
         }
     }
 
@@ -6011,25 +6360,69 @@ public final class CachedInternalValueState<K, N, V> implements InternalValueSta
         }
     }
 
+    private enum NativePointAdaptiveMode {
+        ACTIVE,
+        BYPASS
+    }
+
+    private enum NativePointProbePermit {
+        NORMAL,
+        TRIAL,
+        TARGETED,
+        SKIP
+    }
+
+    private enum NativePointCacheDisposition {
+        HIT,
+        DELEGATE_AND_FILL,
+        DELEGATE_NO_FILL
+    }
+
     private static final class NativePointCacheResult<V> {
-        private static final NativePointCacheResult<?> MISS =
-                new NativePointCacheResult<>(false, null);
+        private static final NativePointCacheResult<?> DELEGATE_AND_FILL =
+                new NativePointCacheResult<>(
+                        NativePointCacheDisposition.DELEGATE_AND_FILL, null, false);
+        private static final NativePointCacheResult<?> ADAPTIVE_BYPASS =
+                new NativePointCacheResult<>(
+                        NativePointCacheDisposition.DELEGATE_NO_FILL, null, true);
 
-        private final boolean hit;
+        private final NativePointCacheDisposition disposition;
         private final V value;
+        private final boolean adaptiveFillSuppressed;
 
-        private NativePointCacheResult(boolean hit, V value) {
-            this.hit = hit;
+        private NativePointCacheResult(
+                NativePointCacheDisposition disposition,
+                V value,
+                boolean adaptiveFillSuppressed) {
+            this.disposition = disposition;
             this.value = value;
+            this.adaptiveFillSuppressed = adaptiveFillSuppressed;
         }
 
         @SuppressWarnings("unchecked")
-        private static <V> NativePointCacheResult<V> miss() {
-            return (NativePointCacheResult<V>) MISS;
+        private static <V> NativePointCacheResult<V> delegateAndFill() {
+            return (NativePointCacheResult<V>) DELEGATE_AND_FILL;
+        }
+
+        @SuppressWarnings("unchecked")
+        private static <V> NativePointCacheResult<V> adaptiveBypass() {
+            return (NativePointCacheResult<V>) ADAPTIVE_BYPASS;
         }
 
         private static <V> NativePointCacheResult<V> hit(V value) {
-            return new NativePointCacheResult<>(true, value);
+            return new NativePointCacheResult<>(NativePointCacheDisposition.HIT, value, false);
+        }
+
+        private boolean isHit() {
+            return disposition == NativePointCacheDisposition.HIT;
+        }
+
+        private boolean shouldFillAfterDelegateRead() {
+            return disposition == NativePointCacheDisposition.DELEGATE_AND_FILL;
+        }
+
+        private boolean adaptiveFillSuppressed() {
+            return adaptiveFillSuppressed;
         }
     }
 

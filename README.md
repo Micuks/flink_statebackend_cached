@@ -4,6 +4,9 @@ Apache Flink is an open source stream processing framework with powerful stream-
 
 Learn more about Flink at [https://flink.apache.org/](https://flink.apache.org/)
 
+CacheKit 原生三阶段的中文构建、部署、开关和实验说明见
+[flink-statebackend-cachekit/README.md](flink-state-backends/flink-statebackend-cachekit/README.md)。
+
 
 ### Features
 

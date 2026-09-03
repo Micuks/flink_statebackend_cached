@@ -44,8 +44,14 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
     private static final String EMBEDDED_LIBRARY =
             "/META-INF/native/libcachekit_snapshot_jni.so";
     private static String loadedLibrary;
+    private static final ThreadLocal<Boolean> SNAPSHOT_FEATURE_AVAILABLE_FOR_TESTING =
+            new ThreadLocal<>();
 
     static boolean snapshotFeatureAvailable(String libraryPath, boolean nativeRequested) {
+        Boolean testOverride = SNAPSHOT_FEATURE_AVAILABLE_FOR_TESTING.get();
+        if (testOverride != null) {
+            return testOverride;
+        }
         if (!isCandidatePlatform(
                 System.getProperty("os.name", ""), System.getProperty("os.arch", ""))) {
             return false;
@@ -58,6 +64,14 @@ final class NativeMapSnapshotCache<K, N, UK> implements AutoCloseable {
         }
         loadLibrary(libraryPath, false);
         return nativeSnapshotFeatureAvailable();
+    }
+
+    static void setSnapshotFeatureAvailableForTesting(Boolean available) {
+        if (available == null) {
+            SNAPSHOT_FEATURE_AVAILABLE_FOR_TESTING.remove();
+        } else {
+            SNAPSHOT_FEATURE_AVAILABLE_FOR_TESTING.set(available);
+        }
     }
 
     static boolean isCandidatePlatform(String osName, String osArch) {

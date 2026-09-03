@@ -162,7 +162,6 @@ private:
     std::vector<ProbeResult> probe_results_;
     std::vector<std::uint32_t> unique_source_indexes_;
     std::vector<std::uint32_t> source_group_indexes_;
-    std::vector<std::uint32_t> source_tokens_;
     std::vector<std::uint32_t> group_counts_;
     std::size_t reserved_entries_ = 0;
     std::uint64_t growth_count_ = 0;

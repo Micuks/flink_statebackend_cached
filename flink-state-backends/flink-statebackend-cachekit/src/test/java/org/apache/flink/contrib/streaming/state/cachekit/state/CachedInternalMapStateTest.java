@@ -53,9 +53,21 @@ import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.internal.BatchPrefetchableMapState;
 import org.apache.flink.runtime.state.internal.InternalMapState;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class CachedInternalMapStateTest {
+
+    @BeforeEach
+    void enableSnapshotFeatureForTests() {
+        NativeMapSnapshotCache.setSnapshotFeatureAvailableForTesting(true);
+    }
+
+    @AfterEach
+    void clearSnapshotFeatureOverride() {
+        NativeMapSnapshotCache.setSnapshotFeatureAvailableForTesting(null);
+    }
 
     @Test
     @SuppressWarnings("unchecked")
@@ -1034,10 +1046,9 @@ class CachedInternalMapStateTest {
         when(delegate.entries()).thenReturn(entries.entrySet());
         when(delegate.get("uk1")).thenReturn(7);
 
-        String originalArch = System.getProperty("os.arch");
         CachedInternalMapState<String, VoidNamespace, String, Integer> state;
         try {
-            System.setProperty("os.arch", "x86_64");
+            NativeMapSnapshotCache.setSnapshotFeatureAvailableForTesting(false);
             state =
                     new CachedInternalMapState<>(
                             delegate,
@@ -1068,11 +1079,7 @@ class CachedInternalMapStateTest {
                             262144,
                             new NativeMapSnapshotOptions(true, false, false, ""));
         } finally {
-            if (originalArch == null) {
-                System.clearProperty("os.arch");
-            } else {
-                System.setProperty("os.arch", originalArch);
-            }
+            NativeMapSnapshotCache.setSnapshotFeatureAvailableForTesting(true);
         }
         state.setCurrentNamespace(VoidNamespace.INSTANCE);
 

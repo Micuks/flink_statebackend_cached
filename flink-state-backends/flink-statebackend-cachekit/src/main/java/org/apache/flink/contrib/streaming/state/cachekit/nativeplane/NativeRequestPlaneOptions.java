@@ -54,6 +54,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
     private final boolean readActivatedWriteThrough;
     private final boolean residentMutationBatchEnabled;
     private final boolean valueCacheEnabled;
+    private final boolean valuePointAdaptiveBypassEnabled;
+    private final int valuePointAdaptiveWindowProbes;
+    private final int valuePointAdaptiveZeroWindows;
+    private final int valuePointAdaptiveResampleIntervalProbes;
+    private final int valuePointAdaptiveSampleSlots;
     private final boolean mapCacheEnabled;
     private final boolean mapSnapshotEnabled;
     private final boolean prefetchEnabled;
@@ -1253,6 +1258,11 @@ public final class NativeRequestPlaneOptions implements Serializable {
         this.mapSnapshotAdaptiveWindowProbes = mapSnapshotAdaptiveWindowProbes;
         this.mapSnapshotAdaptiveMinUsefulHitRate = mapSnapshotAdaptiveMinUsefulHitRate;
         this.mapSnapshotAdaptiveResampleIntervalProbes = mapSnapshotAdaptiveResampleIntervalProbes;
+        this.valuePointAdaptiveBypassEnabled = false;
+        this.valuePointAdaptiveWindowProbes = 4096;
+        this.valuePointAdaptiveZeroWindows = 2;
+        this.valuePointAdaptiveResampleIntervalProbes = 4096;
+        this.valuePointAdaptiveSampleSlots = 64;
     }
 
     public static NativeRequestPlaneOptions disabled() {
@@ -1355,6 +1365,26 @@ public final class NativeRequestPlaneOptions implements Serializable {
         return valueCacheEnabled;
     }
 
+    public boolean valuePointAdaptiveBypassEnabled() {
+        return valuePointAdaptiveBypassEnabled;
+    }
+
+    public int valuePointAdaptiveWindowProbes() {
+        return valuePointAdaptiveWindowProbes;
+    }
+
+    public int valuePointAdaptiveZeroWindows() {
+        return valuePointAdaptiveZeroWindows;
+    }
+
+    public int valuePointAdaptiveResampleIntervalProbes() {
+        return valuePointAdaptiveResampleIntervalProbes;
+    }
+
+    public int valuePointAdaptiveSampleSlots() {
+        return valuePointAdaptiveSampleSlots;
+    }
+
     /** Whether the separately gated native MapState point-cache path is enabled. */
     public boolean mapCacheEnabled() {
         return mapCacheEnabled;
@@ -1424,7 +1454,64 @@ public final class NativeRequestPlaneOptions implements Serializable {
                 : new NativeRequestPlaneOptions(this, batchSize);
     }
 
+    /** Returns an otherwise identical option set with adaptive ValueState point bypass settings. */
+    public NativeRequestPlaneOptions withValuePointAdaptiveBypass(
+            boolean enabled,
+            int windowProbes,
+            int zeroWindows,
+            int resampleIntervalProbes,
+            int sampleSlots) {
+        if (enabled && !valueCacheEnabled) {
+            throw new IllegalArgumentException(
+                    "Adaptive ValueState point bypass requires native ValueState cache.");
+        }
+        if (windowProbes <= 0
+                || zeroWindows <= 0
+                || resampleIntervalProbes <= 0
+                || sampleSlots <= 0) {
+            throw new IllegalArgumentException(
+                    "Adaptive ValueState point window, zero-window threshold, resample interval, and sample slots must be positive.");
+        }
+        if ((sampleSlots & (sampleSlots - 1)) != 0) {
+            throw new IllegalArgumentException(
+                    "Adaptive ValueState point sample slots must be a power of two.");
+        }
+        if (enabled == valuePointAdaptiveBypassEnabled
+                && windowProbes == valuePointAdaptiveWindowProbes
+                && zeroWindows == valuePointAdaptiveZeroWindows
+                && resampleIntervalProbes == valuePointAdaptiveResampleIntervalProbes
+                && sampleSlots == valuePointAdaptiveSampleSlots) {
+            return this;
+        }
+        return new NativeRequestPlaneOptions(
+                this,
+                directArenaBatchSize,
+                enabled,
+                windowProbes,
+                zeroWindows,
+                resampleIntervalProbes,
+                sampleSlots);
+    }
+
     private NativeRequestPlaneOptions(NativeRequestPlaneOptions source, int batchSize) {
+        this(
+                source,
+                batchSize,
+                source.valuePointAdaptiveBypassEnabled,
+                source.valuePointAdaptiveWindowProbes,
+                source.valuePointAdaptiveZeroWindows,
+                source.valuePointAdaptiveResampleIntervalProbes,
+                source.valuePointAdaptiveSampleSlots);
+    }
+
+    private NativeRequestPlaneOptions(
+            NativeRequestPlaneOptions source,
+            int batchSize,
+            boolean valuePointAdaptiveBypassEnabled,
+            int valuePointAdaptiveWindowProbes,
+            int valuePointAdaptiveZeroWindows,
+            int valuePointAdaptiveResampleIntervalProbes,
+            int valuePointAdaptiveSampleSlots) {
         this.enabled = source.enabled;
         this.libraryPath = source.libraryPath;
         this.kernel = source.kernel;
@@ -1463,6 +1550,12 @@ public final class NativeRequestPlaneOptions implements Serializable {
         this.mapSnapshotAdaptiveMinUsefulHitRate = source.mapSnapshotAdaptiveMinUsefulHitRate;
         this.mapSnapshotAdaptiveResampleIntervalProbes =
                 source.mapSnapshotAdaptiveResampleIntervalProbes;
+        this.valuePointAdaptiveBypassEnabled = valuePointAdaptiveBypassEnabled;
+        this.valuePointAdaptiveWindowProbes = valuePointAdaptiveWindowProbes;
+        this.valuePointAdaptiveZeroWindows = valuePointAdaptiveZeroWindows;
+        this.valuePointAdaptiveResampleIntervalProbes =
+                valuePointAdaptiveResampleIntervalProbes;
+        this.valuePointAdaptiveSampleSlots = valuePointAdaptiveSampleSlots;
     }
 
     /** Whether prepared keys bypass native cache probe/fill and go directly to RocksDB MultiGet. */

@@ -140,7 +140,6 @@ void BatchScratch::ReserveEntries(std::size_t count) {
     probe_results_.reserve(count);
     unique_source_indexes_.reserve(count);
     source_group_indexes_.reserve(count);
-    source_tokens_.reserve(count);
     group_counts_.reserve(count);
     reserved_entries_ = count;
     ++growth_count_;
@@ -288,18 +287,13 @@ BatchBridgeCode GroupTokenPlanDirectBatch(
     }
     try {
         scratch->ReserveEntries(count);
-        scratch->source_tokens_.resize(count);
         scratch->unique_source_indexes_.resize(count);
         scratch->source_group_indexes_.resize(count);
         scratch->group_counts_.resize(count);
-        for (std::size_t index = 0; index < count; ++index) {
-            scratch->source_tokens_[index] = ReadNative<std::uint32_t>(
-                    source_tokens.data + index * sizeof(std::uint32_t));
-        }
 
         std::size_t written = 0;
         if (plane->GroupTokenBatch(
-                    scratch->source_tokens_.data(),
+                    source_tokens.data,
                     scratch->unique_source_indexes_.data(),
                     scratch->source_group_indexes_.data(),
                     scratch->group_counts_.data(),

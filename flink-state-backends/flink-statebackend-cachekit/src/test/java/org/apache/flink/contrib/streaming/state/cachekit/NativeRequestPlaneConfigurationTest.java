@@ -170,6 +170,11 @@ class NativeRequestPlaneConfigurationTest {
         assertFalse(options.directArenaReadOnlyEnabled());
         assertFalse(options.directArenaEagerMaterializationEnabled());
         assertFalse(options.negativeHandoffEnabled());
+        assertFalse(options.valuePointAdaptiveBypassEnabled());
+        assertEquals(4096, options.valuePointAdaptiveWindowProbes());
+        assertEquals(2, options.valuePointAdaptiveZeroWindows());
+        assertEquals(4096, options.valuePointAdaptiveResampleIntervalProbes());
+        assertEquals(64, options.valuePointAdaptiveSampleSlots());
         assertFalse(options.compactionScratchSlotEnabled());
         assertEquals(4096, options.compactionScratchEntries());
         assertEquals(2 << 20, options.compactionScratchKeyArenaBytes());
@@ -191,6 +196,15 @@ class NativeRequestPlaneConfigurationTest {
         config.set(
                 CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_READ_ACTIVATED_WRITE_THROUGH, true);
         config.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ADAPTIVE_BYPASS_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ADAPTIVE_WINDOW_PROBES, 123);
+        config.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ADAPTIVE_ZERO_WINDOWS, 4);
+        config.set(
+                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ADAPTIVE_RESAMPLE_INTERVAL_PROBES,
+                456);
+        config.set(
+                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ADAPTIVE_SAMPLE_SLOTS,
+                32);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_CACHE_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ENABLED, true);
         config.set(CacheKitStateBackendFactory.NATIVE_MAP_SNAPSHOT_ADAPTIVE_BYPASS_ENABLED, true);
@@ -234,6 +248,11 @@ class NativeRequestPlaneConfigurationTest {
         assertTrue(options.writeThroughMutations());
         assertTrue(options.readActivatedWriteThrough());
         assertTrue(options.valueCacheEnabled());
+        assertTrue(options.valuePointAdaptiveBypassEnabled());
+        assertEquals(123, options.valuePointAdaptiveWindowProbes());
+        assertEquals(4, options.valuePointAdaptiveZeroWindows());
+        assertEquals(456, options.valuePointAdaptiveResampleIntervalProbes());
+        assertEquals(32, options.valuePointAdaptiveSampleSlots());
         assertTrue(options.mapCacheEnabled());
         assertTrue(options.mapSnapshotEnabled());
         assertTrue(options.mapSnapshotAdaptiveBypassEnabled());
@@ -253,6 +272,13 @@ class NativeRequestPlaneConfigurationTest {
         assertEquals(777, options.compactionScratchEntries());
         assertEquals(123456, options.compactionScratchKeyArenaBytes());
         assertTrue(options.requiresValueCache());
+
+        NativeRequestPlaneOptions resized = options.withDirectArenaBatchSize(64);
+        assertTrue(resized.valuePointAdaptiveBypassEnabled());
+        assertEquals(123, resized.valuePointAdaptiveWindowProbes());
+        assertEquals(4, resized.valuePointAdaptiveZeroWindows());
+        assertEquals(456, resized.valuePointAdaptiveResampleIntervalProbes());
+        assertEquals(32, resized.valuePointAdaptiveSampleSlots());
     }
 
     @Test
@@ -400,6 +426,63 @@ class NativeRequestPlaneConfigurationTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalidResample));
+
+    }
+
+    @Test
+    void testNativeValuePointAdaptiveBypassRequiresValueCacheAndPositiveBounds() {
+        Configuration missingValueCache = new Configuration();
+        missingValueCache.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        missingValueCache.set(
+                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ADAPTIVE_BYPASS_ENABLED, true);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(missingValueCache));
+
+        Configuration invalidWindow = nativeValuePointAdaptiveConfiguration();
+        invalidWindow.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ADAPTIVE_WINDOW_PROBES, 0);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalidWindow));
+
+        Configuration invalidZeroWindows = nativeValuePointAdaptiveConfiguration();
+        invalidZeroWindows.set(
+                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ADAPTIVE_ZERO_WINDOWS, 0);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalidZeroWindows));
+
+        Configuration invalidResample = nativeValuePointAdaptiveConfiguration();
+        invalidResample.set(
+                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ADAPTIVE_RESAMPLE_INTERVAL_PROBES,
+                0);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalidResample));
+
+        Configuration invalidSampleSlots = nativeValuePointAdaptiveConfiguration();
+        invalidSampleSlots.set(
+                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ADAPTIVE_SAMPLE_SLOTS, 0);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> CacheKitStateBackendFactory.nativeRequestPlaneOptions(invalidSampleSlots));
+
+        Configuration nonPowerOfTwoSampleSlots = nativeValuePointAdaptiveConfiguration();
+        nonPowerOfTwoSampleSlots.set(
+                CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ADAPTIVE_SAMPLE_SLOTS, 63);
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        CacheKitStateBackendFactory.nativeRequestPlaneOptions(
+                                nonPowerOfTwoSampleSlots));
+    }
+
+    private static Configuration nativeValuePointAdaptiveConfiguration() {
+        Configuration config = new Configuration();
+        config.set(CacheKitStateBackendFactory.NATIVE_REQUEST_PLANE_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ENABLED, true);
+        config.set(CacheKitStateBackendFactory.NATIVE_VALUE_CACHE_ADAPTIVE_BYPASS_ENABLED, true);
+        return config;
     }
 
     @Test
