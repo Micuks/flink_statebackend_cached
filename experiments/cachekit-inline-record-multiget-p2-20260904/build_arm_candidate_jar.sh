@@ -17,6 +17,12 @@ arm_base=$2
 output=$3
 [[ -f $java_candidate && -f $arm_base && ! -e $output ]] || usage
 
+# The native entry is extracted after changing into a temporary directory.  Resolve all
+# caller-provided paths first so relative paths remain valid throughout the build.
+java_candidate=$(realpath "$java_candidate")
+arm_base=$(realpath "$arm_base")
+output=$(realpath -m "$output")
+
 repo=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
 [[ $(git -C "$repo" rev-parse "$expected_source") == "$expected_source" ]] || exit 65
 arm_base_sha=$(sha256sum "$arm_base" | awk '{print $1}')
