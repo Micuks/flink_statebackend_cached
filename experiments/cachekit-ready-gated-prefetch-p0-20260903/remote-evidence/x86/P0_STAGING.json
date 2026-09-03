@@ -1,0 +1,8 @@
+{
+  "candidate_sha256": "e6bcbb6ea5a7e39158bc5ccff67a0e59b9d7d6b8d7eaf205bbb52b0ce8b7938f",
+  "candidate_size_bytes": 3089321,
+  "reused_input_bundle_from": "/home/wuql/flink-cluster/experiments/cachekit-native-stage123-javafullopt-15q-100m-r1-r3-x86-20260903",
+  "reused_input_role": "measurement harness and unchanged runtime dependencies",
+  "schema": "cachekit-ready-gated-prefetch-p0-staging-v1",
+  "source_commit": "7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000"
+}

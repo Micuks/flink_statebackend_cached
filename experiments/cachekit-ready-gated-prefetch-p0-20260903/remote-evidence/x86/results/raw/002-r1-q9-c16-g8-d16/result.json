@@ -1,0 +1,324 @@
+{
+  "allocated_tm_logical_cpus": 16,
+  "artifact_sha256": "e6bcbb6ea5a7e39158bc5ccff67a0e59b9d7d6b8d7eaf205bbb52b0ce8b7938f",
+  "config_sha256": "8eb37255a65617eb150ec1ef3cbf090eb71ce2e05f9545a63376a5e1e5fc2bc2",
+  "measurement": {
+    "cores": 15.47,
+    "cpu_metric_samples": [
+      {
+        "cores": 14.99,
+        "tms": 8
+      },
+      {
+        "cores": 15.07,
+        "tms": 8
+      },
+      {
+        "cores": 15.54,
+        "tms": 8
+      },
+      {
+        "cores": 15.45,
+        "tms": 8
+      },
+      {
+        "cores": 15.77,
+        "tms": 8
+      },
+      {
+        "cores": 15.65,
+        "tms": 8
+      },
+      {
+        "cores": 15.32,
+        "tms": 8
+      },
+      {
+        "cores": 15.32,
+        "tms": 8
+      },
+      {
+        "cores": 14.96,
+        "tms": 8
+      },
+      {
+        "cores": 15.64,
+        "tms": 8
+      },
+      {
+        "cores": 15.65,
+        "tms": 8
+      },
+      {
+        "cores": 15.6,
+        "tms": 8
+      },
+      {
+        "cores": 14.94,
+        "tms": 8
+      },
+      {
+        "cores": 14.54,
+        "tms": 8
+      },
+      {
+        "cores": 15.34,
+        "tms": 8
+      },
+      {
+        "cores": 15.26,
+        "tms": 8
+      },
+      {
+        "cores": 15.71,
+        "tms": 8
+      },
+      {
+        "cores": 15.81,
+        "tms": 8
+      },
+      {
+        "cores": 15.74,
+        "tms": 8
+      },
+      {
+        "cores": 15.86,
+        "tms": 8
+      },
+      {
+        "cores": 15.61,
+        "tms": 8
+      },
+      {
+        "cores": 14.83,
+        "tms": 8
+      },
+      {
+        "cores": 15.04,
+        "tms": 8
+      },
+      {
+        "cores": 15.62,
+        "tms": 8
+      },
+      {
+        "cores": 15.76,
+        "tms": 8
+      },
+      {
+        "cores": 15.7,
+        "tms": 8
+      },
+      {
+        "cores": 15.74,
+        "tms": 8
+      },
+      {
+        "cores": 15.56,
+        "tms": 8
+      },
+      {
+        "cores": 15.44,
+        "tms": 8
+      },
+      {
+        "cores": 14.15,
+        "tms": 8
+      },
+      {
+        "cores": 15.45,
+        "tms": 8
+      },
+      {
+        "cores": 15.78,
+        "tms": 8
+      },
+      {
+        "cores": 15.79,
+        "tms": 8
+      },
+      {
+        "cores": 15.76,
+        "tms": 8
+      },
+      {
+        "cores": 15.76,
+        "tms": 8
+      },
+      {
+        "cores": 15.74,
+        "tms": 8
+      },
+      {
+        "cores": 15.58,
+        "tms": 8
+      },
+      {
+        "cores": 15.11,
+        "tms": 8
+      },
+      {
+        "cores": 15.12,
+        "tms": 8
+      },
+      {
+        "cores": 15.8,
+        "tms": 8
+      },
+      {
+        "cores": 15.76,
+        "tms": 8
+      },
+      {
+        "cores": 15.72,
+        "tms": 8
+      },
+      {
+        "cores": 15.75,
+        "tms": 8
+      },
+      {
+        "cores": 15.72,
+        "tms": 8
+      },
+      {
+        "cores": 15.7,
+        "tms": 8
+      },
+      {
+        "cores": 15.61,
+        "tms": 8
+      }
+    ],
+    "events": 100000000,
+    "host": "x86",
+    "job_status": {
+      "cpu_metric_cores_median": 15.614999999999998,
+      "cpu_metric_cores_time_average": 15.47,
+      "cpu_metric_log": "/home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p0-q9-100m-x86-20260903/results/raw/002-r1-q9-c16-g8-d16/query.log",
+      "cpu_metric_sample_count": 46,
+      "expected_cpu_metric_tms": 8,
+      "measurement_integrity_valid": true,
+      "observed_cpu_metric_tms": [
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8
+      ],
+      "real_job_completed": true,
+      "real_job_failed": false,
+      "real_job_started": true,
+      "warmup_completed": true,
+      "warmup_failed": false,
+      "warmup_started": true
+    },
+    "measurement_staging": {
+      "file_count": 72,
+      "manifest": "/home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p0-q9-100m-x86-20260903/inputs/measurement-integrity.SHA256SUMS",
+      "taskmanager_containers": [
+        "a9d3ec0d4a21",
+        "63ecbbe01ba7"
+      ]
+    },
+    "measurement_state": "/home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p0-q9-100m-x86-20260903/results/raw/002-r1-q9-c16-g8-d16/measurement-state.json",
+    "metric_log": "/home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p0-q9-100m-x86-20260903/results/raw/002-r1-q9-c16-g8-d16/query.log",
+    "plan_index": 2,
+    "query": "q9",
+    "raw_throughput_kps": 417.74,
+    "schema": "cachekit-golden-runner-result-v1",
+    "throughput_kps_core": 27.0,
+    "variant": "candidate",
+    "variant_files": {
+      "config": {
+        "path": "/home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p0-q9-100m-x86-20260903/variants/c16-g8-d16/flink-conf.yaml",
+        "sha256": "8eb37255a65617eb150ec1ef3cbf090eb71ce2e05f9545a63376a5e1e5fc2bc2"
+      },
+      "runtime_bundle": {
+        "artifacts": [
+          {
+            "actual_sha256": "fe1749a708927d16d07323662eb63e59ab997633107d8200846671fce33fe875",
+            "actual_size_bytes": 85137876,
+            "container_filename": "flink-dist-1.16.3.jar",
+            "covers_modules": [
+              "flink-statebackend-rocksdb",
+              "flink-streaming-java"
+            ],
+            "outer_hash_key": "flink_dist_sha256",
+            "path": "/home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p0-q9-100m-x86-20260903/inputs/runtime/flink-dist-1.16.3.jar",
+            "role": "flink_dist",
+            "sha256": "fe1749a708927d16d07323662eb63e59ab997633107d8200846671fce33fe875",
+            "size_bytes": 85137876
+          },
+          {
+            "actual_sha256": "e6bcbb6ea5a7e39158bc5ccff67a0e59b9d7d6b8d7eaf205bbb52b0ce8b7938f",
+            "actual_size_bytes": 3089321,
+            "container_filename": "flink-statebackend-cachekit-1.16-SNAPSHOT.jar",
+            "covers_modules": [
+              "flink-statebackend-cachekit"
+            ],
+            "outer_hash_key": "cachekit_module_sha256",
+            "path": "/home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p0-q9-100m-x86-20260903/inputs/artifacts/opt/flink-statebackend-cachekit-1.16-SNAPSHOT.jar",
+            "role": "cachekit_module",
+            "sha256": "e6bcbb6ea5a7e39158bc5ccff67a0e59b9d7d6b8d7eaf205bbb52b0ce8b7938f",
+            "size_bytes": 3089321
+          }
+        ],
+        "manifest": {
+          "path": "/home/wuql/flink-cluster/experiments/cachekit-ready-gated-prefetch-p0-q9-100m-x86-20260903/inputs/artifacts/opt/RUNTIME_BUNDLE.json",
+          "sha256": "e7c2a7a89722ebdd78cac91326dd9927ed5f3095590c74068ea99a1d695a3535"
+        },
+        "source_commit": "7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000"
+      }
+    },
+    "wall_seconds": 239.381
+  },
+  "platform": "x86",
+  "query": "q9",
+  "round": 1,
+  "schema": "cachekit-ready-gated-prefetch-p0-leg-v1",
+  "source_commit": "7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000",
+  "valid": true,
+  "variant": "c16-g8-d16"
+}
