@@ -1,0 +1,89 @@
+{
+  "actual_differences": {
+    "state.backend.cachekit.bp-prefetch.async-chunks.enabled": {
+      "c16-g16-d16": "true",
+      "c16-g8-d16": "true",
+      "c32-g16-d16": "true",
+      "c32-g16-d32": "true",
+      "c32-g8-d16": "true",
+      "control": "false"
+    },
+    "state.backend.cachekit.bp-prefetch.async-chunks.size": {
+      "c16-g16-d16": "16",
+      "c16-g8-d16": "16",
+      "c32-g16-d16": "32",
+      "c32-g16-d32": "32",
+      "c32-g8-d16": "32",
+      "control": "16"
+    },
+    "state.backend.cachekit.bp-prefetch.head-guard-records": {
+      "c16-g16-d16": "16",
+      "c16-g8-d16": "8",
+      "c32-g16-d16": "16",
+      "c32-g16-d32": "16",
+      "c32-g8-d16": "8",
+      "control": "0"
+    },
+    "state.backend.cachekit.bp-prefetch.sliding-drain-records": {
+      "c16-g16-d16": "16",
+      "c16-g8-d16": "16",
+      "c32-g16-d16": "16",
+      "c32-g16-d32": "32",
+      "c32-g8-d16": "16",
+      "control": "0"
+    }
+  },
+  "allowed_difference_keys": [
+    "state.backend.cachekit.bp-prefetch.async-chunks.enabled",
+    "state.backend.cachekit.bp-prefetch.async-chunks.size",
+    "state.backend.cachekit.bp-prefetch.cancel-on-dispatch.enabled",
+    "state.backend.cachekit.bp-prefetch.head-guard-records",
+    "state.backend.cachekit.bp-prefetch.sliding-drain-records"
+  ],
+  "cancel_on_dispatch_common_value": "false",
+  "common_invariants": {
+    "parallelism.default": "16",
+    "pipeline.object-reuse": "false",
+    "state.backend": "org.apache.flink.contrib.streaming.state.cachekit.CacheKitStateBackendFactory",
+    "state.backend.cachekit.bp-prefetch.async.enabled": "true",
+    "state.backend.cachekit.bp-prefetch.backpressure-gated": "false",
+    "state.backend.cachekit.bp-prefetch.distance": "64",
+    "state.backend.cachekit.bp-prefetch.enabled": "true",
+    "state.backend.cachekit.bp-prefetch.multiget.chunk-size": "64",
+    "state.backend.cachekit.bp-prefetch.multiget.enabled": "true",
+    "state.backend.cachekit.bp-prefetch.multiget.min-batch-size": "64",
+    "state.backend.cachekit.list-state.cow": "false",
+    "state.backend.cachekit.list-state.ryw": "false",
+    "state.backend.cachekit.local-preagg.enabled": "true",
+    "state.backend.cachekit.mailbox-batch.enabled": "true",
+    "state.backend.cachekit.map.cache.max-entries": "0",
+    "state.backend.cachekit.map.presence.cache.max-entries": "0",
+    "state.backend.cachekit.map.snapshot.cache.max-entries": "2000",
+    "state.backend.cachekit.map.snapshot.cache.native.enabled": "false",
+    "state.backend.cachekit.native.fastlocal.runtime-dispatch.enabled": "false",
+    "state.backend.cachekit.native.local-preagg.enabled": "false",
+    "state.backend.cachekit.native.mailbox-batch.enabled": "false",
+    "state.backend.cachekit.native.map-cache.enabled": "false",
+    "state.backend.cachekit.native.map-distinct-batch-prefetch.enabled": "false",
+    "state.backend.cachekit.native.map-snapshot.enabled": "false",
+    "state.backend.cachekit.native.prefetch.enabled": "false",
+    "state.backend.cachekit.native.request-plane.enabled": "false",
+    "state.backend.cachekit.native.value-cache.enabled": "false",
+    "state.backend.cachekit.priority-queue.opt": "false",
+    "state.backend.cachekit.value.cache.max-entries": "8000",
+    "state.backend.rocksdb.memtable.arm-point.enabled": "false",
+    "state.backend.rocksdb.memtable.arm-point.map-flat-authority": "false",
+    "state.backend.rocksdb.memtable.arm-point.map-keyhead-point-index.enabled": "false",
+    "table.exec.mini-batch.enabled": "false",
+    "taskmanager.numberOfTaskSlots": "2"
+  },
+  "required_shape_difference_keys": [
+    "state.backend.cachekit.bp-prefetch.async-chunks.enabled",
+    "state.backend.cachekit.bp-prefetch.async-chunks.size",
+    "state.backend.cachekit.bp-prefetch.head-guard-records",
+    "state.backend.cachekit.bp-prefetch.sliding-drain-records"
+  ],
+  "schema": "cachekit-ready-gated-prefetch-p0-config-diff-v1",
+  "unexpected_difference_keys": [],
+  "valid": true
+}

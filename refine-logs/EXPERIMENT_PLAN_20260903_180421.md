@@ -1,0 +1,100 @@
+# CacheKit ready-gated prefetch experiment plan
+
+Status: `IN_PROGRESS`
+
+Plan revision: `20260903_180421`
+
+Source: `7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000`
+
+Frozen predecessor used only for unchanged overlay classes: `bbd39affde9278d44b9f78d201849bf929249d54`
+
+## Objective
+
+Maximize the arithmetic mean of the 15 per-query Nexmark throughput-per-core
+uplifts relative to a contemporary Java FullOpt control while preserving exact
+record order and mailbox-thread state mutation. Worker threads may only extract,
+fetch, deserialize, and publish prepared ValueState reads.
+
+## Invariants
+
+- 100,000,000 events, no periodic checkpointing.
+- Parallelism 16, 8 TaskManagers, 2 slots per TaskManager, at most 16.05 measured
+  cores per valid sample.
+- Query order: `q4 q5 q8 q9 q11 q18 q19 q20 q3 q7 q12 q13 q15 q16 q17`.
+- Java FullOpt is the primary contemporary control. Same-host RocksDB is a
+  secondary stack reference only.
+- `pipeline.object-reuse: false` is explicit in every P0 leg.
+- The 8K ValueState cache, MapState snapshot cache, local preaggregation,
+  ordinary asynchronous prefetch, distance 64, and all non-P0 keys are identical.
+- Chen COW/RYW/PQ, planner mini-batch, Java/native MapState point cache, ARM point
+  memtable, and every native feature remain disabled.
+- Operator-chain copy-elision is identical across all legs.
+- A leg is valid only with real job completion, complete raw logs, 8-TM CPU
+  coverage, process-tree ownership, configuration and artifact hashes, and a
+  `LEG_COMPLETE` marker.
+- A host must be free of foreign containers before every leg. No running foreign
+  benchmark is stopped or overlapped.
+
+## Frozen P0 mechanism
+
+P0 uses only the already implemented bounded `StreamRecordBatchOutput` controls.
+The mailbox buffer remains 64 records. A consumer-head prefix is never submitted
+by the early chunk scheduler; retained records remain in arrival order; watermarks,
+watermark status, latency markers, and terminal flushes dispatch all prior records.
+
+| Variant | async chunks | chunk | head guard | sliding drain | cancel on dispatch |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `control` | false | 16 | 0 | 0 | false |
+| `c16-g8-d16` | true | 16 | 8 | 16 | false |
+| `c16-g16-d16` | true | 16 | 16 | 16 | false |
+| `c32-g8-d16` | true | 32 | 8 | 16 | false |
+| `c32-g16-d16` | true | 32 | 16 | 16 | false |
+| `c32-g16-d32` | true | 32 | 16 | 32 | false |
+
+`cancel-on-dispatch` stays off during the shape screen so that the window shape is
+the sole treatment. It may be screened as a separate suffix only after a winning
+shape exists and its exact cancellation-before-dispatch test remains green.
+
+## Stages and gates
+
+1. Activation selection: finish the already running x86 Stage1/2/3 R1 without
+   overlap. Freeze `q9` as the required ValueState canary. Add `q16` and/or `q17`
+   only when their contemporary Java-control logs show `tasksBuilt > 0`; record
+   the resulting immutable canary list before launching P0.
+2. Shape screen: run `control` plus the five P0 shapes on `q9`, 100M, R1. Rank
+   valid shapes by raw K/s/core uplift, then by staged promotion rate and reduced
+   live-read race/cancellation pressure. Advance only a shape with at least
+   `+3.00%` q9 uplift and no integrity failure. If none advances, P0 is exhausted
+   and P1 implementation planning begins.
+3. Canary confirmation: run the winner and a freshly interleaved control on every
+   other frozen active canary. Require positive arithmetic-mean canary uplift and
+   no active canary below `-3.00%`.
+4. Full 15Q R1: breadth-first, contemporary control and winner. Require all valid
+   legs, positive arithmetic mean of the 15 per-query uplifts, and no query below
+   `-5.00%` before replication.
+5. Full 15Q R2/R3: repeat the same two variants. The final headline is the
+   arithmetic mean of paired per-query, per-round K/s/core percentages. Report raw
+   K/s/core to exactly two decimals, raw K/s, cores, valid-leg status, hashes, and
+   activation counters. Ratios of aggregate means are diagnostic only.
+6. Cross-host replication starts only after Kunpeng reaches a stable idle gate.
+   Keep x86 and Kunpeng claims within-host unless their RocksDB storage media and
+   bind mounts are proven equivalent.
+
+## P1 boundary
+
+P1 is authorized only if P0 does not pass its shape-screen gate. Before editing,
+write a separate implementation plan for a bounded ordered ready-gated ring:
+per-slot ownership, generation tags, worker fetch-only behavior, mailbox-only
+dispatch and mutation, timeout/failure fallback, watermark and checkpoint fences,
+object-reuse handling, cancellation, teardown, and counters. Unit tests precede a
+benchmark artifact. P1 must not inherit performance credit from an invalid P0 leg.
+
+## Audit outputs
+
+- Immutable experiment identity and per-variant configuration hashes.
+- Config-difference audit allowing only the five P0 keys in the table.
+- Artifact manifest with source and frozen-overlay hashes.
+- Per-leg measurement, raw CPU samples, container logs, ownership audit, and
+  activation/counter audit.
+- Fixed and timestamped result summaries using paired arithmetic uplift.
+- Independent experiment audit after the campaign is complete.

@@ -1,0 +1,38 @@
+{
+  "architecture": "x86_64",
+  "artifact_sha256": "16204de9848c9f3e2f55a04071fc0947d752d96134f396d08a0ae5dc69752254",
+  "artifact_size_bytes": 3089627,
+  "checkpointing": "disabled by absence of execution.checkpointing.interval",
+  "events": 100000000,
+  "frozen_overlay_commit": "bbd39affde9278d44b9f78d201849bf929249d54",
+  "object_reuse": false,
+  "phase": "q9-shape-screen",
+  "platform": "x86",
+  "primary_control": "control",
+  "queries": [
+    "q9"
+  ],
+  "rounds": [
+    1
+  ],
+  "schema": "cachekit-ready-gated-prefetch-p0-v1",
+  "slots": 16,
+  "source_commit": "7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000",
+  "taskmanagers": 8,
+  "variant_config_sha256": {
+    "c16-g16-d16": "19969248867a33e8c10252634a31fe86aa5525130d1ebf19c0bd860ec7997cf9",
+    "c16-g8-d16": "e2c7955a46108b63ddc547f17dfe48dca27a3b86b445b5f6a81dce956a0ae777",
+    "c32-g16-d16": "d3ab5706573a907353f7cf564f7e0c603150f8359146b4fa6997a023681ab38f",
+    "c32-g16-d32": "8b707f660db2a68b5c9ae76ef008cdc7485c95ee2c04d2a49c9aa844ff2f487b",
+    "c32-g8-d16": "fc4b8571ab310e5631ed3e02d5f50c1cf2f050c1c10dd78bcb6bdfdbca641841",
+    "control": "328b6ab53839c7a12d2df6a19527bd5da912a23d482bbbc37d9888a560fc1f40"
+  },
+  "variants": [
+    "control",
+    "c16-g8-d16",
+    "c16-g16-d16",
+    "c32-g8-d16",
+    "c32-g16-d16",
+    "c32-g16-d32"
+  ]
+}
