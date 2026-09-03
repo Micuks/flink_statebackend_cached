@@ -1,0 +1,14 @@
+{
+  "actual_differences": {
+    "state.backend.cachekit.bp-prefetch.immediate-record.enabled": {
+      "control": "false",
+      "immediate": "true"
+    }
+  },
+  "allowed_difference_keys": [
+    "state.backend.cachekit.bp-prefetch.immediate-record.enabled"
+  ],
+  "schema": "cachekit-inline-record-multiget-p2-config-diff-v1",
+  "unexpected_difference_keys": [],
+  "valid": true
+}

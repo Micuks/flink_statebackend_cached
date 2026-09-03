@@ -1,0 +1,55 @@
+{
+  "architecture": "aarch64",
+  "arm_native_origin": {
+    "native_entry": "META-INF/native/libcachekit_snapshot_jni.so",
+    "native_entry_sha256": "6765775306c7ed00b1606de5340f0ba18ae5adc8fe242b49b336f79f96749fe2",
+    "source_artifact_sha256": "35092a30d3ac979477a4445c5ead455258ab8a6a5278c815ad29a4301a3a7efd",
+    "source_experiment": "/home/wuql/flink-cluster/experiments/cachekit-native-stage123-javafullopt-15q-100m-r1-r3-kunpeng-20260903"
+  },
+  "artifact_build": {
+    "arm_base_sha256": "97487e04d293f154b8856e43decf2573fabaaf35e36077ea635a1f55d0f59dfc",
+    "embedded_arm_native_sha256": "6765775306c7ed00b1606de5340f0ba18ae5adc8fe242b49b336f79f96749fe2",
+    "java_candidate_sha256": "6caa77843ebfc37799c897bcca6bbd530d40022d2a54fd4f015659dc880e47f4"
+  },
+  "artifact_sha256": "164411a963b78ccd508524c9ca4e1a0d50b497830394a59c016ed3ef644fd741",
+  "artifact_size_bytes": 3108010,
+  "base_source_commit": "7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000",
+  "checkpointing": "disabled by absence of execution.checkpointing.interval",
+  "claim_boundary": "same-host paired quick validation under disjoint NUMA CPU and memory binding; not idle-host final performance evidence",
+  "events": 100000000,
+  "execution_environment": "numa-isolated-colocated-quick-validation",
+  "frozen_overlay_commit": "bbd39affde9278d44b9f78d201849bf929249d54",
+  "numa_binding": {
+    "allocated_cpus": "38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74",
+    "container_cpuset_mems": "0",
+    "node": 0,
+    "node_cpulist": "0-79"
+  },
+  "object_reuse": false,
+  "phase": "q9-inline-record-multiget-paired-screen",
+  "platform": "kunpeng",
+  "primary_control": "control",
+  "queries": [
+    "q9"
+  ],
+  "rounds": [
+    1
+  ],
+  "schema": "cachekit-inline-record-multiget-p2-screen-v1",
+  "slots": 16,
+  "source_commit": "a7aa558791becb34164b27c787ab6cffdebf0dc2",
+  "taskmanagers": 8,
+  "template_provenance": {
+    "base_compose_sha256": "c6c96ca9f485292637d22123aebc1cffb06610586873c06f5d0f7b181e9f15a7",
+    "base_config_sha256": "8b6b83826aa849b402d24e88c34ed60e9160890cbf461a5f20678a4bc5f78388",
+    "source_experiment": "/home/wuql/flink-cluster/experiments/cachekit-native-stage123-javafullopt-15q-100m-r1-r3-kunpeng-20260903"
+  },
+  "variant_config_sha256": {
+    "control": "26f3a7e46a67e6c104a749e21fd7814fe87cf60a9104793de7ad8034387c894f",
+    "immediate": "8064e4cc3f3a147d593050bb4207e9f54821efca81393025bb2e8756c0fa9634"
+  },
+  "variants": [
+    "control",
+    "immediate"
+  ]
+}

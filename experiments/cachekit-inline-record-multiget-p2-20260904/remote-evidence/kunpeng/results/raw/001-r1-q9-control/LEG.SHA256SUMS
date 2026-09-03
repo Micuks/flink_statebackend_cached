@@ -1,0 +1,6 @@
+1c0f3c1934a96356b7437c69b2f8c13d03c28791e40738958f7fe9481f83069e  /home/wuql/flink-cluster/experiments/cachekit-inline-record-multiget-p2-q9-100m-kunpeng-20260904/results/raw/001-r1-q9-control/measurement-result.json
+28e451e42f8d998ca420fedc759cae08c0f1bbf9f2999a84584e7639a9eaa945  /home/wuql/flink-cluster/experiments/cachekit-inline-record-multiget-p2-q9-100m-kunpeng-20260904/results/raw/001-r1-q9-control/result.json
+26f3a7e46a67e6c104a749e21fd7814fe87cf60a9104793de7ad8034387c894f  /home/wuql/flink-cluster/experiments/cachekit-inline-record-multiget-p2-q9-100m-kunpeng-20260904/results/raw/001-r1-q9-control/flink-conf.yaml
+7919cacb955eccd9a6a96e69a6469b16fb214ef0be8ade29cfc5a0905f30f925  /home/wuql/flink-cluster/experiments/cachekit-inline-record-multiget-p2-q9-100m-kunpeng-20260904/results/raw/001-r1-q9-control/immediate-record-prometheus.json
+5030690836b1c16d59dc1024567ab5912bf6b312a3ca9ac3a2d9f485d9607c78  /home/wuql/flink-cluster/experiments/cachekit-inline-record-multiget-p2-q9-100m-kunpeng-20260904/results/raw/001-r1-q9-control/VALUE_PREFETCH_AUDIT.json
+e3a36cc5ceb364daf28f5576e920d30762e7dac5aeddbf355e1780e329ae88cd  /home/wuql/flink-cluster/experiments/cachekit-inline-record-multiget-p2-q9-100m-kunpeng-20260904/results/raw/001-r1-q9-control/IMMEDIATE_RECORD_AUDIT.json
