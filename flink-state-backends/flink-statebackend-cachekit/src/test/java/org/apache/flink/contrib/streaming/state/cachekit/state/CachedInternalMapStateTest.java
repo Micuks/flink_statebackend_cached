@@ -67,6 +67,7 @@ class CachedInternalMapStateTest {
         System.clearProperty("cachekit.map.dirty-overlay.enabled");
         System.clearProperty("cachekit.map.snapshot-maintenance.enabled");
         System.clearProperty("cachekit.map.snapshot-value-authority.enabled");
+        System.clearProperty("cachekit.map.point-value-memo.enabled");
     }
 
     @AfterEach
@@ -75,6 +76,7 @@ class CachedInternalMapStateTest {
         System.clearProperty("cachekit.map.dirty-overlay.enabled");
         System.clearProperty("cachekit.map.snapshot-maintenance.enabled");
         System.clearProperty("cachekit.map.snapshot-value-authority.enabled");
+        System.clearProperty("cachekit.map.point-value-memo.enabled");
     }
 
     @Test
@@ -1668,6 +1670,126 @@ class CachedInternalMapStateTest {
         assertArrayEquals(new byte[] {1, 2}, state.entries().iterator().next().getValue());
         verify(delegate, times(0)).entries();
         verify(delegate, times(0)).get(any());
+    }
+
+    @Test
+    void testPointValueMemoElidesRepeatedGetsAndTracksWriteThroughMutations() throws Exception {
+        System.setProperty("cachekit.map.snapshot-value-authority.enabled", "true");
+        System.setProperty("cachekit.map.point-value-memo.enabled", "true");
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Integer> entries = new LinkedHashMap<>();
+        entries.put("uk1", 1);
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                                IntSerializer.INSTANCE));
+        when(delegate.get(any()))
+                .thenAnswer(ignored -> entries.get(ignored.getArgument(0)));
+        doAnswer(
+                        ignored -> {
+                            entries.put(ignored.getArgument(0), ignored.getArgument(1));
+                            return null;
+                        })
+                .when(delegate)
+                .put(any(), any());
+        doAnswer(
+                        ignored -> {
+                            entries.remove(ignored.getArgument(0));
+                            return null;
+                        })
+                .when(delegate)
+                .remove(any());
+        doAnswer(
+                        ignored -> {
+                            entries.clear();
+                            return null;
+                        })
+                .when(delegate)
+                .clear();
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createSmallSnapshotState(
+                        delegate, currentKey, MapSnapshotCacheMetrics.forTesting());
+
+        assertEquals(1, state.get("uk1"));
+        assertEquals(1, state.get("uk1"));
+        verify(delegate, times(1)).get("uk1");
+
+        assertNull(state.get("missing"));
+        assertNull(state.get("missing"));
+        verify(delegate, times(1)).get("missing");
+        assertTrue(state.getPointValueMemoNegativeHitsForTesting() > 0);
+
+        state.put("uk1", 10);
+        clearInvocations(delegate);
+        assertEquals(10, state.get("uk1"));
+        verify(delegate, times(0)).get(any());
+
+        state.remove("uk1");
+        clearInvocations(delegate);
+        assertNull(state.get("uk1"));
+        verify(delegate, times(0)).get(any());
+
+        state.clear();
+        assertTrue(state.getPointValueMemoInvalidationsForTesting() > 0);
+        assertTrue(state.getPointValueMemoUserKeyHitsForTesting() >= 4);
+    }
+
+    @Test
+    void testPointValueMemoPresenceOnlyDoesNotInventAValueAndCopiesCachedValues()
+            throws Exception {
+        System.setProperty("cachekit.map.snapshot-value-authority.enabled", "true");
+        System.setProperty("cachekit.map.point-value-memo.enabled", "true");
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, byte[]> delegate =
+                mock(InternalMapState.class);
+        byte[] stored = new byte[] {1, 2};
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                                BytePrimitiveArraySerializer.INSTANCE));
+        when(delegate.contains("present")).thenReturn(true);
+        when(delegate.get("present")).thenReturn(stored);
+        CachedInternalMapState<String, VoidNamespace, String, byte[]> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        100,
+                        MapSnapshotCacheMetrics.forTesting(),
+                        null,
+                        0,
+                        false,
+                        0,
+                        false,
+                        3);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        assertTrue(state.contains("present"));
+        assertTrue(state.contains("present"));
+        verify(delegate, times(1)).contains("present");
+        assertEquals(1, state.getPointValueMemoContainsHitsForTesting());
+
+        assertArrayEquals(stored, state.get("present"));
+        verify(delegate, times(1)).get("present");
+        byte[] exposed = state.get("present");
+        exposed[0] = 99;
+        assertArrayEquals(stored, state.get("present"));
+        verify(delegate, times(1)).get("present");
     }
 
     @Test

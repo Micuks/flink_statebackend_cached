@@ -70,11 +70,17 @@ public final class CachedInternalMapState<K, N, UK, UV>
             "cachekit.map.snapshot-value-authority.enabled";
     private static final String SNAPSHOT_VALUE_AUTHORITY_ENV =
             "CACHEKIT_MAP_SNAPSHOT_VALUE_AUTHORITY_ENABLED";
+    private static final String POINT_VALUE_MEMO_PROPERTY =
+            "cachekit.map.point-value-memo.enabled";
+    private static final String POINT_VALUE_MEMO_ENV = "CACHEKIT_MAP_POINT_VALUE_MEMO_ENABLED";
     private static final int SNAPSHOT_VALUE_AUTHORITY_WAYS = 4;
     private static final long SNAPSHOT_VALUE_AUTHORITY_FINGERPRINT_ONES =
             0x0001000100010001L;
     private static final long SNAPSHOT_VALUE_AUTHORITY_FINGERPRINT_HIGHS =
             0x8000800080008000L;
+    private static final byte POINT_MEMO_ABSENT = 1;
+    private static final byte POINT_MEMO_PRESENT_ONLY = 2;
+    private static final byte POINT_MEMO_PRESENT_VALUE = 3;
 
     private enum NativeSnapshotAdaptiveMode {
         EVALUATE,
@@ -212,6 +218,20 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private final long[] snapshotValueAuthorityFingerprints;
     private final int[] snapshotValueAuthorityNextVictims;
     private final int snapshotValueAuthoritySetMask;
+    /**
+     * Per-outer-map last-observation memo. The four-way SIEVE directory avoids access-order LRU
+     * mutations while retaining the exact user-key/value observed through the write-through path.
+     */
+    private final boolean pointValueMemoEnabled;
+    private final Object[] pointValueMemoOwners;
+    private final Object[] pointValueMemoUserKeys;
+    private final Object[] pointValueMemoValues;
+    private final int[] pointValueMemoHashes;
+    private final byte[] pointValueMemoKinds;
+    private final long[] pointValueMemoFingerprints;
+    private final byte[] pointValueMemoVisited;
+    private final int[] pointValueMemoNextVictims;
+    private final int pointValueMemoSetMask;
     private final int mapSnapshotSmallMaxEntries;
     private final boolean snapshotOwnedKeyReuseEnabled;
     private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
@@ -243,6 +263,17 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private long snapshotValueAuthorityPointNegativeHits;
     private long snapshotValueAuthorityIteratorTableHits;
     private long snapshotValueAuthorityPointFingerprintRejects;
+    private long pointValueMemoProbes;
+    private long pointValueMemoFingerprintRejects;
+    private long pointValueMemoOwnerHits;
+    private long pointValueMemoUserKeyHits;
+    private long pointValueMemoValueHits;
+    private long pointValueMemoNegativeHits;
+    private long pointValueMemoContainsHits;
+    private long pointValueMemoStores;
+    private long pointValueMemoOwnerAdmissions;
+    private long pointValueMemoOwnerReplacements;
+    private long pointValueMemoInvalidations;
 
     private N currentNamespace;
     private final KeyNamespaceUserKey<K, N, UK> lookupKey =
@@ -743,6 +774,21 @@ public final class CachedInternalMapState<K, N, UK, UV>
         this.snapshotValueAuthorityFingerprints = new long[authoritySetCount];
         this.snapshotValueAuthorityNextVictims = new int[authoritySetCount];
         this.snapshotValueAuthoritySetMask = Math.max(0, authoritySetCount - 1);
+        this.pointValueMemoEnabled =
+                snapshotValueAuthorityEnabled
+                        && !mapCacheEnabled
+                        && pointValueMemoRuntimeEnabled();
+        int pointMemoSetCount = pointValueMemoEnabled ? authoritySetCount : 0;
+        int pointMemoSlots = pointMemoSetCount * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        this.pointValueMemoOwners = new Object[pointMemoSlots];
+        this.pointValueMemoUserKeys = new Object[pointMemoSlots];
+        this.pointValueMemoValues = new Object[pointMemoSlots];
+        this.pointValueMemoHashes = new int[pointMemoSlots];
+        this.pointValueMemoKinds = new byte[pointMemoSlots];
+        this.pointValueMemoFingerprints = new long[pointMemoSetCount];
+        this.pointValueMemoVisited = new byte[pointMemoSetCount];
+        this.pointValueMemoNextVictims = new int[pointMemoSetCount];
+        this.pointValueMemoSetMask = Math.max(0, pointMemoSetCount - 1);
     }
 
     private static boolean dirtyOverlayRuntimeEnabled() {
@@ -779,6 +825,21 @@ public final class CachedInternalMapState<K, N, UK, UV>
         String configured = System.getProperty(SNAPSHOT_VALUE_AUTHORITY_PROPERTY);
         if (configured == null || configured.trim().isEmpty()) {
             configured = System.getenv(SNAPSHOT_VALUE_AUTHORITY_ENV);
+        }
+        if (configured == null) {
+            return false;
+        }
+        String normalized = configured.trim();
+        return "true".equalsIgnoreCase(normalized)
+                || "1".equals(normalized)
+                || "yes".equalsIgnoreCase(normalized)
+                || "on".equalsIgnoreCase(normalized);
+    }
+
+    private static boolean pointValueMemoRuntimeEnabled() {
+        String configured = System.getProperty(POINT_VALUE_MEMO_PROPERTY);
+        if (configured == null || configured.trim().isEmpty()) {
+            configured = System.getenv(POINT_VALUE_MEMO_ENV);
         }
         if (configured == null) {
             return false;
@@ -1264,6 +1325,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
         PrefetchedMapValue<UV> prefetched = getBatchPrefetchedValue(currentKey, userKey);
         if (prefetched != null) {
+            storePointValueMemo(
+                    currentKey,
+                    currentNamespace,
+                    userKey,
+                    prefetched.present,
+                    prefetched.present,
+                    prefetched.value);
             return prefetched.value;
         }
 
@@ -1272,10 +1340,17 @@ public final class CachedInternalMapState<K, N, UK, UV>
         if (authoritative != null) {
             return authoritative.value;
         }
+        SnapshotAuthorityLookup<UV> memoized =
+                lookupPointValueMemo(currentKey, userKey, true);
+        if (memoized != null) {
+            return memoized.value;
+        }
 
         if (bypassEnabled && isBypassing && shouldBypassRead()) {
             NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
             UV value = nativeRead == null ? delegate.get(userKey) : nativeRead.value;
+            storePointValueMemo(
+                    currentKey, currentNamespace, userKey, value != null, true, value);
             if (mapCacheEnabled) {
                 updateValueCache(currentKey, userKey, value, false);
             }
@@ -1303,6 +1378,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
         UV value = nativeRead == null ? delegate.get(userKey) : nativeRead.value;
         recordAccess(nativeRead != null && nativeRead.cacheHit);
+        storePointValueMemo(currentKey, currentNamespace, userKey, value != null, true, value);
         if (mapCacheEnabled) {
             updateValueCache(currentKey, userKey, value, false);
         }
@@ -1337,6 +1413,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, true);
         }
+        storePointValueMemo(currentKey, currentNamespace, userKey, true, true, userValue);
         maintainSnapshotAfterPut(currentKey, userKey);
     }
 
@@ -1365,6 +1442,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
             if (presenceCacheEnabled) {
                 updatePresence(currentKey, uKey, entry.getValue() != null);
             }
+            storePointValueMemo(
+                    currentKey,
+                    currentNamespace,
+                    uKey,
+                    entry.getValue() != null,
+                    entry.getValue() != null,
+                    entry.getValue());
             if (snapshotMaintenanceEnabled) {
                 if (entry.getValue() == null) {
                     maintainSnapshotAfterRemove(currentKey, uKey);
@@ -1398,6 +1482,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, false);
         }
+        storePointValueMemo(currentKey, currentNamespace, userKey, false, false, null);
         maintainSnapshotAfterRemove(currentKey, userKey);
     }
 
@@ -1414,6 +1499,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
         PrefetchedMapValue<UV> prefetched = getBatchPrefetchedValue(currentKey, userKey);
         if (prefetched != null) {
+            storePointValueMemo(
+                    currentKey,
+                    currentNamespace,
+                    userKey,
+                    prefetched.present,
+                    prefetched.present,
+                    prefetched.value);
             return prefetched.present;
         }
 
@@ -1422,11 +1514,23 @@ public final class CachedInternalMapState<K, N, UK, UV>
         if (authoritative != null) {
             return authoritative.present;
         }
+        SnapshotAuthorityLookup<UV> memoized =
+                lookupPointValueMemo(currentKey, userKey, false);
+        if (memoized != null) {
+            return memoized.present;
+        }
 
         if (bypassEnabled && isBypassing && shouldBypassRead()) {
             NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
             boolean exists =
                     nativeRead == null ? delegate.contains(userKey) : nativeRead.value != null;
+            storePointValueMemo(
+                    currentKey,
+                    currentNamespace,
+                    userKey,
+                    exists,
+                    nativeRead != null && exists,
+                    nativeRead == null ? null : nativeRead.value);
             if (mapCacheEnabled && !exists) {
                 updateValueCache(currentKey, userKey, null, false);
             }
@@ -1453,6 +1557,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
         NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
         boolean exists = nativeRead == null ? delegate.contains(userKey) : nativeRead.value != null;
         recordAccess(nativeRead != null && nativeRead.cacheHit);
+        storePointValueMemo(
+                currentKey,
+                currentNamespace,
+                userKey,
+                exists,
+                nativeRead != null && exists,
+                nativeRead == null ? null : nativeRead.value);
         if (mapCacheEnabled && !exists) {
             updateValueCache(currentKey, userKey, null, false);
         }
@@ -1629,6 +1740,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         clearPresenceCaches();
         clearValueCaches();
         resetBypassState();
+        removePointValueMemoOwner(currentKey, currentNamespace);
 
         if (snapshotOptimizationEnabled()) {
             if (currentKey != null && currentNamespace != null) {
@@ -2289,6 +2401,175 @@ public final class CachedInternalMapState<K, N, UK, UV>
         snapshotValueAuthorityFingerprints[set] &= ~(0xffffL << (way << 4));
     }
 
+    /**
+     * Looks up the last exact point observation for the current outer map.
+     *
+     * <p>The directory is keyed by (state key, namespace), while each resident owner retains one
+     * exact user key. This matches the common session-window shape without turning the feature into
+     * a general write-back MapState cache. A presence-only observation can answer contains(), but
+     * deliberately remains UNKNOWN to get().
+     */
+    private SnapshotAuthorityLookup<UV> lookupPointValueMemo(
+            K currentKey, UK userKey, boolean valueRequired) {
+        if (!pointValueMemoEnabled || currentKey == null || currentNamespace == null) {
+            return null;
+        }
+        pointValueMemoProbes++;
+        int hash = CacheKeyHash.hash(currentKey, currentNamespace);
+        int set = hash & pointValueMemoSetMask;
+        if (!snapshotValueAuthorityFingerprintMayContain(
+                pointValueMemoFingerprints[set], hash)) {
+            pointValueMemoFingerprintRejects++;
+            return null;
+        }
+        int base = set * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
+            int slot = base + way;
+            if (pointValueMemoHashes[slot] != hash) {
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            KeyNamespace<K, N> owner = (KeyNamespace<K, N>) pointValueMemoOwners[slot];
+            if (owner == null
+                    || !Objects.equals(owner.key, currentKey)
+                    || !Objects.equals(owner.namespace, currentNamespace)) {
+                continue;
+            }
+            pointValueMemoOwnerHits++;
+            if (!Objects.equals(pointValueMemoUserKeys[slot], userKey)) {
+                return null;
+            }
+            byte kind = pointValueMemoKinds[slot];
+            if (valueRequired && kind == POINT_MEMO_PRESENT_ONLY) {
+                return null;
+            }
+            pointValueMemoVisited[set] |= (byte) (1 << way);
+            pointValueMemoUserKeyHits++;
+            if (!valueRequired) {
+                pointValueMemoContainsHits++;
+            }
+            if (kind == POINT_MEMO_ABSENT) {
+                pointValueMemoNegativeHits++;
+                return SnapshotAuthorityLookup.absent();
+            }
+            if (kind == POINT_MEMO_PRESENT_VALUE) {
+                pointValueMemoValueHits++;
+                @SuppressWarnings("unchecked")
+                UV value = (UV) pointValueMemoValues[slot];
+                return SnapshotAuthorityLookup.present(copyUserValue(value));
+            }
+            return SnapshotAuthorityLookup.present(null);
+        }
+        return null;
+    }
+
+    private void storePointValueMemo(
+            K currentKey,
+            N namespace,
+            UK userKey,
+            boolean present,
+            boolean hasValue,
+            UV value) {
+        if (!pointValueMemoEnabled
+                || currentKey == null
+                || namespace == null
+                || userKey == null) {
+            return;
+        }
+        int hash = CacheKeyHash.hash(currentKey, namespace);
+        int set = hash & pointValueMemoSetMask;
+        int base = set * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        int slot = -1;
+        int emptySlot = -1;
+        for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
+            int candidate = base + way;
+            @SuppressWarnings("unchecked")
+            KeyNamespace<K, N> owner = (KeyNamespace<K, N>) pointValueMemoOwners[candidate];
+            if (owner == null) {
+                if (emptySlot < 0) {
+                    emptySlot = candidate;
+                }
+            } else if (pointValueMemoHashes[candidate] == hash
+                    && Objects.equals(owner.key, currentKey)
+                    && Objects.equals(owner.namespace, namespace)) {
+                slot = candidate;
+                break;
+            }
+        }
+        if (slot < 0) {
+            if (emptySlot >= 0) {
+                slot = emptySlot;
+            } else {
+                int victim = pointValueMemoNextVictims[set];
+                for (int scanned = 0; scanned < SNAPSHOT_VALUE_AUTHORITY_WAYS; scanned++) {
+                    int bit = 1 << victim;
+                    if ((pointValueMemoVisited[set] & bit) == 0) {
+                        break;
+                    }
+                    pointValueMemoVisited[set] &= (byte) ~bit;
+                    victim = (victim + 1) & (SNAPSHOT_VALUE_AUTHORITY_WAYS - 1);
+                }
+                slot = base + victim;
+                pointValueMemoNextVictims[set] =
+                        (victim + 1) & (SNAPSHOT_VALUE_AUTHORITY_WAYS - 1);
+                pointValueMemoOwnerReplacements++;
+            }
+            pointValueMemoOwners[slot] = newStoredKeyNamespace(currentKey, namespace);
+            pointValueMemoHashes[slot] = hash;
+            storePointValueMemoFingerprint(set, slot - base, hash);
+            pointValueMemoOwnerAdmissions++;
+        }
+        pointValueMemoUserKeys[slot] = copyUserKey(userKey);
+        pointValueMemoValues[slot] = present && hasValue ? copyUserValue(value) : null;
+        pointValueMemoKinds[slot] =
+                !present
+                        ? POINT_MEMO_ABSENT
+                        : hasValue ? POINT_MEMO_PRESENT_VALUE : POINT_MEMO_PRESENT_ONLY;
+        pointValueMemoStores++;
+    }
+
+    private void removePointValueMemoOwner(K currentKey, N namespace) {
+        if (!pointValueMemoEnabled || currentKey == null || namespace == null) {
+            return;
+        }
+        int hash = CacheKeyHash.hash(currentKey, namespace);
+        int set = hash & pointValueMemoSetMask;
+        int base = set * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
+            int slot = base + way;
+            if (pointValueMemoHashes[slot] != hash) {
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            KeyNamespace<K, N> owner = (KeyNamespace<K, N>) pointValueMemoOwners[slot];
+            if (owner != null
+                    && Objects.equals(owner.key, currentKey)
+                    && Objects.equals(owner.namespace, namespace)) {
+                pointValueMemoOwners[slot] = null;
+                pointValueMemoUserKeys[slot] = null;
+                pointValueMemoValues[slot] = null;
+                pointValueMemoHashes[slot] = 0;
+                pointValueMemoKinds[slot] = 0;
+                pointValueMemoVisited[set] &= (byte) ~(1 << way);
+                clearPointValueMemoFingerprint(set, way);
+                pointValueMemoInvalidations++;
+                return;
+            }
+        }
+    }
+
+    private void storePointValueMemoFingerprint(int set, int way, int hash) {
+        int shift = way << 4;
+        long mask = 0xffffL << shift;
+        pointValueMemoFingerprints[set] =
+                (pointValueMemoFingerprints[set] & ~mask)
+                        | ((long) snapshotValueAuthorityFingerprint(hash) << shift);
+    }
+
+    private void clearPointValueMemoFingerprint(int set, int way) {
+        pointValueMemoFingerprints[set] &= ~(0xffffL << (way << 4));
+    }
+
     private Iterable<UK> cacheKeys(Iterable<Map.Entry<UK, UV>> entries, K key, N namespace) {
         KeyNamespace<K, N> captured = newStoredKeyNamespace(key, namespace);
         return () ->
@@ -2869,6 +3150,24 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     snapshotValueAuthorityIteratorTableHits,
                     snapshotValueAuthorityPointFingerprintRejects);
         }
+        if (pointValueMemoEnabled) {
+            LOG.info(
+                    "[CACHEKIT MAP POINT VALUE MEMO] enabled=true probes={} "
+                            + "fingerprintRejects={} ownerHits={} userKeyHits={} valueHits={} "
+                            + "negativeHits={} containsHits={} stores={} ownerAdmissions={} "
+                            + "ownerReplacements={} invalidations={}",
+                    pointValueMemoProbes,
+                    pointValueMemoFingerprintRejects,
+                    pointValueMemoOwnerHits,
+                    pointValueMemoUserKeyHits,
+                    pointValueMemoValueHits,
+                    pointValueMemoNegativeHits,
+                    pointValueMemoContainsHits,
+                    pointValueMemoStores,
+                    pointValueMemoOwnerAdmissions,
+                    pointValueMemoOwnerReplacements,
+                    pointValueMemoInvalidations);
+        }
         if (nativeMapCacheEnabled) {
             LOG.info(
                     "[CACHEKIT NATIVE MAP CACHE] stateId={} generation={} probes={} hits={} "
@@ -2980,6 +3279,22 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     long getSnapshotValueAuthorityPointFingerprintRejectsForTesting() {
         return snapshotValueAuthorityPointFingerprintRejects;
+    }
+
+    long getPointValueMemoUserKeyHitsForTesting() {
+        return pointValueMemoUserKeyHits;
+    }
+
+    long getPointValueMemoNegativeHitsForTesting() {
+        return pointValueMemoNegativeHits;
+    }
+
+    long getPointValueMemoContainsHitsForTesting() {
+        return pointValueMemoContainsHits;
+    }
+
+    long getPointValueMemoInvalidationsForTesting() {
+        return pointValueMemoInvalidations;
     }
 
     long getNativeHitsForTesting() {
@@ -4012,6 +4327,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 if (presenceCacheEnabled) {
                     updatePresence(currentKey, namespace, lastUserKey, false);
                 }
+                storePointValueMemo(currentKey, namespace, lastUserKey, false, false, null);
             }
             invalidateSnapshot(currentKey, namespace);
             backfilled = true;
