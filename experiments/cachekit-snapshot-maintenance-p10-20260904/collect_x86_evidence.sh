@@ -6,6 +6,22 @@ p9_remote=/home/wuql/flink-cluster/experiments/cachekit-p9-dirty-overlay-q9-100m
 p10_remote=/home/wuql/flink-cluster/experiments/cachekit-p10-snapshot-maintenance-q9-100m-x86-20260904
 effective5_remote=/home/wuql/flink-cluster/experiments/cachekit-p10-effective5-100m-x86-20260904
 
+through=effective5
+if [[ $# -gt 0 ]]; then
+  [[ $# -eq 2 && $1 == --through ]] || {
+    echo "usage: $0 [--through p9|p10|effective5]" >&2
+    exit 64
+  }
+  through=$2
+fi
+case "$through" in
+  p9 | p10 | effective5) ;;
+  *)
+    echo "invalid collection phase: $through" >&2
+    exit 64
+    ;;
+esac
+
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 evidence_root=$script_dir/remote-evidence
 mkdir -p "$evidence_root"
@@ -89,7 +105,15 @@ fi
 REMOTE
 
 collect_one x86-p9 "$p9_remote" 3 final/P9_SCREEN_SUMMARY.json
+if [[ $through == p9 ]]; then
+  printf 'evidence_collected_through=p9 at=%s\n' "$(date -Is)"
+  exit 0
+fi
 collect_one x86-p10-screen "$p10_remote" 6 final/P10_SCREEN_SUMMARY.json
+if [[ $through == p10 ]]; then
+  printf 'evidence_collected_through=p10 at=%s\n' "$(date -Is)"
+  exit 0
+fi
 collect_one x86-effective5 "$effective5_remote" 12 final/P10_EFFECTIVE5_SUMMARY.json
 
-printf 'evidence_collected_at=%s\n' "$(date -Is)"
+printf 'evidence_collected_through=effective5 at=%s\n' "$(date -Is)"
