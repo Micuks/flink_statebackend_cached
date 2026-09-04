@@ -54,7 +54,7 @@ artifact_sha=${14}
 stage=${15}
 
 [[ -f $source_exp/CAMPAIGN_COMPLETE ]]
-[[ -f $source_exp/final/HOST_RESULT_COMPLETE ]]
+[[ -f $source_exp/final/P8_SCREEN_SUMMARY.json ]]
 [[ ! -e $target_exp ]] || { echo "target already exists: $target_exp" >&2; exit 73; }
 for port in "$target_rest_port" "$target_prom_port" "$target_push_port"; do
   ! ss -ltnH "sport = :$port" | grep -q . || { echo "port already in use: $port" >&2; exit 74; }
