@@ -688,8 +688,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             this.standaloneNativeMapSnapshotCache = null;
         }
         this.snapshotMaintenanceEnabled =
-                dirtyOverlayEnabled
-                        && mapSnapshotCacheEnabled
+                mapSnapshotCacheEnabled
                         && snapshotMaintenanceRuntimeEnabled();
     }
 

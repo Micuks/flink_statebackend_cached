@@ -847,6 +847,49 @@ class CachedInternalMapStateTest {
     }
 
     @Test
+    void testDirectSnapshotMaintenanceKeepsKnownSingleEntryAfterWriteThroughUpdate()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Integer> delegateEntries = new LinkedHashMap<>();
+        delegateEntries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(delegateEntries.entrySet());
+        when(delegate.get("uk1")).thenReturn(2);
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createDirectSnapshotMaintenanceState(delegate, currentKey);
+        assertEquals(1, consumeEntries(state.entries()));
+        state.put("uk1", 2);
+
+        Iterator<Map.Entry<String, Integer>> iterator = state.entries().iterator();
+        assertEquals(2, iterator.next().getValue());
+        assertFalse(iterator.hasNext());
+        verify(delegate, times(1)).entries();
+        verify(delegate, times(1)).put("uk1", 2);
+    }
+
+    @Test
+    void testDirectSnapshotMaintenanceUpdatesKnownSingleEntryToEmptyOnWriteThroughRemove()
+            throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Integer> delegateEntries = new LinkedHashMap<>();
+        delegateEntries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(delegateEntries.entrySet());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createDirectSnapshotMaintenanceState(delegate, currentKey);
+        assertEquals(1, consumeEntries(state.entries()));
+        state.remove("uk1");
+
+        assertFalse(state.entries().iterator().hasNext());
+        verify(delegate, times(1)).entries();
+        verify(delegate, times(1)).remove("uk1");
+    }
+
+    @Test
     void testFlushDoesNotWriteAfterClose() throws Exception {
         AtomicReference<String> currentKey = new AtomicReference<>("k1");
         InternalMapState<String, VoidNamespace, String, Integer> delegate =
@@ -1749,6 +1792,36 @@ class CachedInternalMapStateTest {
             return state;
         } finally {
             System.clearProperty("cachekit.map.dirty-overlay.enabled");
+            System.clearProperty("cachekit.map.snapshot-maintenance.enabled");
+        }
+    }
+
+    private static CachedInternalMapState<String, VoidNamespace, String, Integer>
+            createDirectSnapshotMaintenanceState(
+                    InternalMapState<String, VoidNamespace, String, Integer> delegate,
+                    AtomicReference<String> currentKey) {
+        System.setProperty("cachekit.map.snapshot-maintenance.enabled", "true");
+        try {
+            CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                    new CachedInternalMapState<>(
+                            delegate,
+                            currentKey::get,
+                            currentKey::set,
+                            0,
+                            CachePolicyType.LRU,
+                            0,
+                            PresenceCacheImplementation.PRIMITIVE,
+                            0,
+                            CachePolicyType.LRU,
+                            0,
+                            false,
+                            0.0,
+                            1,
+                            true,
+                            100);
+            state.setCurrentNamespace(VoidNamespace.INSTANCE);
+            return state;
+        } finally {
             System.clearProperty("cachekit.map.snapshot-maintenance.enabled");
         }
     }
