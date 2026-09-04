@@ -65,6 +65,7 @@ class CachedInternalMapStateTest {
         NativeMapSnapshotCache.setSnapshotFeatureAvailableForTesting(true);
         System.clearProperty("cachekit.map.dirty-overlay.enabled");
         System.clearProperty("cachekit.map.snapshot-maintenance.enabled");
+        System.clearProperty("cachekit.map.snapshot-value-authority.enabled");
     }
 
     @AfterEach
@@ -72,6 +73,7 @@ class CachedInternalMapStateTest {
         NativeMapSnapshotCache.setSnapshotFeatureAvailableForTesting(null);
         System.clearProperty("cachekit.map.dirty-overlay.enabled");
         System.clearProperty("cachekit.map.snapshot-maintenance.enabled");
+        System.clearProperty("cachekit.map.snapshot-value-authority.enabled");
     }
 
     @Test
@@ -1487,6 +1489,100 @@ class CachedInternalMapStateTest {
         assertEquals(2, metrics.probes());
         assertEquals(1, metrics.hits());
         assertEquals(1, metrics.singleShortCircuits());
+    }
+
+    @Test
+    void testSnapshotValueAuthorityElidesPointGetAndInvalidatesAfterPut() throws Exception {
+        System.setProperty("cachekit.map.snapshot-value-authority.enabled", "true");
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Integer> entries = new LinkedHashMap<>();
+        entries.put("uk1", 1);
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                                IntSerializer.INSTANCE));
+        when(delegate.entries()).thenAnswer(ignored -> entries.entrySet());
+        when(delegate.get("uk1")).thenAnswer(ignored -> entries.get("uk1"));
+        doAnswer(
+                        invocation -> {
+                            entries.put(invocation.getArgument(0), invocation.getArgument(1));
+                            return null;
+                        })
+                .when(delegate)
+                .put(any(), any());
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createSmallSnapshotState(
+                        delegate, currentKey, MapSnapshotCacheMetrics.forTesting());
+
+        Iterator<Map.Entry<String, Integer>> fillIterator = state.entries().iterator();
+        assertEquals(1, fillIterator.next().getValue());
+        assertFalse(fillIterator.hasNext());
+        clearInvocations(delegate);
+
+        assertEquals(1, state.entries().iterator().next().getValue());
+        verify(delegate, times(0)).entries();
+        verify(delegate, times(0)).get(any());
+
+        state.put("uk1", 10);
+        clearInvocations(delegate);
+        assertEquals(10, state.entries().iterator().next().getValue());
+        verify(delegate, times(1)).entries();
+        verify(delegate, times(0)).get(any());
+    }
+
+    @Test
+    void testSnapshotValueAuthorityDoesNotExposeMutableCachedValue() throws Exception {
+        System.setProperty("cachekit.map.snapshot-value-authority.enabled", "true");
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, byte[]> delegate =
+                mock(InternalMapState.class);
+        Map<String, byte[]> entries = new LinkedHashMap<>();
+        entries.put("uk1", new byte[] {1, 2});
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                                BytePrimitiveArraySerializer.INSTANCE));
+        when(delegate.entries()).thenAnswer(ignored -> entries.entrySet());
+        CachedInternalMapState<String, VoidNamespace, String, byte[]> state =
+                new CachedInternalMapState<>(
+                        delegate,
+                        currentKey::get,
+                        currentKey::set,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        PresenceCacheImplementation.PRIMITIVE,
+                        0,
+                        CachePolicyType.LRU,
+                        0,
+                        false,
+                        0.0,
+                        1,
+                        false,
+                        100,
+                        MapSnapshotCacheMetrics.forTesting(),
+                        null,
+                        0,
+                        false,
+                        0,
+                        false,
+                        3);
+        state.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+        Iterator<Map.Entry<String, byte[]>> fillIterator = state.entries().iterator();
+        fillIterator.next();
+        assertFalse(fillIterator.hasNext());
+        clearInvocations(delegate);
+        byte[] exposed = state.entries().iterator().next().getValue();
+        exposed[0] = 99;
+
+        assertArrayEquals(new byte[] {1, 2}, state.entries().iterator().next().getValue());
+        verify(delegate, times(0)).entries();
+        verify(delegate, times(0)).get(any());
     }
 
     @Test

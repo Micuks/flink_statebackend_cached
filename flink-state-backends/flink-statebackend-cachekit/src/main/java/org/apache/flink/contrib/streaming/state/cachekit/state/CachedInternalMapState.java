@@ -66,6 +66,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
             "cachekit.map.snapshot-maintenance.enabled";
     private static final String SNAPSHOT_MAINTENANCE_ENV =
             "CACHEKIT_MAP_SNAPSHOT_MAINTENANCE_ENABLED";
+    private static final String SNAPSHOT_VALUE_AUTHORITY_PROPERTY =
+            "cachekit.map.snapshot-value-authority.enabled";
+    private static final String SNAPSHOT_VALUE_AUTHORITY_ENV =
+            "CACHEKIT_MAP_SNAPSHOT_VALUE_AUTHORITY_ENABLED";
 
     private enum NativeSnapshotAdaptiveMode {
         EVALUATE,
@@ -191,9 +195,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
             new java.util.concurrent.atomic.AtomicLong();
 
     // --- MapSnapshot cache (entries() fast path) ---
-    private final CachePolicy<KeyNamespace<K, N>, MapSnapshot<UK>> mapSnapshotCache;
+    private final CachePolicy<KeyNamespace<K, N>, MapSnapshot<UK, UV>> mapSnapshotCache;
     private final boolean mapSnapshotCacheEnabled;
     private final boolean snapshotMaintenanceEnabled;
+    private final boolean snapshotValueAuthorityEnabled;
     private final int mapSnapshotSmallMaxEntries;
     private final boolean snapshotOwnedKeyReuseEnabled;
     private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
@@ -215,6 +220,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private long snapshotMaintenanceKnownNoops;
     private long snapshotMaintenanceUpdates;
     private long snapshotMaintenanceOverflowInvalidations;
+    private long snapshotValueAuthorityFills;
+    private long snapshotValueAuthorityEntriesStored;
+    private long snapshotValueAuthorityShortCircuits;
+    private long snapshotValueAuthorityPointGetsElided;
 
     private N currentNamespace;
     private final KeyNamespaceUserKey<K, N, UK> lookupKey =
@@ -690,6 +699,12 @@ public final class CachedInternalMapState<K, N, UK, UV>
         this.snapshotMaintenanceEnabled =
                 mapSnapshotCacheEnabled
                         && snapshotMaintenanceRuntimeEnabled();
+        this.snapshotValueAuthorityEnabled =
+                mapSnapshotCacheEnabled
+                        && !standaloneNativeMapSnapshotEnabled
+                        && !snapshotMaintenanceEnabled
+                        && userValueSerializer != null
+                        && snapshotValueAuthorityRuntimeEnabled();
     }
 
     private static boolean dirtyOverlayRuntimeEnabled() {
@@ -711,6 +726,21 @@ public final class CachedInternalMapState<K, N, UK, UV>
         String configured = System.getProperty(SNAPSHOT_MAINTENANCE_PROPERTY);
         if (configured == null || configured.trim().isEmpty()) {
             configured = System.getenv(SNAPSHOT_MAINTENANCE_ENV);
+        }
+        if (configured == null) {
+            return false;
+        }
+        String normalized = configured.trim();
+        return "true".equalsIgnoreCase(normalized)
+                || "1".equals(normalized)
+                || "yes".equalsIgnoreCase(normalized)
+                || "on".equalsIgnoreCase(normalized);
+    }
+
+    private static boolean snapshotValueAuthorityRuntimeEnabled() {
+        String configured = System.getProperty(SNAPSHOT_VALUE_AUTHORITY_PROPERTY);
+        if (configured == null || configured.trim().isEmpty()) {
+            configured = System.getenv(SNAPSHOT_VALUE_AUTHORITY_ENV);
         }
         if (configured == null) {
             return false;
@@ -1519,7 +1549,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         ensureDelegateNamespace(currentKey);
 
         if (snapshotOptimizationEnabled()) {
-            MapSnapshot<UK> snapshot = lookupSnapshot(currentKey);
+            MapSnapshot<UK, UV> snapshot = lookupSnapshot(currentKey);
             if (snapshot != null) {
                 if (snapshot.isEmpty()) {
                     mapSnapshotCacheMetrics.recordEmptyShortCircuit();
@@ -1770,7 +1800,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         nativeSnapshotAdaptiveBypassClock = 0;
     }
 
-    private MapSnapshot<UK> lookupNativeSnapshot(K currentKey) {
+    private MapSnapshot<UK, UV> lookupNativeSnapshot(K currentKey) {
         if (!nativeMapSnapshotEnabled
                 || currentKey == null
                 || currentNamespace == null
@@ -1826,7 +1856,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
     }
 
-    private void storeNativeSnapshot(K key, N namespace, MapSnapshot<UK> snapshot) {
+    private void storeNativeSnapshot(K key, N namespace, MapSnapshot<UK, UV> snapshot) {
         if (!nativeMapSnapshotEnabled
                 || key == null
                 || namespace == null
@@ -2621,6 +2651,15 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     snapshotMaintenanceUpdates,
                     snapshotMaintenanceOverflowInvalidations);
         }
+        if (snapshotValueAuthorityEnabled) {
+            LOG.info(
+                    "[CACHEKIT MAP SNAPSHOT VALUE AUTHORITY] enabled=true fills={} "
+                            + "entriesStored={} shortCircuits={} pointGetsElided={}",
+                    snapshotValueAuthorityFills,
+                    snapshotValueAuthorityEntriesStored,
+                    snapshotValueAuthorityShortCircuits,
+                    snapshotValueAuthorityPointGetsElided);
+        }
         if (nativeMapCacheEnabled) {
             LOG.info(
                     "[CACHEKIT NATIVE MAP CACHE] stateId={} generation={} probes={} hits={} "
@@ -2955,7 +2994,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     // ====================================================================
 
     private Iterable<Map.Entry<UK, UV>> trySnapshotShortCircuit(K currentKey) throws Exception {
-        MapSnapshot<UK> snapshot = lookupSnapshot(currentKey);
+        MapSnapshot<UK, UV> snapshot = lookupSnapshot(currentKey);
         if (snapshot == null) {
             return null; // UNKNOWN → fallthrough to delegate
         }
@@ -2964,21 +3003,33 @@ public final class CachedInternalMapState<K, N, UK, UV>
             mapSnapshotCacheMetrics.recordEmptyShortCircuit();
             return Collections.emptyList();
         }
-        // SINGLE/SMALL → downgrade the short range scan to bounded point gets. Resolve every
-        // value before publishing the iterable so a stale key can fall back without exposing a
-        // partial result.
+        // A complete bounded traversal can publish values as well as keys. Mutations invalidate
+        // the snapshot, so a value-bearing hit is an exact tiny-map authority and can elide every
+        // RocksDB point get. Copy values before exposure because Flink serializers may return
+        // mutable objects.
         List<UV> values = new ArrayList<>(snapshot.size());
-        for (UK userKey : snapshot.cachedUserKeys) {
-            UV value = this.get(userKey);
-            if (value == null) {
-                // A stale native snapshot must become a generation miss. Publishing a null
-                // exact-key fill would mean a real EMPTY snapshot, not a tombstone.
-                advanceNativeGeneration();
-                removeSnapshot(snapshotProbe);
-                mapSnapshotCacheMetrics.recordStaleInvalidation();
-                return null;
+        if (snapshotValueAuthorityEnabled && snapshot.hasValues()) {
+            for (UV cachedValue : snapshot.cachedValues) {
+                values.add(copyUserValue(cachedValue));
             }
-            values.add(value);
+            snapshotValueAuthorityShortCircuits++;
+            snapshotValueAuthorityPointGetsElided += snapshot.size();
+        } else {
+            // Key-only SINGLE/SMALL snapshots downgrade the short range scan to bounded point
+            // gets. Resolve every value before publishing the iterable so a stale key can fall
+            // back without exposing a partial result.
+            for (UK userKey : snapshot.cachedUserKeys) {
+                UV value = this.get(userKey);
+                if (value == null) {
+                    // A stale native snapshot must become a generation miss. Publishing a null
+                    // exact-key fill would mean a real EMPTY snapshot, not a tombstone.
+                    advanceNativeGeneration();
+                    removeSnapshot(snapshotProbe);
+                    mapSnapshotCacheMetrics.recordStaleInvalidation();
+                    return null;
+                }
+                values.add(value);
+            }
         }
         if (snapshot.isSingle()) {
             mapSnapshotCacheMetrics.recordSingleShortCircuit();
@@ -2989,14 +3040,14 @@ public final class CachedInternalMapState<K, N, UK, UV>
         return snapshotEntries(captured.key, captured.namespace, snapshot.cachedUserKeys, values);
     }
 
-    private MapSnapshot<UK> lookupSnapshot(K currentKey) {
+    private MapSnapshot<UK, UV> lookupSnapshot(K currentKey) {
         if (!snapshotOptimizationEnabled() || currentKey == null || currentNamespace == null) {
             return null;
         }
         snapshotProbe.key = currentKey;
         snapshotProbe.namespace = currentNamespace;
         mapSnapshotCacheMetrics.recordProbe();
-        MapSnapshot<UK> snapshot = null;
+        MapSnapshot<UK, UV> snapshot = null;
         if (standaloneNativeMapSnapshotEnabled) {
             try {
                 NativeMapSnapshotCache.Lookup<UK> nativeSnapshot =
@@ -3024,7 +3075,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         return snapshot;
     }
 
-    private void storeSnapshot(KeyNamespace<K, N> key, MapSnapshot<UK> snapshot) {
+    private void storeSnapshot(KeyNamespace<K, N> key, MapSnapshot<UK, UV> snapshot) {
         if (standaloneNativeMapSnapshotEnabled) {
             try {
                 boolean evicted =
@@ -3093,7 +3144,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return;
         }
         snapshotMaintenancePutAttempts++;
-        MapSnapshot<UK> snapshot = lookupSnapshot(currentKey);
+        MapSnapshot<UK, UV> snapshot = lookupSnapshot(currentKey);
         if (snapshot == null) {
             return;
         }
@@ -3122,7 +3173,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return;
         }
         snapshotMaintenanceRemoveAttempts++;
-        MapSnapshot<UK> snapshot = lookupSnapshot(currentKey);
+        MapSnapshot<UK, UV> snapshot = lookupSnapshot(currentKey);
         if (snapshot == null) {
             return;
         }
@@ -3385,11 +3436,20 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
     }
 
-    private static final class MapSnapshot<UK> {
+    private static final class MapSnapshot<UK, UV> {
         final List<UK> cachedUserKeys;
+        final List<UV> cachedValues;
 
-        MapSnapshot(List<UK> cachedUserKeys) {
+        MapSnapshot(List<UK> cachedUserKeys, List<UV> cachedValues) {
             this.cachedUserKeys = Collections.unmodifiableList(new ArrayList<>(cachedUserKeys));
+            this.cachedValues =
+                    cachedValues == null
+                            ? null
+                            : Collections.unmodifiableList(new ArrayList<>(cachedValues));
+            if (this.cachedValues != null
+                    && this.cachedValues.size() != this.cachedUserKeys.size()) {
+                throw new IllegalArgumentException("Snapshot keys and values must have equal size");
+            }
         }
 
         boolean isEmpty() {
@@ -3408,16 +3468,25 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return cachedUserKeys.get(0);
         }
 
-        static <UK> MapSnapshot<UK> single(UK userKey) {
-            return new MapSnapshot<>(Collections.singletonList(userKey));
+        boolean hasValues() {
+            return cachedValues != null;
         }
 
-        static <UK> MapSnapshot<UK> of(List<UK> userKeys) {
-            return new MapSnapshot<>(userKeys);
+        static <UK, UV> MapSnapshot<UK, UV> single(UK userKey) {
+            return new MapSnapshot<>(Collections.singletonList(userKey), null);
         }
 
-        static <UK> MapSnapshot<UK> empty() {
-            return new MapSnapshot<>(Collections.emptyList());
+        static <UK, UV> MapSnapshot<UK, UV> of(List<UK> userKeys) {
+            return new MapSnapshot<>(userKeys, null);
+        }
+
+        static <UK, UV> MapSnapshot<UK, UV> withValues(
+                List<UK> userKeys, List<UV> cachedValues) {
+            return new MapSnapshot<>(userKeys, cachedValues);
+        }
+
+        static <UK, UV> MapSnapshot<UK, UV> empty() {
+            return new MapSnapshot<>(Collections.emptyList(), Collections.emptyList());
         }
     }
 
@@ -3470,6 +3539,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         private final boolean dirtyOverlay;
         private int iteratedCount = 0;
         private final List<UK> snapshotUserKeys = new ArrayList<>();
+        private final List<UV> snapshotValues = new ArrayList<>();
         private UK lastUserKey = null;
         private boolean backfilled = false;
         private boolean removable;
@@ -3502,6 +3572,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         public Map.Entry<UK, UV> next() {
             Map.Entry<UK, UV> entry = delegateIterator.next();
             UK entryUserKey = entry.getKey();
+            UV entryValue = entry.getValue();
             UK stableUserKey =
                     snapshotOwnedKeyReuseEnabled ? copyUserKey(entryUserKey) : entryUserKey;
             if (cacheEntries && !(entry instanceof DirtyOverlayEntryMarker)) {
@@ -3516,8 +3587,12 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 if (snapshotOwnedKeyReuseEnabled) {
                     mapSnapshotCacheMetrics.recordInternalKeyCopyAvoided();
                 }
+                if (snapshotValueAuthorityEnabled) {
+                    snapshotValues.add(copyUserValue(entryValue));
+                }
             } else if (!snapshotUserKeys.isEmpty()) {
                 snapshotUserKeys.clear();
+                snapshotValues.clear();
             }
             lastUserKey = stableUserKey;
             removable = true;
@@ -3526,12 +3601,12 @@ public final class CachedInternalMapState<K, N, UK, UV>
                             currentKey,
                             namespace,
                             stableUserKey,
-                            entry.getValue(),
+                            entryValue,
                             null,
                             -1,
                             true)
                     : new SnapshotMapEntry(
-                            currentKey, namespace, entryUserKey, entry.getValue());
+                            currentKey, namespace, entryUserKey, entryValue);
         }
 
         @Override
@@ -3573,7 +3648,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 storeSnapshot(stored, MapSnapshot.empty());
             } else if (iteratedCount <= mapSnapshotSmallMaxEntries
                     && snapshotUserKeys.size() == iteratedCount) {
-                storeSnapshot(stored, MapSnapshot.of(snapshotUserKeys));
+                if (snapshotValueAuthorityEnabled && snapshotValues.size() == iteratedCount) {
+                    storeSnapshot(stored, MapSnapshot.withValues(snapshotUserKeys, snapshotValues));
+                    snapshotValueAuthorityFills++;
+                    snapshotValueAuthorityEntriesStored += iteratedCount;
+                } else {
+                    storeSnapshot(stored, MapSnapshot.of(snapshotUserKeys));
+                }
             } else {
                 mapSnapshotCacheMetrics.recordMultiEntrySkip();
                 removeSnapshot(stored);
