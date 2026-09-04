@@ -27,6 +27,9 @@ legs for every query. No P4 or Kunpeng result is substituted into the headline.
 
 ## Candidate legs
 
+- `stage_effective5_x86.sh` refuses to stage unless the sealed q9 64K source contrast and q9
+  integrated uplift are both positive. `summarize_effective5.py` then joins the q9 screen with the
+  four-query promotion campaign and recomputes every uplift from raw leg results.
 - Reuse the valid q9 `baseline`, `hot2-a`, and `hot2-maintained-64k` P10 screen legs.
 - For q5, q11, q15, and q18, run all three variants with the same P10 artifact:
   - `baseline`: hot levels 0, MapState value cache off, overlay off, maintenance off;
