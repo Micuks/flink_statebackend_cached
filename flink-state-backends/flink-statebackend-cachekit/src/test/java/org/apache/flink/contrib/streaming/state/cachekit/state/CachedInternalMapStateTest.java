@@ -1607,6 +1607,15 @@ class CachedInternalMapStateTest {
         assertFalse(first.hasNext());
         assertFalse(second.hasNext());
         assertEquals(2, metrics.probes());
+
+        for (int index = 0; index < 16; index++) {
+            String unseenKey = "unseen-" + index;
+            rows.put(unseenKey, new LinkedHashMap<>());
+            currentKey.set(unseenKey);
+            assertNull(state.get("uk"));
+        }
+        assertTrue(state.getSnapshotValueAuthorityPointFingerprintRejectsForTesting() > 0);
+        verify(delegate, times(16)).get("uk");
     }
 
     @Test

@@ -71,6 +71,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private static final String SNAPSHOT_VALUE_AUTHORITY_ENV =
             "CACHEKIT_MAP_SNAPSHOT_VALUE_AUTHORITY_ENABLED";
     private static final int SNAPSHOT_VALUE_AUTHORITY_WAYS = 4;
+    private static final long SNAPSHOT_VALUE_AUTHORITY_FINGERPRINT_ONES =
+            0x0001000100010001L;
+    private static final long SNAPSHOT_VALUE_AUTHORITY_FINGERPRINT_HIGHS =
+            0x8000800080008000L;
 
     private enum NativeSnapshotAdaptiveMode {
         EVALUATE,
@@ -204,6 +208,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private final Object[] snapshotValueAuthorityKeys;
     private final Object[] snapshotValueAuthoritySnapshots;
     private final int[] snapshotValueAuthorityHashes;
+    /** Four packed 16-bit SwissTable-style fingerprints per authority set. */
+    private final long[] snapshotValueAuthorityFingerprints;
     private final int[] snapshotValueAuthorityNextVictims;
     private final int snapshotValueAuthoritySetMask;
     private final int mapSnapshotSmallMaxEntries;
@@ -236,6 +242,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private long snapshotValueAuthorityPointValueHits;
     private long snapshotValueAuthorityPointNegativeHits;
     private long snapshotValueAuthorityIteratorTableHits;
+    private long snapshotValueAuthorityPointFingerprintRejects;
 
     private N currentNamespace;
     private final KeyNamespaceUserKey<K, N, UK> lookupKey =
@@ -733,6 +740,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         this.snapshotValueAuthorityKeys = new Object[authoritySlots];
         this.snapshotValueAuthoritySnapshots = new Object[authoritySlots];
         this.snapshotValueAuthorityHashes = new int[authoritySlots];
+        this.snapshotValueAuthorityFingerprints = new long[authoritySetCount];
         this.snapshotValueAuthorityNextVictims = new int[authoritySetCount];
         this.snapshotValueAuthoritySetMask = Math.max(0, authoritySetCount - 1);
     }
@@ -2143,7 +2151,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return null;
         }
         snapshotValueAuthorityPointProbes++;
-        MapSnapshot<UK, UV> snapshot = lookupSnapshotValueAuthorityTable(currentKey);
+        MapSnapshot<UK, UV> snapshot = lookupSnapshotValueAuthorityTable(currentKey, true);
         if (snapshot == null) {
             return null;
         }
@@ -2161,12 +2169,20 @@ public final class CachedInternalMapState<K, N, UK, UV>
         return SnapshotAuthorityLookup.absent();
     }
 
-    private MapSnapshot<UK, UV> lookupSnapshotValueAuthorityTable(K currentKey) {
+    private MapSnapshot<UK, UV> lookupSnapshotValueAuthorityTable(
+            K currentKey, boolean filterPointMisses) {
         if (currentKey == null || currentNamespace == null) {
             return null;
         }
         int hash = CacheKeyHash.hash(currentKey, currentNamespace);
-        int base = (hash & snapshotValueAuthoritySetMask) * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        int set = hash & snapshotValueAuthoritySetMask;
+        if (filterPointMisses
+                && !snapshotValueAuthorityFingerprintMayContain(
+                        snapshotValueAuthorityFingerprints[set], hash)) {
+            snapshotValueAuthorityPointFingerprintRejects++;
+            return null;
+        }
+        int base = set * SNAPSHOT_VALUE_AUTHORITY_WAYS;
         for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
             int slot = base + way;
             if (snapshotValueAuthorityHashes[slot] != hash) {
@@ -2219,11 +2235,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
         snapshotValueAuthorityKeys[slot] = key;
         snapshotValueAuthoritySnapshots[slot] = snapshot;
         snapshotValueAuthorityHashes[slot] = hash;
+        storeSnapshotValueAuthorityFingerprint(set, slot - base, hash);
     }
 
     private void removeSnapshotValueAuthority(KeyNamespace<K, N> key) {
         int hash = key.hashCode();
-        int base = (hash & snapshotValueAuthoritySetMask) * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        int set = hash & snapshotValueAuthoritySetMask;
+        int base = set * SNAPSHOT_VALUE_AUTHORITY_WAYS;
         for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
             int slot = base + way;
             if (snapshotValueAuthorityHashes[slot] != hash) {
@@ -2236,9 +2254,39 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 snapshotValueAuthorityKeys[slot] = null;
                 snapshotValueAuthoritySnapshots[slot] = null;
                 snapshotValueAuthorityHashes[slot] = 0;
+                clearSnapshotValueAuthorityFingerprint(set, slot - base);
                 return;
             }
         }
+    }
+
+    private static int snapshotValueAuthorityFingerprint(int hash) {
+        int fingerprint = (hash ^ (hash >>> 16)) & 0xffff;
+        return fingerprint == 0 ? 1 : fingerprint;
+    }
+
+    private static boolean snapshotValueAuthorityFingerprintMayContain(
+            long packedFingerprints, int hash) {
+        long repeated =
+                (long) snapshotValueAuthorityFingerprint(hash)
+                        * SNAPSHOT_VALUE_AUTHORITY_FINGERPRINT_ONES;
+        long differences = packedFingerprints ^ repeated;
+        return ((differences - SNAPSHOT_VALUE_AUTHORITY_FINGERPRINT_ONES)
+                        & ~differences
+                        & SNAPSHOT_VALUE_AUTHORITY_FINGERPRINT_HIGHS)
+                != 0;
+    }
+
+    private void storeSnapshotValueAuthorityFingerprint(int set, int way, int hash) {
+        int shift = way << 4;
+        long mask = 0xffffL << shift;
+        snapshotValueAuthorityFingerprints[set] =
+                (snapshotValueAuthorityFingerprints[set] & ~mask)
+                        | ((long) snapshotValueAuthorityFingerprint(hash) << shift);
+    }
+
+    private void clearSnapshotValueAuthorityFingerprint(int set, int way) {
+        snapshotValueAuthorityFingerprints[set] &= ~(0xffffL << (way << 4));
     }
 
     private Iterable<UK> cacheKeys(Iterable<Map.Entry<UK, UV>> entries, K key, N namespace) {
@@ -2808,7 +2856,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     "[CACHEKIT MAP SNAPSHOT VALUE AUTHORITY] enabled=true fills={} "
                             + "entriesStored={} shortCircuits={} pointGetsElided={} "
                             + "pointProbes={} pointSnapshotHits={} pointValueHits={} "
-                            + "pointNegativeHits={} iteratorTableHits={}",
+                            + "pointNegativeHits={} iteratorTableHits={} "
+                            + "pointFingerprintRejects={}",
                     snapshotValueAuthorityFills,
                     snapshotValueAuthorityEntriesStored,
                     snapshotValueAuthorityShortCircuits,
@@ -2817,7 +2866,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     snapshotValueAuthorityPointSnapshotHits,
                     snapshotValueAuthorityPointValueHits,
                     snapshotValueAuthorityPointNegativeHits,
-                    snapshotValueAuthorityIteratorTableHits);
+                    snapshotValueAuthorityIteratorTableHits,
+                    snapshotValueAuthorityPointFingerprintRejects);
         }
         if (nativeMapCacheEnabled) {
             LOG.info(
@@ -2926,6 +2976,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     long getNativeProbeAttemptsForTesting() {
         return nativeProbeAttempts;
+    }
+
+    long getSnapshotValueAuthorityPointFingerprintRejectsForTesting() {
+        return snapshotValueAuthorityPointFingerprintRejects;
     }
 
     long getNativeHitsForTesting() {
@@ -3155,7 +3209,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private Iterable<Map.Entry<UK, UV>> trySnapshotShortCircuit(K currentKey) throws Exception {
         MapSnapshot<UK, UV> snapshot =
                 snapshotValueAuthorityEnabled
-                        ? lookupSnapshotValueAuthorityTable(currentKey)
+                        ? lookupSnapshotValueAuthorityTable(currentKey, false)
                         : null;
         if (snapshot == null) {
             snapshot = lookupSnapshot(currentKey);
