@@ -60,7 +60,7 @@ for port in "$target_rest_port" "$target_prom_port" "$target_push_port"; do
   ! ss -ltnH "sport = :$port" | grep -q . || { echo "port already in use: $port" >&2; exit 74; }
 done
 
-variants=(hot2-a hot2-overlay hot2-maintained)
+variants=(hot2-a hot2-overlay hot2-maintained hot2-overlay-64k hot2-maintained-64k)
 mkdir -p "$target_exp/logs"
 cp -a "$source_exp/inputs" "$target_exp/inputs"
 for variant in "${variants[@]}"; do
@@ -93,9 +93,11 @@ source_prom_port, target_prom_port = sys.argv[10:12]
 source_push_port, target_push_port = sys.argv[12:14]
 source_commit, artifact_sha = sys.argv[14:16]
 variants = {
-    "hot2-a": {"map_cache": "0", "overlay": "false", "maintenance": "false"},
-    "hot2-overlay": {"map_cache": "65536", "overlay": "true", "maintenance": "false"},
-    "hot2-maintained": {"map_cache": "65536", "overlay": "true", "maintenance": "true"},
+    "hot2-a": {"map_cache": "0", "snapshot_cache": "2000", "overlay": "false", "maintenance": "false"},
+    "hot2-overlay": {"map_cache": "65536", "snapshot_cache": "2000", "overlay": "true", "maintenance": "false"},
+    "hot2-maintained": {"map_cache": "65536", "snapshot_cache": "2000", "overlay": "true", "maintenance": "true"},
+    "hot2-overlay-64k": {"map_cache": "65536", "snapshot_cache": "65536", "overlay": "true", "maintenance": "false"},
+    "hot2-maintained-64k": {"map_cache": "65536", "snapshot_cache": "65536", "overlay": "true", "maintenance": "true"},
 }
 
 replacements = [(value.encode(), replacement.encode()) for value, replacement in (
@@ -150,6 +152,16 @@ for variant, settings in variants.items():
         old_cache,
         "state.backend.cachekit.map.cache.max-entries: " + settings["map_cache"],
     )
+    old_snapshot_cache = "state.backend.cachekit.map.snapshot.cache.max-entries: 2000"
+    if text.count(old_snapshot_cache) != 1:
+        raise SystemExit(
+            f"snapshot cache setting count {text.count(old_snapshot_cache)} in {config}"
+        )
+    text = text.replace(
+        old_snapshot_cache,
+        "state.backend.cachekit.map.snapshot.cache.max-entries: "
+        + settings["snapshot_cache"],
+    )
     config.write_text(text)
 
 runner = root / "run_campaign.sh"
@@ -171,11 +183,19 @@ replace_once(
 )
 replace_once(
     "variants=(hot2-a hot2-cache hot2-overlay)",
-    "variants=(hot2-a hot2-overlay hot2-maintained)",
+    "variants=(hot2-a hot2-overlay hot2-maintained hot2-overlay-64k hot2-maintained-64k)",
 )
 replace_once(
     "expected_map={'hot2-a':'0','hot2-cache':'65536','hot2-overlay':'65536'}[variant]",
-    "expected_map={'hot2-a':'0','hot2-overlay':'65536','hot2-maintained':'65536'}[variant]",
+    "expected_map={'hot2-a':'0','hot2-overlay':'65536','hot2-maintained':'65536','hot2-overlay-64k':'65536','hot2-maintained-64k':'65536'}[variant]\n"
+    "expected_snapshot={'hot2-a':'2000','hot2-overlay':'2000','hot2-maintained':'2000','hot2-overlay-64k':'65536','hot2-maintained-64k':'65536'}[variant]",
+)
+replace_once(
+    "assert values['state.backend.cachekit.map.cache.max-entries']==expected_map\n"
+    "assert values['state.backend.cachekit.bp-prefetch.ready-gated.max-in-flight-batches']=='2'",
+    "assert values['state.backend.cachekit.map.cache.max-entries']==expected_map\n"
+    "assert values['state.backend.cachekit.map.snapshot.cache.max-entries']==expected_snapshot\n"
+    "assert values['state.backend.cachekit.bp-prefetch.ready-gated.max-in-flight-batches']=='2'",
 )
 
 activation_start = "marker='[CACHEKIT MAP DIRTY OVERLAY]'\n"
@@ -186,7 +206,7 @@ discarded, separator, after = remainder.partition("result={\n")
 if not separator:
     raise SystemExit("result block after activation not found")
 activation = r'''overlay_marker='[CACHEKIT MAP DIRTY OVERLAY]'
-overlay_enabled=variant in ('hot2-overlay','hot2-maintained')
+overlay_enabled=variant in ('hot2-overlay','hot2-maintained','hot2-overlay-64k','hot2-maintained-64k')
 overlay_activation={'enabled':overlay_enabled,'marker_count':logs.count(overlay_marker)}
 if overlay_enabled:
     import re
@@ -204,7 +224,7 @@ else:
     assert overlay_marker not in logs
 
 maintenance_marker='[CACHEKIT MAP SNAPSHOT MAINTENANCE]'
-maintenance_enabled=variant=='hot2-maintained'
+maintenance_enabled=variant in ('hot2-maintained','hot2-maintained-64k')
 maintenance_activation={'enabled':maintenance_enabled,'marker_count':logs.count(maintenance_marker)}
 if maintenance_enabled:
     pattern=(r'\[CACHEKIT MAP SNAPSHOT MAINTENANCE\] enabled=true putAttempts=(\d+) '
@@ -278,7 +298,9 @@ identity.update({
     "variants": list(variants),
     "primary_control": "hot2-a",
     "mechanism_control": "hot2-overlay",
-    "treatment": "hot2-maintained",
+    "mechanism_treatment": "hot2-maintained",
+    "capacity_control": "hot2-overlay-64k",
+    "treatment": "hot2-maintained-64k",
     "execution_environment": "idle-host-same-artifact-paired-source-mechanism-screen",
     "claim_boundary": "same x86 host and P10 artifact; dirty overlay and incrementally maintained exact snapshot gates are explicit",
 })
@@ -315,7 +337,13 @@ configs = {
     for variant in variants
 }
 config_differences = {}
-for left, right in (("hot2-a", "hot2-overlay"), ("hot2-overlay", "hot2-maintained")):
+for left, right in (
+    ("hot2-a", "hot2-overlay"),
+    ("hot2-overlay", "hot2-maintained"),
+    ("hot2-overlay", "hot2-overlay-64k"),
+    ("hot2-overlay-64k", "hot2-maintained-64k"),
+    ("hot2-maintained", "hot2-maintained-64k"),
+):
     values = {
         key: {left: configs[left].get(key), right: configs[right].get(key)}
         for key in sorted(set(configs[left]) | set(configs[right]))
@@ -325,6 +353,13 @@ for left, right in (("hot2-a", "hot2-overlay"), ("hot2-overlay", "hot2-maintaine
 expected_config = {
     "hot2-a_vs_hot2-overlay": {"state.backend.cachekit.map.cache.max-entries"},
     "hot2-overlay_vs_hot2-maintained": set(),
+    "hot2-overlay_vs_hot2-overlay-64k": {
+        "state.backend.cachekit.map.snapshot.cache.max-entries"
+    },
+    "hot2-overlay-64k_vs_hot2-maintained-64k": set(),
+    "hot2-maintained_vs_hot2-maintained-64k": {
+        "state.backend.cachekit.map.snapshot.cache.max-entries"
+    },
 }
 compose_env = {}
 for variant, settings in variants.items():

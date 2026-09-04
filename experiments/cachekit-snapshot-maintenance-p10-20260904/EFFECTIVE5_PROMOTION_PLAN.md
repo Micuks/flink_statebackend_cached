@@ -1,8 +1,9 @@
 # P10 Effective-5 Promotion Plan
 
 This promotion is conditional on a valid q9 P10 screen with nonzero snapshot-maintenance and
-single-entry short-circuit counters. A source mechanism that does not improve the
-`hot2-maintained` versus `hot2-overlay` contrast is rejected before expansion.
+single-entry short-circuit counters. The predeclared 64K source contrast
+`hot2-maintained-64k` versus `hot2-overlay-64k` must be positive, and the integrated
+`hot2-maintained-64k` treatment must improve over `hot2-a`, before expansion.
 
 ## Claim boundary
 
@@ -27,8 +28,8 @@ incompatible RDB campaign.
 
 ## Candidate legs
 
-- Reuse the valid q9 `hot2-maintained` P10 screen leg.
-- Run P10 `hot2-maintained` for q5, q11, q15, and q18 on the idle x86 host.
+- Reuse the valid q9 `hot2-maintained-64k` P10 screen leg.
+- Run P10 `hot2-maintained-64k` for q5, q11, q15, and q18 on the idle x86 host.
 - Run a fresh q15 P4 control config on the same host. The source artifact may be P10 only if both
   source gates and MapState cache are explicitly off and the rendered P4 configuration matches;
   otherwise rebuild/use the frozen P4 artifact.

@@ -19,11 +19,20 @@ Run q9 on x86 with one P10 artifact in every leg:
 
 - `hot2-a`: map value cache off, dirty overlay off, snapshot maintenance off.
 - `hot2-overlay`: map value cache on, dirty overlay on, snapshot maintenance off.
-- `hot2-maintained`: map value cache on, dirty overlay on, snapshot maintenance on.
+- `hot2-maintained`: map value cache on, dirty overlay on, snapshot maintenance on, with the
+  inherited 2,000-entry exact-membership LRU.
+- `hot2-overlay-64k`: dirty overlay on and snapshot maintenance off, with a 65,536-entry
+  exact-membership LRU; this controls for capacity without B.
+- `hot2-maintained-64k`: the predeclared A+B treatment; identical to `hot2-maintained` except
+  that the exact-membership LRU is aligned with the 65,536-entry MapState value cache.
 
-The primary comparison is `hot2-maintained` versus `hot2-a`; the isolated P10 source effect is
-`hot2-maintained` versus `hot2-overlay`. Every valid P10 leg must have nonzero maintenance
-activation counters and must reduce dirty-overlay base iterator requests relative to P9.
+The primary comparison is `hot2-maintained-64k` versus `hot2-a`; the isolated P10 source effect is
+measured twice: `hot2-maintained` versus `hot2-overlay` at 2K and `hot2-maintained-64k` versus
+`hot2-overlay-64k` at 64K. Capacity effects are separately measured with maintenance both off and
+on. The 64K treatment is declared before execution because prior q9 evidence showed about 335K
+exact-snapshot evictions at the inherited 2K capacity. Every maintained leg must have nonzero
+maintenance activation counters and must reduce dirty-overlay base iterator requests relative to
+its same-capacity overlay control.
 
 ## Promotion gate
 

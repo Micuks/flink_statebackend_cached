@@ -36,6 +36,9 @@ The implementation combines three existing CacheKit capabilities in a new state-
    path, so the mechanism does not create a second value-consistency protocol.
 
 Both mechanisms are default-off runtime gates and have independent terminal counters. The x86
-screen uses one P10 artifact in all three legs, separating map-cache capacity, P9 overlay, and P10
-incremental maintenance. Promotion depends on measured K/s/core and nonzero execution counters,
-not on resemblance to the cited designs.
+screen uses one P10 artifact in all five legs, separating map-cache capacity, P9 overlay, P10
+incremental maintenance, and the capacity of the exact-membership data structure. Overlay and
+maintained legs are both run at 2K and 64K, so capacity cannot be mistaken for the source effect.
+The 64K capacity is aligned with the existing MapState value cache and is predeclared because the
+prior 2K q9 screen recorded substantial exact-snapshot eviction churn. Promotion depends on
+measured K/s/core and nonzero execution counters, not on resemblance to the cited designs.
