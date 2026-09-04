@@ -34,6 +34,7 @@ import org.rocksdb.BlockBasedTableConfig;
 import org.rocksdb.BloomFilter;
 import org.rocksdb.Cache;
 import org.rocksdb.ColumnFamilyOptions;
+import org.rocksdb.CompressionType;
 import org.rocksdb.DBOptions;
 import org.rocksdb.Filter;
 import org.rocksdb.IndexType;
@@ -50,6 +51,7 @@ import javax.annotation.Nullable;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -491,11 +493,26 @@ public final class RocksDBResourceContainer implements AutoCloseable {
         currentOptions.setCompactionStyle(
                 internalGetOption(RocksDBConfigurableOptions.COMPACTION_STYLE));
 
-        currentOptions.setCompressionType(
-                internalGetOption(RocksDBConfigurableOptions.COMPRESSION_TYPE));
+        final CompressionType compressionType =
+                internalGetOption(RocksDBConfigurableOptions.COMPRESSION_TYPE);
+        final int uncompressedHotLevels =
+                internalGetOption(RocksDBConfigurableOptions.UNCOMPRESSED_HOT_LEVELS);
+        currentOptions.setCompressionType(compressionType);
+        if (uncompressedHotLevels > 0) {
+            final List<CompressionType> compressionPerLevel = new ArrayList<>(7);
+            for (int level = 0; level < 7; level++) {
+                compressionPerLevel.add(
+                        level < uncompressedHotLevels
+                                ? CompressionType.NO_COMPRESSION
+                                : compressionType);
+            }
+            currentOptions.setCompressionPerLevel(compressionPerLevel);
+        }
         LOG.info(
-                "Configured RocksDB compression type: {}",
-                currentOptions.compressionType());
+                "Configured RocksDB compression type: {}, uncompressed hot levels: {}, per-level policy: {}",
+                currentOptions.compressionType(),
+                uncompressedHotLevels,
+                currentOptions.compressionPerLevel());
 
         currentOptions.setLevelCompactionDynamicLevelBytes(
                 internalGetOption(RocksDBConfigurableOptions.USE_DYNAMIC_LEVEL_SIZE));

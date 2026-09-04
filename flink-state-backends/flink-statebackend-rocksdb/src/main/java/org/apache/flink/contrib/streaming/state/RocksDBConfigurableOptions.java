@@ -149,6 +149,17 @@ public class RocksDBConfigurableOptions implements Serializable {
                             "The compression algorithm for newly generated RocksDB SST files. "
                                     + "The default preserves RocksDB's SNAPPY_COMPRESSION behavior.");
 
+    public static final ConfigOption<Integer> UNCOMPRESSED_HOT_LEVELS =
+            key("state.backend.rocksdb.compression.uncompressed-hot-levels")
+                    .intType()
+                    .defaultValue(0)
+                    .withDescription(
+                            "The number of leading RocksDB levels that use NO_COMPRESSION, while "
+                                    + "later levels retain state.backend.rocksdb.compression.type. "
+                                    + "Valid values are 0 through 7; 0 preserves the ordinary "
+                                    + "single compression policy. With dynamic level sizing, level "
+                                    + "index 1 follows RocksDB's base-level-relative semantics.");
+
     public static final ConfigOption<Boolean> USE_DYNAMIC_LEVEL_SIZE =
             key("state.backend.rocksdb.compaction.level.use-dynamic-size")
                     .booleanType()
@@ -365,6 +376,7 @@ public class RocksDBConfigurableOptions implements Serializable {
                 // configurable ColumnFamilyOptions
                 COMPACTION_STYLE,
                 COMPRESSION_TYPE,
+                UNCOMPRESSED_HOT_LEVELS,
                 USE_DYNAMIC_LEVEL_SIZE,
                 TARGET_FILE_SIZE_BASE,
                 MAX_SIZE_LEVEL_BASE,
@@ -441,6 +453,11 @@ public class RocksDBConfigurableOptions implements Serializable {
             Preconditions.checkArgument(
                     ratio >= 0.0 && ratio <= 0.25,
                     "Configured value for key " + key + " must be between 0.0 and 0.25.");
+        } else if (UNCOMPRESSED_HOT_LEVELS.equals(option)) {
+            int levels = (Integer) value;
+            Preconditions.checkArgument(
+                    levels >= 0 && levels <= 7,
+                    "Configured value for key " + key + " must be between 0 and 7.");
         } else if (BLOOM_FILTER_FASTLOCAL_BLOCK_BYTES.equals(option)) {
             int blockBytes = (Integer) value;
             Preconditions.checkArgument(

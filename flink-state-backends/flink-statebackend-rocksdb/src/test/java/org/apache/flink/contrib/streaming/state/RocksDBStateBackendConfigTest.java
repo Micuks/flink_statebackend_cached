@@ -59,6 +59,7 @@ import org.rocksdb.InfoLogLevel;
 import org.rocksdb.util.SizeUnit;
 
 import java.io.File;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 
@@ -515,6 +516,8 @@ public class RocksDBStateBackendConfigTest {
 
             verifyIllegalArgument(RocksDBConfigurableOptions.COMPACTION_STYLE, "LEV");
             verifyIllegalArgument(RocksDBConfigurableOptions.COMPRESSION_TYPE, "NONE");
+            verifyIllegalArgument(RocksDBConfigurableOptions.UNCOMPRESSED_HOT_LEVELS, "-1");
+            verifyIllegalArgument(RocksDBConfigurableOptions.UNCOMPRESSED_HOT_LEVELS, "8");
             verifyIllegalArgument(RocksDBConfigurableOptions.USE_BLOOM_FILTER, "NO");
             verifyIllegalArgument(RocksDBConfigurableOptions.BLOOM_FILTER_BLOCK_BASED_MODE, "YES");
             verifyIllegalArgument(RocksDBConfigurableOptions.MEMTABLE_BLOOM_RATIO, "-0.1");
@@ -565,6 +568,7 @@ public class RocksDBStateBackendConfigTest {
                 ColumnFamilyOptions columnOptions = optionsContainer.getColumnOptions();
                 assertEquals(CompactionStyle.LEVEL, columnOptions.compactionStyle());
                 assertEquals(CompressionType.NO_COMPRESSION, columnOptions.compressionType());
+                assertTrue(columnOptions.compressionPerLevel().isEmpty());
                 assertTrue(columnOptions.levelCompactionDynamicLevelBytes());
                 assertEquals(8 * SizeUnit.MB, columnOptions.targetFileSizeBase());
                 assertEquals(128 * SizeUnit.MB, columnOptions.maxBytesForLevelBase());
@@ -581,6 +585,31 @@ public class RocksDBStateBackendConfigTest {
                 assertEquals(512 * SizeUnit.MB, tableConfig.blockCacheSize());
                 assertTrue(tableConfig.filterPolicy() instanceof BloomFilter);
             }
+        }
+    }
+
+    @Test
+    public void testUncompressedHotLevels() throws Exception {
+        Configuration configuration = new Configuration();
+        configuration.setString(
+                RocksDBConfigurableOptions.COMPRESSION_TYPE.key(), "SNAPPY_COMPRESSION");
+        configuration.setInteger(RocksDBConfigurableOptions.UNCOMPRESSED_HOT_LEVELS, 2);
+
+        try (RocksDBResourceContainer optionsContainer =
+                new RocksDBResourceContainer(
+                        configuration, PredefinedOptions.DEFAULT, null, null, null, false)) {
+            ColumnFamilyOptions columnOptions = optionsContainer.getColumnOptions();
+            assertEquals(CompressionType.SNAPPY_COMPRESSION, columnOptions.compressionType());
+            assertEquals(
+                    Arrays.asList(
+                            CompressionType.NO_COMPRESSION,
+                            CompressionType.NO_COMPRESSION,
+                            CompressionType.SNAPPY_COMPRESSION,
+                            CompressionType.SNAPPY_COMPRESSION,
+                            CompressionType.SNAPPY_COMPRESSION,
+                            CompressionType.SNAPPY_COMPRESSION,
+                            CompressionType.SNAPPY_COMPRESSION),
+                    columnOptions.compressionPerLevel());
         }
     }
 
