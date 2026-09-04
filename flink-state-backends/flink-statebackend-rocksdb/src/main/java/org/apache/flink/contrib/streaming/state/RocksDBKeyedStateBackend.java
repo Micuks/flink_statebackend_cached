@@ -389,6 +389,8 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @SuppressWarnings("unchecked")
     @Override
     public <N> Stream<K> getKeys(String state, N namespace) {
+        flushMapStateIndexedWriteBatchUnchecked(
+                "enumerating state keys", RocksDBWriteBatchWrapper.FlushReason.ENUMERATE_KEYS);
         RocksDbKvStateInfo columnInfo = kvStateInformation.get(state);
         if (columnInfo == null
                 || !(columnInfo.metaInfo instanceof RegisteredKeyValueStateBackendMetaInfo)) {
@@ -436,6 +438,9 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @Override
     public <N> Stream<Tuple2<K, N>> getKeysAndNamespaces(String state) {
+        flushMapStateIndexedWriteBatchUnchecked(
+                "enumerating state keys and namespaces",
+                RocksDBWriteBatchWrapper.FlushReason.ENUMERATE_KEYS_AND_NAMESPACES);
         RocksDbKvStateInfo columnInfo = kvStateInformation.get(state);
         if (columnInfo == null
                 || !(columnInfo.metaInfo instanceof RegisteredKeyValueStateBackendMetaInfo)) {
@@ -974,7 +979,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             throws Exception {
 
         // flush everything into db before taking a snapshot
-        writeBatchWrapper.flush();
+        writeBatchWrapper.flush(RocksDBWriteBatchWrapper.FlushReason.SNAPSHOT);
 
         return new SnapshotStrategyRunner<>(
                         checkpointSnapshotStrategy.getDescription(),
@@ -989,7 +994,7 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     public SavepointResources<K> savepoint() throws Exception {
 
         // flush everything into db before taking a snapshot
-        writeBatchWrapper.flush();
+        writeBatchWrapper.flush(RocksDBWriteBatchWrapper.FlushReason.SAVEPOINT);
 
         Map<String, HeapPriorityQueueSnapshotRestoreWrapper<?>> registeredPQStates;
         if (heapPriorityQueuesManager != null) {
@@ -1165,6 +1170,8 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             Tuple2<ColumnFamilyHandle, RegisteredKeyValueStateBackendMetaInfo<N, SV>> stateMetaInfo)
             throws Exception {
 
+        flushMapStateIndexedWriteBatch(RocksDBWriteBatchWrapper.FlushReason.MIGRATION);
+
         if (stateDesc.getType() == StateDescriptor.Type.MAP) {
             TypeSerializerSnapshot<SV> previousSerializerSnapshot =
                     stateMetaInfo.f1.getPreviousStateSerializerSnapshot();
@@ -1326,6 +1333,8 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @VisibleForTesting
     @Override
     public int numKeyValueStateEntries() {
+        flushMapStateIndexedWriteBatchUnchecked(
+                "counting state entries", RocksDBWriteBatchWrapper.FlushReason.COUNT_ENTRIES);
         int count = 0;
 
         for (RocksDbKvStateInfo metaInfo : kvStateInformation.values()) {
@@ -1382,5 +1391,66 @@ public class RocksDBKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @Nonnegative
     long getWriteBatchSize() {
         return writeBatchSize;
+    }
+
+    boolean isMapStateIndexedWriteBatchEnabled() {
+        return writeBatchWrapper.isIndexed();
+    }
+
+    boolean hasPendingMapStateIndexedWrites() {
+        return writeBatchWrapper.isIndexed() && writeBatchWrapper.hasPendingWrites();
+    }
+
+    byte[] getMapStateValue(ColumnFamilyHandle columnFamily, byte[] key) throws RocksDBException {
+        return writeBatchWrapper.isIndexed()
+                ? writeBatchWrapper.getFromBatchAndDB(columnFamily, readOptions, key)
+                : db.get(columnFamily, key);
+    }
+
+    void putMapStateValue(ColumnFamilyHandle columnFamily, byte[] key, byte[] value)
+            throws RocksDBException {
+        if (writeBatchWrapper.isIndexed()) {
+            writeBatchWrapper.putMapState(columnFamily, key, value);
+        } else {
+            db.put(columnFamily, writeOptions, key, value);
+        }
+    }
+
+    void deleteMapStateValue(ColumnFamilyHandle columnFamily, byte[] key) throws RocksDBException {
+        if (writeBatchWrapper.isIndexed()) {
+            writeBatchWrapper.removeMapState(columnFamily, key);
+        } else {
+            db.delete(columnFamily, writeOptions, key);
+        }
+    }
+
+    RocksIteratorWrapper getMapStateIterator(
+            ColumnFamilyHandle columnFamily, ReadOptions iteratorReadOptions) {
+        return writeBatchWrapper.isIndexed()
+                ? writeBatchWrapper.newIteratorWithBase(columnFamily, iteratorReadOptions)
+                : RocksDBOperationUtils.getRocksIterator(db, columnFamily, iteratorReadOptions);
+    }
+
+    void flushMapStateIndexedWriteBatch() throws RocksDBException {
+        if (writeBatchWrapper.isIndexed()) {
+            writeBatchWrapper.flush();
+        }
+    }
+
+    void flushMapStateIndexedWriteBatch(RocksDBWriteBatchWrapper.FlushReason reason)
+            throws RocksDBException {
+        if (writeBatchWrapper.isIndexed()) {
+            writeBatchWrapper.flush(reason);
+        }
+    }
+
+    private void flushMapStateIndexedWriteBatchUnchecked(
+            String operation, RocksDBWriteBatchWrapper.FlushReason reason) {
+        try {
+            flushMapStateIndexedWriteBatch(reason);
+        } catch (RocksDBException e) {
+            throw new FlinkRuntimeException(
+                    "Failed to flush indexed MapState writes before " + operation + ".", e);
+        }
     }
 }

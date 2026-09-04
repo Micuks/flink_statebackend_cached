@@ -123,7 +123,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
     public UV get(UK userKey) throws IOException, RocksDBException {
         byte[] rawKeyBytes =
                 serializeCurrentKeyWithGroupAndNamespacePlusUserKey(userKey, userKeySerializer);
-        byte[] rawValueBytes = backend.db.get(columnFamily, rawKeyBytes);
+        byte[] rawValueBytes = backend.getMapStateValue(columnFamily, rawKeyBytes);
 
         return (rawValueBytes == null
                 ? null
@@ -170,6 +170,10 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             return Collections.emptyList();
         }
         List<byte[]> keyRange = rocksDBKeys.subList(fromIndex, toIndex);
+        // RocksJava 6.20 does not expose MultiGetFromBatchAndDB. Commit the pending indexed
+        // delta before a bulk read so async prefetch cannot observe an older DB image.
+        backend.flushMapStateIndexedWriteBatch(
+                RocksDBWriteBatchWrapper.FlushReason.BULK_READ);
         return backend.db.multiGetAsList(
                 Collections.nCopies(keyRange.size(), columnFamily), keyRange);
     }
@@ -210,6 +214,8 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             ByteBuffer valueArena,
             int valueStride)
             throws RocksDBException {
+        backend.flushMapStateIndexedWriteBatch(
+                RocksDBWriteBatchWrapper.FlushReason.DIRECT_BULK_READ);
         return backend.db.multiGetDirectArena(
                 columnFamily,
                 backend.getReadOptions(),
@@ -227,7 +233,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                 serializeCurrentKeyWithGroupAndNamespacePlusUserKey(userKey, userKeySerializer);
         byte[] rawValueBytes = serializeValueNullSensitive(userValue, userValueSerializer);
 
-        backend.db.put(columnFamily, writeOptions, rawKeyBytes, rawValueBytes);
+        backend.putMapStateValue(columnFamily, rawKeyBytes, rawValueBytes);
     }
 
     @Override
@@ -245,7 +251,11 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                                 entry.getKey(), userKeySerializer);
                 byte[] rawValueBytes =
                         serializeValueNullSensitive(entry.getValue(), userValueSerializer);
-                writeBatchWrapper.put(columnFamily, rawKeyBytes, rawValueBytes);
+                if (backend.isMapStateIndexedWriteBatchEnabled()) {
+                    backend.putMapStateValue(columnFamily, rawKeyBytes, rawValueBytes);
+                } else {
+                    writeBatchWrapper.put(columnFamily, rawKeyBytes, rawValueBytes);
+                }
             }
         }
     }
@@ -255,14 +265,14 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
         byte[] rawKeyBytes =
                 serializeCurrentKeyWithGroupAndNamespacePlusUserKey(userKey, userKeySerializer);
 
-        backend.db.delete(columnFamily, writeOptions, rawKeyBytes);
+        backend.deleteMapStateValue(columnFamily, rawKeyBytes);
     }
 
     @Override
     public boolean contains(UK userKey) throws IOException, RocksDBException {
         byte[] rawKeyBytes =
                 serializeCurrentKeyWithGroupAndNamespacePlusUserKey(userKey, userKeySerializer);
-        byte[] rawValueBytes = backend.db.get(columnFamily, rawKeyBytes);
+        byte[] rawValueBytes = backend.getMapStateValue(columnFamily, rawKeyBytes);
 
         return (rawValueBytes != null);
     }
@@ -359,8 +369,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
         final byte[] prefixBytes = serializeCurrentKeyWithGroupAndNamespace();
 
         try (RocksIteratorWrapper iterator =
-                RocksDBOperationUtils.getRocksIterator(
-                        backend.db, columnFamily, backend.getReadOptions())) {
+                backend.getMapStateIterator(columnFamily, backend.getReadOptions())) {
 
             iterator.seek(prefixBytes);
 
@@ -370,6 +379,13 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
 
     @Override
     public void clear() {
+        try {
+            // The clear implementation writes a separate bulk batch. Fence the shared indexed
+            // delta first so an older pending put cannot be replayed after the clear.
+            backend.flushMapStateIndexedWriteBatch(RocksDBWriteBatchWrapper.FlushReason.CLEAR);
+        } catch (RocksDBException e) {
+            throw new FlinkRuntimeException("Error while fencing indexed MapState writes.", e);
+        }
         try (RocksIteratorWrapper iterator =
                         RocksDBOperationUtils.getRocksIterator(
                                 backend.db, columnFamily, backend.getReadOptions());
@@ -646,7 +662,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             rawValueBytes = null;
 
             try {
-                db.delete(columnFamily, writeOptions, materializeRawKey());
+                backend.deleteMapStateValue(columnFamily, materializeRawKey());
             } catch (RocksDBException e) {
                 throw new FlinkRuntimeException("Error while removing data from RocksDB.", e);
             }
@@ -717,7 +733,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
                 userValue = value;
                 rawValueBytes = serializeValueNullSensitive(value, valueSerializer);
 
-                db.put(columnFamily, writeOptions, materializeRawKey(), rawValueBytes);
+                backend.putMapStateValue(columnFamily, materializeRawKey(), rawValueBytes);
             } catch (IOException | RocksDBException e) {
                 throw new FlinkRuntimeException("Error while putting data into RocksDB.", e);
             }
@@ -823,6 +839,7 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             // Any non-COMPLETE outcome falls through to the ordinary iterator below.
             if (currentEntry == null
                     && backend.isMapIteratorPackedTinyScanEnabled()
+                    && !backend.isMapStateIndexedWriteBatchEnabled()
                     && tryLoadPackedTinyMap()) {
                 return;
             }
@@ -855,12 +872,11 @@ class RocksDBMapState<K, N, UK, UV> extends AbstractRocksDBState<K, N, Map<UK, U
             try (Slice ignoredUpperBoundSlice = upperBoundSlice;
                     ReadOptions ignoredBoundedReadOptions = boundedReadOptions;
                     RocksIteratorWrapper iterator =
-                    RocksDBOperationUtils.getRocksIterator(
-                            db,
-                            columnFamily,
-                            boundedReadOptions == null
-                                    ? backend.getReadOptions()
-                                    : boundedReadOptions)) {
+                            backend.getMapStateIterator(
+                                    columnFamily,
+                                    boundedReadOptions == null
+                                            ? backend.getReadOptions()
+                                            : boundedReadOptions)) {
                 nativeIterators = 1;
                 boundedIterators = boundedReadOptions == null ? 0 : 1;
                 /*

@@ -391,7 +391,11 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
 
             writeBatchWrapper =
                     new RocksDBWriteBatchWrapper(
-                            db, optionsContainer.getWriteOptions(), writeBatchSize);
+                            db,
+                            optionsContainer.getWriteOptions(),
+                            500,
+                            writeBatchSize,
+                            optionsContainer.isWriteBatchWithIndexEnabled());
 
             // it is important that we only create the key builder after the restore, and not
             // before;

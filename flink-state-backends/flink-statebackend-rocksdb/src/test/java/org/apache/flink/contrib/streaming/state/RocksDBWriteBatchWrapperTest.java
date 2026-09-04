@@ -26,6 +26,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.rocksdb.ColumnFamilyDescriptor;
 import org.rocksdb.ColumnFamilyHandle;
+import org.rocksdb.ReadOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.WriteOptions;
 
@@ -35,6 +36,9 @@ import java.util.concurrent.ThreadLocalRandom;
 
 import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.WRITE_BATCH_SIZE;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 /** Tests to guard {@link RocksDBWriteBatchWrapper}. */
 public class RocksDBWriteBatchWrapperTest {
@@ -121,6 +125,49 @@ public class RocksDBWriteBatchWrapperTest {
             }
             writeBatchWrapper.put(handle, dummy, dummy);
             assertEquals(initBatchSize, writeBatchWrapper.getDataSize());
+        }
+    }
+
+    @Test
+    public void testIndexedBatchProvidesPointAndIteratorReadYourWrites() throws Exception {
+        byte[] key1 = "key-1".getBytes();
+        byte[] key2 = "key-2".getBytes();
+        byte[] value1 = "value-1".getBytes();
+        byte[] value2 = "value-2".getBytes();
+
+        try (RocksDB db = RocksDB.open(folder.newFolder().getAbsolutePath());
+                WriteOptions options = new WriteOptions().setDisableWAL(true);
+                ReadOptions readOptions = new ReadOptions();
+                ColumnFamilyHandle handle =
+                        db.createColumnFamily(new ColumnFamilyDescriptor("test".getBytes()));
+                RocksDBWriteBatchWrapper writeBatchWrapper =
+                        new RocksDBWriteBatchWrapper(db, options, 100, 0, true)) {
+            assertTrue(writeBatchWrapper.isIndexed());
+            writeBatchWrapper.putMapState(handle, key1, value1);
+            writeBatchWrapper.putMapState(handle, key2, value2);
+
+            assertNull(db.get(handle, key1));
+            Assert.assertArrayEquals(
+                    value1, writeBatchWrapper.getFromBatchAndDB(handle, readOptions, key1));
+
+            try (RocksIteratorWrapper iterator =
+                    writeBatchWrapper.newIteratorWithBase(handle, readOptions)) {
+                iterator.seekToFirst();
+                assertTrue(iterator.isValid());
+                Assert.assertArrayEquals(key1, iterator.key());
+                iterator.next();
+                assertTrue(iterator.isValid());
+                Assert.assertArrayEquals(key2, iterator.key());
+                iterator.next();
+                assertFalse(iterator.isValid());
+            }
+
+            writeBatchWrapper.removeMapState(handle, key1);
+            assertNull(writeBatchWrapper.getFromBatchAndDB(handle, readOptions, key1));
+            writeBatchWrapper.flush();
+            assertNull(db.get(handle, key1));
+            Assert.assertArrayEquals(value2, db.get(handle, key2));
+            assertFalse(writeBatchWrapper.hasPendingWrites());
         }
     }
 }

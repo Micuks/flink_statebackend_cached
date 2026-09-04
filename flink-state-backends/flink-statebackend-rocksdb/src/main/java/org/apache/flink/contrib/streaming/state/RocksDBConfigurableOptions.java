@@ -253,6 +253,17 @@ public class RocksDBConfigurableOptions implements Serializable {
                             "The max size of the consumed memory for RocksDB batch write, "
                                     + "will flush just based on item count if this config set to 0.");
 
+    public static final ConfigOption<Boolean> WRITE_BATCH_WITH_INDEX_ENABLED =
+            key("state.backend.rocksdb.write-batch-with-index.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "If true, MapState point mutations use the backend's shared "
+                                    + "WriteBatchWithIndex. Point reads and iterators merge the "
+                                    + "pending delta with RocksDB to preserve read-your-writes, "
+                                    + "and checkpoints flush the delta before snapshotting. The "
+                                    + "default is false.");
+
     public static final ConfigOption<Boolean> USE_BLOOM_FILTER =
             key("state.backend.rocksdb.use-bloom-filter")
                     .booleanType()
@@ -386,6 +397,7 @@ public class RocksDBConfigurableOptions implements Serializable {
                 BLOCK_SIZE,
                 METADATA_BLOCK_SIZE,
                 BLOCK_CACHE_SIZE,
+                WRITE_BATCH_WITH_INDEX_ENABLED,
                 USE_BLOOM_FILTER,
                 BLOOM_FILTER_BITS_PER_KEY,
                 BLOOM_FILTER_BLOCK_BASED_MODE,

@@ -20,6 +20,7 @@ package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.runtime.operators.testutils.MockEnvironment;
@@ -46,7 +47,17 @@ public class RocksDBKeyedStateBackendTestFactory implements AutoCloseable {
     public <K> RocksDBKeyedStateBackend<K> create(
             TemporaryFolder tmp, TypeSerializer<K> keySerializer, int maxKeyGroupNumber)
             throws Exception {
+        return create(tmp, keySerializer, maxKeyGroupNumber, new Configuration());
+    }
+
+    public <K> RocksDBKeyedStateBackend<K> create(
+            TemporaryFolder tmp,
+            TypeSerializer<K> keySerializer,
+            int maxKeyGroupNumber,
+            Configuration configuration)
+            throws Exception {
         RocksDBStateBackend backend = getRocksDBStateBackend(tmp);
+        backend = backend.configure(configuration, getClass().getClassLoader());
         env = MockEnvironment.builder().build();
         keyedStateBackend =
                 (RocksDBKeyedStateBackend<K>)

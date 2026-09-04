@@ -614,6 +614,21 @@ public class RocksDBStateBackendConfigTest {
     }
 
     @Test
+    public void testWriteBatchWithIndexIsDefaultOffAndConfigurable() throws Exception {
+        try (RocksDBResourceContainer defaultContainer = new RocksDBResourceContainer()) {
+            assertFalse(defaultContainer.isWriteBatchWithIndexEnabled());
+        }
+
+        Configuration configuration = new Configuration();
+        configuration.setBoolean(RocksDBConfigurableOptions.WRITE_BATCH_WITH_INDEX_ENABLED, true);
+        try (RocksDBResourceContainer configuredContainer =
+                new RocksDBResourceContainer(
+                        configuration, PredefinedOptions.DEFAULT, null, null, null, false)) {
+            assertTrue(configuredContainer.isWriteBatchWithIndexEnabled());
+        }
+    }
+
+    @Test
     public void testOptionsFactory() throws Exception {
         String checkpointPath = tempFolder.newFolder().toURI().toString();
         RocksDBStateBackend rocksDbBackend = new RocksDBStateBackend(checkpointPath);

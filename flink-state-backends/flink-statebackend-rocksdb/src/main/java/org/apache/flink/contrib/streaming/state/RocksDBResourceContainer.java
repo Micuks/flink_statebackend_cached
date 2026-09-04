@@ -195,6 +195,11 @@ public final class RocksDBResourceContainer implements AutoCloseable {
         return sharedResources.getResourceHandle().getWriteBufferManagerCapacity();
     }
 
+    /** Whether MapState should use an indexed pending-write delta with read-your-writes. */
+    public boolean isWriteBatchWithIndexEnabled() {
+        return internalGetOption(RocksDBConfigurableOptions.WRITE_BATCH_WITH_INDEX_ENABLED);
+    }
+
     /** Gets the RocksDB {@link ColumnFamilyOptions} to be used for all RocksDB instances. */
     public ColumnFamilyOptions getColumnOptions() {
         // initial options from common profile
