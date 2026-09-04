@@ -1558,8 +1558,8 @@ class CachedInternalMapStateTest {
         InternalMapState<String, VoidNamespace, String, Integer> delegate =
                 mock(InternalMapState.class);
         Map<String, Map<String, Integer>> rows = new LinkedHashMap<>();
-        rows.put("k1", Collections.singletonMap("uk", 1));
-        rows.put("k2", Collections.singletonMap("uk", 2));
+        rows.put("k1", new LinkedHashMap<>(Collections.singletonMap("uk", 1)));
+        rows.put("k2", new LinkedHashMap<>(Collections.singletonMap("uk", 2)));
         when(delegate.getValueSerializer())
                 .thenReturn(
                         new MapSerializer<>(
@@ -1571,6 +1571,14 @@ class CachedInternalMapStateTest {
                 .thenAnswer(
                         invocation ->
                                 rows.get(currentKey.get()).get(invocation.getArgument(0)));
+        doAnswer(
+                        invocation -> {
+                            rows.get(currentKey.get())
+                                    .put(invocation.getArgument(0), invocation.getArgument(1));
+                            return null;
+                        })
+                .when(delegate)
+                .put(any(), any());
         MapSnapshotCacheMetrics metrics = MapSnapshotCacheMetrics.forTesting();
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =
                 createSmallSnapshotState(delegate, currentKey, metrics);
@@ -1590,6 +1598,14 @@ class CachedInternalMapStateTest {
         assertEquals(2, state.get("uk"));
         assertEquals(2, metrics.probes());
         verify(delegate, times(0)).get(any());
+
+        Iterable<Map.Entry<String, Integer>> cachedEntries = state.entries();
+        Iterator<Map.Entry<String, Integer>> first = cachedEntries.iterator();
+        Iterator<Map.Entry<String, Integer>> second = cachedEntries.iterator();
+        assertEquals(2, first.next().setValue(3));
+        assertEquals(3, second.next().getValue());
+        assertFalse(first.hasNext());
+        assertFalse(second.hasNext());
     }
 
     @Test

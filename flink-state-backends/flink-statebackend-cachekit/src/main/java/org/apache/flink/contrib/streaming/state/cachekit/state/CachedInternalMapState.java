@@ -3156,16 +3156,27 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
         // A complete bounded traversal can publish values as well as keys. Mutations invalidate
         // the snapshot, so a value-bearing hit is an exact tiny-map authority and can elide every
-        // RocksDB point get. Copy values before exposure because Flink serializers may return
-        // mutable objects.
-        List<UV> values = new ArrayList<>(snapshot.size());
+        // RocksDB point get. The overwhelmingly common SINGLE case uses a dedicated iterable that
+        // defers defensive key/value copies until getKey()/getValue(), avoiding intermediate lists
+        // and arrays on every short-circuit.
+        List<UV> values;
         if (snapshotValueAuthorityEnabled && snapshot.hasValues()) {
+            snapshotValueAuthorityShortCircuits++;
+            snapshotValueAuthorityPointGetsElided += snapshot.size();
+            if (snapshot.isSingle()) {
+                mapSnapshotCacheMetrics.recordSingleShortCircuit();
+                return new SingletonSnapshotIterable(
+                        copyStateKey(currentKey),
+                        copyStateNamespace(currentNamespace),
+                        snapshot.singleUserKey(),
+                        snapshot.cachedValues.get(0));
+            }
+            values = new ArrayList<>(snapshot.size());
             for (UV cachedValue : snapshot.cachedValues) {
                 values.add(copyUserValue(cachedValue));
             }
-            snapshotValueAuthorityShortCircuits++;
-            snapshotValueAuthorityPointGetsElided += snapshot.size();
         } else {
+            values = new ArrayList<>(snapshot.size());
             // Key-only SINGLE/SMALL snapshots downgrade the short range scan to bounded point
             // gets. Resolve every value before publishing the iterable so a stale key can fall
             // back without exposing a partial result.
@@ -3463,6 +3474,113 @@ public final class CachedInternalMapState<K, N, UK, UV>
         };
     }
 
+    private final class SingletonSnapshotIterable implements Iterable<Map.Entry<UK, UV>> {
+        private final K stateKey;
+        private final N namespace;
+        private final UK internalUserKey;
+        private UV currentValue;
+        private boolean removed;
+
+        private SingletonSnapshotIterable(
+                K stateKey, N namespace, UK internalUserKey, UV internalValue) {
+            this.stateKey = stateKey;
+            this.namespace = namespace;
+            this.internalUserKey = internalUserKey;
+            this.currentValue = internalValue;
+        }
+
+        @Override
+        public Iterator<Map.Entry<UK, UV>> iterator() {
+            return new SingletonSnapshotIteratorEntry(this);
+        }
+    }
+
+    /** Independent iterator and entry for the allocation-minimal authoritative SINGLE path. */
+    private final class SingletonSnapshotIteratorEntry
+            implements Iterator<Map.Entry<UK, UV>>, Map.Entry<UK, UV> {
+        private final SingletonSnapshotIterable owner;
+        private UK exposedUserKey;
+        private UV exposedValue;
+        private boolean exposedUserKeyInitialized;
+        private boolean exposedValueInitialized;
+        private boolean consumed;
+        private boolean removable;
+
+        private SingletonSnapshotIteratorEntry(SingletonSnapshotIterable owner) {
+            this.owner = owner;
+        }
+
+        @Override
+        public boolean hasNext() {
+            return !consumed && !owner.removed;
+        }
+
+        @Override
+        public Map.Entry<UK, UV> next() {
+            if (!hasNext()) {
+                throw new java.util.NoSuchElementException();
+            }
+            consumed = true;
+            removable = true;
+            return this;
+        }
+
+        @Override
+        public void remove() {
+            if (!removable) {
+                throw new IllegalStateException("remove() requires a preceding next()");
+            }
+            try {
+                mutateSnapshotEntry(
+                        owner.stateKey, owner.namespace, owner.internalUserKey, null, true);
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to remove MapState entry", e);
+            }
+            owner.removed = true;
+            removable = false;
+        }
+
+        @Override
+        public UK getKey() {
+            if (!exposedUserKeyInitialized) {
+                exposedUserKey = copyUserKey(owner.internalUserKey);
+                exposedUserKeyInitialized = true;
+            }
+            return exposedUserKey;
+        }
+
+        @Override
+        public UV getValue() {
+            if (!exposedValueInitialized) {
+                exposedValue = copyUserValue(owner.currentValue);
+                exposedValueInitialized = true;
+            }
+            return exposedValue;
+        }
+
+        @Override
+        public UV setValue(UV newValue) {
+            if (newValue == null) {
+                throw new NullPointerException("MapState entries do not accept null values");
+            }
+            UV previous = getValue();
+            try {
+                mutateSnapshotEntry(
+                        owner.stateKey,
+                        owner.namespace,
+                        owner.internalUserKey,
+                        newValue,
+                        false);
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to update MapState entry", e);
+            }
+            owner.currentValue = newValue;
+            exposedValue = newValue;
+            exposedValueInitialized = true;
+            return previous;
+        }
+    }
+
     private final class SnapshotMapEntry implements Map.Entry<UK, UV> {
         private final K stateKey;
         private final N namespace;
@@ -3561,17 +3679,29 @@ public final class CachedInternalMapState<K, N, UK, UV>
     }
 
     private KeyNamespace<K, N> newStoredKeyNamespace(K key, N namespace) {
-        K keyCopy = keySerializer == null ? key : keySerializer.copy(key);
-        N nsCopy = namespaceSerializer == null ? namespace : namespaceSerializer.copy(namespace);
-        if (keySerializer == null
-                && key instanceof org.apache.flink.table.data.binary.BinaryRowData) {
-            keyCopy = (K) ((org.apache.flink.table.data.binary.BinaryRowData) key).copy();
+        return new KeyNamespace<>(copyStateKey(key), copyStateNamespace(namespace));
+    }
+
+    @SuppressWarnings("unchecked")
+    private K copyStateKey(K key) {
+        if (keySerializer != null) {
+            return keySerializer.copy(key);
         }
-        if (namespaceSerializer == null
-                && namespace instanceof org.apache.flink.table.data.binary.BinaryRowData) {
-            nsCopy = (N) ((org.apache.flink.table.data.binary.BinaryRowData) namespace).copy();
+        if (key instanceof org.apache.flink.table.data.binary.BinaryRowData) {
+            return (K) ((org.apache.flink.table.data.binary.BinaryRowData) key).copy();
         }
-        return new KeyNamespace<>(keyCopy, nsCopy);
+        return key;
+    }
+
+    @SuppressWarnings("unchecked")
+    private N copyStateNamespace(N namespace) {
+        if (namespaceSerializer != null) {
+            return namespaceSerializer.copy(namespace);
+        }
+        if (namespace instanceof org.apache.flink.table.data.binary.BinaryRowData) {
+            return (N) ((org.apache.flink.table.data.binary.BinaryRowData) namespace).copy();
+        }
+        return namespace;
     }
 
     private static final class KeyNamespace<K, N> {
