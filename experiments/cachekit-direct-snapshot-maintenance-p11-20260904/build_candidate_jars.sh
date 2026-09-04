@@ -7,8 +7,13 @@ expected_arm_p10_sha=ffc55699efb16639e41b35fe29eb9f00ad150c0088840d335d52d2b409f
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo=$(git -C "$script_dir" rev-parse --show-toplevel)
-[[ $(git -C "$repo" rev-parse HEAD) == "$expected_source" ]] || {
-  echo "unexpected source commit" >&2
+git -C "$repo" merge-base --is-ancestor "$expected_source" HEAD || {
+  echo "expected runtime source is not an ancestor" >&2
+  exit 65
+}
+git -C "$repo" diff --quiet "$expected_source" HEAD -- \
+  flink-state-backends/flink-statebackend-cachekit || {
+  echo "runtime source differs from $expected_source" >&2
   exit 65
 }
 git -C "$repo" diff --quiet && git -C "$repo" diff --cached --quiet || {
