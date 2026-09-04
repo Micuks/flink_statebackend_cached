@@ -199,6 +199,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private final boolean mapSnapshotCacheEnabled;
     private final boolean snapshotMaintenanceEnabled;
     private final boolean snapshotValueAuthorityEnabled;
+    /** One exact recently filled tiny-map row, independent of the bounded LRU admission table. */
+    private KeyNamespace<K, N> snapshotValueAuthorityFrontKey;
+    private MapSnapshot<UK, UV> snapshotValueAuthorityFrontSnapshot;
     private final int mapSnapshotSmallMaxEntries;
     private final boolean snapshotOwnedKeyReuseEnabled;
     private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
@@ -2117,8 +2120,12 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return null;
         }
         snapshotValueAuthorityPointProbes++;
-        MapSnapshot<UK, UV> snapshot = lookupSnapshot(currentKey);
-        if (snapshot == null || !snapshot.hasValues()) {
+        MapSnapshot<UK, UV> snapshot = snapshotValueAuthorityFrontSnapshot;
+        KeyNamespace<K, N> frontKey = snapshotValueAuthorityFrontKey;
+        if (snapshot == null
+                || frontKey == null
+                || !Objects.equals(frontKey.key, currentKey)
+                || !Objects.equals(frontKey.namespace, currentNamespace)) {
             return null;
         }
         snapshotValueAuthorityPointSnapshotHits++;
@@ -3147,6 +3154,16 @@ public final class CachedInternalMapState<K, N, UK, UV>
         } else if (mapSnapshotCacheEnabled) {
             mapSnapshotCache.put(key, snapshot);
         }
+        if (snapshotValueAuthorityEnabled) {
+            if (snapshot.hasValues()) {
+                snapshotValueAuthorityFrontKey = key;
+                snapshotValueAuthorityFrontSnapshot = snapshot;
+            } else if (snapshotValueAuthorityFrontKey != null
+                    && snapshotValueAuthorityFrontKey.equals(key)) {
+                snapshotValueAuthorityFrontKey = null;
+                snapshotValueAuthorityFrontSnapshot = null;
+            }
+        }
         if (snapshot.isEmpty() || snapshot.isSingle()) {
             storeNativeSnapshot(key.key, key.namespace, snapshot);
         }
@@ -3160,6 +3177,11 @@ public final class CachedInternalMapState<K, N, UK, UV>
     }
 
     private boolean removeSnapshot(KeyNamespace<K, N> key) {
+        if (snapshotValueAuthorityFrontKey != null
+                && snapshotValueAuthorityFrontKey.equals(key)) {
+            snapshotValueAuthorityFrontKey = null;
+            snapshotValueAuthorityFrontSnapshot = null;
+        }
         boolean removed;
         if (standaloneNativeMapSnapshotEnabled) {
             try {

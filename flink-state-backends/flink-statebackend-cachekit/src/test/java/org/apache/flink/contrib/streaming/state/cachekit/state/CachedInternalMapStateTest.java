@@ -1513,9 +1513,16 @@ class CachedInternalMapStateTest {
                         })
                 .when(delegate)
                 .put(any(), any());
+        doAnswer(
+                        ignored -> {
+                            entries.clear();
+                            return null;
+                        })
+                .when(delegate)
+                .clear();
+        MapSnapshotCacheMetrics metrics = MapSnapshotCacheMetrics.forTesting();
         CachedInternalMapState<String, VoidNamespace, String, Integer> state =
-                createSmallSnapshotState(
-                        delegate, currentKey, MapSnapshotCacheMetrics.forTesting());
+                createSmallSnapshotState(delegate, currentKey, metrics);
 
         Iterator<Map.Entry<String, Integer>> fillIterator = state.entries().iterator();
         assertEquals(1, fillIterator.next().getValue());
@@ -1526,6 +1533,7 @@ class CachedInternalMapStateTest {
         assertTrue(state.contains("uk1"));
         assertNull(state.get("missing"));
         assertFalse(state.contains("missing"));
+        assertEquals(1, metrics.probes());
         assertEquals(1, state.entries().iterator().next().getValue());
         verify(delegate, times(0)).entries();
         verify(delegate, times(0)).get(any());
@@ -1536,6 +1544,10 @@ class CachedInternalMapStateTest {
         assertEquals(10, state.entries().iterator().next().getValue());
         verify(delegate, times(1)).entries();
         verify(delegate, times(1)).get("uk1");
+
+        state.clear();
+        clearInvocations(delegate);
+        assertNull(state.get("uk1"));
     }
 
     @Test
