@@ -64,12 +64,14 @@ class CachedInternalMapStateTest {
     void enableSnapshotFeatureForTests() {
         NativeMapSnapshotCache.setSnapshotFeatureAvailableForTesting(true);
         System.clearProperty("cachekit.map.dirty-overlay.enabled");
+        System.clearProperty("cachekit.map.snapshot-maintenance.enabled");
     }
 
     @AfterEach
     void clearSnapshotFeatureOverride() {
         NativeMapSnapshotCache.setSnapshotFeatureAvailableForTesting(null);
         System.clearProperty("cachekit.map.dirty-overlay.enabled");
+        System.clearProperty("cachekit.map.snapshot-maintenance.enabled");
     }
 
     @Test
@@ -784,6 +786,64 @@ class CachedInternalMapStateTest {
         assertEquals(2, iterator.next().getValue());
         assertFalse(iterator.hasNext());
         verify(delegate, times(0)).put(any(), any());
+    }
+
+    @Test
+    void testSnapshotMaintenanceKeepsKnownSingleEntryAfterUpdate() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Integer> delegateEntries = new LinkedHashMap<>();
+        delegateEntries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(delegateEntries.entrySet());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createSnapshotMaintenanceState(delegate, currentKey);
+        assertEquals(1, consumeEntries(state.entries()));
+        state.put("uk1", 2);
+
+        Iterator<Map.Entry<String, Integer>> iterator = state.entries().iterator();
+        assertEquals(2, iterator.next().getValue());
+        assertFalse(iterator.hasNext());
+        verify(delegate, times(1)).entries();
+        verify(delegate, times(0)).put(any(), any());
+    }
+
+    @Test
+    void testSnapshotMaintenanceUpdatesKnownSingleEntryToEmptyOnRemove() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Integer> delegateEntries = new LinkedHashMap<>();
+        delegateEntries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(delegateEntries.entrySet());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createSnapshotMaintenanceState(delegate, currentKey);
+        assertEquals(1, consumeEntries(state.entries()));
+        state.remove("uk1");
+
+        assertFalse(state.entries().iterator().hasNext());
+        verify(delegate, times(1)).entries();
+        verify(delegate, times(0)).remove(any());
+    }
+
+    @Test
+    void testSnapshotMaintenanceInvalidatesWhenExactCapacityWouldOverflow() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Integer> delegateEntries = new LinkedHashMap<>();
+        delegateEntries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(delegateEntries.entrySet());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createSnapshotMaintenanceState(delegate, currentKey);
+        assertEquals(1, consumeEntries(state.entries()));
+        state.put("uk2", 2);
+
+        assertEquals(2, consumeEntries(state.entries()));
+        verify(delegate, times(2)).entries();
     }
 
     @Test
@@ -1658,6 +1718,38 @@ class CachedInternalMapStateTest {
             return state;
         } finally {
             System.clearProperty("cachekit.map.dirty-overlay.enabled");
+        }
+    }
+
+    private static CachedInternalMapState<String, VoidNamespace, String, Integer>
+            createSnapshotMaintenanceState(
+                    InternalMapState<String, VoidNamespace, String, Integer> delegate,
+                    AtomicReference<String> currentKey) {
+        System.setProperty("cachekit.map.dirty-overlay.enabled", "true");
+        System.setProperty("cachekit.map.snapshot-maintenance.enabled", "true");
+        try {
+            CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                    new CachedInternalMapState<>(
+                            delegate,
+                            currentKey::get,
+                            currentKey::set,
+                            0,
+                            CachePolicyType.LRU,
+                            0,
+                            PresenceCacheImplementation.PRIMITIVE,
+                            100,
+                            CachePolicyType.LRU,
+                            0,
+                            false,
+                            0.0,
+                            1,
+                            true,
+                            100);
+            state.setCurrentNamespace(VoidNamespace.INSTANCE);
+            return state;
+        } finally {
+            System.clearProperty("cachekit.map.dirty-overlay.enabled");
+            System.clearProperty("cachekit.map.snapshot-maintenance.enabled");
         }
     }
 
