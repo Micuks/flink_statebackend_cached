@@ -1,0 +1,6 @@
+schema=cachekit-p13-artifact-overlay-audit-v1
+source_commit=920c7748eaa9d8fcc75164521d6aabf0f9e5077c
+focused_tests=42
+overlay_stem=org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState
+x86 9714d3582ba72bec45147e7a49d008832405508d231f086b1158750c05cc8308 2ab4dffa819e8613162ca19f237461c337d2c8f48d97ab6a52c7377df0ce826b /mnt/data2/wuql/flink-cluster/cachekit-ready-gated-prefetch-p0-20260903/flink-state-backends/flink-statebackend-cachekit/target/flink-statebackend-cachekit-1.16-SNAPSHOT-p13-x86.jar
+aarch64 de935deec5eb709c8afbae79e1161a9ecaadc30c5e7cc89602b04404ca2c3e29 2b3eea7d4c32020931e6d0877597e090b722d797c0db39f918c1fe43a0f120f1 /mnt/data2/wuql/flink-cluster/cachekit-ready-gated-prefetch-p0-20260903/flink-state-backends/flink-statebackend-cachekit/target/flink-statebackend-cachekit-1.16-SNAPSHOT-p13-aarch64.jar
