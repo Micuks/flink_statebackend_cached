@@ -17,6 +17,8 @@ MapState value cache, and MapSnapshot cache are also enabled.
 
 Run q9 on x86 with one P10 artifact in every leg:
 
+- `baseline`: the same high-memory configuration and P10 artifact as all other legs, with hot-level
+  compression policy at zero and both source gates off.
 - `hot2-a`: map value cache off, dirty overlay off, snapshot maintenance off.
 - `hot2-overlay`: map value cache on, dirty overlay on, snapshot maintenance off.
 - `hot2-maintained`: map value cache on, dirty overlay on, snapshot maintenance on, with the
@@ -26,7 +28,8 @@ Run q9 on x86 with one P10 artifact in every leg:
 - `hot2-maintained-64k`: the predeclared A+B treatment; identical to `hot2-maintained` except
   that the exact-membership LRU is aligned with the 65,536-entry MapState value cache.
 
-The primary comparison is `hot2-maintained-64k` versus `hot2-a`; the isolated P10 source effect is
+The headline integrated comparison is `hot2-maintained-64k` versus `baseline`; the incremental
+B-over-A comparison is `hot2-maintained-64k` versus `hot2-a`. The isolated P10 source effect is
 measured twice: `hot2-maintained` versus `hot2-overlay` at 2K and `hot2-maintained-64k` versus
 `hot2-overlay-64k` at 64K. Capacity effects are separately measured with maintenance both off and
 on. The 64K treatment is declared before execution because prior q9 evidence showed about 335K
@@ -37,5 +40,6 @@ its same-capacity overlay control.
 ## Promotion gate
 
 Promote only if all legs pass the frozen CPU/topology/artifact gates, the P9 and P10 activation
-markers agree with the rendered treatment, and q9 K/s/core improves enough for the effective-five
-arithmetic mean versus the frozen RDB controls to remain above 10%.
+markers agree with the rendered treatment, the 64K source effect is positive, and q9 A+B improves
+over the fresh same-artifact baseline. The final effective-five mean will use fresh same-artifact
+baseline/A/A+B legs; older P4 rows remain screening references only.

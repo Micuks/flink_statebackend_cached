@@ -38,6 +38,7 @@ def main():
         if item.get("query") == "q9":
             results[item["variant"]] = item
     expected = {
+        "baseline",
         "hot2-a",
         "hot2-overlay",
         "hot2-maintained",
@@ -47,14 +48,22 @@ def main():
     if set(results) != expected:
         raise SystemExit(f"unexpected q9 variants: {sorted(results)}")
 
-    control = measurement(results["hot2-a"])
+    baseline = measurement(results["baseline"])
+    a_control = measurement(results["hot2-a"])
     overlay = measurement(results["hot2-overlay"])
     maintained = measurement(results["hot2-maintained"])
     overlay_64k = measurement(results["hot2-overlay-64k"])
     maintained_64k = measurement(results["hot2-maintained-64k"])
     if not all(
         item["valid"]
-        for item in (control, overlay, maintained, overlay_64k, maintained_64k)
+        for item in (
+            baseline,
+            a_control,
+            overlay,
+            maintained,
+            overlay_64k,
+            maintained_64k,
+        )
     ):
         raise SystemExit("one or more screen legs are invalid")
 
@@ -131,14 +140,16 @@ def main():
     ) * 100.0
 
     summary = {
-        "schema": "cachekit-snapshot-maintenance-p10-x86-summary-v1",
+        "schema": "cachekit-snapshot-maintenance-p10-x86-summary-v2",
         "query": "q9",
-        "control": {"variant": "hot2-a", **control},
+        "baseline": {"variant": "baseline", **baseline},
+        "a": {"variant": "hot2-a", **a_control},
         "overlay": {"variant": "hot2-overlay", **overlay},
         "mechanism_treatment": {"variant": "hot2-maintained", **maintained},
         "capacity_control": {"variant": "hot2-overlay-64k", **overlay_64k},
         "treatment": {"variant": "hot2-maintained-64k", **maintained_64k},
-        "overlay_vs_a_uplift_percent_kps_core": uplift(overlay, control),
+        "a_vs_baseline_uplift_percent_kps_core": uplift(a_control, baseline),
+        "overlay_vs_a_uplift_percent_kps_core": uplift(overlay, a_control),
         "maintenance_2k_vs_overlay_uplift_percent_kps_core": uplift(
             maintained, overlay
         ),
@@ -151,7 +162,12 @@ def main():
         "capacity_64k_vs_2k_with_maintenance_uplift_percent_kps_core": uplift(
             maintained_64k, maintained
         ),
-        "a_plus_b_vs_a_uplift_percent_kps_core": uplift(maintained_64k, control),
+        "a_plus_b_vs_a_uplift_percent_kps_core": uplift(
+            maintained_64k, a_control
+        ),
+        "a_plus_b_vs_baseline_uplift_percent_kps_core": uplift(
+            maintained_64k, baseline
+        ),
         "dirty_overlay_iterator_reduction_2k_vs_overlay_percent": (
             iterator_reduction_2k
         ),
@@ -168,7 +184,8 @@ def main():
         "causal_claim": (
             "same host and P10 artifact; maintained-vs-overlay changes only the "
             "snapshot-maintenance runtime gate at each capacity, while each 64k-vs-2k "
-            "contrast changes only exact-membership cache capacity"
+            "contrast changes only exact-membership cache capacity and baseline-vs-A "
+            "changes only uncompressed hot-level count"
         ),
     }
 
@@ -179,7 +196,8 @@ def main():
     )
     rows = []
     for key in (
-        "control",
+        "baseline",
+        "a",
         "overlay",
         "mechanism_treatment",
         "capacity_control",
@@ -199,6 +217,8 @@ def main():
             "|---|---:|---:|---:|---|",
             *rows,
             "",
+            "A vs baseline K/s/core uplift: "
+            f"{summary['a_vs_baseline_uplift_percent_kps_core']:.2f}%.",
             "Overlay vs A K/s/core uplift: "
             f"{summary['overlay_vs_a_uplift_percent_kps_core']:.2f}%.",
             "Maintenance 2K vs overlay K/s/core uplift: "
@@ -211,6 +231,8 @@ def main():
             f"{summary['capacity_64k_vs_2k_with_maintenance_uplift_percent_kps_core']:.2f}%.",
             "A+B vs A K/s/core uplift: "
             f"{summary['a_plus_b_vs_a_uplift_percent_kps_core']:.2f}%.",
+            "A+B vs baseline K/s/core uplift: "
+            f"{summary['a_plus_b_vs_baseline_uplift_percent_kps_core']:.2f}%.",
             "Dirty-overlay iterator reduction, maintained 2K vs overlay: "
             f"{iterator_reduction_2k:.2f}%.",
             "Dirty-overlay iterator reduction, maintained 64K vs overlay: "

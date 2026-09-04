@@ -36,7 +36,8 @@ The implementation combines three existing CacheKit capabilities in a new state-
    path, so the mechanism does not create a second value-consistency protocol.
 
 Both mechanisms are default-off runtime gates and have independent terminal counters. The x86
-screen uses one P10 artifact in all five legs, separating map-cache capacity, P9 overlay, P10
+screen uses one P10 artifact in all six legs, separating the fresh baseline, hot2 A, map-cache
+capacity, P9 overlay, P10
 incremental maintenance, and the capacity of the exact-membership data structure. Overlay and
 maintained legs are both run at 2K and 64K, so capacity cannot be mistaken for the source effect.
 The 64K capacity is aligned with the existing MapState value cache and is predeclared because the

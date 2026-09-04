@@ -60,7 +60,7 @@ for port in "$target_rest_port" "$target_prom_port" "$target_push_port"; do
   ! ss -ltnH "sport = :$port" | grep -q . || { echo "port already in use: $port" >&2; exit 74; }
 done
 
-variants=(hot2-a hot2-overlay hot2-maintained hot2-overlay-64k hot2-maintained-64k)
+variants=(baseline hot2-a hot2-overlay hot2-maintained hot2-overlay-64k hot2-maintained-64k)
 mkdir -p "$target_exp/logs"
 cp -a "$source_exp/inputs" "$target_exp/inputs"
 for variant in "${variants[@]}"; do
@@ -93,11 +93,12 @@ source_prom_port, target_prom_port = sys.argv[10:12]
 source_push_port, target_push_port = sys.argv[12:14]
 source_commit, artifact_sha = sys.argv[14:16]
 variants = {
-    "hot2-a": {"map_cache": "0", "snapshot_cache": "2000", "overlay": "false", "maintenance": "false"},
-    "hot2-overlay": {"map_cache": "65536", "snapshot_cache": "2000", "overlay": "true", "maintenance": "false"},
-    "hot2-maintained": {"map_cache": "65536", "snapshot_cache": "2000", "overlay": "true", "maintenance": "true"},
-    "hot2-overlay-64k": {"map_cache": "65536", "snapshot_cache": "65536", "overlay": "true", "maintenance": "false"},
-    "hot2-maintained-64k": {"map_cache": "65536", "snapshot_cache": "65536", "overlay": "true", "maintenance": "true"},
+    "baseline": {"hot_levels": "0", "map_cache": "0", "snapshot_cache": "2000", "overlay": "false", "maintenance": "false"},
+    "hot2-a": {"hot_levels": "2", "map_cache": "0", "snapshot_cache": "2000", "overlay": "false", "maintenance": "false"},
+    "hot2-overlay": {"hot_levels": "2", "map_cache": "65536", "snapshot_cache": "2000", "overlay": "true", "maintenance": "false"},
+    "hot2-maintained": {"hot_levels": "2", "map_cache": "65536", "snapshot_cache": "2000", "overlay": "true", "maintenance": "true"},
+    "hot2-overlay-64k": {"hot_levels": "2", "map_cache": "65536", "snapshot_cache": "65536", "overlay": "true", "maintenance": "false"},
+    "hot2-maintained-64k": {"hot_levels": "2", "map_cache": "65536", "snapshot_cache": "65536", "overlay": "true", "maintenance": "true"},
 }
 
 replacements = [(value.encode(), replacement.encode()) for value, replacement in (
@@ -162,6 +163,16 @@ for variant, settings in variants.items():
         "state.backend.cachekit.map.snapshot.cache.max-entries: "
         + settings["snapshot_cache"],
     )
+    old_hot_levels = "state.backend.rocksdb.compression.uncompressed-hot-levels: 2"
+    if text.count(old_hot_levels) != 1:
+        raise SystemExit(
+            f"hot-level setting count {text.count(old_hot_levels)} in {config}"
+        )
+    text = text.replace(
+        old_hot_levels,
+        "state.backend.rocksdb.compression.uncompressed-hot-levels: "
+        + settings["hot_levels"],
+    )
     config.write_text(text)
 
 runner = root / "run_campaign.sh"
@@ -183,12 +194,17 @@ replace_once(
 )
 replace_once(
     "variants=(hot2-a hot2-cache hot2-overlay)",
-    "variants=(hot2-a hot2-overlay hot2-maintained hot2-overlay-64k hot2-maintained-64k)",
+    "variants=(baseline hot2-a hot2-overlay hot2-maintained hot2-overlay-64k hot2-maintained-64k)",
 )
 replace_once(
     "expected_map={'hot2-a':'0','hot2-cache':'65536','hot2-overlay':'65536'}[variant]",
-    "expected_map={'hot2-a':'0','hot2-overlay':'65536','hot2-maintained':'65536','hot2-overlay-64k':'65536','hot2-maintained-64k':'65536'}[variant]\n"
-    "expected_snapshot={'hot2-a':'2000','hot2-overlay':'2000','hot2-maintained':'2000','hot2-overlay-64k':'65536','hot2-maintained-64k':'65536'}[variant]",
+    "expected_map={'baseline':'0','hot2-a':'0','hot2-overlay':'65536','hot2-maintained':'65536','hot2-overlay-64k':'65536','hot2-maintained-64k':'65536'}[variant]\n"
+    "expected_snapshot={'baseline':'2000','hot2-a':'2000','hot2-overlay':'2000','hot2-maintained':'2000','hot2-overlay-64k':'65536','hot2-maintained-64k':'65536'}[variant]\n"
+    "expected_hot={'baseline':'0','hot2-a':'2','hot2-overlay':'2','hot2-maintained':'2','hot2-overlay-64k':'2','hot2-maintained-64k':'2'}[variant]",
+)
+replace_once(
+    "assert values['state.backend.rocksdb.compression.uncompressed-hot-levels']=='2'",
+    "assert values['state.backend.rocksdb.compression.uncompressed-hot-levels']==expected_hot",
 )
 replace_once(
     "assert values['state.backend.cachekit.map.cache.max-entries']==expected_map\n"
@@ -266,6 +282,15 @@ replace_once(
     " 'snapshot_maintenance_activation':maintenance_activation,\n"
     " 'map_snapshot_activation':snapshot_activation,",
 )
+replace_once(
+    "  hot_levels=2\n"
+    "  python3 \"$expdir/audit_hot_levels.py\" \"$d\" --expected-hot-levels \"$hot_levels\"",
+    "  case \"$variant\" in\n"
+    "    baseline) hot_levels=0 ;;\n"
+    "    *) hot_levels=2 ;;\n"
+    "  esac\n"
+    "  python3 \"$expdir/audit_hot_levels.py\" \"$d\" --expected-hot-levels \"$hot_levels\"",
+)
 runner.write_text(text)
 
 runtime_path = root / "inputs/artifacts/opt/RUNTIME_BUNDLE.json"
@@ -296,7 +321,8 @@ identity.update({
     ).stat().st_size,
     "queries": ["q9"],
     "variants": list(variants),
-    "primary_control": "hot2-a",
+    "primary_control": "baseline",
+    "a_control": "hot2-a",
     "mechanism_control": "hot2-overlay",
     "mechanism_treatment": "hot2-maintained",
     "capacity_control": "hot2-overlay-64k",
@@ -338,6 +364,7 @@ configs = {
 }
 config_differences = {}
 for left, right in (
+    ("baseline", "hot2-a"),
     ("hot2-a", "hot2-overlay"),
     ("hot2-overlay", "hot2-maintained"),
     ("hot2-overlay", "hot2-overlay-64k"),
@@ -351,6 +378,9 @@ for left, right in (
     }
     config_differences[f"{left}_vs_{right}"] = values
 expected_config = {
+    "baseline_vs_hot2-a": {
+        "state.backend.rocksdb.compression.uncompressed-hot-levels"
+    },
     "hot2-a_vs_hot2-overlay": {"state.backend.cachekit.map.cache.max-entries"},
     "hot2-overlay_vs_hot2-maintained": set(),
     "hot2-overlay_vs_hot2-overlay-64k": {
