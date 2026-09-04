@@ -1,0 +1,50 @@
+{
+  "artifacts": {
+    "aarch64_sha256": "ffc55699efb16639e41b35fe29eb9f00ad150c0088840d335d52d2b409f94e39",
+    "x86_sha256": "09f5cd7078005bc803107e14a010263a921fb4e6307a92bb52ac9d358c503251"
+  },
+  "focused_map_state_tests": {
+    "errors": 0,
+    "failures": 0,
+    "required_p10_tests": [
+      "testSnapshotMaintenanceInvalidatesWhenExactCapacityWouldOverflow",
+      "testSnapshotMaintenanceKeepsKnownSingleEntryAfterUpdate",
+      "testSnapshotMaintenanceUpdatesKnownSingleEntryToEmptyOnRemove"
+    ],
+    "tests": 38
+  },
+  "module_tests": {
+    "errors": 0,
+    "failures": 0,
+    "skipped": 17,
+    "tests": 315
+  },
+  "platform_skips": 17,
+  "runtime_source_identical_to_source_commit": true,
+  "schema": "cachekit-p10-correctness-audit-v1",
+  "source_commit": "8780838608a9c4ef1f374b91873ad3be7f576782",
+  "source_sha256": "8a42f33280d4212ec272c30e71bf64a75eba66a2a15a1635ff5f7675c5c94160",
+  "surefire_report_sha256": {
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.CacheKitKeyedStateBackendLifecycleTest.xml": "4e551a3c1b56f49eba95e75023e5a1889bf07afc51ce86f90942636a11706d96",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.NativeRequestPlaneConfigurationTest.xml": "4b76314fbaf52d533f9abc9d8d0b8609db26884ff0958dc592249adfc591560f",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.PrefetchExecutorTest.xml": "2982fad218f1eace51d9f4cf5d0d5da0f3a811e2e033554a2d23855e6551b7fe",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.nativeplane.DirectBufferDataInputViewTest.xml": "924719fea0020007a34a705d2511ade6ef020b9e433adacf7f67f5d7ab6ed9cd",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.nativeplane.DirectBufferDataOutputViewTest.xml": "de82e502cf662fe52b982875170fd8caeb392c77b4f38b7c914a738d4f4b75a1",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneBridgeTest.xml": "80b4a5ec9eb2f5ec5cfd43d1eea158c9052b306d6fc1e7ea16cf7ed4a997df11",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.nativeplane.NativeRequestPlaneCoordinatorTest.xml": "8a57e3be257a2cdbeba240dfc4da04051b6cbaa4d93be5a8108b873ff6e5da1e",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.nativeplane.SerializedKeyBatchTest.xml": "5e33366762650fc98bf355d2ce76281dc4fab414a5c3a32091077e1dfc3dc948",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.state.AdaptiveNativeMailboxDensityControllerTest.xml": "0f9c2d03815855f5e650869c865303059a052d5788d381524a0a1f562da49d14",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.state.AdaptiveNativeProbeControllerTest.xml": "9d19eeb5ab4a6e3951705e0ab904b948b9adcc73a4c2dee97cec8973cf0d2f86",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.state.CacheKeyHashTest.xml": "6a68bda5e2ad1bb3d2516ef97db321c4311e3b7b219186958b9cd3e6dad630fe",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalListStateTest.xml": "7b47a7b10123b950e95f1b78b7413a6212207909ec812ee46f11112466a9dcf0",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalMapStateTest.xml": "cdf5c0ae85e6ec0de99251bb4a171532f654d69461956b59f5daea6d1329952f",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalPriorityQueueSetTest.xml": "288596b575832510005e90a82decb3fe436d7ee2eaeb1d3afa5fe38a4b19e17e",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.state.CachedInternalValueStateTest.xml": "85cd7dd0292d19438ccc8294ab187b70a14f71fbeff5168bfbe6a676ea4c385f",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.state.NativeMapSnapshotCacheTest.xml": "4dd37159f8612e708c03548a5ac1f605e67a2341affa160d0583c7635db6ef75",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.state.NativeMapStateTest.xml": "9198d3f27630c3d34a163e62930dd5acd497b3aba2ef056a5200e0e7603507f0",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.state.NativePreparedValueStateTest.xml": "b06566da412f766354a034ee20a9f718fb7a1c98fed595f965a7c1b9d4281b60",
+    "TEST-org.apache.flink.contrib.streaming.state.cachekit.state.PromotionYieldAdmissionControllerTest.xml": "f739cff717459f5eafa402d9bb42eb917c1996e82af304e041722fa4dfb7b1cd"
+  },
+  "test_source_sha256": "81a21c5e5d3e61e6503983e6457acf8df4e2522fb18ff883016d58c64f22525e",
+  "valid": true
+}
