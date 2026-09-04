@@ -221,11 +221,12 @@ if not separator:
 discarded, separator, after = remainder.partition("result={\n")
 if not separator:
     raise SystemExit("result block after activation not found")
-activation = r'''overlay_marker='[CACHEKIT MAP DIRTY OVERLAY]'
+activation = r'''import re
+
+overlay_marker='[CACHEKIT MAP DIRTY OVERLAY]'
 overlay_enabled=variant in ('hot2-overlay','hot2-maintained','hot2-overlay-64k','hot2-maintained-64k')
 overlay_activation={'enabled':overlay_enabled,'marker_count':logs.count(overlay_marker)}
 if overlay_enabled:
-    import re
     pattern=(r'\[CACHEKIT MAP DIRTY OVERLAY\] enabled=true iteratorRequests=(\d+) '
              r'flushesAvoided=(\d+) dirtyEntriesSnapshotted=(\d+) '
              r'delegateOverrides=(\d+) appendedDirtyEntries=(\d+) '

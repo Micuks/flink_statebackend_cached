@@ -193,7 +193,7 @@ def main():
         "snapshot_maintenance_64k_activation": maintenance_64k_activation,
         "map_snapshot_activation": snapshot,
         "causal_claim": (
-            "same Kunpeng NUMA2 cluster and P10 artifact; the recorded coexistence "
+            "same Kunpeng NUMA0 cluster and P10 artifact; the recorded coexistence "
             "preflight proves the selected CPUs idle and captures any foreign "
             "containers; maintained-vs-overlay changes only the "
             "snapshot-maintenance runtime gate at each capacity, while each 64k-vs-2k "
@@ -224,7 +224,7 @@ def main():
         )
     markdown = "\n".join(
         [
-            "# P10 Kunpeng NUMA2 q9 screen",
+            "# P10 Kunpeng NUMA0 q9 screen",
             "",
             "| Variant | Raw K/s | Cores | K/s/core | Leg |",
             "|---|---:|---:|---:|---|",

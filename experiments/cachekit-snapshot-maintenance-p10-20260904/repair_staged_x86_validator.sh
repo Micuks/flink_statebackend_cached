@@ -32,13 +32,22 @@ if text.count(assertion) != 1 or text.count(assignment) != 1:
 if text.index(assignment) > text.index(assertion):
     text = text.replace(assignment + "\n", "", 1)
     text = text.replace(assertion, assignment + "\n" + assertion, 1)
-    runner.write_text(text)
+
+old_import = "import hashlib,json,pathlib,sys"
+new_import = "import hashlib,json,pathlib,re,sys"
+if text.count(old_import) == 1 and text.count(new_import) == 0:
+    text = text.replace(old_import, new_import, 1)
+elif text.count(old_import) != 0 or text.count(new_import) != 1:
+    raise SystemExit("unexpected result-validator import shape")
+runner.write_text(text)
 
 verified = runner.read_text()
 if verified.count(assertion) != 1 or verified.count(assignment) != 1:
     raise SystemExit("validator repair did not preserve unique statements")
 if verified.index(assignment) > verified.index(assertion):
     raise SystemExit("expected_hot is still assigned after use")
+if verified.count("import hashlib,json,pathlib,re,sys") != 1:
+    raise SystemExit("result validator does not import re exactly once")
 PY
 
 ssh -o BatchMode=yes "$host" bash -n "$runner"

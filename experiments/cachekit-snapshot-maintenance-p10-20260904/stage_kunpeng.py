@@ -17,7 +17,7 @@ RUNNER_PATH = (
     "cachekit-p10-snapshot-maintenance-q9-100m-x86-20260904/run_campaign.sh"
 )
 RUNNER_SHA256 = (
-    "57c3b5ee328b567aad103dab2e01771cf59852de7c975eac4836bb47debbe84c"
+    "910799896d4b58060b7ce3755ad678a14ed32a6c8693c0eee3877287983e5f5a"
 )
 SOURCE_EXPERIMENT = (
     "/home/wuql/flink-cluster/experiments/"
@@ -25,11 +25,11 @@ SOURCE_EXPERIMENT = (
 )
 TARGET_EXPERIMENT = (
     "/home/wuql/flink-cluster/experiments/"
-    "cachekit-p10-snapshot-maintenance-q9-100m-kunpeng-numa2-20260904"
+    "cachekit-p10-snapshot-maintenance-q9-100m-kunpeng-numa0-20260904"
 )
-TARGET_PROJECT = "ckkp5a9p10n2"
+TARGET_PROJECT = "ckkp5a9p10n0"
 SOURCE_SCRATCH = "/tmp/ckkp5a9p7"
-TARGET_SCRATCH = "/tmp/ckkp5a9p10n2"
+TARGET_SCRATCH = "/tmp/ckkp5a9p10n0"
 SOURCE_PORTS = ("10814", "11877", "11878")
 TARGET_PORTS = ("10850", "11949", "11950")
 SOURCE_COMMIT = "8780838608a9c4ef1f374b91873ad3be7f576782"
@@ -37,10 +37,9 @@ ARTIFACT_SHA256 = (
     "ffc55699efb16639e41b35fe29eb9f00ad150c0088840d335d52d2b409f94e39"
 )
 TARGET_CPUSET = (
-    "200,202,204,206,208,210,212,214,216,218,"
-    "220,222,224,226,228,230,232,234,236"
+    "38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74"
 )
-TARGET_CPUSET_MEMS = "2"
+TARGET_CPUSET_MEMS = "0"
 REMOTE_STAGE = "/tmp/cachekit-p10-snapshot-maintenance-kunpeng-stage-20260904"
 
 
@@ -244,11 +243,11 @@ old_mems_json = (
 )
 new_mems_json = (
     "export GOLDEN_CONTAINER_CPUSET_MEMS_JSON="
-    f"'{{\"{target_project}_jobmanager_1\":\"2\","
-    f"\"{target_project}_taskmanager1_1\":\"2\","
-    f"\"{target_project}_taskmanager2_1\":\"2\","
-    f"\"{target_project}_prometheus_1\":\"2\","
-    f"\"{target_project}_pushgateway_1\":\"2\"}}'"
+    f"'{{\"{target_project}_jobmanager_1\":\"{target_cpuset_mems}\","
+    f"\"{target_project}_taskmanager1_1\":\"{target_cpuset_mems}\","
+    f"\"{target_project}_taskmanager2_1\":\"{target_cpuset_mems}\","
+    f"\"{target_project}_prometheus_1\":\"{target_cpuset_mems}\","
+    f"\"{target_project}_pushgateway_1\":\"{target_cpuset_mems}\"}}'"
 )
 runner_text = replace_once(
     runner_text, old_mems_json, new_mems_json, "runner mems json"
@@ -301,17 +300,17 @@ for old, new in (
 runner.write_text(runner_text)
 
 compose_cpu_replacements = (
-    ("cpuset: '54'", "cpuset: '216'"),
+    ("cpuset: '54'", "cpuset: '54'"),
     (
         "cpuset: 38,40,42,44,46,48,50,52",
-        "cpuset: 200,202,204,206,208,210,212,214",
+        "cpuset: 38,40,42,44,46,48,50,52",
     ),
     (
         "cpuset: 56,58,60,62,64,66,68,70",
-        "cpuset: 218,220,222,224,226,228,230,232",
+        "cpuset: 56,58,60,62,64,66,68,70",
     ),
-    ("cpuset: '72'", "cpuset: '234'"),
-    ("cpuset: '74'", "cpuset: '236'"),
+    ("cpuset: '72'", "cpuset: '72'"),
+    ("cpuset: '74'", "cpuset: '74'"),
 )
 for variant, settings in variants.items():
     compose = target_exp / "variants" / variant / "docker-compose.yml"
@@ -417,7 +416,7 @@ identity.update(
     {
         "schema": "cachekit-snapshot-maintenance-p10-kunpeng-screen-v1",
         "phase": (
-            "kunpeng-numa2-q9-same-artifact-"
+            "kunpeng-numa0-q9-same-artifact-"
             "incremental-exact-snapshot-screen"
         ),
         "source_commit": source_commit,
@@ -435,21 +434,21 @@ identity.update(
         "capacity_control": "hot2-overlay-64k",
         "treatment": "hot2-maintained-64k",
         "execution_environment": (
-            "kunpeng-numa2-isolated-disjoint-container-compatible"
+            "kunpeng-numa0-isolated-disjoint-container-compatible"
         ),
         "numa_binding": {
-            "node": 2,
-            "cpuset_mems": "2",
+            "node": 0,
+            "cpuset_mems": "0",
             "all_service_cpus": target_cpuset,
-            "taskmanager1_cpus": "200,202,204,206,208,210,212,214",
-            "jobmanager_cpu": "216",
-            "taskmanager2_cpus": "218,220,222,224,226,228,230,232",
-            "prometheus_cpu": "234",
-            "pushgateway_cpu": "236",
-            "runner_cpu": "238",
+            "taskmanager1_cpus": "38,40,42,44,46,48,50,52",
+            "jobmanager_cpu": "54",
+            "taskmanager2_cpus": "56,58,60,62,64,66,68,70",
+            "prometheus_cpu": "72",
+            "pushgateway_cpu": "74",
+            "runner_cpu": "76",
         },
         "claim_boundary": (
-            "same Kunpeng NUMA2 physical cluster and P10 artifact; the "
+            "same Kunpeng NUMA0 physical cluster and P10 artifact; the "
             "coexistence preflight proves the selected CPUs idle and records "
             "any foreign containers; dirty-overlay and incrementally maintained "
             "exact-snapshot gates are explicit"
@@ -594,11 +593,11 @@ for line in subprocess.check_output(
         continue
     cpu, node = map(int, line.split(",")[:2])
     topology[cpu] = node
-if any(topology[cpu] != 2 for cpu in selected):
-    raise SystemExit("selected CPUs are not all on NUMA2")
+if any(topology[cpu] != 0 for cpu in selected):
+    raise SystemExit("selected CPUs are not all on NUMA0")
 preflight = {
     "schema": "cachekit-p10-kunpeng-numa-coexistence-preflight-v1",
-    "target_node": 2,
+    "target_node": 0,
     "target_cpuset": target_cpuset,
     "target_cpuset_mems": target_cpuset_mems,
     "sample_seconds": 2,
@@ -618,7 +617,7 @@ preflight["valid"] = (
     and preflight["selected_cpu_max_utilization_percent"] < 30.0
 )
 if not preflight["valid"]:
-    raise SystemExit(f"NUMA2 target CPUs are busy: {preflight}")
+    raise SystemExit(f"NUMA0 target CPUs are busy: {preflight}")
 (target_exp / "COEXISTENCE_PREFLIGHT.json").write_text(
     json.dumps(preflight, indent=2, sort_keys=True) + "\n"
 )
@@ -745,7 +744,7 @@ def main():
             HOST,
             "taskset",
             "-c",
-            "198",
+            "76",
             "python3",
             "-",
             *remote_args,
