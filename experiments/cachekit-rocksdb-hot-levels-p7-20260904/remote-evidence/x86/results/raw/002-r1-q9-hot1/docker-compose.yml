@@ -1,0 +1,168 @@
+x-flink-common:
+  image: cachekit-flink:sealed-20260819
+  environment:
+    JOB_MANAGER_RPC_ADDRESS: jobmanager
+    LD_LIBRARY_PATH: /opt/cachekit-runtime/lib
+    NEXMARK_SQL_SUBMIT_TIMEOUT_SEC: '180'
+  volumes:
+  - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/variants/hot1/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml:ro
+  - /home/wutb/tools/jdk-11.0.32.1+1:/opt/java/openjdk:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-dist-1.16.3.jar:/opt/flink/lib/flink-dist-1.16.3.jar:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-table-runtime-1.16.3.jar:/opt/flink/lib/flink-table-runtime-1.16.3.jar:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/artifacts/opt/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:/opt/flink/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/libstdc++.so.6.0.32:/opt/cachekit-runtime/lib/libstdc++.so.6:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/artifacts/opt/libcachekit_native_request_plane_jni.so:/opt/cachekit-native/libcachekit_native_request_plane_jni.so:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/nexmark-flink-0.3-SNAPSHOT.jar:/opt/flink/lib/nexmark-flink-0.3-SNAPSHOT.jar:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/nexmark-flink-0.3-SNAPSHOT.jar:/opt/nexmark/lib/nexmark-flink-0.3-SNAPSHOT.jar:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-alg-falcon.jar:/opt/flink/lib/flink-alg-falcon.jar:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/side_input.txt:/opt/flink/data/side_input.txt:ro
+  - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/nexmark-flink:/opt/nexmark:ro
+  - nexmark-logs:/opt/nexmark/log
+  - nexmark-diagnostics:/opt/nexmark/diagnostics
+  - nexmark-data:/opt/nexmark/data
+  - /tmp/ckx865a9p7:/cachekit-rocksdb
+  - flink-logs:/opt/flink/log
+  - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-table-planner-loader-1.16.3.jar:/opt/flink/lib/flink-table-planner-loader-1.16.3.jar:ro
+  networks:
+  - flink-net
+services:
+  jobmanager:
+    image: cachekit-flink:sealed-20260819
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: jobmanager
+      ROLE: jobmanager
+      LD_LIBRARY_PATH: /opt/cachekit-runtime/lib
+      NEXMARK_SQL_SUBMIT_TIMEOUT_SEC: '180'
+    volumes:
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/variants/hot1/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml:ro
+    - /home/wutb/tools/jdk-11.0.32.1+1:/opt/java/openjdk:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-dist-1.16.3.jar:/opt/flink/lib/flink-dist-1.16.3.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-table-runtime-1.16.3.jar:/opt/flink/lib/flink-table-runtime-1.16.3.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/artifacts/opt/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:/opt/flink/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/libstdc++.so.6.0.32:/opt/cachekit-runtime/lib/libstdc++.so.6:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/artifacts/opt/libcachekit_native_request_plane_jni.so:/opt/cachekit-native/libcachekit_native_request_plane_jni.so:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/nexmark-flink-0.3-SNAPSHOT.jar:/opt/flink/lib/nexmark-flink-0.3-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/nexmark-flink-0.3-SNAPSHOT.jar:/opt/nexmark/lib/nexmark-flink-0.3-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-alg-falcon.jar:/opt/flink/lib/flink-alg-falcon.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/side_input.txt:/opt/flink/data/side_input.txt:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/nexmark-flink:/opt/nexmark:ro
+    - nexmark-logs:/opt/nexmark/log
+    - nexmark-diagnostics:/opt/nexmark/diagnostics
+    - nexmark-data:/opt/nexmark/data
+    - /tmp/ckx865a9p7:/cachekit-rocksdb
+    - flink-logs:/opt/flink/log
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/entrypoint-2x4.sh:/opt/cachekit-runtime/entrypoint-2x4.sh:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-table-planner-loader-1.16.3.jar:/opt/flink/lib/flink-table-planner-loader-1.16.3.jar:ro
+    networks:
+    - flink-net
+    hostname: jobmanager
+    cpuset: '1'
+    ports:
+    - 10810:8081
+    command:
+    - jobmanager
+    entrypoint:
+    - /opt/cachekit-runtime/entrypoint-2x4.sh
+  taskmanager1:
+    image: cachekit-flink:sealed-20260819
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: jobmanager
+      ROLE: taskmanager
+      TASKMANAGERS_PER_CONTAINER: '4'
+      LD_LIBRARY_PATH: /opt/cachekit-runtime/lib
+      NEXMARK_SQL_SUBMIT_TIMEOUT_SEC: '180'
+    volumes:
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/variants/hot1/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml:ro
+    - /home/wutb/tools/jdk-11.0.32.1+1:/opt/java/openjdk:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-dist-1.16.3.jar:/opt/flink/lib/flink-dist-1.16.3.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-table-runtime-1.16.3.jar:/opt/flink/lib/flink-table-runtime-1.16.3.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/artifacts/opt/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:/opt/flink/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/libstdc++.so.6.0.32:/opt/cachekit-runtime/lib/libstdc++.so.6:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/artifacts/opt/libcachekit_native_request_plane_jni.so:/opt/cachekit-native/libcachekit_native_request_plane_jni.so:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/nexmark-flink-0.3-SNAPSHOT.jar:/opt/flink/lib/nexmark-flink-0.3-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/nexmark-flink-0.3-SNAPSHOT.jar:/opt/nexmark/lib/nexmark-flink-0.3-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-alg-falcon.jar:/opt/flink/lib/flink-alg-falcon.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/side_input.txt:/opt/flink/data/side_input.txt:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/nexmark-flink:/opt/nexmark:ro
+    - nexmark-logs:/opt/nexmark/log
+    - nexmark-diagnostics:/opt/nexmark/diagnostics
+    - nexmark-data:/opt/nexmark/data
+    - /tmp/ckx865a9p7:/cachekit-rocksdb
+    - flink-logs:/opt/flink/log
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/entrypoint-2x4.sh:/opt/cachekit-runtime/entrypoint-2x4.sh:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-table-planner-loader-1.16.3.jar:/opt/flink/lib/flink-table-planner-loader-1.16.3.jar:ro
+    networks:
+    - flink-net
+    hostname: taskmanager1
+    cpuset: 0,2,4,6,8,10,12,14
+    command:
+    - taskmanager
+    depends_on:
+    - jobmanager
+    entrypoint:
+    - /opt/cachekit-runtime/entrypoint-2x4.sh
+  taskmanager2:
+    image: cachekit-flink:sealed-20260819
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: jobmanager
+      ROLE: taskmanager
+      TASKMANAGERS_PER_CONTAINER: '4'
+      LD_LIBRARY_PATH: /opt/cachekit-runtime/lib
+      NEXMARK_SQL_SUBMIT_TIMEOUT_SEC: '180'
+    volumes:
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/variants/hot1/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml:ro
+    - /home/wutb/tools/jdk-11.0.32.1+1:/opt/java/openjdk:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-dist-1.16.3.jar:/opt/flink/lib/flink-dist-1.16.3.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-table-runtime-1.16.3.jar:/opt/flink/lib/flink-table-runtime-1.16.3.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/artifacts/opt/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:/opt/flink/lib/flink-statebackend-cachekit-1.16-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/libstdc++.so.6.0.32:/opt/cachekit-runtime/lib/libstdc++.so.6:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/artifacts/opt/libcachekit_native_request_plane_jni.so:/opt/cachekit-native/libcachekit_native_request_plane_jni.so:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/nexmark-flink-0.3-SNAPSHOT.jar:/opt/flink/lib/nexmark-flink-0.3-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/nexmark-flink-0.3-SNAPSHOT.jar:/opt/nexmark/lib/nexmark-flink-0.3-SNAPSHOT.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-alg-falcon.jar:/opt/flink/lib/flink-alg-falcon.jar:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/side_input.txt:/opt/flink/data/side_input.txt:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/nexmark-flink:/opt/nexmark:ro
+    - nexmark-logs:/opt/nexmark/log
+    - nexmark-diagnostics:/opt/nexmark/diagnostics
+    - nexmark-data:/opt/nexmark/data
+    - /tmp/ckx865a9p7:/cachekit-rocksdb
+    - flink-logs:/opt/flink/log
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/entrypoint-2x4.sh:/opt/cachekit-runtime/entrypoint-2x4.sh:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-table-planner-loader-1.16.3.jar:/opt/flink/lib/flink-table-planner-loader-1.16.3.jar:ro
+    networks:
+    - flink-net
+    hostname: taskmanager2
+    cpuset: 16,18,20,22,24,26,28,30
+    command:
+    - taskmanager
+    depends_on:
+    - jobmanager
+    entrypoint:
+    - /opt/cachekit-runtime/entrypoint-2x4.sh
+  prometheus:
+    image: prom/prometheus:v2.37.0
+    cpuset: '17'
+    ports:
+    - 11869:9090
+    volumes:
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/prometheus-2x4.yml:/etc/prometheus/prometheus.yml:ro
+    - /home/wuql/flink-cluster/experiments/cachekit-p7-hot-level-compression-q9-100m-x86-20260904/inputs/runtime/flink-table-planner-loader-1.16.3.jar:/opt/flink-1.16.3/lib/flink-table-planner-loader-1.16.3.jar:ro
+    depends_on:
+    - pushgateway
+    networks:
+    - flink-net
+  pushgateway:
+    image: prom/pushgateway:v1.4.3
+    cpuset: '19'
+    ports:
+    - 11870:9091
+    networks:
+    - flink-net
+    volumes: []
+networks:
+  flink-net: {}
+volumes:
+  flink-logs: {}
+  nexmark-logs: {}
+  nexmark-diagnostics: {}
+  nexmark-data: {}

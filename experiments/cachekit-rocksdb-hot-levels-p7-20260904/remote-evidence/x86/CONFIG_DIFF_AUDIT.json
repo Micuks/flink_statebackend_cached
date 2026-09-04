@@ -1,0 +1,37 @@
+{
+  "highmem-snappy": {
+    "differences": {},
+    "expected_difference_keys": [],
+    "missing_difference_keys": [],
+    "unexpected_difference_keys": [],
+    "valid": true
+  },
+  "hot1": {
+    "differences": {
+      "state.backend.rocksdb.compression.uncompressed-hot-levels": {
+        "candidate": "1",
+        "control": "0"
+      }
+    },
+    "expected_difference_keys": [
+      "state.backend.rocksdb.compression.uncompressed-hot-levels"
+    ],
+    "missing_difference_keys": [],
+    "unexpected_difference_keys": [],
+    "valid": true
+  },
+  "hot2": {
+    "differences": {
+      "state.backend.rocksdb.compression.uncompressed-hot-levels": {
+        "candidate": "2",
+        "control": "0"
+      }
+    },
+    "expected_difference_keys": [
+      "state.backend.rocksdb.compression.uncompressed-hot-levels"
+    ],
+    "missing_difference_keys": [],
+    "unexpected_difference_keys": [],
+    "valid": true
+  }
+}

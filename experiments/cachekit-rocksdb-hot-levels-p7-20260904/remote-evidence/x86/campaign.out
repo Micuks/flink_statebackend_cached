@@ -1,0 +1,10 @@
+inputs/runtime/flink-dist-1.16.3.jar: OK
+inputs/artifacts/opt/flink-statebackend-cachekit-1.16-SNAPSHOT.jar: OK
+inputs/artifacts/opt/libcachekit_native_request_plane_jni.so: OK
+[2026-09-04T10:31:29+08:00] START 001-r1-q9-highmem-snappy
+[2026-09-04T10:36:03+08:00] OK 001-r1-q9-highmem-snappy kps_core=32.1
+[2026-09-04T10:36:05+08:00] START 002-r1-q9-hot1
+[2026-09-04T10:40:29+08:00] OK 002-r1-q9-hot1 kps_core=33.89
+[2026-09-04T10:40:31+08:00] START 003-r1-q9-hot2
+[2026-09-04T10:44:45+08:00] OK 003-r1-q9-hot2 kps_core=36.91
+[2026-09-04T10:44:47+08:00] CAMPAIGN_COMPLETE legs=3

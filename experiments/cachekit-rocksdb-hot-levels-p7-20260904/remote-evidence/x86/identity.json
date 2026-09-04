@@ -1,0 +1,41 @@
+{
+  "architecture": "x86_64",
+  "artifact_build": {
+    "non_overlay_entries_identical_to_p4": true,
+    "p4_x86_base_sha256": "66f1bac9c25c6e8a777b2ca370e2b21621cccc57e020d869db2fd7c245c6a46b",
+    "rocksdb_overlay_source_commit": "fb4d62eb92a2fce445d4b19b6a3fdf900e0bf1ce"
+  },
+  "artifact_sha256": "27466030bae4e792777a6002ca4ee4e831b2b92411340e642c00484f549516bc",
+  "artifact_size_bytes": 3105290,
+  "base_source_commit": "7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000",
+  "checkpointing": "disabled by absence of execution.checkpointing.interval",
+  "claim_boundary": "same x86 host and P7 artifact for causal hot-level comparison",
+  "events": 100000000,
+  "execution_environment": "idle-host-same-artifact-paired-source-policy-screen",
+  "frozen_overlay_commit": "bbd39affde9278d44b9f78d201849bf929249d54",
+  "object_reuse": false,
+  "phase": "x86-q9-source-hot-level-screen",
+  "platform": "x86",
+  "primary_control": "highmem-snappy",
+  "queries": [
+    "q9"
+  ],
+  "rounds": [
+    1
+  ],
+  "schema": "cachekit-rocksdb-hot-level-compression-p7-x86-screen-v1",
+  "secondary_reference": "/home/wuql/flink-cluster/experiments/cachekit-rocksdb-p6-lsm-screen-q9-100m-x86-20260904/results/raw/001-r1-q9-highmem",
+  "slots": 16,
+  "source_commit": "fb4d62eb92a2fce445d4b19b6a3fdf900e0bf1ce",
+  "taskmanagers": 8,
+  "variant_config_sha256": {
+    "highmem-snappy": "7f1f477da7e31dc575a4cc05b73cc6ecf4b836d4bc54a4376151835f1da053ba",
+    "hot1": "55760cbc5bdd3e53fafe010f8c9b87384872b712beea812a3b630e467428af85",
+    "hot2": "f3484a254b8e775aa02821c0f8aa3536e8fb77d1cbf8ed0d41085583db4ee03d"
+  },
+  "variants": [
+    "highmem-snappy",
+    "hot1",
+    "hot2"
+  ]
+}

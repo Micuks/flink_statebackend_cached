@@ -132,7 +132,7 @@ PY
 python3 - "$target_exp" "$source_exp" "$target_exp" "$source_project" \
   "$target_project" "$source_scratch" "$target_scratch" "$source_rest_port" \
   "$target_rest_port" "$source_prom_port" "$target_prom_port" \
-  "$source_push_port" "$target_push_port" "$source_commit" "$artifact_sha" <<'PY'
+  "$source_push_port" "$target_push_port" "$source_commit" "$artifact_sha" <<'PY_STAGE'
 import hashlib
 import json
 import pathlib
@@ -190,6 +190,76 @@ def replace_once(old, new):
     if text.count(old) != 1:
         raise SystemExit(f"runner replacement count {text.count(old)} for {old!r}")
     text = text.replace(old, new)
+
+replace_once(
+    '''fail_on_foreign_containers() {
+  local id owner_project owner_cpus foreign=0
+  while read -r id; do
+    [[ -n $id ]] || continue
+    owner_project=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$id" 2>/dev/null || true)
+    if [[ $owner_project != "$project" ]]; then
+      owner_cpus=$(docker inspect -f '{{.HostConfig.CpusetCpus}}' "$id" 2>/dev/null || true)
+      if [[ $allow_disjoint_foreign == true && -n $owner_cpus ]] &&
+          ! python3 - "$owner_cpus" "$target_cpuset" <<'PY'
+import sys
+
+
+def expand(spec):
+    result = set()
+    for part in spec.split(','):
+        bounds = [int(value) for value in part.split('-', 1)]
+        result.update(range(bounds[0], bounds[-1] + 1))
+    return result
+
+
+raise SystemExit(0 if expand(sys.argv[1]) & expand(sys.argv[2]) else 1)
+PY
+      then
+        docker inspect -f 'allowed_disjoint_container={{.Name}} cpus={{.HostConfig.CpusetCpus}}' "$id" >&2
+      else
+        docker inspect -f 'foreign_container={{.Name}} image={{.Config.Image}} project={{index .Config.Labels "com.docker.compose.project"}} cpus={{.HostConfig.CpusetCpus}}' "$id" >&2
+        foreign=1
+      fi
+    fi
+  done < <(docker ps -q)
+  (( foreign == 0 )) || return 1
+}''',
+    '''fail_on_foreign_containers() {
+  local id inspect owner_name owner_project owner_cpus remainder foreign=0
+  while read -r id; do
+    [[ -n $id ]] || continue
+    inspect=$(docker inspect -f '{{.Name}}|{{index .Config.Labels "com.docker.compose.project"}}|{{.HostConfig.CpusetCpus}}' "$id" 2>/dev/null) || continue
+    owner_name=${inspect%%|*}
+    remainder=${inspect#*|}
+    owner_project=${remainder%%|*}
+    owner_cpus=${remainder#*|}
+    if [[ $owner_project != "$project" ]]; then
+      if [[ $allow_disjoint_foreign == true && -n $owner_cpus ]] &&
+          ! python3 - "$owner_cpus" "$target_cpuset" <<'PY'
+import sys
+
+
+def expand(spec):
+    result = set()
+    for part in spec.split(','):
+        bounds = [int(value) for value in part.split('-', 1)]
+        result.update(range(bounds[0], bounds[-1] + 1))
+    return result
+
+
+raise SystemExit(0 if expand(sys.argv[1]) & expand(sys.argv[2]) else 1)
+PY
+      then
+        echo "allowed_disjoint_container=$owner_name cpus=$owner_cpus" >&2
+      else
+        echo "foreign_container=$owner_name project=$owner_project cpus=$owner_cpus" >&2
+        foreign=1
+      fi
+    fi
+  done < <(docker ps -q)
+  (( foreign == 0 )) || return 1
+}''',
+)
 
 replace_once(
     "source_commit=a95bcc56d2207a5ac6cd3ba2e62459bc5d409ce4",
@@ -312,7 +382,7 @@ if not audit["valid"]:
 assert hashlib.sha256(
     (root / "inputs/runtime/flink-statebackend-cachekit-1.16-SNAPSHOT.jar").read_bytes()
 ).hexdigest() == artifact_sha
-PY
+PY_STAGE
 
 (
   cd "$target_exp"
