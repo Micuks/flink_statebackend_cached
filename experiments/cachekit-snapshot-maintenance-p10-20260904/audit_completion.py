@@ -74,6 +74,16 @@ def uplift(treatment, control):
     return (treatment / control - 1.0) * 100.0
 
 
+def maintenance_activation_valid(activation):
+    totals = activation.get("totals", [])
+    return (
+        activation.get("enabled") is True
+        and len(totals) == 5
+        and totals[0] > 0
+        and totals[2] > 0
+    )
+
+
 def main():
     script_dir = pathlib.Path(__file__).resolve().parent
     evidence = script_dir / "remote-evidence"
@@ -163,7 +173,7 @@ def main():
     q9_treatment = p10_results[("q9", "hot2-maintained-64k")]
     q9_maintenance = q9_treatment["snapshot_maintenance_activation"]
     q9_snapshot = q9_treatment["map_snapshot_activation"]
-    if not q9_maintenance.get("enabled") or min(q9_maintenance.get("totals", [0])[:3]) <= 0:
+    if not maintenance_activation_valid(q9_maintenance):
         raise SystemExit("P10 q9 maintenance counters are not active")
     if q9_snapshot.get("single_short_circuits", 0) <= 0:
         raise SystemExit("P10 q9 singleton short circuit is not active")
