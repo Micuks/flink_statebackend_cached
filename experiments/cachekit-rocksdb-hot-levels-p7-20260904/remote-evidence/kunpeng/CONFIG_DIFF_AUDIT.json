@@ -1,0 +1,20 @@
+{
+  "actual_differences": {
+    "state.backend.rocksdb.compression.type": {
+      "hot2": "SNAPPY_COMPRESSION",
+      "source_highmem": "NO_COMPRESSION"
+    },
+    "state.backend.rocksdb.compression.uncompressed-hot-levels": {
+      "hot2": "2",
+      "source_highmem": null
+    }
+  },
+  "allowed_difference_keys": [
+    "state.backend.rocksdb.compression.type",
+    "state.backend.rocksdb.compression.uncompressed-hot-levels"
+  ],
+  "missing_difference_keys": [],
+  "schema": "cachekit-p7-hot2-vs-p6-highmem-config-diff-v1",
+  "unexpected_difference_keys": [],
+  "valid": true
+}

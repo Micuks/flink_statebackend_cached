@@ -1,0 +1,32 @@
+inputs/runtime/flink-dist-1.16.3.jar: OK
+inputs/runtime/flink-statebackend-cachekit-1.16-SNAPSHOT.jar: OK
+inputs/runtime/libcachekit_native_request_plane_jni.so: OK
+allowed_disjoint_container=/ckkpbbd39abl_taskmanager2_1 cpus=136,138,140,142,144,146,148,150
+allowed_disjoint_container=/ckkpbbd39abl_taskmanager1_1 cpus=118,120,122,124,126,128,130,132
+allowed_disjoint_container=/ckkpbbd39abl_prometheus_1 cpus=152
+allowed_disjoint_container=/ckkpbbd39abl_jobmanager_1 cpus=134
+allowed_disjoint_container=/ckkpbbd39abl_pushgateway_1 cpus=154
+[2026-09-04T10:50:52+08:00] START 001-r1-q5-hot2
+allowed_disjoint_container=/ckkpbbd39abl_taskmanager2_1 cpus=136,138,140,142,144,146,148,150
+allowed_disjoint_container=/ckkpbbd39abl_taskmanager1_1 cpus=118,120,122,124,126,128,130,132
+allowed_disjoint_container=/ckkpbbd39abl_prometheus_1 cpus=152
+allowed_disjoint_container=/ckkpbbd39abl_jobmanager_1 cpus=134
+allowed_disjoint_container=/ckkpbbd39abl_pushgateway_1 cpus=154
+[2026-09-04T10:53:37+08:00] OK 001-r1-q5-hot2 kps_core=81.35
+[2026-09-04T10:53:40+08:00] START 002-r1-q9-hot2
+
+Error: No such object: 0f26d4ed1498
+[2026-09-04T10:53:41+08:00] FATAL foreign containers before 002-r1-q9-hot2
+inputs/runtime/flink-dist-1.16.3.jar: OK
+inputs/runtime/flink-statebackend-cachekit-1.16-SNAPSHOT.jar: OK
+inputs/runtime/libcachekit_native_request_plane_jni.so: OK
+[2026-09-04T10:57:58+08:00] skip 001-r1-q5-hot2 (done)
+[2026-09-04T10:57:58+08:00] START 002-r1-q9-hot2
+[2026-09-04T11:02:13+08:00] OK 002-r1-q9-hot2 kps_core=34.44
+[2026-09-04T11:02:17+08:00] START 003-r1-q11-hot2
+[2026-09-04T11:05:41+08:00] OK 003-r1-q11-hot2 kps_core=46.37
+[2026-09-04T11:05:44+08:00] START 004-r1-q15-hot2
+[2026-09-04T11:09:18+08:00] OK 004-r1-q15-hot2 kps_core=52.78
+[2026-09-04T11:09:22+08:00] START 005-r1-q18-hot2
+[2026-09-04T11:11:47+08:00] OK 005-r1-q18-hot2 kps_core=113.04
+[2026-09-04T11:11:50+08:00] CAMPAIGN_COMPLETE legs=5

@@ -1,0 +1,6 @@
+schema=cachekit-p7-kunpeng-host-result-complete-v1
+completed_at=2026-09-04T11:13:00.606882+08:00
+arithmetic_mean_uplift_pct=11.037139373495615
+goal_gate_pass=true
+runtime_activation_pass=true
+host_postflight_valid=true

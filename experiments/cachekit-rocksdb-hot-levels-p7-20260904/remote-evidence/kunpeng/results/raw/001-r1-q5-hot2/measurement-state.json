@@ -1,0 +1,60 @@
+{
+  "q5": {
+    "cores": [
+      10.26
+    ],
+    "end_epochs": [
+      1788490413.604593
+    ],
+    "job_statuses": [
+      {
+        "cpu_metric_cores_median": 10.26,
+        "cpu_metric_sample_count": 19,
+        "expected_cpu_metric_tms": 8,
+        "measurement_integrity_valid": true,
+        "observed_cpu_metric_tms": [
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8
+        ],
+        "real_job_completed": true,
+        "real_job_failed": false,
+        "real_job_started": true,
+        "warmup_completed": true,
+        "warmup_failed": false,
+        "warmup_started": true
+      }
+    ],
+    "live_metrics": {
+      "cache_counters": {},
+      "cache_counters_by_state": {},
+      "cached_gauges": {},
+      "rocksdb": {}
+    },
+    "results": [
+      81.35
+    ],
+    "round_times": [
+      136.66372108459473
+    ],
+    "start_epochs": [
+      1788490276.940872
+    ]
+  }
+}

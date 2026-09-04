@@ -1,0 +1,10 @@
+schema=cachekit-p7-harness-foreign-container-race-repair-v1
+repaired_at=2026-09-04T10:57:49.122029+08:00
+scope=read-only foreign-container occupancy preflight
+symptom=docker ps returned a foreign container that disappeared before docker inspect
+failure=the vanished ID was conservatively misclassified as an overlapping container
+repair=inspect each ID once and skip IDs that have already disappeared
+treatment_config_changed=false
+completed_q5_preserved=true
+old_function_sha256=fe787b0355fe011fa8013ae5c40d061214892e55b7251da8dd922136808e7302
+new_function_sha256=deece484a1605ead14961c6eaeb0e403fd002a585f2bc4c65a070ccc895ec271

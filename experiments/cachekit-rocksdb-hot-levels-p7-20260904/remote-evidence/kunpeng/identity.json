@@ -1,0 +1,58 @@
+{
+  "architecture": "aarch64",
+  "arm_native_origin": {
+    "native_entry": "META-INF/native/libcachekit_snapshot_jni.so",
+    "native_entry_sha256": "6765775306c7ed00b1606de5340f0ba18ae5adc8fe242b49b336f79f96749fe2",
+    "source_artifact_sha256": "35092a30d3ac979477a4445c5ead455258ab8a6a5278c815ad29a4301a3a7efd",
+    "source_experiment": "/home/wuql/flink-cluster/experiments/cachekit-native-stage123-javafullopt-15q-100m-r1-r3-kunpeng-20260903"
+  },
+  "artifact_build": {
+    "non_overlay_entries_identical_to_p4": true,
+    "p4_aarch64_base_sha256": "3c52ba5be2c2f903f348a991659036fa60a44bc161d4a3efb150b00cbd49c723",
+    "rocksdb_overlay_source_commit": "fb4d62eb92a2fce445d4b19b6a3fdf900e0bf1ce"
+  },
+  "artifact_sha256": "6f6411d5a73126983eaba65f5c1c3335f4e269054ed0151392afad63bc6e7d57",
+  "artifact_size_bytes": 3108974,
+  "base_source_commit": "7a9e568dcbd75ab4f24e7a33a4339f5cd1cf8000",
+  "checkpointing": "disabled by absence of execution.checkpointing.interval",
+  "claim_boundary": "same Kunpeng host; P7 differs from P4 artifact only in audited RocksDB policy classes",
+  "events": 100000000,
+  "execution_environment": "numa0-isolated-candidate-with-disjoint-foreign-numa1-campaign",
+  "foreign_container_preflight": "FOREIGN_CONTAINER_PREFLIGHT.json",
+  "frozen_overlay_commit": "bbd39affde9278d44b9f78d201849bf929249d54",
+  "numa_binding": {
+    "allocated_cpus": "38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74",
+    "container_cpuset_mems": "0",
+    "node": 0,
+    "node_cpulist": "0-79"
+  },
+  "object_reuse": false,
+  "phase": "kunpeng-effective5-source-hot2-confirmation",
+  "platform": "kunpeng",
+  "primary_control": "reused per-query P4 controls",
+  "queries": [
+    "q5",
+    "q9",
+    "q11",
+    "q15",
+    "q18"
+  ],
+  "rounds": [
+    1
+  ],
+  "schema": "cachekit-rocksdb-hot-level-compression-p7-kunpeng-effective5-v1",
+  "slots": 16,
+  "source_commit": "fb4d62eb92a2fce445d4b19b6a3fdf900e0bf1ce",
+  "taskmanagers": 8,
+  "template_provenance": {
+    "base_compose_sha256": "c6c96ca9f485292637d22123aebc1cffb06610586873c06f5d0f7b181e9f15a7",
+    "base_config_sha256": "8b6b83826aa849b402d24e88c34ed60e9160890cbf461a5f20678a4bc5f78388",
+    "source_experiment": "/home/wuql/flink-cluster/experiments/cachekit-native-stage123-javafullopt-15q-100m-r1-r3-kunpeng-20260903"
+  },
+  "variant_config_sha256": {
+    "hot2": "c935eb30cb593a6d11ce8e255e58d1043c5a1140c18af67ef9a0014794fa06ca"
+  },
+  "variants": [
+    "hot2"
+  ]
+}
