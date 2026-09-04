@@ -6,6 +6,23 @@ MapState `put`, point-read, and iterator work. The implementation therefore targ
 `put -> entries()` cycle that was forcing dirty values through RocksDB and reopening a base
 iterator for every traversal.
 
+An operator-level Top-1 rewrite is explicitly rejected as a candidate. Runtime logs prove that q9
+already selects Flink's `FastTop1Function`, whose implementation uses an LRU plus `ValueState`;
+the same profile attributes only 3.54% of CPU samples to Rank but 46.13% to the streaming join.
+Reimplementing scalar Top-1 state would therefore replicate an active leading path while missing
+the measured join-side MapState bottleneck.
+
+The q9 SQL joins `auction.id = bid.auction`. Nexmark generates one auction row per auction id, but
+the benchmark DDL exposes `auction` and `bid` as views without a declared primary key. Flink's
+`JoinUtil.analyzeJoinInput` therefore selects `withoutUniqueKey` for both inputs, and runtime logs
+confirm that both `left-records` and `right-records` are MapState rather than the existing
+join-key-contains-unique-key ValueState fast path. This creates a safe, narrow opportunity for
+P10: after the first complete traversal proves that a keyed MapState has exactly one member,
+later bid-to-auction probes can reuse that exact singleton membership without reopening a RocksDB
+iterator. Correctness does not assume auction uniqueness: a second distinct member exceeds the
+configured exact capacity of one, invalidates the view, and falls back to the original MapState
+iterator path.
+
 ## Leading ideas considered
 
 - [Accordion](https://www.vldb.org/pvldb/vol11/p1863-bortnikov.pdf) reapplies LSM organization in
