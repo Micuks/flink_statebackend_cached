@@ -107,6 +107,10 @@ def main():
         raise SystemExit("promotion identity does not seal the current q9 screen summary")
     if screen_summary["maintenance_64k_vs_overlay_64k_uplift_percent_kps_core"] <= 0:
         raise SystemExit("q9 directly isolated 64K source effect is not positive")
+    if screen_summary["dirty_overlay_iterator_reduction_2k_vs_overlay_percent"] <= 0:
+        raise SystemExit("q9 2K source treatment did not reduce base iterator requests")
+    if screen_summary["dirty_overlay_iterator_reduction_64k_vs_overlay_percent"] <= 0:
+        raise SystemExit("q9 64K source treatment did not reduce base iterator requests")
 
     screen_results = collect_results(screen, {"q9"})
     promotion_results = collect_results(promotion, set(QUERIES) - {"q9"})
