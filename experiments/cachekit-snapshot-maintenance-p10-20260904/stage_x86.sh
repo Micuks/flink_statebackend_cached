@@ -199,11 +199,11 @@ replace_once(
 replace_once(
     "expected_map={'hot2-a':'0','hot2-cache':'65536','hot2-overlay':'65536'}[variant]",
     "expected_map={'baseline':'0','hot2-a':'0','hot2-overlay':'65536','hot2-maintained':'65536','hot2-overlay-64k':'65536','hot2-maintained-64k':'65536'}[variant]\n"
-    "expected_snapshot={'baseline':'2000','hot2-a':'2000','hot2-overlay':'2000','hot2-maintained':'2000','hot2-overlay-64k':'65536','hot2-maintained-64k':'65536'}[variant]\n"
-    "expected_hot={'baseline':'0','hot2-a':'2','hot2-overlay':'2','hot2-maintained':'2','hot2-overlay-64k':'2','hot2-maintained-64k':'2'}[variant]",
+    "expected_snapshot={'baseline':'2000','hot2-a':'2000','hot2-overlay':'2000','hot2-maintained':'2000','hot2-overlay-64k':'65536','hot2-maintained-64k':'65536'}[variant]",
 )
 replace_once(
     "assert values['state.backend.rocksdb.compression.uncompressed-hot-levels']=='2'",
+    "expected_hot={'baseline':'0','hot2-a':'2','hot2-overlay':'2','hot2-maintained':'2','hot2-overlay-64k':'2','hot2-maintained-64k':'2'}[variant]\n"
     "assert values['state.backend.rocksdb.compression.uncompressed-hot-levels']==expected_hot",
 )
 replace_once(
