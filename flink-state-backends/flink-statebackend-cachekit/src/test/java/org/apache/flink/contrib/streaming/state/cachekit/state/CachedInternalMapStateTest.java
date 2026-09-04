@@ -1606,6 +1606,7 @@ class CachedInternalMapStateTest {
         assertEquals(3, second.next().getValue());
         assertFalse(first.hasNext());
         assertFalse(second.hasNext());
+        assertEquals(2, metrics.probes());
     }
 
     @Test

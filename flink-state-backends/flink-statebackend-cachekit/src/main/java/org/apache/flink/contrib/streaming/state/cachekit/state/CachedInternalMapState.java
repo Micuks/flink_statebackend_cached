@@ -235,6 +235,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private long snapshotValueAuthorityPointSnapshotHits;
     private long snapshotValueAuthorityPointValueHits;
     private long snapshotValueAuthorityPointNegativeHits;
+    private long snapshotValueAuthorityIteratorTableHits;
 
     private N currentNamespace;
     private final KeyNamespaceUserKey<K, N, UK> lookupKey =
@@ -2142,27 +2143,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return null;
         }
         snapshotValueAuthorityPointProbes++;
-        int hash = CacheKeyHash.hash(currentKey, currentNamespace);
-        int base = (hash & snapshotValueAuthoritySetMask) * SNAPSHOT_VALUE_AUTHORITY_WAYS;
-        MapSnapshot<UK, UV> snapshot = null;
-        for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
-            int slot = base + way;
-            if (snapshotValueAuthorityHashes[slot] != hash) {
-                continue;
-            }
-            @SuppressWarnings("unchecked")
-            KeyNamespace<K, N> stored =
-                    (KeyNamespace<K, N>) snapshotValueAuthorityKeys[slot];
-            if (stored != null
-                    && Objects.equals(stored.key, currentKey)
-                    && Objects.equals(stored.namespace, currentNamespace)) {
-                @SuppressWarnings("unchecked")
-                MapSnapshot<UK, UV> matched =
-                        (MapSnapshot<UK, UV>) snapshotValueAuthoritySnapshots[slot];
-                snapshot = matched;
-                break;
-            }
-        }
+        MapSnapshot<UK, UV> snapshot = lookupSnapshotValueAuthorityTable(currentKey);
         if (snapshot == null) {
             return null;
         }
@@ -2178,6 +2159,32 @@ public final class CachedInternalMapState<K, N, UK, UV>
         snapshotValueAuthorityPointNegativeHits++;
         snapshotValueAuthorityPointGetsElided++;
         return SnapshotAuthorityLookup.absent();
+    }
+
+    private MapSnapshot<UK, UV> lookupSnapshotValueAuthorityTable(K currentKey) {
+        if (currentKey == null || currentNamespace == null) {
+            return null;
+        }
+        int hash = CacheKeyHash.hash(currentKey, currentNamespace);
+        int base = (hash & snapshotValueAuthoritySetMask) * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
+            int slot = base + way;
+            if (snapshotValueAuthorityHashes[slot] != hash) {
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            KeyNamespace<K, N> stored =
+                    (KeyNamespace<K, N>) snapshotValueAuthorityKeys[slot];
+            if (stored != null
+                    && Objects.equals(stored.key, currentKey)
+                    && Objects.equals(stored.namespace, currentNamespace)) {
+                @SuppressWarnings("unchecked")
+                MapSnapshot<UK, UV> matched =
+                        (MapSnapshot<UK, UV>) snapshotValueAuthoritySnapshots[slot];
+                return matched;
+            }
+        }
+        return null;
     }
 
     private void storeSnapshotValueAuthority(
@@ -2801,7 +2808,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     "[CACHEKIT MAP SNAPSHOT VALUE AUTHORITY] enabled=true fills={} "
                             + "entriesStored={} shortCircuits={} pointGetsElided={} "
                             + "pointProbes={} pointSnapshotHits={} pointValueHits={} "
-                            + "pointNegativeHits={}",
+                            + "pointNegativeHits={} iteratorTableHits={}",
                     snapshotValueAuthorityFills,
                     snapshotValueAuthorityEntriesStored,
                     snapshotValueAuthorityShortCircuits,
@@ -2809,7 +2816,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     snapshotValueAuthorityPointProbes,
                     snapshotValueAuthorityPointSnapshotHits,
                     snapshotValueAuthorityPointValueHits,
-                    snapshotValueAuthorityPointNegativeHits);
+                    snapshotValueAuthorityPointNegativeHits,
+                    snapshotValueAuthorityIteratorTableHits);
         }
         if (nativeMapCacheEnabled) {
             LOG.info(
@@ -3145,7 +3153,15 @@ public final class CachedInternalMapState<K, N, UK, UV>
     // ====================================================================
 
     private Iterable<Map.Entry<UK, UV>> trySnapshotShortCircuit(K currentKey) throws Exception {
-        MapSnapshot<UK, UV> snapshot = lookupSnapshot(currentKey);
+        MapSnapshot<UK, UV> snapshot =
+                snapshotValueAuthorityEnabled
+                        ? lookupSnapshotValueAuthorityTable(currentKey)
+                        : null;
+        if (snapshot == null) {
+            snapshot = lookupSnapshot(currentKey);
+        } else {
+            snapshotValueAuthorityIteratorTableHits++;
+        }
         if (snapshot == null) {
             return null; // UNKNOWN → fallthrough to delegate
         }
