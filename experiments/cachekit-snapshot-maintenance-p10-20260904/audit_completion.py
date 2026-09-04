@@ -80,7 +80,7 @@ def maintenance_activation_valid(activation):
         activation.get("enabled") is True
         and len(totals) == 5
         and totals[0] > 0
-        and totals[2] > 0
+        and totals[3] > 0
     )
 
 

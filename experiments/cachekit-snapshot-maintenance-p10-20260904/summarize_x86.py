@@ -112,7 +112,7 @@ def main():
             not activation.get("enabled")
             or len(totals) != 5
             or totals[0] <= 0
-            or totals[2] <= 0
+            or totals[3] <= 0
         ):
             raise SystemExit(
                 f"snapshot maintenance did not meet activation gate for {variant}: "
