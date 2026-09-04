@@ -31,6 +31,7 @@ import static org.mockito.Mockito.withSettings;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -1548,6 +1549,47 @@ class CachedInternalMapStateTest {
         state.clear();
         clearInvocations(delegate);
         assertNull(state.get("uk1"));
+    }
+
+    @Test
+    void testSnapshotValueAuthorityRetainsMultipleRowsWithoutLruProbes() throws Exception {
+        System.setProperty("cachekit.map.snapshot-value-authority.enabled", "true");
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Map<String, Integer>> rows = new LinkedHashMap<>();
+        rows.put("k1", Collections.singletonMap("uk", 1));
+        rows.put("k2", Collections.singletonMap("uk", 2));
+        when(delegate.getValueSerializer())
+                .thenReturn(
+                        new MapSerializer<>(
+                                org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                                IntSerializer.INSTANCE));
+        when(delegate.entries())
+                .thenAnswer(ignored -> rows.get(currentKey.get()).entrySet());
+        when(delegate.get(any()))
+                .thenAnswer(
+                        invocation ->
+                                rows.get(currentKey.get()).get(invocation.getArgument(0)));
+        MapSnapshotCacheMetrics metrics = MapSnapshotCacheMetrics.forTesting();
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createSmallSnapshotState(delegate, currentKey, metrics);
+
+        for (Map.Entry<String, Integer> ignored : state.entries()) {
+            // Complete k1 and publish its exact value-bearing row.
+        }
+        currentKey.set("k2");
+        for (Map.Entry<String, Integer> ignored : state.entries()) {
+            // Complete k2 without evicting k1 from the four-way authority set.
+        }
+
+        clearInvocations(delegate);
+        currentKey.set("k1");
+        assertEquals(1, state.get("uk"));
+        currentKey.set("k2");
+        assertEquals(2, state.get("uk"));
+        assertEquals(2, metrics.probes());
+        verify(delegate, times(0)).get(any());
     }
 
     @Test

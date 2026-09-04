@@ -70,6 +70,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             "cachekit.map.snapshot-value-authority.enabled";
     private static final String SNAPSHOT_VALUE_AUTHORITY_ENV =
             "CACHEKIT_MAP_SNAPSHOT_VALUE_AUTHORITY_ENABLED";
+    private static final int SNAPSHOT_VALUE_AUTHORITY_WAYS = 4;
 
     private enum NativeSnapshotAdaptiveMode {
         EVALUATE,
@@ -199,9 +200,12 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private final boolean mapSnapshotCacheEnabled;
     private final boolean snapshotMaintenanceEnabled;
     private final boolean snapshotValueAuthorityEnabled;
-    /** One exact recently filled tiny-map row, independent of the bounded LRU admission table. */
-    private KeyNamespace<K, N> snapshotValueAuthorityFrontKey;
-    private MapSnapshot<UK, UV> snapshotValueAuthorityFrontSnapshot;
+    /** Fixed four-way authority table; point lookups never mutate the general snapshot LRU. */
+    private final Object[] snapshotValueAuthorityKeys;
+    private final Object[] snapshotValueAuthoritySnapshots;
+    private final int[] snapshotValueAuthorityHashes;
+    private final int[] snapshotValueAuthorityNextVictims;
+    private final int snapshotValueAuthoritySetMask;
     private final int mapSnapshotSmallMaxEntries;
     private final boolean snapshotOwnedKeyReuseEnabled;
     private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
@@ -712,6 +716,24 @@ public final class CachedInternalMapState<K, N, UK, UV>
                         && !snapshotMaintenanceEnabled
                         && userValueSerializer != null
                         && snapshotValueAuthorityRuntimeEnabled();
+        int authoritySetCount = 0;
+        if (snapshotValueAuthorityEnabled) {
+            int minimumSetCount =
+                    Math.max(
+                            1,
+                            (mapSnapshotCacheMaxEntries + SNAPSHOT_VALUE_AUTHORITY_WAYS - 1)
+                                    / SNAPSHOT_VALUE_AUTHORITY_WAYS);
+            authoritySetCount = 1;
+            while (authoritySetCount < minimumSetCount) {
+                authoritySetCount <<= 1;
+            }
+        }
+        int authoritySlots = authoritySetCount * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        this.snapshotValueAuthorityKeys = new Object[authoritySlots];
+        this.snapshotValueAuthoritySnapshots = new Object[authoritySlots];
+        this.snapshotValueAuthorityHashes = new int[authoritySlots];
+        this.snapshotValueAuthorityNextVictims = new int[authoritySetCount];
+        this.snapshotValueAuthoritySetMask = Math.max(0, authoritySetCount - 1);
     }
 
     private static boolean dirtyOverlayRuntimeEnabled() {
@@ -2120,12 +2142,28 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return null;
         }
         snapshotValueAuthorityPointProbes++;
-        MapSnapshot<UK, UV> snapshot = snapshotValueAuthorityFrontSnapshot;
-        KeyNamespace<K, N> frontKey = snapshotValueAuthorityFrontKey;
-        if (snapshot == null
-                || frontKey == null
-                || !Objects.equals(frontKey.key, currentKey)
-                || !Objects.equals(frontKey.namespace, currentNamespace)) {
+        int hash = CacheKeyHash.hash(currentKey, currentNamespace);
+        int base = (hash & snapshotValueAuthoritySetMask) * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        MapSnapshot<UK, UV> snapshot = null;
+        for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
+            int slot = base + way;
+            if (snapshotValueAuthorityHashes[slot] != hash) {
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            KeyNamespace<K, N> stored =
+                    (KeyNamespace<K, N>) snapshotValueAuthorityKeys[slot];
+            if (stored != null
+                    && Objects.equals(stored.key, currentKey)
+                    && Objects.equals(stored.namespace, currentNamespace)) {
+                @SuppressWarnings("unchecked")
+                MapSnapshot<UK, UV> matched =
+                        (MapSnapshot<UK, UV>) snapshotValueAuthoritySnapshots[slot];
+                snapshot = matched;
+                break;
+            }
+        }
+        if (snapshot == null) {
             return null;
         }
         snapshotValueAuthorityPointSnapshotHits++;
@@ -2140,6 +2178,60 @@ public final class CachedInternalMapState<K, N, UK, UV>
         snapshotValueAuthorityPointNegativeHits++;
         snapshotValueAuthorityPointGetsElided++;
         return SnapshotAuthorityLookup.absent();
+    }
+
+    private void storeSnapshotValueAuthority(
+            KeyNamespace<K, N> key, MapSnapshot<UK, UV> snapshot) {
+        int hash = key.hashCode();
+        int set = hash & snapshotValueAuthoritySetMask;
+        int base = set * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        int emptySlot = -1;
+        for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
+            int slot = base + way;
+            @SuppressWarnings("unchecked")
+            KeyNamespace<K, N> stored =
+                    (KeyNamespace<K, N>) snapshotValueAuthorityKeys[slot];
+            if (stored == null) {
+                if (emptySlot < 0) {
+                    emptySlot = slot;
+                }
+            } else if (snapshotValueAuthorityHashes[slot] == hash && stored.equals(key)) {
+                snapshotValueAuthoritySnapshots[slot] = snapshot;
+                return;
+            }
+        }
+        int slot;
+        if (emptySlot >= 0) {
+            slot = emptySlot;
+        } else {
+            int victim = snapshotValueAuthorityNextVictims[set];
+            slot = base + victim;
+            snapshotValueAuthorityNextVictims[set] =
+                    (victim + 1) & (SNAPSHOT_VALUE_AUTHORITY_WAYS - 1);
+        }
+        snapshotValueAuthorityKeys[slot] = key;
+        snapshotValueAuthoritySnapshots[slot] = snapshot;
+        snapshotValueAuthorityHashes[slot] = hash;
+    }
+
+    private void removeSnapshotValueAuthority(KeyNamespace<K, N> key) {
+        int hash = key.hashCode();
+        int base = (hash & snapshotValueAuthoritySetMask) * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
+            int slot = base + way;
+            if (snapshotValueAuthorityHashes[slot] != hash) {
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            KeyNamespace<K, N> stored =
+                    (KeyNamespace<K, N>) snapshotValueAuthorityKeys[slot];
+            if (stored != null && stored.equals(key)) {
+                snapshotValueAuthorityKeys[slot] = null;
+                snapshotValueAuthoritySnapshots[slot] = null;
+                snapshotValueAuthorityHashes[slot] = 0;
+                return;
+            }
+        }
     }
 
     private Iterable<UK> cacheKeys(Iterable<Map.Entry<UK, UV>> entries, K key, N namespace) {
@@ -3156,12 +3248,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
         if (snapshotValueAuthorityEnabled) {
             if (snapshot.hasValues()) {
-                snapshotValueAuthorityFrontKey = key;
-                snapshotValueAuthorityFrontSnapshot = snapshot;
-            } else if (snapshotValueAuthorityFrontKey != null
-                    && snapshotValueAuthorityFrontKey.equals(key)) {
-                snapshotValueAuthorityFrontKey = null;
-                snapshotValueAuthorityFrontSnapshot = null;
+                storeSnapshotValueAuthority(key, snapshot);
+            } else {
+                removeSnapshotValueAuthority(key);
             }
         }
         if (snapshot.isEmpty() || snapshot.isSingle()) {
@@ -3177,10 +3266,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
     }
 
     private boolean removeSnapshot(KeyNamespace<K, N> key) {
-        if (snapshotValueAuthorityFrontKey != null
-                && snapshotValueAuthorityFrontKey.equals(key)) {
-            snapshotValueAuthorityFrontKey = null;
-            snapshotValueAuthorityFrontSnapshot = null;
+        if (snapshotValueAuthorityEnabled) {
+            removeSnapshotValueAuthority(key);
         }
         boolean removed;
         if (standaloneNativeMapSnapshotEnabled) {
