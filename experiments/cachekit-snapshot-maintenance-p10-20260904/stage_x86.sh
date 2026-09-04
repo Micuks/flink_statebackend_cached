@@ -251,7 +251,7 @@ if maintenance_enabled:
     assert rows and maintenance_activation['marker_count']>=len(rows)
     totals=[sum(row[i] for row in rows) for i in range(len(rows[0]))]
     maintenance_activation.update({'rows':len(rows),'totals':totals})
-    assert totals[0]>0 and totals[2]>0
+    assert totals[0]>0 and totals[3]>0
 else:
     assert maintenance_marker not in logs
 

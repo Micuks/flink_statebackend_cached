@@ -17,7 +17,7 @@ RUNNER_PATH = (
     "cachekit-p10-snapshot-maintenance-q9-100m-x86-20260904/run_campaign.sh"
 )
 RUNNER_SHA256 = (
-    "910799896d4b58060b7ce3755ad678a14ed32a6c8693c0eee3877287983e5f5a"
+    "1e93db23506920483bfd38a483e80de987128a4f094cafb8b1533a768a6df13a"
 )
 SOURCE_EXPERIMENT = (
     "/home/wuql/flink-cluster/experiments/"

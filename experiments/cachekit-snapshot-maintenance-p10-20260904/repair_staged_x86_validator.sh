@@ -39,6 +39,13 @@ if text.count(old_import) == 1 and text.count(new_import) == 0:
     text = text.replace(old_import, new_import, 1)
 elif text.count(old_import) != 0 or text.count(new_import) != 1:
     raise SystemExit("unexpected result-validator import shape")
+
+old_maintenance_assertion = "assert totals[0]>0 and totals[2]>0"
+new_maintenance_assertion = "assert totals[0]>0 and totals[3]>0"
+if text.count(old_maintenance_assertion) == 1 and text.count(new_maintenance_assertion) == 0:
+    text = text.replace(old_maintenance_assertion, new_maintenance_assertion, 1)
+elif text.count(old_maintenance_assertion) != 0 or text.count(new_maintenance_assertion) != 1:
+    raise SystemExit("unexpected maintenance activation assertion shape")
 runner.write_text(text)
 
 verified = runner.read_text()
@@ -48,6 +55,8 @@ if verified.index(assignment) > verified.index(assertion):
     raise SystemExit("expected_hot is still assigned after use")
 if verified.count("import hashlib,json,pathlib,re,sys") != 1:
     raise SystemExit("result validator does not import re exactly once")
+if verified.count("assert totals[0]>0 and totals[3]>0") != 1:
+    raise SystemExit("maintenance validator does not require put attempts and updates")
 PY
 
 ssh -o BatchMode=yes "$host" bash -n "$runner"

@@ -140,7 +140,7 @@ replace_once(
     "    assert totals[3]+totals[4]+totals[5]>0\n",
     "",
 )
-replace_once("    assert totals[0]>0 and totals[2]>0\n", "")
+replace_once("    assert totals[0]>0 and totals[3]>0\n", "")
 replace_once(
     "if maintenance_enabled:\n"
     "    assert snapshot_activation['single_short_circuits']>0\n",
