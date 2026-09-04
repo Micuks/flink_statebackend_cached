@@ -14,6 +14,7 @@ The q9 source screen uses one P11 artifact in every leg:
 Dirty overlay and Java MapState value cache stay disabled in all legs. The screen requires valid
 100M-event measurements, exact artifact/config identity, nonzero maintenance put attempts and
 applied updates in both treatment legs, no dirty-overlay marker, and no fatal runtime errors.
-Promotion requires at least 10% K/s/core uplift over the fresh same-artifact A leg. A promoted
+The predeclared screen selection rule chooses the higher valid q9 K/s/core result of the 2K and
+64K capacities. Promotion requires at least 10% K/s/core uplift over the fresh same-artifact A leg. A promoted
 effective-query campaign must rerun fresh A/A+B controls on one host and compute the arithmetic
 mean of per-query percentages.
