@@ -61,6 +61,8 @@ import sys
 summary = json.load(open(sys.argv[1]))
 assert summary["maintenance_64k_vs_overlay_64k_uplift_percent_kps_core"] > 0.0
 assert summary["a_plus_b_vs_baseline_uplift_percent_kps_core"] > 0.0
+assert summary["dirty_overlay_iterator_reduction_2k_vs_overlay_percent"] > 0.0
+assert summary["dirty_overlay_iterator_reduction_64k_vs_overlay_percent"] > 0.0
 PY
 [[ ! -e $target_exp ]] || { echo "target already exists: $target_exp" >&2; exit 73; }
 for port in "$target_rest_port" "$target_prom_port" "$target_push_port"; do

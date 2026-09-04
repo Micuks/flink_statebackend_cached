@@ -138,6 +138,11 @@ def main():
         if overlay_64k_totals[0]
         else 0.0
     ) * 100.0
+    if iterator_reduction_2k <= 0.0 or iterator_reduction_64k <= 0.0:
+        raise SystemExit(
+            "snapshot maintenance did not reduce dirty-overlay base iterator requests: "
+            f"2k={iterator_reduction_2k:.2f}% 64k={iterator_reduction_64k:.2f}%"
+        )
 
     summary = {
         "schema": "cachekit-snapshot-maintenance-p10-x86-summary-v2",
