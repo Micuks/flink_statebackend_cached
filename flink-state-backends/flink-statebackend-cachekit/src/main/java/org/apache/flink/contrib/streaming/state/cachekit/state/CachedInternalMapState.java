@@ -59,6 +59,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
         implements InternalMapState<K, N, UK, UV>, BatchPrefetchableMapState<UK> {
 
     private static final Logger LOG = LoggerFactory.getLogger(CachedInternalMapState.class);
+    private static final String DIRTY_OVERLAY_PROPERTY =
+            "cachekit.map.dirty-overlay.enabled";
+    private static final String DIRTY_OVERLAY_ENV = "CACHEKIT_MAP_DIRTY_OVERLAY_ENABLED";
 
     private enum NativeSnapshotAdaptiveMode {
         EVALUATE,
@@ -78,6 +81,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private final boolean presenceCacheEnabled;
     private final PresenceCacheImplementation presenceCacheImplementation;
     private final boolean mapCacheEnabled;
+    private final boolean dirtyOverlayEnabled;
     private final CachePolicyType mapCachePolicyType;
     private final int mapCacheLruOverflow;
     private final java.util.function.Consumer<K> keyContextSetter;
@@ -195,6 +199,12 @@ public final class CachedInternalMapState<K, N, UK, UV>
             dirtyValueEntriesByNamespace = new HashMap<>();
     /** Reusable lookup key for {@link #dirtyValueEntriesByNamespace}. */
     private final KeyNamespace<K, N> dirtyNamespaceProbe = new KeyNamespace<>(null, null);
+    private long dirtyOverlayIteratorRequests;
+    private long dirtyOverlayFlushesAvoided;
+    private long dirtyOverlayEntriesSnapshotted;
+    private long dirtyOverlayDelegateOverrides;
+    private long dirtyOverlayAppendedEntries;
+    private long dirtyOverlayTombstonesSuppressed;
 
     private N currentNamespace;
     private final KeyNamespaceUserKey<K, N, UK> lookupKey =
@@ -491,6 +501,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         this.presenceCacheImplementation =
                 Objects.requireNonNull(presenceCacheImplementation, "presenceCacheImplementation");
         this.mapCacheEnabled = mapCacheMaxEntries > 0;
+        this.dirtyOverlayEnabled = mapCacheEnabled && dirtyOverlayRuntimeEnabled();
         this.mapCachePolicyType = Objects.requireNonNull(mapCachePolicyType, "mapCachePolicyType");
         this.mapCacheLruOverflow = Math.max(0, mapCacheLruOverflow);
         this.bypassEnabled = bypassEnabled;
@@ -666,6 +677,21 @@ public final class CachedInternalMapState<K, N, UK, UV>
             this.mapSnapshotCache = new NoOpCachePolicy<>();
             this.standaloneNativeMapSnapshotCache = null;
         }
+    }
+
+    private static boolean dirtyOverlayRuntimeEnabled() {
+        String configured = System.getProperty(DIRTY_OVERLAY_PROPERTY);
+        if (configured == null || configured.trim().isEmpty()) {
+            configured = System.getenv(DIRTY_OVERLAY_ENV);
+        }
+        if (configured == null) {
+            return false;
+        }
+        String normalized = configured.trim();
+        return "true".equalsIgnoreCase(normalized)
+                || "1".equals(normalized)
+                || "yes".equalsIgnoreCase(normalized)
+                || "on".equalsIgnoreCase(normalized);
     }
 
     // Helper to update lookup key safely without allocation
@@ -1332,13 +1358,22 @@ public final class CachedInternalMapState<K, N, UK, UV>
             }
         }
 
-        flushCurrentKey(currentKey);
+        if (!dirtyOverlayEnabled) {
+            flushCurrentKey(currentKey);
+        }
         Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
+        if (dirtyOverlayEnabled) {
+            entries = dirtyOverlayEntries(entries, currentKey, currentNamespace);
+        }
         if (!mapCacheEnabled && !presenceCacheEnabled && !snapshotOptimizationEnabled()) {
             return entries;
         }
         return wrapWithSnapshotAwareIterator(
-                entries, currentKey, currentNamespace, iterationCacheFillEnabled);
+                entries,
+                currentKey,
+                currentNamespace,
+                iterationCacheFillEnabled,
+                dirtyOverlayEnabled);
     }
 
     @Override
@@ -1351,6 +1386,18 @@ public final class CachedInternalMapState<K, N, UK, UV>
             if (shortCircuit != null) {
                 return entryKeys(shortCircuit);
             }
+        }
+
+        if (dirtyOverlayEnabled) {
+            Iterable<Map.Entry<UK, UV>> entries =
+                    dirtyOverlayEntries(delegate.entries(), currentKey, currentNamespace);
+            return entryKeys(
+                    wrapWithSnapshotAwareIterator(
+                            entries,
+                            currentKey,
+                            currentNamespace,
+                            iterationCacheFillEnabled,
+                            true));
         }
 
         flushCurrentKey(currentKey);
@@ -1376,6 +1423,18 @@ public final class CachedInternalMapState<K, N, UK, UV>
             }
         }
 
+        if (dirtyOverlayEnabled) {
+            Iterable<Map.Entry<UK, UV>> entries =
+                    dirtyOverlayEntries(delegate.entries(), currentKey, currentNamespace);
+            return entryValues(
+                    wrapWithSnapshotAwareIterator(
+                            entries,
+                            currentKey,
+                            currentNamespace,
+                            iterationCacheFillEnabled,
+                            true));
+        }
+
         flushCurrentKey(currentKey);
         if (!mapCacheEnabled && !presenceCacheEnabled) {
             return delegate.values();
@@ -1399,13 +1458,22 @@ public final class CachedInternalMapState<K, N, UK, UV>
             }
         }
 
-        flushCurrentKey(currentKey);
+        if (!dirtyOverlayEnabled) {
+            flushCurrentKey(currentKey);
+        }
         Iterator<Map.Entry<UK, UV>> iterator = delegate.iterator();
+        if (dirtyOverlayEnabled) {
+            iterator = dirtyOverlayIterator(iterator, currentKey, currentNamespace);
+        }
         if (!mapCacheEnabled && !presenceCacheEnabled && !snapshotOptimizationEnabled()) {
             return iterator;
         }
         return new SnapshotAwareIterator(
-                iterator, currentKey, currentNamespace, iterationCacheFillEnabled);
+                iterator,
+                currentKey,
+                currentNamespace,
+                iterationCacheFillEnabled,
+                dirtyOverlayEnabled);
     }
 
     @Override
@@ -2220,6 +2288,115 @@ public final class CachedInternalMapState<K, N, UK, UV>
         flush(currentKey, namespace);
     }
 
+    private Iterable<Map.Entry<UK, UV>> dirtyOverlayEntries(
+            Iterable<Map.Entry<UK, UV>> delegateEntries, K stateKey, N namespace) {
+        KeyNamespace<K, N> captured = newStoredKeyNamespace(stateKey, namespace);
+        return () ->
+                dirtyOverlayIterator(
+                        iteratorInContext(delegateEntries, captured.key, captured.namespace),
+                        captured.key,
+                        captured.namespace);
+    }
+
+    private Iterator<Map.Entry<UK, UV>> dirtyOverlayIterator(
+            Iterator<Map.Entry<UK, UV>> delegateIterator, K stateKey, N namespace) {
+        dirtyOverlayIteratorRequests++;
+        List<DirtyOverlayEntry> dirtyEntries = snapshotDirtyOverlayEntries(stateKey, namespace);
+        dirtyOverlayEntriesSnapshotted += dirtyEntries.size();
+        if (!dirtyEntries.isEmpty()) {
+            dirtyOverlayFlushesAvoided++;
+        }
+        return new Iterator<Map.Entry<UK, UV>>() {
+            private int appendedIndex;
+            private Map.Entry<UK, UV> nextEntry;
+            private boolean nextReady;
+
+            @Override
+            public boolean hasNext() {
+                prepareNext();
+                return nextReady;
+            }
+
+            @Override
+            public Map.Entry<UK, UV> next() {
+                prepareNext();
+                if (!nextReady) {
+                    throw new java.util.NoSuchElementException();
+                }
+                Map.Entry<UK, UV> current = nextEntry;
+                nextEntry = null;
+                nextReady = false;
+                return current;
+            }
+
+            private void prepareNext() {
+                if (nextReady) {
+                    return;
+                }
+                while (delegateIterator.hasNext()) {
+                    Map.Entry<UK, UV> delegateEntry = delegateIterator.next();
+                    DirtyOverlayEntry dirty =
+                            findDirtyOverlayEntry(dirtyEntries, delegateEntry.getKey());
+                    if (dirty == null) {
+                        nextEntry = delegateEntry;
+                        nextReady = true;
+                        return;
+                    }
+                    dirty.emitted = true;
+                    if (dirty.tombstone) {
+                        dirtyOverlayTombstonesSuppressed++;
+                        continue;
+                    }
+                    dirtyOverlayDelegateOverrides++;
+                    nextEntry = new DirtyOverlayMapEntry(dirty.userKey, dirty.value);
+                    nextReady = true;
+                    return;
+                }
+                while (appendedIndex < dirtyEntries.size()) {
+                    DirtyOverlayEntry dirty = dirtyEntries.get(appendedIndex++);
+                    if (dirty.emitted || dirty.tombstone) {
+                        continue;
+                    }
+                    dirty.emitted = true;
+                    dirtyOverlayAppendedEntries++;
+                    nextEntry = new DirtyOverlayMapEntry(dirty.userKey, dirty.value);
+                    nextReady = true;
+                    return;
+                }
+            }
+        };
+    }
+
+    private List<DirtyOverlayEntry> snapshotDirtyOverlayEntries(K stateKey, N namespace) {
+        if (stateKey == null || namespace == null) {
+            return Collections.emptyList();
+        }
+        List<KeyNamespaceUserKey<K, N, UK>> dirtyKeys =
+                snapshotDirtyKeys(stateKey, namespace, true);
+        if (dirtyKeys.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<DirtyOverlayEntry> dirtyEntries = new ArrayList<>(dirtyKeys.size());
+        for (KeyNamespaceUserKey<K, N, UK> key : dirtyKeys) {
+            CachedMapValue<UV> value = l1ValueCache.get(key);
+            if (value != null && value.dirty) {
+                dirtyEntries.add(
+                        new DirtyOverlayEntry(key.userKey, value.valueOrNull(), value.isNull()));
+            }
+        }
+        return dirtyEntries;
+    }
+
+    private DirtyOverlayEntry findDirtyOverlayEntry(
+            List<DirtyOverlayEntry> dirtyEntries, UK userKey) {
+        for (DirtyOverlayEntry dirty : dirtyEntries) {
+            if (Objects.equals(dirty.userKey, userKey)) {
+                return dirty;
+            }
+        }
+        return null;
+    }
+
     private void flush(K scopeKey, N scopeNamespace) {
         boolean scoped = scopeKey != null && scopeNamespace != null;
         lifecycleLock.readLock().lock();
@@ -2383,6 +2560,18 @@ public final class CachedInternalMapState<K, N, UK, UV>
             }
         } finally {
             lifecycleLock.writeLock().unlock();
+        }
+        if (dirtyOverlayEnabled) {
+            LOG.info(
+                    "[CACHEKIT MAP DIRTY OVERLAY] enabled=true iteratorRequests={} "
+                            + "flushesAvoided={} dirtyEntriesSnapshotted={} delegateOverrides={} "
+                            + "appendedDirtyEntries={} tombstonesSuppressed={}",
+                    dirtyOverlayIteratorRequests,
+                    dirtyOverlayFlushesAvoided,
+                    dirtyOverlayEntriesSnapshotted,
+                    dirtyOverlayDelegateOverrides,
+                    dirtyOverlayAppendedEntries,
+                    dirtyOverlayTombstonesSuppressed);
         }
         if (nativeMapCacheEnabled) {
             LOG.info(
@@ -2854,14 +3043,16 @@ public final class CachedInternalMapState<K, N, UK, UV>
             Iterable<Map.Entry<UK, UV>> delegateEntries,
             K currentKey,
             N namespace,
-            boolean cacheEntries) {
+            boolean cacheEntries,
+            boolean dirtyOverlay) {
         KeyNamespace<K, N> captured = newStoredKeyNamespace(currentKey, namespace);
         return () ->
                 new SnapshotAwareIterator(
                         iteratorInContext(delegateEntries, captured.key, captured.namespace),
                         captured.key,
                         captured.namespace,
-                        cacheEntries);
+                        cacheEntries,
+                        dirtyOverlay);
     }
 
     private Iterator<Map.Entry<UK, UV>> iteratorInContext(
@@ -3125,26 +3316,71 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
     }
 
+    private interface DirtyOverlayEntryMarker {}
+
+    private final class DirtyOverlayEntry {
+        private final UK userKey;
+        private final UV value;
+        private final boolean tombstone;
+        private boolean emitted;
+
+        private DirtyOverlayEntry(UK userKey, UV value, boolean tombstone) {
+            this.userKey = userKey;
+            this.value = value;
+            this.tombstone = tombstone;
+        }
+    }
+
+    private final class DirtyOverlayMapEntry
+            implements Map.Entry<UK, UV>, DirtyOverlayEntryMarker {
+        private final UK userKey;
+        private final UV value;
+
+        private DirtyOverlayMapEntry(UK userKey, UV value) {
+            this.userKey = userKey;
+            this.value = value;
+        }
+
+        @Override
+        public UK getKey() {
+            return userKey;
+        }
+
+        @Override
+        public UV getValue() {
+            return value;
+        }
+
+        @Override
+        public UV setValue(UV ignored) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
     private final class SnapshotAwareIterator implements Iterator<Map.Entry<UK, UV>> {
         private final Iterator<Map.Entry<UK, UV>> delegateIterator;
         private final K currentKey;
         private final N namespace;
         private final boolean cacheEntries;
+        private final boolean dirtyOverlay;
         private int iteratedCount = 0;
         private final List<UK> snapshotUserKeys = new ArrayList<>();
         private UK lastUserKey = null;
         private boolean backfilled = false;
+        private boolean removable;
 
         SnapshotAwareIterator(
                 Iterator<Map.Entry<UK, UV>> delegateIterator,
                 K currentKey,
                 N namespace,
-                boolean cacheEntries) {
+                boolean cacheEntries,
+                boolean dirtyOverlay) {
             this.delegateIterator = delegateIterator;
             KeyNamespace<K, N> captured = newStoredKeyNamespace(currentKey, namespace);
             this.currentKey = captured.key;
             this.namespace = captured.namespace;
             this.cacheEntries = cacheEntries;
+            this.dirtyOverlay = dirtyOverlay;
         }
 
         @Override
@@ -3163,7 +3399,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             UK entryUserKey = entry.getKey();
             UK stableUserKey =
                     snapshotOwnedKeyReuseEnabled ? copyUserKey(entryUserKey) : entryUserKey;
-            if (cacheEntries) {
+            if (cacheEntries && !(entry instanceof DirtyOverlayEntryMarker)) {
                 cacheEntry(currentKey, namespace, entry);
             }
             iteratedCount++;
@@ -3179,6 +3415,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 snapshotUserKeys.clear();
             }
             lastUserKey = stableUserKey;
+            removable = true;
             return snapshotOwnedKeyReuseEnabled
                     ? new SnapshotMapEntry(
                             currentKey,
@@ -3194,6 +3431,19 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
         @Override
         public void remove() {
+            if (!removable) {
+                throw new IllegalStateException("remove() requires a preceding next()");
+            }
+            if (dirtyOverlay) {
+                try {
+                    mutateSnapshotEntry(currentKey, namespace, lastUserKey, null, true);
+                } catch (Exception e) {
+                    throw new RuntimeException("Failed to remove MapState entry", e);
+                }
+                backfilled = true;
+                removable = false;
+                return;
+            }
             delegateIterator.remove();
             advanceNativeGeneration();
             if (lastUserKey != null) {
@@ -3206,6 +3456,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             }
             invalidateSnapshot(currentKey, namespace);
             backfilled = true;
+            removable = false;
         }
 
         private void backfillSnapshotCache() {

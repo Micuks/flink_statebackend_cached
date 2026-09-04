@@ -33,6 +33,7 @@ import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -62,11 +63,13 @@ class CachedInternalMapStateTest {
     @BeforeEach
     void enableSnapshotFeatureForTests() {
         NativeMapSnapshotCache.setSnapshotFeatureAvailableForTesting(true);
+        System.clearProperty("cachekit.map.dirty-overlay.enabled");
     }
 
     @AfterEach
     void clearSnapshotFeatureOverride() {
         NativeMapSnapshotCache.setSnapshotFeatureAvailableForTesting(null);
+        System.clearProperty("cachekit.map.dirty-overlay.enabled");
     }
 
     @Test
@@ -693,6 +696,94 @@ class CachedInternalMapStateTest {
 
         state.flush();
         verify(delegate, times(1)).put("uk1", 42);
+    }
+
+    @Test
+    void testDirtyOverlayMergesUpdateInsertAndDeleteWithoutPrematureFlush() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Integer> delegateEntries = new LinkedHashMap<>();
+        delegateEntries.put("updated", 1);
+        delegateEntries.put("deleted", 3);
+        delegateEntries.put("clean", 4);
+        when(delegate.entries()).thenReturn(delegateEntries.entrySet());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createDirtyOverlayState(delegate, currentKey);
+        state.put("updated", 2);
+        state.put("inserted", 5);
+        state.remove("deleted");
+
+        Map<String, Integer> merged = new LinkedHashMap<>();
+        for (Map.Entry<String, Integer> entry : state.entries()) {
+            merged.put(entry.getKey(), entry.getValue());
+        }
+
+        Map<String, Integer> expected = new LinkedHashMap<>();
+        expected.put("updated", 2);
+        expected.put("clean", 4);
+        expected.put("inserted", 5);
+        assertEquals(expected, merged);
+        LinkedHashSet<String> mergedKeys = new LinkedHashSet<>();
+        for (String key : state.keys()) {
+            mergedKeys.add(key);
+        }
+        LinkedHashSet<Integer> mergedValues = new LinkedHashSet<>();
+        for (Integer value : state.values()) {
+            mergedValues.add(value);
+        }
+        assertEquals(expected.keySet(), mergedKeys);
+        assertEquals(new LinkedHashSet<>(expected.values()), mergedValues);
+        verify(delegate, times(0)).put(any(), any());
+        verify(delegate, times(0)).remove(any());
+
+        state.flush();
+        verify(delegate).put("updated", 2);
+        verify(delegate).put("inserted", 5);
+        verify(delegate).remove("deleted");
+    }
+
+    @Test
+    void testDirtyOverlayIteratorRemoveRemainsWriteBack() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Integer> delegateEntries = new LinkedHashMap<>();
+        delegateEntries.put("uk1", 1);
+        when(delegate.entries()).thenReturn(delegateEntries.entrySet());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createDirtyOverlayState(delegate, currentKey);
+        Iterator<Map.Entry<String, Integer>> iterator = state.entries().iterator();
+        assertEquals("uk1", iterator.next().getKey());
+        iterator.remove();
+
+        assertEquals(1, delegateEntries.size());
+        assertNull(state.get("uk1"));
+        verify(delegate, times(0)).remove(any());
+        state.flush();
+        verify(delegate).remove("uk1");
+    }
+
+    @Test
+    void testDirtyOverlayDirectIteratorReturnsPendingValue() throws Exception {
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Integer> delegateEntries = new LinkedHashMap<>();
+        delegateEntries.put("uk1", 1);
+        when(delegate.iterator()).thenAnswer(ignored -> delegateEntries.entrySet().iterator());
+
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createDirtyOverlayState(delegate, currentKey);
+        state.put("uk1", 2);
+
+        Iterator<Map.Entry<String, Integer>> iterator = state.iterator();
+        assertTrue(iterator.hasNext());
+        assertEquals(2, iterator.next().getValue());
+        assertFalse(iterator.hasNext());
+        verify(delegate, times(0)).put(any(), any());
     }
 
     @Test
@@ -1538,6 +1629,36 @@ class CachedInternalMapStateTest {
             count++;
         }
         return count;
+    }
+
+    private static CachedInternalMapState<String, VoidNamespace, String, Integer>
+            createDirtyOverlayState(
+                    InternalMapState<String, VoidNamespace, String, Integer> delegate,
+                    AtomicReference<String> currentKey) {
+        System.setProperty("cachekit.map.dirty-overlay.enabled", "true");
+        try {
+            CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                    new CachedInternalMapState<>(
+                            delegate,
+                            currentKey::get,
+                            currentKey::set,
+                            0,
+                            CachePolicyType.LRU,
+                            0,
+                            PresenceCacheImplementation.PRIMITIVE,
+                            100,
+                            CachePolicyType.LRU,
+                            0,
+                            false,
+                            0.0,
+                            1,
+                            true,
+                            0);
+            state.setCurrentNamespace(VoidNamespace.INSTANCE);
+            return state;
+        } finally {
+            System.clearProperty("cachekit.map.dirty-overlay.enabled");
+        }
     }
 
     private static byte[] serializedMapValue(Integer value) throws Exception {
