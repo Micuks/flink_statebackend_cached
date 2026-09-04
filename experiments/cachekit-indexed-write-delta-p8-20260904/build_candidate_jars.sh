@@ -84,8 +84,10 @@ build_one() {
   unzip -Z1 "$candidate" | LC_ALL=C sort -u >"$overlay/$arch.candidate.entries"
   find "$overlay/org" -type f -name '*.class' -printf '%P\n' | \
     sed 's#^#org/#' | LC_ALL=C sort -u >"$overlay/overlay.entries"
-  cmp -s "$overlay/$arch.base.entries" "$overlay/$arch.candidate.entries" || {
-    echo "$arch candidate entry set differs from frozen P4 runtime" >&2
+  LC_ALL=C sort -u "$overlay/$arch.base.entries" "$overlay/overlay.entries" \
+    >"$overlay/$arch.expected.entries"
+  cmp -s "$overlay/$arch.expected.entries" "$overlay/$arch.candidate.entries" || {
+    echo "$arch candidate entry set is not the exact base-plus-overlay union" >&2
     exit 69
   }
 
@@ -103,6 +105,13 @@ build_one() {
     fi
   done <"$overlay/$arch.base.entries"
 
+  while IFS= read -r entry; do
+    cmp -s "$overlay/$entry" <(unzip -p "$candidate" "$entry") || {
+      echo "RocksDB overlay mismatch: $entry" >&2
+      exit 70
+    }
+  done <"$overlay/overlay.entries"
+
   candidate_sha=$(sha256sum "$candidate" | awk '{print $1}')
   {
     echo "source_commit=$expected_source"
@@ -111,6 +120,7 @@ build_one() {
     echo "candidate_sha256=$candidate_sha"
     echo "candidate_path=$candidate"
     echo "rocksdb_overlay_class_count=$(wc -l <"$overlay/overlay.entries")"
+    echo "entry_set_exact_base_plus_overlay=true"
     echo "non_overlay_entries_identical=true"
   } >"$candidate.BUILD.txt"
   echo "$arch candidate=$candidate"
