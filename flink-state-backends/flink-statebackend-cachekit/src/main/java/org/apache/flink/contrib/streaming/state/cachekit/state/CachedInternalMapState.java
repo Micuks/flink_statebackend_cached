@@ -224,6 +224,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private long snapshotValueAuthorityEntriesStored;
     private long snapshotValueAuthorityShortCircuits;
     private long snapshotValueAuthorityPointGetsElided;
+    private long snapshotValueAuthorityPointProbes;
+    private long snapshotValueAuthorityPointSnapshotHits;
+    private long snapshotValueAuthorityPointValueHits;
+    private long snapshotValueAuthorityPointNegativeHits;
 
     private N currentNamespace;
     private final KeyNamespaceUserKey<K, N, UK> lookupKey =
@@ -1229,6 +1233,12 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return prefetched.value;
         }
 
+        SnapshotAuthorityLookup<UV> authoritative =
+                lookupSnapshotValueAuthority(currentKey, userKey);
+        if (authoritative != null) {
+            return authoritative.value;
+        }
+
         if (bypassEnabled && isBypassing && shouldBypassRead()) {
             NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
             UV value = nativeRead == null ? delegate.get(userKey) : nativeRead.value;
@@ -1371,6 +1381,12 @@ public final class CachedInternalMapState<K, N, UK, UV>
         PrefetchedMapValue<UV> prefetched = getBatchPrefetchedValue(currentKey, userKey);
         if (prefetched != null) {
             return prefetched.present;
+        }
+
+        SnapshotAuthorityLookup<UV> authoritative =
+                lookupSnapshotValueAuthority(currentKey, userKey);
+        if (authoritative != null) {
+            return authoritative.present;
         }
 
         if (bypassEnabled && isBypassing && shouldBypassRead()) {
@@ -2089,6 +2105,36 @@ public final class CachedInternalMapState<K, N, UK, UV>
         return userValueSerializer.copy(value);
     }
 
+    /**
+     * Uses a complete value-bearing tiny-map snapshot as a point-read authority.
+     *
+     * <p>A null return means UNKNOWN and falls through to the ordinary cache/delegate path. A
+     * non-null result is authoritative for both present and absent user keys because only complete
+     * traversals publish values and every wrapper mutation invalidates the snapshot.
+     */
+    private SnapshotAuthorityLookup<UV> lookupSnapshotValueAuthority(K currentKey, UK userKey) {
+        if (!snapshotValueAuthorityEnabled) {
+            return null;
+        }
+        snapshotValueAuthorityPointProbes++;
+        MapSnapshot<UK, UV> snapshot = lookupSnapshot(currentKey);
+        if (snapshot == null || !snapshot.hasValues()) {
+            return null;
+        }
+        snapshotValueAuthorityPointSnapshotHits++;
+        for (int index = 0; index < snapshot.cachedUserKeys.size(); index++) {
+            if (Objects.equals(snapshot.cachedUserKeys.get(index), userKey)) {
+                snapshotValueAuthorityPointValueHits++;
+                snapshotValueAuthorityPointGetsElided++;
+                return SnapshotAuthorityLookup.present(
+                        copyUserValue(snapshot.cachedValues.get(index)));
+            }
+        }
+        snapshotValueAuthorityPointNegativeHits++;
+        snapshotValueAuthorityPointGetsElided++;
+        return SnapshotAuthorityLookup.absent();
+    }
+
     private Iterable<UK> cacheKeys(Iterable<Map.Entry<UK, UV>> entries, K key, N namespace) {
         KeyNamespace<K, N> captured = newStoredKeyNamespace(key, namespace);
         return () ->
@@ -2654,11 +2700,17 @@ public final class CachedInternalMapState<K, N, UK, UV>
         if (snapshotValueAuthorityEnabled) {
             LOG.info(
                     "[CACHEKIT MAP SNAPSHOT VALUE AUTHORITY] enabled=true fills={} "
-                            + "entriesStored={} shortCircuits={} pointGetsElided={}",
+                            + "entriesStored={} shortCircuits={} pointGetsElided={} "
+                            + "pointProbes={} pointSnapshotHits={} pointValueHits={} "
+                            + "pointNegativeHits={}",
                     snapshotValueAuthorityFills,
                     snapshotValueAuthorityEntriesStored,
                     snapshotValueAuthorityShortCircuits,
-                    snapshotValueAuthorityPointGetsElided);
+                    snapshotValueAuthorityPointGetsElided,
+                    snapshotValueAuthorityPointProbes,
+                    snapshotValueAuthorityPointSnapshotHits,
+                    snapshotValueAuthorityPointValueHits,
+                    snapshotValueAuthorityPointNegativeHits);
         }
         if (nativeMapCacheEnabled) {
             LOG.info(
@@ -3433,6 +3485,24 @@ public final class CachedInternalMapState<K, N, UK, UV>
         @Override
         public int hashCode() {
             return CacheKeyHash.hash(key, namespace);
+        }
+    }
+
+    private static final class SnapshotAuthorityLookup<UV> {
+        final boolean present;
+        final UV value;
+
+        private SnapshotAuthorityLookup(boolean present, UV value) {
+            this.present = present;
+            this.value = value;
+        }
+
+        static <UV> SnapshotAuthorityLookup<UV> present(UV value) {
+            return new SnapshotAuthorityLookup<>(true, value);
+        }
+
+        static <UV> SnapshotAuthorityLookup<UV> absent() {
+            return new SnapshotAuthorityLookup<>(false, null);
         }
     }
 

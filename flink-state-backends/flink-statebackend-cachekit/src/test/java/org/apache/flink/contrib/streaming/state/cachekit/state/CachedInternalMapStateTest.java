@@ -1522,15 +1522,20 @@ class CachedInternalMapStateTest {
         assertFalse(fillIterator.hasNext());
         clearInvocations(delegate);
 
+        assertEquals(1, state.get("uk1"));
+        assertTrue(state.contains("uk1"));
+        assertNull(state.get("missing"));
+        assertFalse(state.contains("missing"));
         assertEquals(1, state.entries().iterator().next().getValue());
         verify(delegate, times(0)).entries();
         verify(delegate, times(0)).get(any());
 
         state.put("uk1", 10);
         clearInvocations(delegate);
+        assertEquals(10, state.get("uk1"));
         assertEquals(10, state.entries().iterator().next().getValue());
         verify(delegate, times(1)).entries();
-        verify(delegate, times(0)).get(any());
+        verify(delegate, times(1)).get("uk1");
     }
 
     @Test
