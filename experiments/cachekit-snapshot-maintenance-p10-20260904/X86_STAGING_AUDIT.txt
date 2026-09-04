@@ -1,0 +1,13 @@
+schema=cachekit-p10-x86-staging-audit-v1
+host=114.116.229.206
+remote_experiment=/home/wuql/flink-cluster/experiments/cachekit-p10-snapshot-maintenance-q9-100m-x86-20260904
+source_commit=8780838608a9c4ef1f374b91873ad3be7f576782
+artifact_sha256=09f5cd7078005bc803107e14a010263a921fb4e6307a92bb52ac9d358c503251
+variants=hot2-a,hot2-overlay,hot2-maintained
+identity_json_valid=true
+config_diff_audit_valid=true
+artifact_manifest_valid=true
+compose_render_valid=true
+runner_shell_syntax_valid=true
+runner_activation_gate=dirty_overlay,snapshot_maintenance,map_snapshot_short_circuit
+started=false
