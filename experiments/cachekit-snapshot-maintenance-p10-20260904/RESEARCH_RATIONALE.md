@@ -49,6 +49,19 @@ iterator path.
   index is a bounded per-key membership view, updated synchronously by MapState deltas and
   discarded on an unrepresentable transition.
 
+## Profiled fallback candidates rejected
+
+- An inline 0/1/N container for `AssociatedRecords` would optimize the right operator but the
+  wrong allocations. In the join allocation scope, `AssociatedRecords.of` contains 42.91% of
+  sampled allocation weight, while its own leaf objects are small: `ArrayList` 1.11%,
+  `OuterRecord` 0.27%, `AssociatedRecords` 0.13%, and `RecordsIterable` 0.12%. Most contained
+  weight instead comes from MapState key/value materialization. This candidate is therefore kept
+  behind P10 rather than implemented speculatively.
+- Snapshot-owned key reuse already received an independent P3 q9 screen. It activated but
+  improved K/s/core by only 0.66%; its follow-up profile put `copyUserKey` at 0.34% of leaf CPU
+  samples, versus 28.36% in RocksDB background flush/compaction. Repackaging that mechanism is
+  explicitly rejected.
+
 ## What is new in the A+B combination
 
 The implementation combines three existing CacheKit capabilities in a new state-specific path:
