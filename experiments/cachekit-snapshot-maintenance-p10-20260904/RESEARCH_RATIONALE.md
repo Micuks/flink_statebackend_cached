@@ -41,6 +41,13 @@ iterator path.
   small MapState. Once a complete traversal proves the set, later puts/removes maintain it by
   delta; `entries()` resolves those known members through point reads or dirty values and can
   avoid the RocksDB base iterator.
+- Alibaba Cloud's 2025 PVLDB
+  [Streaming View](https://www.vldb.org/pvldb/vol18/p5153-zhou.pdf) uses SQL characteristics and
+  observed statistics to select join and near-unique indexes for disk-backed incremental view
+  maintenance. P10 follows the narrower direction of creating an index only after execution has
+  proved its exact contents, but it neither ports Streaming View nor changes query planning: the
+  index is a bounded per-key membership view, updated synchronously by MapState deltas and
+  discarded on an unrepresentable transition.
 
 ## What is new in the A+B combination
 
