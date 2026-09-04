@@ -21,8 +21,11 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
@@ -100,22 +103,55 @@ public class RocksDBBatchMapReaderTest {
             assertTrue(backend.hasPendingMapStateIndexedWrites());
             assertEquals(Integer.valueOf(11), state.get("u1"));
 
+            Set<String> keys = new HashSet<>();
+            for (String key : state.keys()) {
+                keys.add(key);
+            }
+            assertEquals(new HashSet<>(Arrays.asList("u1", "u2")), keys);
+            assertTrue(backend.hasPendingMapStateIndexedWrites());
+
+            Set<Integer> stateValues = new HashSet<>();
+            for (Integer value : state.values()) {
+                stateValues.add(value);
+            }
+            assertEquals(new HashSet<>(Arrays.asList(11, 22)), stateValues);
+            assertTrue(backend.hasPendingMapStateIndexedWrites());
+
             int entryCount = 0;
             for (Map.Entry<String, Integer> entry : state.entries()) {
                 assertTrue(entry.getKey().equals("u1") || entry.getKey().equals("u2"));
                 entryCount++;
             }
             assertEquals(2, entryCount);
+            assertTrue(backend.hasPendingMapStateIndexedWrites());
+
+            int iteratorCount = 0;
+            Iterator<Map.Entry<String, Integer>> iterator = state.iterator();
+            while (iterator.hasNext()) {
+                iterator.next();
+                iteratorCount++;
+            }
+            assertEquals(2, iteratorCount);
+            assertTrue(backend.hasPendingMapStateIndexedWrites());
+            assertTrue(!state.isEmpty());
+            assertTrue(backend.hasPendingMapStateIndexedWrites());
 
             RocksDBBatchMapReader<String> reader = (RocksDBBatchMapReader<String>) state;
-            List<byte[]> keys = reader.serializeRocksDBKeysByUserKeys(Arrays.asList("u1", "u2"));
-            assertNull(backend.db.get(backend.getColumnFamilyHandle("indexed-map"), keys.get(0)));
-            List<byte[]> values = reader.getSerializedValuesByRocksDBKeys(keys, 0, keys.size());
+            List<byte[]> rocksDBKeys =
+                    reader.serializeRocksDBKeysByUserKeys(Arrays.asList("u1", "u2"));
+            assertNull(
+                    backend.db.get(
+                            backend.getColumnFamilyHandle("indexed-map"), rocksDBKeys.get(0)));
+            List<byte[]> values =
+                    reader.getSerializedValuesByRocksDBKeys(
+                            rocksDBKeys, 0, rocksDBKeys.size());
             assertEquals(Integer.valueOf(11), deserializeMapValue(values.get(0)));
             assertEquals(Integer.valueOf(22), deserializeMapValue(values.get(1)));
             assertTrue(!backend.hasPendingMapStateIndexedWrites());
             assertTrue(
-                    backend.db.get(backend.getColumnFamilyHandle("indexed-map"), keys.get(0))
+                    backend.db.get(
+                                    backend.getColumnFamilyHandle("indexed-map"),
+                                    rocksDBKeys.get(0))
                             != null);
 
             state.remove("u1");
