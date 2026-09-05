@@ -1738,6 +1738,65 @@ class CachedInternalMapStateTest {
     }
 
     @Test
+    void testPointMemoNullGetDoesNotProveAbsence() throws Exception {
+        System.setProperty("cachekit.map.snapshot-value-authority.enabled", "true");
+        System.setProperty("cachekit.map.point-value-memo.enabled", "true");
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        when(delegate.getValueSerializer())
+                .thenReturn(new MapSerializer<>(
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE));
+        when(delegate.contains("nullable")).thenReturn(true);
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createSmallSnapshotState(delegate, currentKey, MapSnapshotCacheMetrics.forTesting());
+        assertNull(state.get("nullable"));
+        assertNull(state.get("nullable"));
+        assertTrue(state.contains("nullable"));
+        verify(delegate, times(1)).contains("nullable");
+        state.putAll(Collections.singletonMap("nullable", null));
+        assertTrue(state.contains("nullable"));
+        assertNull(state.get("nullable"));
+        state.getStateIncrementalVisitor(1);
+        when(delegate.get("nullable")).thenReturn(42);
+        assertEquals(42, state.get("nullable"));
+    }
+
+    @Test
+    void testPointMemoKeysAndValuesRemovalInvalidateCapturedOwner() throws Exception {
+        System.setProperty("cachekit.map.snapshot-value-authority.enabled", "true");
+        System.setProperty("cachekit.map.point-value-memo.enabled", "true");
+        AtomicReference<String> currentKey = new AtomicReference<>("k1");
+        InternalMapState<String, VoidNamespace, String, Integer> delegate =
+                mock(InternalMapState.class);
+        Map<String, Integer> data = new LinkedHashMap<>();
+        data.put("uk", 7);
+        when(delegate.getValueSerializer())
+                .thenReturn(new MapSerializer<>(
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE));
+        when(delegate.get(any())).thenAnswer(call -> data.get(call.getArgument(0)));
+        when(delegate.entries()).thenAnswer(call -> data.entrySet());
+        CachedInternalMapState<String, VoidNamespace, String, Integer> state =
+                createSmallSnapshotState(delegate, currentKey, MapSnapshotCacheMetrics.forTesting());
+        assertEquals(7, state.get("uk"));
+        Iterator<String> keys = state.keys().iterator();
+        assertEquals("uk", keys.next());
+        keys.remove();
+        assertNull(state.get("uk"));
+        state.clear();
+        // Start a second owner whose delegate data has not been memoized.
+        currentKey.set("k2");
+        data.put("uk", 9);
+        assertEquals(9, state.get("uk"));
+        Iterator<Integer> values = state.values().iterator();
+        assertEquals(9, values.next());
+        values.remove();
+        assertNull(state.get("uk"));
+    }
+
+    @Test
     void testPointValueMemoPresenceOnlyDoesNotInventAValueAndCopiesCachedValues()
             throws Exception {
         System.setProperty("cachekit.map.snapshot-value-authority.enabled", "true");

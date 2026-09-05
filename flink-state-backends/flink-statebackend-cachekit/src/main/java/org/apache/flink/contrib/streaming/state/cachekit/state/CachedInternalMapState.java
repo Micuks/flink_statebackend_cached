@@ -81,6 +81,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private static final byte POINT_MEMO_ABSENT = 1;
     private static final byte POINT_MEMO_PRESENT_ONLY = 2;
     private static final byte POINT_MEMO_PRESENT_VALUE = 3;
+    private static final byte POINT_MEMO_GET_NULL = 4;
 
     private enum NativeSnapshotAdaptiveMode {
         EVALUATE,
@@ -223,6 +224,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
      * mutations while retaining the exact user-key/value observed through the write-through path.
      */
     private final boolean pointValueMemoEnabled;
+    private boolean pointValueMemoVisitorExposed;
     private final Object[] pointValueMemoOwners;
     private final Object[] pointValueMemoUserKeys;
     private final Object[] pointValueMemoValues;
@@ -1446,8 +1448,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     currentKey,
                     currentNamespace,
                     uKey,
-                    entry.getValue() != null,
-                    entry.getValue() != null,
+                    true,
+                    true,
                     entry.getValue());
             if (snapshotMaintenanceEnabled) {
                 if (entry.getValue() == null) {
@@ -1606,6 +1608,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     @Override
     public Iterable<UK> keys() throws Exception {
+        if (pointValueMemoEnabled) {
+            return entryKeys(entries());
+        }
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
 
@@ -1641,6 +1646,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     @Override
     public Iterable<UV> values() throws Exception {
+        if (pointValueMemoEnabled) {
+            return entryValues(entries());
+        }
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
 
@@ -1795,6 +1803,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
     @Override
     public StateIncrementalVisitor<K, N, Map<UK, UV>> getStateIncrementalVisitor(
             int recommendedMaxNumberOfReturnedRecords) {
+        // The delegate visitor may outlive this call and mutate state outside wrapper hooks.
+        pointValueMemoVisitorExposed = true;
         ensureDelegateNamespace(null);
         flush();
         return delegate.getStateIncrementalVisitor(recommendedMaxNumberOfReturnedRecords);
@@ -2411,7 +2421,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
      */
     private SnapshotAuthorityLookup<UV> lookupPointValueMemo(
             K currentKey, UK userKey, boolean valueRequired) {
-        if (!pointValueMemoEnabled || currentKey == null || currentNamespace == null) {
+        if (!pointValueMemoEnabled
+                || pointValueMemoVisitorExposed
+                || currentKey == null
+                || currentNamespace == null) {
             return null;
         }
         pointValueMemoProbes++;
@@ -2443,12 +2456,15 @@ public final class CachedInternalMapState<K, N, UK, UV>
             if (valueRequired && kind == POINT_MEMO_PRESENT_ONLY) {
                 return null;
             }
+            if (!valueRequired && kind == POINT_MEMO_GET_NULL) {
+                return null;
+            }
             pointValueMemoVisited[set] |= (byte) (1 << way);
             pointValueMemoUserKeyHits++;
             if (!valueRequired) {
                 pointValueMemoContainsHits++;
             }
-            if (kind == POINT_MEMO_ABSENT) {
+            if (kind == POINT_MEMO_ABSENT || kind == POINT_MEMO_GET_NULL) {
                 pointValueMemoNegativeHits++;
                 return SnapshotAuthorityLookup.absent();
             }
@@ -2471,6 +2487,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
             boolean hasValue,
             UV value) {
         if (!pointValueMemoEnabled
+                || pointValueMemoVisitorExposed
                 || currentKey == null
                 || namespace == null
                 || userKey == null) {
@@ -2523,7 +2540,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         pointValueMemoValues[slot] = present && hasValue ? copyUserValue(value) : null;
         pointValueMemoKinds[slot] =
                 !present
-                        ? POINT_MEMO_ABSENT
+                        ? (hasValue ? POINT_MEMO_GET_NULL : POINT_MEMO_ABSENT)
                         : hasValue ? POINT_MEMO_PRESENT_VALUE : POINT_MEMO_PRESENT_ONLY;
         pointValueMemoStores++;
     }
