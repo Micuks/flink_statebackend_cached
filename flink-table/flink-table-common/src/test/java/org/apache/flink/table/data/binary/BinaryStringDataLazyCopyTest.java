@@ -29,8 +29,8 @@ class BinaryStringDataLazyCopyTest {
     private static final boolean ENABLED =
             Boolean.parseBoolean(
                     System.getProperty(
-                            "flink.table.binary-string.lazy-copy.enabled",
-                            System.getenv("FLINK_TABLE_BINARY_STRING_LAZY_COPY_ENABLED")));
+                            "cachekit.binary-string.lazy-copy.enabled",
+                            System.getenv("CACHEKIT_BINARY_STRING_LAZY_COPY_ENABLED")));
 
     @Test
     void preservesLazyRepresentationOnlyWhenEnabled() {

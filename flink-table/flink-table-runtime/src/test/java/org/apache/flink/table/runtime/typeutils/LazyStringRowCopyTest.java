@@ -44,8 +44,8 @@ class LazyStringRowCopyTest {
         RowData first = serializer.copy(original);
         RowData second = serializer.copy(first);
         boolean enabled = Boolean.parseBoolean(System.getProperty(
-                "flink.table.binary-string.lazy-copy.enabled",
-                System.getenv("FLINK_TABLE_BINARY_STRING_LAZY_COPY_ENABLED")));
+                "cachekit.binary-string.lazy-copy.enabled",
+                System.getenv("CACHEKIT_BINARY_STRING_LAZY_COPY_ENABLED")));
         assertThat(((BinaryStringData) second.getString(0)).getBinarySection() == null)
                 .isEqualTo(enabled);
         original.setField(0, BinaryStringData.fromString("different"));

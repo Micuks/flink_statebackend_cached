@@ -1,5 +1,21 @@
 # FullOpt+LC: reproduce the Kunpeng historical +65.48% configuration
 
+## CacheKit option namespace migration
+
+LC now uses `cachekit.binary-string.lazy-copy.enabled` or
+`CACHEKIT_BINARY_STRING_LAZY_COPY_ENABLED`, default OFF, with JVM property
+precedence. The old Flink-prefixed names are no longer accepted by the runtime.
+This remains a CacheKit-owned optimization implemented in Flink's string-copy path.
+Rebuild and restart: merely renaming the environment on an old JAR will not enable LC.
+The preparation tool migrates the archived environment and audit code automatically.
+Historical artifacts/results remain unchanged.
+
+The verification below permits exactly the two option-name UTF8 constant changes
+in `BinaryStringData.class`; all 42 other target classes and every non-target entry
+must still match the archive. `lock.json.class_sha256` retains historical hashes;
+`rebuild.py` derives the renamed class expectation from the verified reference.
+This revision is not byte-identical to the historical runtime and was not benchmarked.
+
 This is the supported **frozen-runtime reproduction path**, not a promise that
 an arbitrary full-tree Maven distribution or YAML alone yields +65%.
 `cachekit/dev` now contains the five tested source families, their tests and
@@ -44,9 +60,9 @@ python3 reproduction/fullopt-lc/rebuild.py --compile \
 ```
 
 The output directory must not exist. The tool compiles from this checkout,
-requires exact source and bytecode hashes, replaces only target classes in the
+requires exact source and bytecode hashes (with the two-name migration above), replaces only target classes in the
 locked runtime and compares **every ZIP entry** to the reference. Archive SHA256
-may differ from ZIP metadata/recompression; class and resource bytes must not.
+may differ from ZIP metadata/recompression; no other class/resource changes are allowed.
 `BUILD_AUDIT.json` records the branch commit, dirty status, source hashes and
 each output JAR hash. Missing or stale classes fail closed. No second table-common
 JAR should be added to the classpath: P30 belongs in the existing table API uber JAR.
@@ -71,7 +87,7 @@ In particular:
 
 ```yaml
 CACHEKIT_VALUE_EVICTION_WRITE_BATCH_ENABLED: "true"
-FLINK_TABLE_BINARY_STRING_LAZY_COPY_ENABLED: "true"
+CACHEKIT_BINARY_STRING_LAZY_COPY_ENABLED: "true"
 ```
 
 These are environment/JVM switches, not Flink YAML keys. Explicit JVM properties
@@ -113,8 +129,8 @@ Replace `NEW` with a unique lowercase alphanumeric suffix (including in the proj
 Requires Python3 + PyYAML. This copies inputs and harness, not old query results,
 remaps project/paths/ports, mounts all three rebuilt JARs on all JM/TMs, updates
 artifact checksums and records the build audit. It **does not launch Docker**.
-The historical source pin stays in the harness because the runtime class content
-is identical; the current integration commit is separately in `reproduction_build`.
+The current build commit is recorded in the generated identity, runtime manifest
+and harness; the historical reference is retained separately.
 
 For a future authorized run, first inspect free ports, foreign jobs, CPU/NUMA
 occupancy and all bind mounts, then validate the generated Compose with the

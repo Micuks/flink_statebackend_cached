@@ -45,7 +45,8 @@ def main():
         p.error('wrong reference configuration')
     for item in build['artifacts']:
         if (sha(a.runtime / item['name']) != item['sha256']
-                or not item['all_entries_identical']
+                or not item['non_overlay_entries_identical']
+                or not item['verified_gate_rename_only']
                 or item['reference_sha256'] != lock['reference_jars'][item['name']]):
             p.error('rebuilt artifact changed')
     a.output.mkdir(parents=True)
@@ -60,6 +61,10 @@ def main():
 
     def remap(text):
         text = text.replace(str(a.archive), str(a.output)).replace(oldproject, a.project)
+        text = text.replace('FLINK_TABLE_BINARY_STRING_LAZY_COPY_ENABLED',
+                            'CACHEKIT_BINARY_STRING_LAZY_COPY_ENABLED')
+        text = text.replace('flink.table.binary-string.lazy-copy.enabled',
+                            'cachekit.binary-string.lazy-copy.enabled')
         for old, new in zip((12980, 12981, 12982), range(a.port_base, a.port_base + 3)):
             text = text.replace(str(old), str(new))
         return text
@@ -73,6 +78,7 @@ def main():
         shutil.copy2(a.runtime / item['name'], runtime / item['name'])
     manifest_path = runtime / 'RUNTIME_BUNDLE.json'
     manifest = json.loads(remap(manifest_path.read_text()))
+    manifest['source_commit'] = build['source_commit']
     for item in manifest['artifacts']:
         path = runtime / Path(item['path']).name
         item.update(path=str(path), sha256=sha(path), size_bytes=path.stat().st_size)
@@ -93,11 +99,12 @@ def main():
     identity_path = a.output / 'identity.json'
     identity = json.loads(identity_path.read_text())
     identity['historical_overlay_audits'] = identity.pop('overlay_audits', [])
-    identity.update(reproduction_build=build, historical_reference=str(a.archive),
+    identity.update(source_commit=build['source_commit'],
+                    reproduction_build=build, historical_reference=str(a.archive),
                     performance_rerun=False,
                     variant_compose_sha256={'p29p30': sha(cf)})
-    # Historical source pin remains the byte-identical five-family runtime pin;
-    # the branch build commit is separately retained in reproduction_build.
+    runner = a.output / 'run_campaign.sh'
+    runner.write_text(runner.read_text().replace(lock['historical_source'], build['source_commit']))
     identity_path.write_text(json.dumps(identity, indent=2) + '\n')
     sums = a.output / 'inputs/ARTIFACTS.SHA256SUMS'
     lines = []

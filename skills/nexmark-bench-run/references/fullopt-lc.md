@@ -33,7 +33,7 @@ and TM service's `environment` mapping**. The two positive gates are:
 
 ```yaml
 CACHEKIT_VALUE_EVICTION_WRITE_BATCH_ENABLED: "true"
-FLINK_TABLE_BINARY_STRING_LAZY_COPY_ENABLED: "true"
+CACHEKIT_BINARY_STRING_LAZY_COPY_ENABLED: "true"
 ```
 
 These are NOT `flink-conf.yaml` keys. Setting shell variables alone does not
@@ -41,11 +41,14 @@ propagate them into containers. Equivalent JVM options are:
 
 ```text
 -Dcachekit.value.eviction-write-batch.enabled=true
--Dflink.table.binary-string.lazy-copy.enabled=true
+-Dcachekit.binary-string.lazy-copy.enabled=true
 ```
 
 JVM properties take precedence over environment settings; remove conflicting
 options. Apply before JVM startup and restart the owned cluster after changes.
+The old Flink-prefixed LC names are not runtime aliases. Rebuild the runtime when
+migrating: old archived JARs still require their historical option names. The
+locked reproduction preparation tool migrates archived configuration for new JARs.
 For plain FullOpt controls set both gates explicitly false and match all other
 settings. Leave unrelated exploratory gates off as the environment map specifies.
 

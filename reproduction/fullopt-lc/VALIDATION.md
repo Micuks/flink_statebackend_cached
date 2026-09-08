@@ -1,5 +1,19 @@
 # Integration validation — 2026-09-08
 
+The 43/43 byte-identical result below describes integration commit `0e8c22c175`.
+The subsequent CacheKit option rename changes two UTF8 constants in the outer
+BinaryStringData class only. The rebuild verifier checks precisely that migration
+and requires the other 42 target classes and all non-target entries to remain
+unchanged. Historical performance results were not rerun.
+
+Namespace migration validation: seven string-copy tests passed for new JVM ON,
+new environment ON, JVM OFF overriding environment ON, and old JVM option ON
+being ignored (LC remains OFF). The 116 row/serializer tests passed in each new
+JVM ON/OFF mode. Five Python helper tests passed, including archived environment
+migration, source identity update, rejection and non-overlay preservation.
+The rebuild verifier accepted exactly the two UTF8 constant changes, with all
+other compiled target bytes and non-overlay entries unchanged. No performance run.
+
 No performance experiment, Docker launch, foreign-job modification or baseline
 rerun was performed. The +65.48% figure remains the historical measurement.
 

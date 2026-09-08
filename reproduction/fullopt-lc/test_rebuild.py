@@ -20,13 +20,18 @@ class OverlayTests(unittest.TestCase):
             with zipfile.ZipFile(dst) as z:
                 self.assertEqual(z.read('resource'), b'keep')
 
-    def test_changed_class_is_rejected(self):
+    def test_verified_replacement_is_written(self):
         with tempfile.TemporaryDirectory() as d:
             src, dst = Path(d) / 'src.jar', Path(d) / 'dst.jar'
             with zipfile.ZipFile(src, 'w') as z:
                 z.writestr('A.class', b'original')
-            with self.assertRaisesRegex(RuntimeError, 'contents differ'):
-                rebuild.overlay(src, dst, {'A.class': b'changed'})
+            rebuild.overlay(src, dst, {'A.class': b'changed'})
+            with zipfile.ZipFile(dst) as z:
+                self.assertEqual(z.read('A.class'), b'changed')
+
+    def test_migration_rejects_unexpected_reference(self):
+        with self.assertRaisesRegex(RuntimeError, 'constant missing'):
+            rebuild.migrate_gate(b'not a historical class')
 
     def test_missing_class_is_rejected(self):
         with tempfile.TemporaryDirectory() as d:

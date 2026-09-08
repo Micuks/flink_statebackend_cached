@@ -26,7 +26,9 @@ class PrepareTests(unittest.TestCase):
             shutil.copy2(HERE / 'kunpeng-flink-conf.yaml', archive / 'variants/p29p30/flink-conf.yaml')
             identity = {'source_commit': lock['historical_source'], 'project': 'ckp31kp0908'}
             (archive / 'identity.json').write_text(json.dumps(identity))
-            (archive / 'run_campaign.sh').write_text('#!/bin/bash\nexit 99 # must not run\n')
+            (archive / 'run_campaign.sh').write_text(
+                '#!/bin/bash\nsource_commit=' + lock['historical_source'] +
+                '\nexit 99 # must not run\n')
             manifest = {'source_commit': lock['historical_source'], 'artifacts': []}
             audits = []
             for name, ref in lock['reference_jars'].items():
@@ -36,14 +38,17 @@ class PrepareTests(unittest.TestCase):
                 (archive / 'inputs/runtime' / name).write_bytes(b'old')
                 manifest['artifacts'].append({'path': str(archive / 'inputs/runtime' / name)})
                 audits.append({'name': name, 'sha256': digest, 'reference_sha256': ref,
-                               'all_entries_identical': True})
+                               'non_overlay_entries_identical': True,
+                               'verified_gate_rename_only': True})
             (archive / 'inputs/runtime/RUNTIME_BUNDLE.json').write_text(json.dumps(manifest))
             (built / 'BUILD_AUDIT.json').write_text(json.dumps({
-                'valid': True, 'verified_class_count': 43, 'runtime_source_hashes': lock['runtime_sources'],
+                'valid': True, 'source_commit': 'new-branch-commit',
+                'verified_class_count': 43, 'runtime_source_hashes': lock['runtime_sources'],
                 'artifacts': audits}))
             (archive / 'inputs/ARTIFACTS.SHA256SUMS').write_text(
                 'old  inputs/runtime/flink-dist-1.16.3.jar\n')
-            services = {n: {'volumes': [str(archive / 'inputs/runtime' / jar) + ':/opt/flink/lib/' + jar + ':ro'
+            services = {n: {'environment': {'FLINK_TABLE_BINARY_STRING_LAZY_COPY_ENABLED': 'true'},
+                            'volumes': [str(archive / 'inputs/runtime' / jar) + ':/opt/flink/lib/' + jar + ':ro'
                                        for jar in lock['reference_jars']]}
                         for n in ['jobmanager', 'taskmanager1', 'taskmanager2']}
             (archive / 'variants/p29p30/docker-compose.yml').write_text(yaml.safe_dump({'services': services}))
@@ -57,6 +62,9 @@ class PrepareTests(unittest.TestCase):
             compose = yaml.safe_load((output / 'variants/p29p30/docker-compose.yml').read_text())
             for service in compose['services'].values():
                 self.assertTrue(all(v.startswith(str(output / 'inputs/runtime')) for v in service['volumes']))
+                self.assertEqual(service['environment'], {'CACHEKIT_BINARY_STRING_LAZY_COPY_ENABLED': 'true'})
+            self.assertEqual(json.loads((output / 'identity.json').read_text())['source_commit'], 'new-branch-commit')
+            self.assertIn('source_commit=new-branch-commit', (output / 'run_campaign.sh').read_text())
             repeated = subprocess.run(command, capture_output=True, text=True)
             self.assertNotEqual(repeated.returncode, 0)
 

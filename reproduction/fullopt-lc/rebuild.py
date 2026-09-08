@@ -26,6 +26,19 @@ def require(ok, message):
         raise RuntimeError(message)
 
 
+def migrate_gate(data):
+    """Permit only the two requested constant-pool UTF8 name changes."""
+    for old, new in [
+        ('flink.table.binary-string.lazy-copy.enabled', 'cachekit.binary-string.lazy-copy.enabled'),
+        ('FLINK_TABLE_BINARY_STRING_LAZY_COPY_ENABLED', 'CACHEKIT_BINARY_STRING_LAZY_COPY_ENABLED'),
+    ]:
+        old, new = old.encode(), new.encode()
+        needle = len(old).to_bytes(2, 'big') + old
+        require(data.count(needle) == 1, 'historical gate constant missing/duplicated')
+        data = data.replace(needle, len(new).to_bytes(2, 'big') + new)
+    return data
+
+
 def overlay(reference, output, replacements):
     with zipfile.ZipFile(reference) as src:
         names = src.namelist()
@@ -40,10 +53,8 @@ def overlay(reference, output, replacements):
         with zipfile.ZipFile(output) as dst:
             require(dst.testzip() is None, 'corrupt ZIP output')
             require(dst.namelist() == names, 'ZIP entry order changed')
-            # Every class replacement was already required to match the historical
-            # class hash, so the entire runtime must remain entry-wise identical.
-            require(all(dst.read(n) == src.read(n) for n in names),
-                    'runtime contents differ from historical reference')
+            require(all(dst.read(n) == replacements.get(n, src.read(n)) for n in names),
+                    'runtime contents differ from verified replacements')
 
 
 def main():
@@ -82,6 +93,11 @@ def main():
         classes[group] = {}
         for name, expected_hash in expected.items():
             data = (target / name).read_bytes()
+            if name == 'org/apache/flink/table/data/binary/BinaryStringData.class':
+                with zipfile.ZipFile(args.reference_runtime / 'flink-table-api-java-uber-1.16.3.jar') as ref:
+                    original = ref.read(name)
+                require(digest(original) == expected_hash, 'historical class mismatch')
+                expected_hash = digest(migrate_gate(original))
             require(digest(data) == expected_hash, 'compiled bytecode mismatch: ' + name)
             classes[group][name] = data
     args.output.mkdir(parents=True)
@@ -97,7 +113,9 @@ def main():
         overlay(source, output, selected)
         audits.append({'name': name, 'sha256': digest(output.read_bytes()),
                        'reference_sha256': lock['reference_jars'][name],
-                       'replacement_classes': len(selected), 'all_entries_identical': True})
+                       'replacement_classes': len(selected),
+                       'non_overlay_entries_identical': True,
+                       'verified_gate_rename_only': True})
     report = {'valid': True, 'source_commit': subprocess.check_output(
         ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
         'worktree_dirty': bool(subprocess.check_output(

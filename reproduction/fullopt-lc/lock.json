@@ -7,7 +7,7 @@
     "flink-state-backends/flink-statebackend-cachekit/src/main/java/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState.java": "0745063e47429f80f237797298868c72f1969490ee1c61ea8e00a22f8f47b488",
     "flink-state-backends/flink-statebackend-rocksdb/src/main/java/org/apache/flink/contrib/streaming/state/RocksDBBatchValueReader.java": "f7d8863289a6d78e00e99384cc77ae9acd31a29941c5f486b4e79f35e46bcecf",
     "flink-state-backends/flink-statebackend-rocksdb/src/main/java/org/apache/flink/contrib/streaming/state/RocksDBValueState.java": "daca417176b720241a0733897fe97be1c4507adda621d19ffed2cd076659a75d",
-    "flink-table/flink-table-common/src/main/java/org/apache/flink/table/data/binary/BinaryStringData.java": "292914c5e622714e086552c09885539130922360a3cac5fcd3132de9b2358dd8"
+    "flink-table/flink-table-common/src/main/java/org/apache/flink/table/data/binary/BinaryStringData.java": "9e29a41ef86b55319c98bc6e310992e024eab05f9e8d80363316f45f07c3400f"
   },
   "stems": {
     "cachekit": [
