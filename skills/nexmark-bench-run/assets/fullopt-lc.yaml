@@ -1,0 +1,59 @@
+# Portable FullOpt treatment fragment; LC JVM gates are in fullopt-lc-environment.yaml.
+# Merge with host config; no periodic checkpoint interval. Minimum batch 64 is a reference.
+state.backend: org.apache.flink.contrib.streaming.state.cachekit.CacheKitStateBackendFactory
+
+state.backend.rocksdb.use-bloom-filter: true
+state.backend.rocksdb.bloom-filter.bits-per-key: 10.0
+state.backend.rocksdb.bloom-filter.block-based-mode: false
+state.backend.rocksdb.memtable-bloom.ratio: 0.1
+state.backend.rocksdb.memtable-bloom.whole-key: true
+
+state.backend.cachekit.value.cache.max-entries: 8000
+state.backend.cachekit.value.cache.policy: LRU
+state.backend.cachekit.value.cache.lru.overflow: 1024
+state.backend.cachekit.value.bypass.enabled: false
+state.backend.cachekit.value.hit-rate.threshold: 0.03
+state.backend.cachekit.value.hit-rate.window: 5000
+
+state.backend.cachekit.map.cache.max-entries: 0
+state.backend.cachekit.map.snapshot.cache.max-entries: 2000
+state.backend.cachekit.map.presence.cache.max-entries: 0
+state.backend.cachekit.map.iteration.cache-fill.enabled: false
+state.backend.cachekit.map.bypass.enabled: false
+
+state.backend.cachekit.bp-prefetch.enabled: true
+state.backend.cachekit.bp-prefetch.distance: 64
+state.backend.cachekit.bp-prefetch.backpressure-gated: false
+state.backend.cachekit.bp-prefetch.commutative-key-sort: false
+state.backend.cachekit.bp-prefetch.async.enabled: true
+state.backend.cachekit.bp-prefetch.multiget.enabled: true
+state.backend.cachekit.bp-prefetch.multiget.chunk-size: 64
+state.backend.cachekit.bp-prefetch.multiget.min-batch-size: 64
+state.backend.cachekit.bp-prefetch.async-chunks.enabled: false
+state.backend.cachekit.bp-prefetch.async-chunks.size: 64
+state.backend.cachekit.bp-prefetch.staging.max-entries: 8192
+state.backend.cachekit.value.sticky-update-in-place.enabled: true
+state.backend.cachekit.value.lazy-staging.enabled: true
+state.backend.cachekit.value.lazy-staging.max-retained-bytes: 67108864
+state.backend.cachekit.local-preagg.enabled: true
+
+state.backend.cachekit.mailbox-batch.enabled: true
+state.backend.cachekit.mailbox-batch.size: 4096
+state.backend.cachekit.mailbox-batch.timeout-us: 0
+state.backend.cachekit.mailbox-batch.commutative-key-sort: false
+
+state.backend.cachekit.native.request-plane.enabled: false
+state.backend.cachekit.native.value-cache.enabled: false
+state.backend.cachekit.native.map-cache.enabled: false
+state.backend.cachekit.map.snapshot.cache.native.enabled: false
+state.backend.cachekit.native.mailbox-batch.enabled: false
+state.backend.cachekit.native.prefetch.enabled: false
+state.backend.cachekit.native.local-preagg.enabled: false
+state.backend.cachekit.native.map-distinct-batch-prefetch.enabled: false
+
+state.backend.cachekit.list-state.cow: false
+state.backend.cachekit.list-state.ryw: false
+state.backend.cachekit.list-state.cleared-keys.capacity: 200000
+state.backend.cachekit.priority-queue.opt: false
+table.exec.mini-batch.enabled: false
+table.optimizer.distinct-agg.split.enabled: true
