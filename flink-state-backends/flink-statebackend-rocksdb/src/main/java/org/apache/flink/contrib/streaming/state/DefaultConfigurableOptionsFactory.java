@@ -54,8 +54,6 @@ import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOption
 import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.MAX_OPEN_FILES;
 import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.MAX_SIZE_LEVEL_BASE;
 import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.MAX_WRITE_BUFFER_NUMBER;
-import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.MEMTABLE_BLOOM_RATIO;
-import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.MEMTABLE_BLOOM_WHOLE_KEY;
 import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.METADATA_BLOCK_SIZE;
 import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.MIN_WRITE_BUFFER_NUMBER_TO_MERGE;
 import static org.apache.flink.contrib.streaming.state.RocksDBConfigurableOptions.TARGET_FILE_SIZE_BASE;
@@ -140,14 +138,6 @@ public class DefaultConfigurableOptionsFactory implements ConfigurableRocksDBOpt
 
         if (isOptionConfigured(MIN_WRITE_BUFFER_NUMBER_TO_MERGE)) {
             currentOptions.setMinWriteBufferNumberToMerge(getMinWriteBufferNumberToMerge());
-        }
-
-        if (isOptionConfigured(MEMTABLE_BLOOM_RATIO)) {
-            currentOptions.setMemtablePrefixBloomSizeRatio(getMemtableBloomRatio());
-        }
-
-        if (isOptionConfigured(MEMTABLE_BLOOM_WHOLE_KEY)) {
-            currentOptions.setMemtableWholeKeyFiltering(getMemtableBloomWholeKey());
         }
 
         TableFormatConfig tableFormatConfig = currentOptions.tableFormatConfig();
@@ -499,25 +489,6 @@ public class DefaultConfigurableOptionsFactory implements ConfigurableRocksDBOpt
         return this;
     }
 
-    private double getMemtableBloomRatio() {
-        return Double.parseDouble(getInternal(MEMTABLE_BLOOM_RATIO.key()));
-    }
-
-    public DefaultConfigurableOptionsFactory setMemtableBloomRatio(double ratio) {
-        Preconditions.checkArgument(ratio >= 0.0 && ratio <= 0.25);
-        setInternal(MEMTABLE_BLOOM_RATIO.key(), String.valueOf(ratio));
-        return this;
-    }
-
-    private boolean getMemtableBloomWholeKey() {
-        return Boolean.parseBoolean(getInternal(MEMTABLE_BLOOM_WHOLE_KEY.key()));
-    }
-
-    public DefaultConfigurableOptionsFactory setMemtableBloomWholeKey(boolean wholeKey) {
-        setInternal(MEMTABLE_BLOOM_WHOLE_KEY.key(), String.valueOf(wholeKey));
-        return this;
-    }
-
     private static final ConfigOption<?>[] CANDIDATE_CONFIGS =
             new ConfigOption<?>[] {
                 // configurable DBOptions
@@ -541,9 +512,7 @@ public class DefaultConfigurableOptionsFactory implements ConfigurableRocksDBOpt
                 BLOCK_CACHE_SIZE,
                 USE_BLOOM_FILTER,
                 BLOOM_FILTER_BITS_PER_KEY,
-                BLOOM_FILTER_BLOCK_BASED_MODE,
-                MEMTABLE_BLOOM_RATIO,
-                MEMTABLE_BLOOM_WHOLE_KEY
+                BLOOM_FILTER_BLOCK_BASED_MODE
             };
 
     private static final Set<ConfigOption<?>> POSITIVE_INT_CONFIG_SET =
@@ -623,11 +592,6 @@ public class DefaultConfigurableOptionsFactory implements ConfigurableRocksDBOpt
             Preconditions.checkArgument(
                     new File((String) value).isAbsolute(),
                     "Configured path for key " + key + " is not absolute.");
-        } else if (MEMTABLE_BLOOM_RATIO.equals(option)) {
-            double ratio = (Double) value;
-            Preconditions.checkArgument(
-                    ratio >= 0.0 && ratio <= 0.25,
-                    "Configured value for key " + key + " must be between 0.0 and 0.25.");
         }
     }
 
