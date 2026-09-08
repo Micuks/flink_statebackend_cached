@@ -250,6 +250,33 @@ class RocksDBValueState<K, N, V> extends AbstractRocksDBState<K, N, V>
         }
     }
 
+    @Override
+    public boolean supportsSynchronousValueWriteBatch() {
+        return true;
+    }
+
+    @Override
+    public void writeSerializedValueBatch(List<byte[]> rocksDBKeys, List<V> values)
+            throws Exception {
+        if (rocksDBKeys.size() != values.size()) {
+            throw new IllegalArgumentException("Mismatched value write batch sizes");
+        }
+        if (rocksDBKeys.isEmpty()) {
+            return;
+        }
+        try (org.rocksdb.WriteBatch batch = new org.rocksdb.WriteBatch()) {
+            for (int i = 0; i < rocksDBKeys.size(); i++) {
+                V value = values.get(i);
+                if (value == null) {
+                    batch.delete(columnFamily, rocksDBKeys.get(i));
+                } else {
+                    batch.put(columnFamily, rocksDBKeys.get(i), serializeValue(value));
+                }
+            }
+            backend.db.write(writeOptions, batch);
+        }
+    }
+
     @SuppressWarnings("unchecked")
     static <K, N, SV, S extends State, IS extends S> IS create(
             StateDescriptor<S, SV> stateDesc,
