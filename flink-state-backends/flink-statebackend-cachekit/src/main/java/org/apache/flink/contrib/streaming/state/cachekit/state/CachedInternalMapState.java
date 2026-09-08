@@ -59,6 +59,41 @@ public final class CachedInternalMapState<K, N, UK, UV>
         implements InternalMapState<K, N, UK, UV>, BatchPrefetchableMapState<UK> {
 
     private static final Logger LOG = LoggerFactory.getLogger(CachedInternalMapState.class);
+    private static final String DIRTY_OVERLAY_PROPERTY =
+            "cachekit.map.dirty-overlay.enabled";
+    private static final String DIRTY_OVERLAY_ENV = "CACHEKIT_MAP_DIRTY_OVERLAY_ENABLED";
+    private static final String SNAPSHOT_MAINTENANCE_PROPERTY =
+            "cachekit.map.snapshot-maintenance.enabled";
+    private static final String SNAPSHOT_MAINTENANCE_ENV =
+            "CACHEKIT_MAP_SNAPSHOT_MAINTENANCE_ENABLED";
+    private static final String SNAPSHOT_VALUE_AUTHORITY_PROPERTY =
+            "cachekit.map.snapshot-value-authority.enabled";
+    private static final String SNAPSHOT_VALUE_AUTHORITY_ENV =
+            "CACHEKIT_MAP_SNAPSHOT_VALUE_AUTHORITY_ENABLED";
+    private static final String POINT_VALUE_MEMO_PROPERTY =
+            "cachekit.map.point-value-memo.enabled";
+    private static final String POINT_VALUE_MEMO_ENV = "CACHEKIT_MAP_POINT_VALUE_MEMO_ENABLED";
+    private static final String POINT_MEMO_USEFULNESS_PROPERTY =
+            "cachekit.map.point-value-memo.usefulness-gate.enabled";
+    private static final String POINT_MEMO_USEFULNESS_ENV =
+            "CACHEKIT_MAP_POINT_VALUE_MEMO_USEFULNESS_GATE_ENABLED";
+    private static final String POINT_MEMO_FIRST_PROPERTY =
+            "cachekit.map.point-value-memo.first.enabled";
+    private static final String POINT_MEMO_FIRST_ENV =
+            "CACHEKIT_MAP_POINT_VALUE_MEMO_FIRST_ENABLED";
+    private static final String POINT_MEMO_MAX_OWNERS_PROPERTY =
+            "cachekit.map.point-value-memo.max-owners";
+    private static final String POINT_MEMO_MAX_OWNERS_ENV =
+            "CACHEKIT_MAP_POINT_VALUE_MEMO_MAX_OWNERS";
+    private static final int SNAPSHOT_VALUE_AUTHORITY_WAYS = 4;
+    private static final long SNAPSHOT_VALUE_AUTHORITY_FINGERPRINT_ONES =
+            0x0001000100010001L;
+    private static final long SNAPSHOT_VALUE_AUTHORITY_FINGERPRINT_HIGHS =
+            0x8000800080008000L;
+    private static final byte POINT_MEMO_ABSENT = 1;
+    private static final byte POINT_MEMO_PRESENT_ONLY = 2;
+    private static final byte POINT_MEMO_PRESENT_VALUE = 3;
+    private static final byte POINT_MEMO_GET_NULL = 4;
 
     private enum NativeSnapshotAdaptiveMode {
         EVALUATE,
@@ -78,6 +113,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private final boolean presenceCacheEnabled;
     private final PresenceCacheImplementation presenceCacheImplementation;
     private final boolean mapCacheEnabled;
+    private final boolean dirtyOverlayEnabled;
     private final CachePolicyType mapCachePolicyType;
     private final int mapCacheLruOverflow;
     private final java.util.function.Consumer<K> keyContextSetter;
@@ -183,9 +219,47 @@ public final class CachedInternalMapState<K, N, UK, UV>
             new java.util.concurrent.atomic.AtomicLong();
 
     // --- MapSnapshot cache (entries() fast path) ---
-    private final CachePolicy<KeyNamespace<K, N>, MapSnapshot<UK>> mapSnapshotCache;
+    private final CachePolicy<KeyNamespace<K, N>, MapSnapshot<UK, UV>> mapSnapshotCache;
     private final boolean mapSnapshotCacheEnabled;
+    private final boolean snapshotMaintenanceEnabled;
+    private final boolean snapshotValueAuthorityEnabled;
+    /** Fixed four-way authority table; point lookups never mutate the general snapshot LRU. */
+    private final Object[] snapshotValueAuthorityKeys;
+    private final Object[] snapshotValueAuthoritySnapshots;
+    private final int[] snapshotValueAuthorityHashes;
+    /** Four packed 16-bit SwissTable-style fingerprints per authority set. */
+    private final long[] snapshotValueAuthorityFingerprints;
+    private final int[] snapshotValueAuthorityNextVictims;
+    private final int snapshotValueAuthoritySetMask;
+    /**
+     * Per-outer-map last-observation memo. The four-way SIEVE directory avoids access-order LRU
+     * mutations while retaining the exact user-key/value observed through the write-through path.
+     */
+    private final boolean pointValueMemoEnabled;
+    private final boolean pointMemoUsefulnessGateEnabled;
+    private final boolean pointMemoFirstEnabled;
+    private long pointMemoFirstAuthorityProbesAvoided;
+    private int pointMemoUsefulnessBudget = 8192;
+    private boolean pointMemoUsefulnessEvaluated;
+    private boolean pointMemoUsefulnessBypassed;
+    private long pointMemoDecisionProbes;
+    private long pointMemoDecisionHits;
+    private long pointMemoDecisionStores;
+    private final boolean userKeyJavaEqualityMatchesSerialization;
+    private DataOutputSerializer userKeyComparisonLeft;
+    private DataOutputSerializer userKeyComparisonRight;
+    private boolean externalMutationVisitorExposed;
+    private final Object[] pointValueMemoOwners;
+    private final Object[] pointValueMemoUserKeys;
+    private final Object[] pointValueMemoValues;
+    private final int[] pointValueMemoHashes;
+    private final byte[] pointValueMemoKinds;
+    private final long[] pointValueMemoFingerprints;
+    private final byte[] pointValueMemoVisited;
+    private final int[] pointValueMemoNextVictims;
+    private final int pointValueMemoSetMask;
     private final int mapSnapshotSmallMaxEntries;
+    private final boolean snapshotOwnedKeyReuseEnabled;
     private final MapSnapshotCacheMetrics mapSnapshotCacheMetrics;
     /** Reusable probe key for snapshot cache lookups (avoids allocation per lookup). */
     private final KeyNamespace<K, N> snapshotProbe = new KeyNamespace<>(null, null);
@@ -194,6 +268,38 @@ public final class CachedInternalMapState<K, N, UK, UV>
             dirtyValueEntriesByNamespace = new HashMap<>();
     /** Reusable lookup key for {@link #dirtyValueEntriesByNamespace}. */
     private final KeyNamespace<K, N> dirtyNamespaceProbe = new KeyNamespace<>(null, null);
+    private long dirtyOverlayIteratorRequests;
+    private long dirtyOverlayFlushesAvoided;
+    private long dirtyOverlayEntriesSnapshotted;
+    private long dirtyOverlayDelegateOverrides;
+    private long dirtyOverlayAppendedEntries;
+    private long dirtyOverlayTombstonesSuppressed;
+    private long snapshotMaintenancePutAttempts;
+    private long snapshotMaintenanceRemoveAttempts;
+    private long snapshotMaintenanceKnownNoops;
+    private long snapshotMaintenanceUpdates;
+    private long snapshotMaintenanceOverflowInvalidations;
+    private long snapshotValueAuthorityFills;
+    private long snapshotValueAuthorityEntriesStored;
+    private long snapshotValueAuthorityShortCircuits;
+    private long snapshotValueAuthorityPointGetsElided;
+    private long snapshotValueAuthorityPointProbes;
+    private long snapshotValueAuthorityPointSnapshotHits;
+    private long snapshotValueAuthorityPointValueHits;
+    private long snapshotValueAuthorityPointNegativeHits;
+    private long snapshotValueAuthorityIteratorTableHits;
+    private long snapshotValueAuthorityPointFingerprintRejects;
+    private long pointValueMemoProbes;
+    private long pointValueMemoFingerprintRejects;
+    private long pointValueMemoOwnerHits;
+    private long pointValueMemoUserKeyHits;
+    private long pointValueMemoValueHits;
+    private long pointValueMemoNegativeHits;
+    private long pointValueMemoContainsHits;
+    private long pointValueMemoStores;
+    private long pointValueMemoOwnerAdmissions;
+    private long pointValueMemoOwnerReplacements;
+    private long pointValueMemoInvalidations;
 
     private N currentNamespace;
     private final KeyNamespaceUserKey<K, N, UK> lookupKey =
@@ -490,6 +596,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         this.presenceCacheImplementation =
                 Objects.requireNonNull(presenceCacheImplementation, "presenceCacheImplementation");
         this.mapCacheEnabled = mapCacheMaxEntries > 0;
+        this.dirtyOverlayEnabled = mapCacheEnabled && dirtyOverlayRuntimeEnabled();
         this.mapCachePolicyType = Objects.requireNonNull(mapCachePolicyType, "mapCachePolicyType");
         this.mapCacheLruOverflow = Math.max(0, mapCacheLruOverflow);
         this.bypassEnabled = bypassEnabled;
@@ -509,6 +616,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
         this.userKeySerializer = resolvedUserKeySerializer;
         this.userValueSerializer = resolvedUserValueSerializer;
+        this.userKeyJavaEqualityMatchesSerialization =
+                usesExactJavaKeyEquality(resolvedUserKeySerializer);
         if (nativeMapCacheEnabled
                 && (nativeRequestPlaneCoordinator == null
                         || resolvedUserKeySerializer == null
@@ -527,6 +636,11 @@ public final class CachedInternalMapState<K, N, UK, UV>
         this.nativeMapSnapshotEnabled = nativeMapSnapshotEnabled;
         this.nativeSnapshotStateId = nativeSnapshotStateId;
         Objects.requireNonNull(standaloneNativeSnapshotOptions, "standaloneNativeSnapshotOptions");
+        this.snapshotOwnedKeyReuseEnabled =
+                standaloneNativeSnapshotOptions.ownedKeyReuseEnabled();
+        if (snapshotOwnedKeyReuseEnabled) {
+            mapSnapshotCacheMetrics.recordOwnedKeyReuseActiveState();
+        }
         if (nativeMapSnapshotEnabled && standaloneNativeSnapshotOptions.enabled()) {
             throw new IllegalArgumentException(
                     "The request-plane and standalone native MapSnapshot caches cannot both be enabled.");
@@ -660,6 +774,153 @@ public final class CachedInternalMapState<K, N, UK, UV>
             this.mapSnapshotCache = new NoOpCachePolicy<>();
             this.standaloneNativeMapSnapshotCache = null;
         }
+        this.snapshotMaintenanceEnabled =
+                mapSnapshotCacheEnabled
+                        && snapshotMaintenanceRuntimeEnabled();
+        this.snapshotValueAuthorityEnabled =
+                mapSnapshotCacheEnabled
+                        && !standaloneNativeMapSnapshotEnabled
+                        && !snapshotMaintenanceEnabled
+                        && userValueSerializer != null
+                        && snapshotValueAuthorityRuntimeEnabled();
+        int authoritySetCount = 0;
+        if (snapshotValueAuthorityEnabled) {
+            int minimumSetCount =
+                    Math.max(
+                            1,
+                            (mapSnapshotCacheMaxEntries + SNAPSHOT_VALUE_AUTHORITY_WAYS - 1)
+                                    / SNAPSHOT_VALUE_AUTHORITY_WAYS);
+            authoritySetCount = 1;
+            while (authoritySetCount < minimumSetCount) {
+                authoritySetCount <<= 1;
+            }
+        }
+        int authoritySlots = authoritySetCount * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        this.snapshotValueAuthorityKeys = new Object[authoritySlots];
+        this.snapshotValueAuthoritySnapshots = new Object[authoritySlots];
+        this.snapshotValueAuthorityHashes = new int[authoritySlots];
+        this.snapshotValueAuthorityFingerprints = new long[authoritySetCount];
+        this.snapshotValueAuthorityNextVictims = new int[authoritySetCount];
+        this.snapshotValueAuthoritySetMask = Math.max(0, authoritySetCount - 1);
+        this.pointValueMemoEnabled =
+                snapshotValueAuthorityEnabled
+                        && !mapCacheEnabled
+                        && pointValueMemoRuntimeEnabled();
+        this.pointMemoUsefulnessGateEnabled =
+                pointValueMemoEnabled && pointMemoUsefulnessRuntimeEnabled();
+        String memoFirst = System.getProperty(POINT_MEMO_FIRST_PROPERTY);
+        if (memoFirst == null || memoFirst.trim().isEmpty()) {
+            memoFirst = System.getenv(POINT_MEMO_FIRST_ENV);
+        }
+        this.pointMemoFirstEnabled =
+                pointValueMemoEnabled && "true".equalsIgnoreCase(memoFirst);
+        int pointMemoSetCount = pointValueMemoEnabled
+                ? pointMemoOwnerCapacity(authoritySlots) / SNAPSHOT_VALUE_AUTHORITY_WAYS : 0;
+        int pointMemoSlots = pointMemoSetCount * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        this.pointValueMemoOwners = new Object[pointMemoSlots];
+        this.pointValueMemoUserKeys = new Object[pointMemoSlots];
+        this.pointValueMemoValues = new Object[pointMemoSlots];
+        this.pointValueMemoHashes = new int[pointMemoSlots];
+        this.pointValueMemoKinds = new byte[pointMemoSlots];
+        this.pointValueMemoFingerprints = new long[pointMemoSetCount];
+        this.pointValueMemoVisited = new byte[pointMemoSetCount];
+        this.pointValueMemoNextVictims = new int[pointMemoSetCount];
+        this.pointValueMemoSetMask = Math.max(0, pointMemoSetCount - 1);
+    }
+
+    private static boolean dirtyOverlayRuntimeEnabled() {
+        String configured = System.getProperty(DIRTY_OVERLAY_PROPERTY);
+        if (configured == null || configured.trim().isEmpty()) {
+            configured = System.getenv(DIRTY_OVERLAY_ENV);
+        }
+        if (configured == null) {
+            return false;
+        }
+        String normalized = configured.trim();
+        return "true".equalsIgnoreCase(normalized)
+                || "1".equals(normalized)
+                || "yes".equalsIgnoreCase(normalized)
+                || "on".equalsIgnoreCase(normalized);
+    }
+
+    private static boolean snapshotMaintenanceRuntimeEnabled() {
+        String configured = System.getProperty(SNAPSHOT_MAINTENANCE_PROPERTY);
+        if (configured == null || configured.trim().isEmpty()) {
+            configured = System.getenv(SNAPSHOT_MAINTENANCE_ENV);
+        }
+        if (configured == null) {
+            return false;
+        }
+        String normalized = configured.trim();
+        return "true".equalsIgnoreCase(normalized)
+                || "1".equals(normalized)
+                || "yes".equalsIgnoreCase(normalized)
+                || "on".equalsIgnoreCase(normalized);
+    }
+
+    private static boolean snapshotValueAuthorityRuntimeEnabled() {
+        String configured = System.getProperty(SNAPSHOT_VALUE_AUTHORITY_PROPERTY);
+        if (configured == null || configured.trim().isEmpty()) {
+            configured = System.getenv(SNAPSHOT_VALUE_AUTHORITY_ENV);
+        }
+        if (configured == null) {
+            return false;
+        }
+        String normalized = configured.trim();
+        return "true".equalsIgnoreCase(normalized)
+                || "1".equals(normalized)
+                || "yes".equalsIgnoreCase(normalized)
+                || "on".equalsIgnoreCase(normalized);
+    }
+
+    private static boolean pointValueMemoRuntimeEnabled() {
+        String configured = System.getProperty(POINT_VALUE_MEMO_PROPERTY);
+        if (configured == null || configured.trim().isEmpty()) {
+            configured = System.getenv(POINT_VALUE_MEMO_ENV);
+        }
+        if (configured == null) {
+            return false;
+        }
+        String normalized = configured.trim();
+        return "true".equalsIgnoreCase(normalized)
+                || "1".equals(normalized)
+                || "yes".equalsIgnoreCase(normalized)
+                || "on".equalsIgnoreCase(normalized);
+    }
+
+    private static boolean pointMemoUsefulnessRuntimeEnabled() {
+        String configured = System.getProperty(POINT_MEMO_USEFULNESS_PROPERTY);
+        if (configured == null || configured.trim().isEmpty()) {
+            configured = System.getenv(POINT_MEMO_USEFULNESS_ENV);
+        }
+        return configured != null
+                && ("true".equalsIgnoreCase(configured.trim())
+                        || "1".equals(configured.trim()));
+    }
+
+    /** Independent bounded entry budget; zero preserves the snapshot-derived default. */
+    private static int pointMemoOwnerCapacity(int defaultCapacity) {
+        String configured = System.getProperty(POINT_MEMO_MAX_OWNERS_PROPERTY);
+        if (configured == null || configured.trim().isEmpty()) {
+            configured = System.getenv(POINT_MEMO_MAX_OWNERS_ENV);
+        }
+        if (configured == null || configured.trim().isEmpty()) {
+            return defaultCapacity;
+        }
+        final int capacity;
+        try {
+            capacity = Integer.parseInt(configured.trim());
+        } catch (NumberFormatException invalid) {
+            throw new IllegalArgumentException("Invalid point memo max-owners: expected integer", invalid);
+        }
+        if (capacity == 0) {
+            return defaultCapacity;
+        }
+        if (capacity < SNAPSHOT_VALUE_AUTHORITY_WAYS || capacity > 262144
+                || Integer.bitCount(capacity) != 1) {
+            throw new IllegalArgumentException("Point memo max-owners must be zero or a power of two in [4,262144]");
+        }
+        return capacity;
     }
 
     // Helper to update lookup key safely without allocation
@@ -1136,12 +1397,26 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
         PrefetchedMapValue<UV> prefetched = getBatchPrefetchedValue(currentKey, userKey);
         if (prefetched != null) {
+            storePointValueMemo(
+                    currentKey,
+                    currentNamespace,
+                    userKey,
+                    prefetched.present,
+                    prefetched.present,
+                    prefetched.value);
             return prefetched.value;
+        }
+
+        SnapshotAuthorityLookup<UV> observed = lookupPointReadCaches(currentKey, userKey, true);
+        if (observed != null) {
+            return observed.value;
         }
 
         if (bypassEnabled && isBypassing && shouldBypassRead()) {
             NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
             UV value = nativeRead == null ? delegate.get(userKey) : nativeRead.value;
+            storePointValueMemo(
+                    currentKey, currentNamespace, userKey, value != null, true, value);
             if (mapCacheEnabled) {
                 updateValueCache(currentKey, userKey, value, false);
             }
@@ -1169,6 +1444,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
         UV value = nativeRead == null ? delegate.get(userKey) : nativeRead.value;
         recordAccess(nativeRead != null && nativeRead.cacheHit);
+        storePointValueMemo(currentKey, currentNamespace, userKey, value != null, true, value);
         if (mapCacheEnabled) {
             updateValueCache(currentKey, userKey, value, false);
         }
@@ -1203,7 +1479,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, true);
         }
-        invalidateSnapshot(currentKey);
+        storePointValueMemo(currentKey, currentNamespace, userKey, true, true, userValue);
+        maintainSnapshotAfterPut(currentKey, userKey);
     }
 
     @Override
@@ -1231,8 +1508,24 @@ public final class CachedInternalMapState<K, N, UK, UV>
             if (presenceCacheEnabled) {
                 updatePresence(currentKey, uKey, entry.getValue() != null);
             }
+            storePointValueMemo(
+                    currentKey,
+                    currentNamespace,
+                    uKey,
+                    true,
+                    true,
+                    entry.getValue());
+            if (snapshotMaintenanceEnabled) {
+                if (entry.getValue() == null) {
+                    maintainSnapshotAfterRemove(currentKey, uKey);
+                } else {
+                    maintainSnapshotAfterPut(currentKey, uKey);
+                }
+            }
         }
-        invalidateSnapshot(currentKey);
+        if (!snapshotMaintenanceEnabled) {
+            invalidateSnapshot(currentKey);
+        }
     }
 
     @Override
@@ -1255,7 +1548,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
         if (presenceCacheEnabled) {
             updatePresence(currentKey, userKey, false);
         }
-        invalidateSnapshot(currentKey);
+        storePointValueMemo(currentKey, currentNamespace, userKey, false, false, null);
+        maintainSnapshotAfterRemove(currentKey, userKey);
     }
 
     @Override
@@ -1271,13 +1565,32 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
         PrefetchedMapValue<UV> prefetched = getBatchPrefetchedValue(currentKey, userKey);
         if (prefetched != null) {
+            storePointValueMemo(
+                    currentKey,
+                    currentNamespace,
+                    userKey,
+                    prefetched.present,
+                    prefetched.present,
+                    prefetched.value);
             return prefetched.present;
+        }
+
+        SnapshotAuthorityLookup<UV> observed = lookupPointReadCaches(currentKey, userKey, false);
+        if (observed != null) {
+            return observed.present;
         }
 
         if (bypassEnabled && isBypassing && shouldBypassRead()) {
             NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
             boolean exists =
                     nativeRead == null ? delegate.contains(userKey) : nativeRead.value != null;
+            storePointValueMemo(
+                    currentKey,
+                    currentNamespace,
+                    userKey,
+                    exists,
+                    nativeRead != null && exists,
+                    nativeRead == null ? null : nativeRead.value);
             if (mapCacheEnabled && !exists) {
                 updateValueCache(currentKey, userKey, null, false);
             }
@@ -1304,6 +1617,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
         NativeMapRead<UV> nativeRead = readThroughNative(currentKey, userKey);
         boolean exists = nativeRead == null ? delegate.contains(userKey) : nativeRead.value != null;
         recordAccess(nativeRead != null && nativeRead.cacheHit);
+        storePointValueMemo(
+                currentKey,
+                currentNamespace,
+                userKey,
+                exists,
+                nativeRead != null && exists,
+                nativeRead == null ? null : nativeRead.value);
         if (mapCacheEnabled && !exists) {
             updateValueCache(currentKey, userKey, null, false);
         }
@@ -1326,17 +1646,29 @@ public final class CachedInternalMapState<K, N, UK, UV>
             }
         }
 
-        flushCurrentKey(currentKey);
+        if (!dirtyOverlayEnabled) {
+            flushCurrentKey(currentKey);
+        }
         Iterable<Map.Entry<UK, UV>> entries = delegate.entries();
+        if (dirtyOverlayEnabled) {
+            entries = dirtyOverlayEntries(entries, currentKey, currentNamespace);
+        }
         if (!mapCacheEnabled && !presenceCacheEnabled && !snapshotOptimizationEnabled()) {
             return entries;
         }
         return wrapWithSnapshotAwareIterator(
-                entries, currentKey, currentNamespace, iterationCacheFillEnabled);
+                entries,
+                currentKey,
+                currentNamespace,
+                iterationCacheFillEnabled,
+                dirtyOverlayEnabled);
     }
 
     @Override
     public Iterable<UK> keys() throws Exception {
+        if (pointValueMemoEnabled) {
+            return entryKeys(entries());
+        }
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
 
@@ -1345,6 +1677,18 @@ public final class CachedInternalMapState<K, N, UK, UV>
             if (shortCircuit != null) {
                 return entryKeys(shortCircuit);
             }
+        }
+
+        if (dirtyOverlayEnabled) {
+            Iterable<Map.Entry<UK, UV>> entries =
+                    dirtyOverlayEntries(delegate.entries(), currentKey, currentNamespace);
+            return entryKeys(
+                    wrapWithSnapshotAwareIterator(
+                            entries,
+                            currentKey,
+                            currentNamespace,
+                            iterationCacheFillEnabled,
+                            true));
         }
 
         flushCurrentKey(currentKey);
@@ -1360,6 +1704,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     @Override
     public Iterable<UV> values() throws Exception {
+        if (pointValueMemoEnabled) {
+            return entryValues(entries());
+        }
         K currentKey = currentKeyProvider.getCurrentKey();
         ensureDelegateNamespace(currentKey);
 
@@ -1368,6 +1715,18 @@ public final class CachedInternalMapState<K, N, UK, UV>
             if (shortCircuit != null) {
                 return entryValues(shortCircuit);
             }
+        }
+
+        if (dirtyOverlayEnabled) {
+            Iterable<Map.Entry<UK, UV>> entries =
+                    dirtyOverlayEntries(delegate.entries(), currentKey, currentNamespace);
+            return entryValues(
+                    wrapWithSnapshotAwareIterator(
+                            entries,
+                            currentKey,
+                            currentNamespace,
+                            iterationCacheFillEnabled,
+                            true));
         }
 
         flushCurrentKey(currentKey);
@@ -1393,13 +1752,22 @@ public final class CachedInternalMapState<K, N, UK, UV>
             }
         }
 
-        flushCurrentKey(currentKey);
+        if (!dirtyOverlayEnabled) {
+            flushCurrentKey(currentKey);
+        }
         Iterator<Map.Entry<UK, UV>> iterator = delegate.iterator();
+        if (dirtyOverlayEnabled) {
+            iterator = dirtyOverlayIterator(iterator, currentKey, currentNamespace);
+        }
         if (!mapCacheEnabled && !presenceCacheEnabled && !snapshotOptimizationEnabled()) {
             return iterator;
         }
         return new SnapshotAwareIterator(
-                iterator, currentKey, currentNamespace, iterationCacheFillEnabled);
+                iterator,
+                currentKey,
+                currentNamespace,
+                iterationCacheFillEnabled,
+                dirtyOverlayEnabled);
     }
 
     @Override
@@ -1408,7 +1776,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         ensureDelegateNamespace(currentKey);
 
         if (snapshotOptimizationEnabled()) {
-            MapSnapshot<UK> snapshot = lookupSnapshot(currentKey);
+            MapSnapshot<UK, UV> snapshot = lookupSnapshot(currentKey);
             if (snapshot != null) {
                 if (snapshot.isEmpty()) {
                     mapSnapshotCacheMetrics.recordEmptyShortCircuit();
@@ -1438,6 +1806,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         clearPresenceCaches();
         clearValueCaches();
         resetBypassState();
+        removePointValueMemoOwner(currentKey, currentNamespace);
 
         if (snapshotOptimizationEnabled()) {
             if (currentKey != null && currentNamespace != null) {
@@ -1492,6 +1861,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
     @Override
     public StateIncrementalVisitor<K, N, Map<UK, UV>> getStateIncrementalVisitor(
             int recommendedMaxNumberOfReturnedRecords) {
+        // The delegate visitor may outlive this call and mutate state outside wrapper hooks.
+        externalMutationVisitorExposed = true;
         ensureDelegateNamespace(null);
         flush();
         return delegate.getStateIncrementalVisitor(recommendedMaxNumberOfReturnedRecords);
@@ -1659,7 +2030,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         nativeSnapshotAdaptiveBypassClock = 0;
     }
 
-    private MapSnapshot<UK> lookupNativeSnapshot(K currentKey) {
+    private MapSnapshot<UK, UV> lookupNativeSnapshot(K currentKey) {
         if (!nativeMapSnapshotEnabled
                 || currentKey == null
                 || currentNamespace == null
@@ -1715,7 +2086,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
     }
 
-    private void storeNativeSnapshot(K key, N namespace, MapSnapshot<UK> snapshot) {
+    private void storeNativeSnapshot(K key, N namespace, MapSnapshot<UK, UV> snapshot) {
         if (!nativeMapSnapshotEnabled
                 || key == null
                 || namespace == null
@@ -1745,9 +2116,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
     }
 
     private boolean snapshotOptimizationEnabled() {
-        return mapSnapshotCacheEnabled
-                || nativeMapSnapshotEnabled
-                || standaloneNativeMapSnapshotEnabled;
+        return !externalMutationVisitorExposed
+                && (mapSnapshotCacheEnabled
+                        || nativeMapSnapshotEnabled
+                        || standaloneNativeMapSnapshotEnabled);
     }
 
     private void advanceNativeGeneration() {
@@ -1946,6 +2318,436 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return value;
         }
         return userValueSerializer.copy(value);
+    }
+
+    /**
+     * Uses a complete value-bearing tiny-map snapshot as a point-read authority.
+     *
+     * <p>A null return means UNKNOWN and falls through to the ordinary cache/delegate path. A
+     * non-null result is authoritative for both present and absent user keys because only complete
+     * traversals publish values and every wrapper mutation invalidates the snapshot.
+     */
+    private SnapshotAuthorityLookup<UV> lookupSnapshotValueAuthority(K currentKey, UK userKey)
+            throws java.io.IOException {
+        if (!snapshotValueAuthorityEnabled || externalMutationVisitorExposed) {
+            return null;
+        }
+        snapshotValueAuthorityPointProbes++;
+        MapSnapshot<UK, UV> snapshot = lookupSnapshotValueAuthorityTable(currentKey, true);
+        if (snapshot == null) {
+            return null;
+        }
+        snapshotValueAuthorityPointSnapshotHits++;
+        for (int index = 0; index < snapshot.cachedUserKeys.size(); index++) {
+            if (authorityUserKeysEqual(snapshot.cachedUserKeys.get(index), userKey)) {
+                snapshotValueAuthorityPointValueHits++;
+                snapshotValueAuthorityPointGetsElided++;
+                return SnapshotAuthorityLookup.present(
+                        copyUserValue(snapshot.cachedValues.get(index)));
+            }
+        }
+        snapshotValueAuthorityPointNegativeHits++;
+        snapshotValueAuthorityPointGetsElided++;
+        return SnapshotAuthorityLookup.absent();
+    }
+
+    private static boolean usesExactJavaKeyEquality(TypeSerializer<?> serializer) {
+        return serializer instanceof org.apache.flink.api.common.typeutils.base.StringSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.LongSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.IntSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.ShortSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.ByteSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.CharSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.BooleanSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.FloatSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.DoubleSerializer;
+    }
+
+    /** RocksDB identifies user keys by serialized bytes, not arbitrary Java equals methods. */
+    private boolean authorityUserKeysEqual(UK left, UK right) throws java.io.IOException {
+        if (userKeyJavaEqualityMatchesSerialization) {
+            return Objects.equals(left, right);
+        }
+        if (userKeySerializer
+                        instanceof org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer
+                && left instanceof byte[]
+                && right instanceof byte[]) {
+            return java.util.Arrays.equals((byte[]) left, (byte[]) right);
+        }
+        if (userKeySerializer == null) {
+            return false;
+        }
+        if (userKeyComparisonLeft == null) {
+            userKeyComparisonLeft = new DataOutputSerializer(128);
+            userKeyComparisonRight = new DataOutputSerializer(128);
+        }
+        userKeyComparisonLeft.clear();
+        userKeyComparisonRight.clear();
+        userKeySerializer.serialize(left, userKeyComparisonLeft);
+        userKeySerializer.serialize(right, userKeyComparisonRight);
+        int size = userKeyComparisonLeft.length();
+        if (size != userKeyComparisonRight.length()) {
+            return false;
+        }
+        byte[] leftBytes = userKeyComparisonLeft.getSharedBuffer();
+        byte[] rightBytes = userKeyComparisonRight.getSharedBuffer();
+        for (int index = 0; index < size; index++) {
+            if (leftBytes[index] != rightBytes[index]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private MapSnapshot<UK, UV> lookupSnapshotValueAuthorityTable(
+            K currentKey, boolean filterPointMisses) {
+        if (currentKey == null || currentNamespace == null) {
+            return null;
+        }
+        int hash = CacheKeyHash.hash(currentKey, currentNamespace);
+        int set = hash & snapshotValueAuthoritySetMask;
+        if (filterPointMisses
+                && !snapshotValueAuthorityFingerprintMayContain(
+                        snapshotValueAuthorityFingerprints[set], hash)) {
+            snapshotValueAuthorityPointFingerprintRejects++;
+            return null;
+        }
+        int base = set * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
+            int slot = base + way;
+            if (snapshotValueAuthorityHashes[slot] != hash) {
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            KeyNamespace<K, N> stored =
+                    (KeyNamespace<K, N>) snapshotValueAuthorityKeys[slot];
+            if (stored != null
+                    && Objects.equals(stored.key, currentKey)
+                    && Objects.equals(stored.namespace, currentNamespace)) {
+                @SuppressWarnings("unchecked")
+                MapSnapshot<UK, UV> matched =
+                        (MapSnapshot<UK, UV>) snapshotValueAuthoritySnapshots[slot];
+                return matched;
+            }
+        }
+        return null;
+    }
+
+    private void storeSnapshotValueAuthority(
+            KeyNamespace<K, N> key, MapSnapshot<UK, UV> snapshot) {
+        int hash = key.hashCode();
+        int set = hash & snapshotValueAuthoritySetMask;
+        int base = set * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        int emptySlot = -1;
+        for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
+            int slot = base + way;
+            @SuppressWarnings("unchecked")
+            KeyNamespace<K, N> stored =
+                    (KeyNamespace<K, N>) snapshotValueAuthorityKeys[slot];
+            if (stored == null) {
+                if (emptySlot < 0) {
+                    emptySlot = slot;
+                }
+            } else if (snapshotValueAuthorityHashes[slot] == hash && stored.equals(key)) {
+                snapshotValueAuthoritySnapshots[slot] = snapshot;
+                return;
+            }
+        }
+        int slot;
+        if (emptySlot >= 0) {
+            slot = emptySlot;
+        } else {
+            int victim = snapshotValueAuthorityNextVictims[set];
+            slot = base + victim;
+            snapshotValueAuthorityNextVictims[set] =
+                    (victim + 1) & (SNAPSHOT_VALUE_AUTHORITY_WAYS - 1);
+        }
+        snapshotValueAuthorityKeys[slot] = key;
+        snapshotValueAuthoritySnapshots[slot] = snapshot;
+        snapshotValueAuthorityHashes[slot] = hash;
+        storeSnapshotValueAuthorityFingerprint(set, slot - base, hash);
+    }
+
+    private void removeSnapshotValueAuthority(KeyNamespace<K, N> key) {
+        int hash = key.hashCode();
+        int set = hash & snapshotValueAuthoritySetMask;
+        int base = set * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
+            int slot = base + way;
+            if (snapshotValueAuthorityHashes[slot] != hash) {
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            KeyNamespace<K, N> stored =
+                    (KeyNamespace<K, N>) snapshotValueAuthorityKeys[slot];
+            if (stored != null && stored.equals(key)) {
+                snapshotValueAuthorityKeys[slot] = null;
+                snapshotValueAuthoritySnapshots[slot] = null;
+                snapshotValueAuthorityHashes[slot] = 0;
+                clearSnapshotValueAuthorityFingerprint(set, slot - base);
+                return;
+            }
+        }
+    }
+
+    private static int snapshotValueAuthorityFingerprint(int hash) {
+        int fingerprint = (hash ^ (hash >>> 16)) & 0xffff;
+        return fingerprint == 0 ? 1 : fingerprint;
+    }
+
+    private static boolean snapshotValueAuthorityFingerprintMayContain(
+            long packedFingerprints, int hash) {
+        long repeated =
+                (long) snapshotValueAuthorityFingerprint(hash)
+                        * SNAPSHOT_VALUE_AUTHORITY_FINGERPRINT_ONES;
+        long differences = packedFingerprints ^ repeated;
+        return ((differences - SNAPSHOT_VALUE_AUTHORITY_FINGERPRINT_ONES)
+                        & ~differences
+                        & SNAPSHOT_VALUE_AUTHORITY_FINGERPRINT_HIGHS)
+                != 0;
+    }
+
+    private void storeSnapshotValueAuthorityFingerprint(int set, int way, int hash) {
+        int shift = way << 4;
+        long mask = 0xffffL << shift;
+        snapshotValueAuthorityFingerprints[set] =
+                (snapshotValueAuthorityFingerprints[set] & ~mask)
+                        | ((long) snapshotValueAuthorityFingerprint(hash) << shift);
+    }
+
+    private void clearSnapshotValueAuthorityFingerprint(int set, int way) {
+        snapshotValueAuthorityFingerprints[set] &= ~(0xffffL << (way << 4));
+    }
+
+    /**
+     * Looks up the last exact point observation for the current outer map.
+     *
+     * <p>The directory is keyed by (state key, namespace), while each resident owner retains one
+     * exact user key. This matches the common session-window shape without turning the feature into
+     * a general write-back MapState cache. A presence-only observation can answer contains(), but
+     * deliberately remains UNKNOWN to get().
+     */
+    private SnapshotAuthorityLookup<UV> lookupPointReadCaches(
+            K currentKey, UK userKey, boolean valueRequired) throws java.io.IOException {
+        if (pointMemoFirstEnabled) {
+            SnapshotAuthorityLookup<UV> memo = lookupPointValueMemo(currentKey, userKey, valueRequired);
+            if (memo != null) {
+                pointMemoFirstAuthorityProbesAvoided++;
+                return memo;
+            }
+        }
+        SnapshotAuthorityLookup<UV> snapshot = lookupSnapshotValueAuthority(currentKey, userKey);
+        if (snapshot != null) {
+            return snapshot;
+        }
+        return pointMemoFirstEnabled ? null : lookupPointValueMemo(currentKey, userKey, valueRequired);
+    }
+
+    private SnapshotAuthorityLookup<UV> lookupPointValueMemo(
+            K currentKey, UK userKey, boolean valueRequired) throws java.io.IOException {
+        if (!pointValueMemoEnabled
+                || externalMutationVisitorExposed
+                || currentKey == null
+                || currentNamespace == null
+                || bypassPointMemoForLowUsefulness()) {
+            return null;
+        }
+        pointValueMemoProbes++;
+        int hash = CacheKeyHash.hash(currentKey, currentNamespace);
+        int set = hash & pointValueMemoSetMask;
+        if (!snapshotValueAuthorityFingerprintMayContain(
+                pointValueMemoFingerprints[set], hash)) {
+            pointValueMemoFingerprintRejects++;
+            return null;
+        }
+        int base = set * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
+            int slot = base + way;
+            if (pointValueMemoHashes[slot] != hash) {
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            KeyNamespace<K, N> owner = (KeyNamespace<K, N>) pointValueMemoOwners[slot];
+            if (owner == null
+                    || !Objects.equals(owner.key, currentKey)
+                    || !Objects.equals(owner.namespace, currentNamespace)) {
+                continue;
+            }
+            pointValueMemoOwnerHits++;
+            if (!Objects.equals(pointValueMemoUserKeys[slot], userKey)) {
+                return null;
+            }
+            @SuppressWarnings("unchecked")
+            UK storedUserKey = (UK) pointValueMemoUserKeys[slot];
+            if (!authorityUserKeysEqual(storedUserKey, userKey)) {
+                return null;
+            }
+            byte kind = pointValueMemoKinds[slot];
+            if (valueRequired && kind == POINT_MEMO_PRESENT_ONLY) {
+                return null;
+            }
+            if (!valueRequired && kind == POINT_MEMO_GET_NULL) {
+                return null;
+            }
+            pointValueMemoVisited[set] |= (byte) (1 << way);
+            pointValueMemoUserKeyHits++;
+            if (!valueRequired) {
+                pointValueMemoContainsHits++;
+            }
+            if (kind == POINT_MEMO_ABSENT || kind == POINT_MEMO_GET_NULL) {
+                pointValueMemoNegativeHits++;
+                return SnapshotAuthorityLookup.absent();
+            }
+            if (kind == POINT_MEMO_PRESENT_VALUE) {
+                pointValueMemoValueHits++;
+                @SuppressWarnings("unchecked")
+                UV value = (UV) pointValueMemoValues[slot];
+                return SnapshotAuthorityLookup.present(copyUserValue(value));
+            }
+            return SnapshotAuthorityLookup.present(null);
+        }
+        return null;
+    }
+
+    private void storePointValueMemo(
+            K currentKey,
+            N namespace,
+            UK userKey,
+            boolean present,
+            boolean hasValue,
+            UV value) {
+        if (!pointValueMemoEnabled
+                || externalMutationVisitorExposed
+                || currentKey == null
+                || namespace == null
+                || userKey == null
+                || bypassPointMemoForLowUsefulness()) {
+            return;
+        }
+        int hash = CacheKeyHash.hash(currentKey, namespace);
+        int set = hash & pointValueMemoSetMask;
+        int base = set * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        int slot = -1;
+        int emptySlot = -1;
+        for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
+            int candidate = base + way;
+            @SuppressWarnings("unchecked")
+            KeyNamespace<K, N> owner = (KeyNamespace<K, N>) pointValueMemoOwners[candidate];
+            if (owner == null) {
+                if (emptySlot < 0) {
+                    emptySlot = candidate;
+                }
+            } else if (pointValueMemoHashes[candidate] == hash
+                    && Objects.equals(owner.key, currentKey)
+                    && Objects.equals(owner.namespace, namespace)) {
+                slot = candidate;
+                break;
+            }
+        }
+        if (slot < 0) {
+            if (emptySlot >= 0) {
+                slot = emptySlot;
+            } else {
+                int victim = pointValueMemoNextVictims[set];
+                for (int scanned = 0; scanned < SNAPSHOT_VALUE_AUTHORITY_WAYS; scanned++) {
+                    int bit = 1 << victim;
+                    if ((pointValueMemoVisited[set] & bit) == 0) {
+                        break;
+                    }
+                    pointValueMemoVisited[set] &= (byte) ~bit;
+                    victim = (victim + 1) & (SNAPSHOT_VALUE_AUTHORITY_WAYS - 1);
+                }
+                slot = base + victim;
+                pointValueMemoNextVictims[set] =
+                        (victim + 1) & (SNAPSHOT_VALUE_AUTHORITY_WAYS - 1);
+                pointValueMemoOwnerReplacements++;
+            }
+            pointValueMemoOwners[slot] = newStoredKeyNamespace(currentKey, namespace);
+            pointValueMemoHashes[slot] = hash;
+            storePointValueMemoFingerprint(set, slot - base, hash);
+            pointValueMemoOwnerAdmissions++;
+        }
+        pointValueMemoUserKeys[slot] = copyUserKey(userKey);
+        pointValueMemoValues[slot] = present && hasValue ? copyUserValue(value) : null;
+        pointValueMemoKinds[slot] =
+                !present
+                        ? (hasValue ? POINT_MEMO_GET_NULL : POINT_MEMO_ABSENT)
+                        : hasValue ? POINT_MEMO_PRESENT_VALUE : POINT_MEMO_PRESENT_ONLY;
+        pointValueMemoStores++;
+    }
+
+    /**
+     * One-way startup gate, not a phase-adaptive controller. After 8192 memo operations,
+     * keep admission only if exact observations saved at least one in 128 probes. An
+     * all-write state also bypasses. Snapshot authority is independent and remains active.
+     * No entry can be resurrected: a bypassed instance never resumes memo reads or writes.
+     */
+    private boolean bypassPointMemoForLowUsefulness() {
+        if (!pointMemoUsefulnessGateEnabled) {
+            return false;
+        }
+        if (pointMemoUsefulnessEvaluated) {
+            return pointMemoUsefulnessBypassed;
+        }
+        if (--pointMemoUsefulnessBudget > 0) {
+            return false;
+        }
+        pointMemoUsefulnessEvaluated = true;
+        pointMemoDecisionProbes = pointValueMemoProbes;
+        pointMemoDecisionHits = pointValueMemoUserKeyHits;
+        pointMemoDecisionStores = pointValueMemoStores;
+        pointMemoUsefulnessBypassed =
+                pointMemoDecisionProbes == 0
+                        || pointMemoDecisionHits * 128 < pointMemoDecisionProbes;
+        if (pointMemoUsefulnessBypassed) {
+            java.util.Arrays.fill(pointValueMemoOwners, null);
+            java.util.Arrays.fill(pointValueMemoUserKeys, null);
+            java.util.Arrays.fill(pointValueMemoValues, null);
+            java.util.Arrays.fill(pointValueMemoFingerprints, 0L);
+        }
+        return pointMemoUsefulnessBypassed;
+    }
+
+    private void removePointValueMemoOwner(K currentKey, N namespace) {
+        if (!pointValueMemoEnabled || currentKey == null || namespace == null) {
+            return;
+        }
+        int hash = CacheKeyHash.hash(currentKey, namespace);
+        int set = hash & pointValueMemoSetMask;
+        int base = set * SNAPSHOT_VALUE_AUTHORITY_WAYS;
+        for (int way = 0; way < SNAPSHOT_VALUE_AUTHORITY_WAYS; way++) {
+            int slot = base + way;
+            if (pointValueMemoHashes[slot] != hash) {
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            KeyNamespace<K, N> owner = (KeyNamespace<K, N>) pointValueMemoOwners[slot];
+            if (owner != null
+                    && Objects.equals(owner.key, currentKey)
+                    && Objects.equals(owner.namespace, namespace)) {
+                pointValueMemoOwners[slot] = null;
+                pointValueMemoUserKeys[slot] = null;
+                pointValueMemoValues[slot] = null;
+                pointValueMemoHashes[slot] = 0;
+                pointValueMemoKinds[slot] = 0;
+                pointValueMemoVisited[set] &= (byte) ~(1 << way);
+                clearPointValueMemoFingerprint(set, way);
+                pointValueMemoInvalidations++;
+                return;
+            }
+        }
+    }
+
+    private void storePointValueMemoFingerprint(int set, int way, int hash) {
+        int shift = way << 4;
+        long mask = 0xffffL << shift;
+        pointValueMemoFingerprints[set] =
+                (pointValueMemoFingerprints[set] & ~mask)
+                        | ((long) snapshotValueAuthorityFingerprint(hash) << shift);
+    }
+
+    private void clearPointValueMemoFingerprint(int set, int way) {
+        pointValueMemoFingerprints[set] &= ~(0xffffL << (way << 4));
     }
 
     private Iterable<UK> cacheKeys(Iterable<Map.Entry<UK, UV>> entries, K key, N namespace) {
@@ -2214,6 +3016,115 @@ public final class CachedInternalMapState<K, N, UK, UV>
         flush(currentKey, namespace);
     }
 
+    private Iterable<Map.Entry<UK, UV>> dirtyOverlayEntries(
+            Iterable<Map.Entry<UK, UV>> delegateEntries, K stateKey, N namespace) {
+        KeyNamespace<K, N> captured = newStoredKeyNamespace(stateKey, namespace);
+        return () ->
+                dirtyOverlayIterator(
+                        iteratorInContext(delegateEntries, captured.key, captured.namespace),
+                        captured.key,
+                        captured.namespace);
+    }
+
+    private Iterator<Map.Entry<UK, UV>> dirtyOverlayIterator(
+            Iterator<Map.Entry<UK, UV>> delegateIterator, K stateKey, N namespace) {
+        dirtyOverlayIteratorRequests++;
+        List<DirtyOverlayEntry> dirtyEntries = snapshotDirtyOverlayEntries(stateKey, namespace);
+        dirtyOverlayEntriesSnapshotted += dirtyEntries.size();
+        if (!dirtyEntries.isEmpty()) {
+            dirtyOverlayFlushesAvoided++;
+        }
+        return new Iterator<Map.Entry<UK, UV>>() {
+            private int appendedIndex;
+            private Map.Entry<UK, UV> nextEntry;
+            private boolean nextReady;
+
+            @Override
+            public boolean hasNext() {
+                prepareNext();
+                return nextReady;
+            }
+
+            @Override
+            public Map.Entry<UK, UV> next() {
+                prepareNext();
+                if (!nextReady) {
+                    throw new java.util.NoSuchElementException();
+                }
+                Map.Entry<UK, UV> current = nextEntry;
+                nextEntry = null;
+                nextReady = false;
+                return current;
+            }
+
+            private void prepareNext() {
+                if (nextReady) {
+                    return;
+                }
+                while (delegateIterator.hasNext()) {
+                    Map.Entry<UK, UV> delegateEntry = delegateIterator.next();
+                    DirtyOverlayEntry dirty =
+                            findDirtyOverlayEntry(dirtyEntries, delegateEntry.getKey());
+                    if (dirty == null) {
+                        nextEntry = delegateEntry;
+                        nextReady = true;
+                        return;
+                    }
+                    dirty.emitted = true;
+                    if (dirty.tombstone) {
+                        dirtyOverlayTombstonesSuppressed++;
+                        continue;
+                    }
+                    dirtyOverlayDelegateOverrides++;
+                    nextEntry = new DirtyOverlayMapEntry(dirty.userKey, dirty.value);
+                    nextReady = true;
+                    return;
+                }
+                while (appendedIndex < dirtyEntries.size()) {
+                    DirtyOverlayEntry dirty = dirtyEntries.get(appendedIndex++);
+                    if (dirty.emitted || dirty.tombstone) {
+                        continue;
+                    }
+                    dirty.emitted = true;
+                    dirtyOverlayAppendedEntries++;
+                    nextEntry = new DirtyOverlayMapEntry(dirty.userKey, dirty.value);
+                    nextReady = true;
+                    return;
+                }
+            }
+        };
+    }
+
+    private List<DirtyOverlayEntry> snapshotDirtyOverlayEntries(K stateKey, N namespace) {
+        if (stateKey == null || namespace == null) {
+            return Collections.emptyList();
+        }
+        List<KeyNamespaceUserKey<K, N, UK>> dirtyKeys =
+                snapshotDirtyKeys(stateKey, namespace, true);
+        if (dirtyKeys.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<DirtyOverlayEntry> dirtyEntries = new ArrayList<>(dirtyKeys.size());
+        for (KeyNamespaceUserKey<K, N, UK> key : dirtyKeys) {
+            CachedMapValue<UV> value = l1ValueCache.get(key);
+            if (value != null && value.dirty) {
+                dirtyEntries.add(
+                        new DirtyOverlayEntry(key.userKey, value.valueOrNull(), value.isNull()));
+            }
+        }
+        return dirtyEntries;
+    }
+
+    private DirtyOverlayEntry findDirtyOverlayEntry(
+            List<DirtyOverlayEntry> dirtyEntries, UK userKey) {
+        for (DirtyOverlayEntry dirty : dirtyEntries) {
+            if (Objects.equals(dirty.userKey, userKey)) {
+                return dirty;
+            }
+        }
+        return null;
+    }
+
     private void flush(K scopeKey, N scopeNamespace) {
         boolean scoped = scopeKey != null && scopeNamespace != null;
         lifecycleLock.readLock().lock();
@@ -2378,6 +3289,85 @@ public final class CachedInternalMapState<K, N, UK, UV>
         } finally {
             lifecycleLock.writeLock().unlock();
         }
+        if (dirtyOverlayEnabled) {
+            LOG.info(
+                    "[CACHEKIT MAP DIRTY OVERLAY] enabled=true iteratorRequests={} "
+                            + "flushesAvoided={} dirtyEntriesSnapshotted={} delegateOverrides={} "
+                            + "appendedDirtyEntries={} tombstonesSuppressed={}",
+                    dirtyOverlayIteratorRequests,
+                    dirtyOverlayFlushesAvoided,
+                    dirtyOverlayEntriesSnapshotted,
+                    dirtyOverlayDelegateOverrides,
+                    dirtyOverlayAppendedEntries,
+                    dirtyOverlayTombstonesSuppressed);
+        }
+        if (snapshotMaintenanceEnabled) {
+            LOG.info(
+                    "[CACHEKIT MAP SNAPSHOT MAINTENANCE] enabled=true putAttempts={} "
+                            + "removeAttempts={} knownNoops={} updates={} "
+                            + "overflowInvalidations={}",
+                    snapshotMaintenancePutAttempts,
+                    snapshotMaintenanceRemoveAttempts,
+                    snapshotMaintenanceKnownNoops,
+                    snapshotMaintenanceUpdates,
+                    snapshotMaintenanceOverflowInvalidations);
+        }
+        if (snapshotValueAuthorityEnabled) {
+            LOG.info(
+                    "[CACHEKIT MAP SNAPSHOT VALUE AUTHORITY] enabled=true fills={} "
+                            + "entriesStored={} shortCircuits={} pointGetsElided={} "
+                            + "pointProbes={} pointSnapshotHits={} pointValueHits={} "
+                            + "pointNegativeHits={} iteratorTableHits={} "
+                            + "pointFingerprintRejects={}",
+                    snapshotValueAuthorityFills,
+                    snapshotValueAuthorityEntriesStored,
+                    snapshotValueAuthorityShortCircuits,
+                    snapshotValueAuthorityPointGetsElided,
+                    snapshotValueAuthorityPointProbes,
+                    snapshotValueAuthorityPointSnapshotHits,
+                    snapshotValueAuthorityPointValueHits,
+                    snapshotValueAuthorityPointNegativeHits,
+                    snapshotValueAuthorityIteratorTableHits,
+                    snapshotValueAuthorityPointFingerprintRejects);
+        }
+        if (pointValueMemoEnabled) {
+            LOG.info(
+                    "[CACHEKIT MAP POINT MEMO CAPACITY] owners={} snapshotAuthorityOwners={}",
+                    pointValueMemoOwners.length,
+                    snapshotValueAuthorityKeys.length);
+            LOG.info(
+                    "[CACHEKIT MAP POINT VALUE MEMO] enabled=true probes={} "
+                            + "fingerprintRejects={} ownerHits={} userKeyHits={} valueHits={} "
+                            + "negativeHits={} containsHits={} stores={} ownerAdmissions={} "
+                            + "ownerReplacements={} invalidations={}",
+                    pointValueMemoProbes,
+                    pointValueMemoFingerprintRejects,
+                    pointValueMemoOwnerHits,
+                    pointValueMemoUserKeyHits,
+                    pointValueMemoValueHits,
+                    pointValueMemoNegativeHits,
+                    pointValueMemoContainsHits,
+                    pointValueMemoStores,
+                    pointValueMemoOwnerAdmissions,
+                    pointValueMemoOwnerReplacements,
+                    pointValueMemoInvalidations);
+            if (pointMemoUsefulnessGateEnabled) {
+                LOG.info(
+                        "[CACHEKIT MAP POINT MEMO USEFULNESS] enabled=true evaluated={} "
+                                + "bypassed={} decisionProbes={} decisionHits={} decisionStores={} "
+                                + "policy=startup-one-way budget=8192 minHitRatio=1/128",
+                        pointMemoUsefulnessEvaluated,
+                        pointMemoUsefulnessBypassed,
+                        pointMemoDecisionProbes,
+                        pointMemoDecisionHits,
+                        pointMemoDecisionStores);
+            }
+            if (pointMemoFirstEnabled) {
+                LOG.info(
+                        "[CACHEKIT MAP POINT MEMO FIRST] enabled=true authorityProbesAvoided={}",
+                        pointMemoFirstAuthorityProbesAvoided);
+            }
+        }
         if (nativeMapCacheEnabled) {
             LOG.info(
                     "[CACHEKIT NATIVE MAP CACHE] stateId={} generation={} probes={} hits={} "
@@ -2485,6 +3475,42 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     long getNativeProbeAttemptsForTesting() {
         return nativeProbeAttempts;
+    }
+
+    long getSnapshotValueAuthorityPointFingerprintRejectsForTesting() {
+        return snapshotValueAuthorityPointFingerprintRejects;
+    }
+
+    long getPointValueMemoUserKeyHitsForTesting() {
+        return pointValueMemoUserKeyHits;
+    }
+
+    boolean isPointMemoUsefulnessBypassedForTesting() {
+        return pointMemoUsefulnessBypassed;
+    }
+
+    long getPointMemoStoresForTesting() {
+        return pointValueMemoStores;
+    }
+
+    long getPointMemoFirstAuthorityProbesAvoidedForTesting() {
+        return pointMemoFirstAuthorityProbesAvoided;
+    }
+
+    int getPointMemoOwnerCapacityForTesting() {
+        return pointValueMemoOwners.length;
+    }
+
+    long getPointValueMemoNegativeHitsForTesting() {
+        return pointValueMemoNegativeHits;
+    }
+
+    long getPointValueMemoContainsHitsForTesting() {
+        return pointValueMemoContainsHits;
+    }
+
+    long getPointValueMemoInvalidationsForTesting() {
+        return pointValueMemoInvalidations;
     }
 
     long getNativeHitsForTesting() {
@@ -2712,7 +3738,15 @@ public final class CachedInternalMapState<K, N, UK, UV>
     // ====================================================================
 
     private Iterable<Map.Entry<UK, UV>> trySnapshotShortCircuit(K currentKey) throws Exception {
-        MapSnapshot<UK> snapshot = lookupSnapshot(currentKey);
+        MapSnapshot<UK, UV> snapshot =
+                snapshotValueAuthorityEnabled
+                        ? lookupSnapshotValueAuthorityTable(currentKey, false)
+                        : null;
+        if (snapshot == null) {
+            snapshot = lookupSnapshot(currentKey);
+        } else {
+            snapshotValueAuthorityIteratorTableHits++;
+        }
         if (snapshot == null) {
             return null; // UNKNOWN → fallthrough to delegate
         }
@@ -2721,21 +3755,44 @@ public final class CachedInternalMapState<K, N, UK, UV>
             mapSnapshotCacheMetrics.recordEmptyShortCircuit();
             return Collections.emptyList();
         }
-        // SINGLE/SMALL → downgrade the short range scan to bounded point gets. Resolve every
-        // value before publishing the iterable so a stale key can fall back without exposing a
-        // partial result.
-        List<UV> values = new ArrayList<>(snapshot.size());
-        for (UK userKey : snapshot.cachedUserKeys) {
-            UV value = this.get(userKey);
-            if (value == null) {
-                // A stale native snapshot must become a generation miss. Publishing a null
-                // exact-key fill would mean a real EMPTY snapshot, not a tombstone.
-                advanceNativeGeneration();
-                removeSnapshot(snapshotProbe);
-                mapSnapshotCacheMetrics.recordStaleInvalidation();
-                return null;
+        // A complete bounded traversal can publish values as well as keys. Mutations invalidate
+        // the snapshot, so a value-bearing hit is an exact tiny-map authority and can elide every
+        // RocksDB point get. The overwhelmingly common SINGLE case uses a dedicated iterable that
+        // defers defensive key/value copies until getKey()/getValue(), avoiding intermediate lists
+        // and arrays on every short-circuit.
+        List<UV> values;
+        if (snapshotValueAuthorityEnabled && snapshot.hasValues()) {
+            snapshotValueAuthorityShortCircuits++;
+            snapshotValueAuthorityPointGetsElided += snapshot.size();
+            if (snapshot.isSingle()) {
+                mapSnapshotCacheMetrics.recordSingleShortCircuit();
+                return new SingletonSnapshotIterable(
+                        copyStateKey(currentKey),
+                        copyStateNamespace(currentNamespace),
+                        snapshot.singleUserKey(),
+                        snapshot.cachedValues.get(0));
             }
-            values.add(value);
+            values = new ArrayList<>(snapshot.size());
+            for (UV cachedValue : snapshot.cachedValues) {
+                values.add(copyUserValue(cachedValue));
+            }
+        } else {
+            values = new ArrayList<>(snapshot.size());
+            // Key-only SINGLE/SMALL snapshots downgrade the short range scan to bounded point
+            // gets. Resolve every value before publishing the iterable so a stale key can fall
+            // back without exposing a partial result.
+            for (UK userKey : snapshot.cachedUserKeys) {
+                UV value = this.get(userKey);
+                if (value == null) {
+                    // A stale native snapshot must become a generation miss. Publishing a null
+                    // exact-key fill would mean a real EMPTY snapshot, not a tombstone.
+                    advanceNativeGeneration();
+                    removeSnapshot(snapshotProbe);
+                    mapSnapshotCacheMetrics.recordStaleInvalidation();
+                    return null;
+                }
+                values.add(value);
+            }
         }
         if (snapshot.isSingle()) {
             mapSnapshotCacheMetrics.recordSingleShortCircuit();
@@ -2746,14 +3803,14 @@ public final class CachedInternalMapState<K, N, UK, UV>
         return snapshotEntries(captured.key, captured.namespace, snapshot.cachedUserKeys, values);
     }
 
-    private MapSnapshot<UK> lookupSnapshot(K currentKey) {
+    private MapSnapshot<UK, UV> lookupSnapshot(K currentKey) {
         if (!snapshotOptimizationEnabled() || currentKey == null || currentNamespace == null) {
             return null;
         }
         snapshotProbe.key = currentKey;
         snapshotProbe.namespace = currentNamespace;
         mapSnapshotCacheMetrics.recordProbe();
-        MapSnapshot<UK> snapshot = null;
+        MapSnapshot<UK, UV> snapshot = null;
         if (standaloneNativeMapSnapshotEnabled) {
             try {
                 NativeMapSnapshotCache.Lookup<UK> nativeSnapshot =
@@ -2781,7 +3838,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         return snapshot;
     }
 
-    private void storeSnapshot(KeyNamespace<K, N> key, MapSnapshot<UK> snapshot) {
+    private void storeSnapshot(KeyNamespace<K, N> key, MapSnapshot<UK, UV> snapshot) {
         if (standaloneNativeMapSnapshotEnabled) {
             try {
                 boolean evicted =
@@ -2801,6 +3858,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
         } else if (mapSnapshotCacheEnabled) {
             mapSnapshotCache.put(key, snapshot);
         }
+        if (snapshotValueAuthorityEnabled) {
+            if (snapshot.hasValues()) {
+                storeSnapshotValueAuthority(key, snapshot);
+            } else {
+                removeSnapshotValueAuthority(key);
+            }
+        }
         if (snapshot.isEmpty() || snapshot.isSingle()) {
             storeNativeSnapshot(key.key, key.namespace, snapshot);
         }
@@ -2814,6 +3878,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
     }
 
     private boolean removeSnapshot(KeyNamespace<K, N> key) {
+        if (snapshotValueAuthorityEnabled) {
+            removeSnapshotValueAuthority(key);
+        }
         boolean removed;
         if (standaloneNativeMapSnapshotEnabled) {
             try {
@@ -2844,18 +3911,77 @@ public final class CachedInternalMapState<K, N, UK, UV>
         removeSnapshot(snapshotProbe);
     }
 
+    private void maintainSnapshotAfterPut(K currentKey, UK userKey) {
+        if (!snapshotMaintenanceEnabled) {
+            invalidateSnapshot(currentKey);
+            return;
+        }
+        snapshotMaintenancePutAttempts++;
+        MapSnapshot<UK, UV> snapshot = lookupSnapshot(currentKey);
+        if (snapshot == null) {
+            return;
+        }
+        for (UK cachedUserKey : snapshot.cachedUserKeys) {
+            if (Objects.equals(cachedUserKey, userKey)) {
+                snapshotMaintenanceKnownNoops++;
+                return;
+            }
+        }
+        int exactCapacity = standaloneNativeMapSnapshotEnabled ? 1 : mapSnapshotSmallMaxEntries;
+        if (snapshot.size() >= exactCapacity) {
+            removeSnapshot(snapshotProbe);
+            snapshotMaintenanceOverflowInvalidations++;
+            return;
+        }
+        List<UK> updated = new ArrayList<>(snapshot.cachedUserKeys);
+        updated.add(copyUserKey(userKey));
+        storeSnapshot(
+                newStoredKeyNamespace(currentKey, currentNamespace), MapSnapshot.of(updated));
+        snapshotMaintenanceUpdates++;
+    }
+
+    private void maintainSnapshotAfterRemove(K currentKey, UK userKey) {
+        if (!snapshotMaintenanceEnabled) {
+            invalidateSnapshot(currentKey);
+            return;
+        }
+        snapshotMaintenanceRemoveAttempts++;
+        MapSnapshot<UK, UV> snapshot = lookupSnapshot(currentKey);
+        if (snapshot == null) {
+            return;
+        }
+        List<UK> updated = new ArrayList<>(snapshot.size());
+        boolean removed = false;
+        for (UK cachedUserKey : snapshot.cachedUserKeys) {
+            if (Objects.equals(cachedUserKey, userKey)) {
+                removed = true;
+            } else {
+                updated.add(cachedUserKey);
+            }
+        }
+        if (!removed) {
+            snapshotMaintenanceKnownNoops++;
+            return;
+        }
+        storeSnapshot(
+                newStoredKeyNamespace(currentKey, currentNamespace), MapSnapshot.of(updated));
+        snapshotMaintenanceUpdates++;
+    }
+
     private Iterable<Map.Entry<UK, UV>> wrapWithSnapshotAwareIterator(
             Iterable<Map.Entry<UK, UV>> delegateEntries,
             K currentKey,
             N namespace,
-            boolean cacheEntries) {
+            boolean cacheEntries,
+            boolean dirtyOverlay) {
         KeyNamespace<K, N> captured = newStoredKeyNamespace(currentKey, namespace);
         return () ->
                 new SnapshotAwareIterator(
                         iteratorInContext(delegateEntries, captured.key, captured.namespace),
                         captured.key,
                         captured.namespace,
-                        cacheEntries);
+                        cacheEntries,
+                        dirtyOverlay);
     }
 
     private Iterator<Map.Entry<UK, UV>> iteratorInContext(
@@ -2880,7 +4006,12 @@ public final class CachedInternalMapState<K, N, UK, UV>
             K stateKey, N namespace, List<UK> userKeys, List<UV> values) {
         final List<UK> internalUserKeys = new ArrayList<>(userKeys.size());
         for (UK userKey : userKeys) {
-            internalUserKeys.add(copyUserKey(userKey));
+            if (snapshotOwnedKeyReuseEnabled) {
+                internalUserKeys.add(userKey);
+                mapSnapshotCacheMetrics.recordInternalKeyCopyAvoided();
+            } else {
+                internalUserKeys.add(copyUserKey(userKey));
+            }
         }
         final List<UV> currentValues = new ArrayList<>(values);
         final boolean[] removed = new boolean[internalUserKeys.size()];
@@ -2914,7 +4045,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 lastSlot = slot;
                 removable = true;
                 return new SnapshotMapEntry(
-                        stateKey, namespace, userKey, value, currentValues, slot);
+                        stateKey,
+                        namespace,
+                        userKey,
+                        value,
+                        currentValues,
+                        slot,
+                        snapshotOwnedKeyReuseEnabled);
             }
 
             @Override
@@ -2938,17 +4075,125 @@ public final class CachedInternalMapState<K, N, UK, UV>
         };
     }
 
+    private final class SingletonSnapshotIterable implements Iterable<Map.Entry<UK, UV>> {
+        private final K stateKey;
+        private final N namespace;
+        private final UK internalUserKey;
+        private UV currentValue;
+        private boolean removed;
+
+        private SingletonSnapshotIterable(
+                K stateKey, N namespace, UK internalUserKey, UV internalValue) {
+            this.stateKey = stateKey;
+            this.namespace = namespace;
+            this.internalUserKey = internalUserKey;
+            this.currentValue = internalValue;
+        }
+
+        @Override
+        public Iterator<Map.Entry<UK, UV>> iterator() {
+            return new SingletonSnapshotIteratorEntry(this);
+        }
+    }
+
+    /** Independent iterator and entry for the allocation-minimal authoritative SINGLE path. */
+    private final class SingletonSnapshotIteratorEntry
+            implements Iterator<Map.Entry<UK, UV>>, Map.Entry<UK, UV> {
+        private final SingletonSnapshotIterable owner;
+        private UK exposedUserKey;
+        private UV exposedValue;
+        private boolean exposedUserKeyInitialized;
+        private boolean exposedValueInitialized;
+        private boolean consumed;
+        private boolean removable;
+
+        private SingletonSnapshotIteratorEntry(SingletonSnapshotIterable owner) {
+            this.owner = owner;
+        }
+
+        @Override
+        public boolean hasNext() {
+            return !consumed && !owner.removed;
+        }
+
+        @Override
+        public Map.Entry<UK, UV> next() {
+            if (!hasNext()) {
+                throw new java.util.NoSuchElementException();
+            }
+            consumed = true;
+            removable = true;
+            return this;
+        }
+
+        @Override
+        public void remove() {
+            if (!removable) {
+                throw new IllegalStateException("remove() requires a preceding next()");
+            }
+            try {
+                mutateSnapshotEntry(
+                        owner.stateKey, owner.namespace, owner.internalUserKey, null, true);
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to remove MapState entry", e);
+            }
+            owner.removed = true;
+            removable = false;
+        }
+
+        @Override
+        public UK getKey() {
+            if (!exposedUserKeyInitialized) {
+                exposedUserKey = copyUserKey(owner.internalUserKey);
+                exposedUserKeyInitialized = true;
+            }
+            return exposedUserKey;
+        }
+
+        @Override
+        public UV getValue() {
+            if (!exposedValueInitialized) {
+                exposedValue = copyUserValue(owner.currentValue);
+                exposedValueInitialized = true;
+            }
+            return exposedValue;
+        }
+
+        @Override
+        public UV setValue(UV newValue) {
+            if (newValue == null) {
+                throw new NullPointerException("MapState entries do not accept null values");
+            }
+            UV previous = getValue();
+            try {
+                mutateSnapshotEntry(
+                        owner.stateKey,
+                        owner.namespace,
+                        owner.internalUserKey,
+                        newValue,
+                        false);
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to update MapState entry", e);
+            }
+            owner.currentValue = newValue;
+            exposedValue = newValue;
+            exposedValueInitialized = true;
+            return previous;
+        }
+    }
+
     private final class SnapshotMapEntry implements Map.Entry<UK, UV> {
         private final K stateKey;
         private final N namespace;
         private final UK internalUserKey;
-        private final UK exposedUserKey;
         private final List<UV> sharedValues;
         private final int sharedSlot;
+        private UK exposedUserKey;
+        private boolean exposedUserKeyInitialized;
         private UV value;
 
         private SnapshotMapEntry(K stateKey, N namespace, UK userKey, UV value) {
-            this(stateKey, namespace, userKey, value, null, -1);
+            this(stateKey, namespace, userKey, value, null, -1, false);
         }
 
         private SnapshotMapEntry(
@@ -2957,11 +4202,21 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 UK userKey,
                 UV value,
                 List<UV> sharedValues,
-                int sharedSlot) {
+                int sharedSlot,
+                boolean ownedInternalUserKey) {
             this.stateKey = stateKey;
             this.namespace = namespace;
-            this.internalUserKey = copyUserKey(userKey);
-            this.exposedUserKey = copyUserKey(internalUserKey);
+            if (ownedInternalUserKey) {
+                this.internalUserKey = userKey;
+                this.exposedUserKey = null;
+                this.exposedUserKeyInitialized = false;
+                mapSnapshotCacheMetrics.recordOwnedInternalKeyReused();
+                mapSnapshotCacheMetrics.recordExposedKeyCopyDeferred();
+            } else {
+                this.internalUserKey = copyUserKey(userKey);
+                this.exposedUserKey = copyUserKey(internalUserKey);
+                this.exposedUserKeyInitialized = true;
+            }
             this.sharedValues = sharedValues;
             this.sharedSlot = sharedSlot;
             this.value = value;
@@ -2969,6 +4224,11 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
         @Override
         public UK getKey() {
+            if (!exposedUserKeyInitialized) {
+                exposedUserKey = copyUserKey(internalUserKey);
+                exposedUserKeyInitialized = true;
+                mapSnapshotCacheMetrics.recordExposedKeyCopyMaterialized();
+            }
             return exposedUserKey;
         }
 
@@ -3020,17 +4280,29 @@ public final class CachedInternalMapState<K, N, UK, UV>
     }
 
     private KeyNamespace<K, N> newStoredKeyNamespace(K key, N namespace) {
-        K keyCopy = keySerializer == null ? key : keySerializer.copy(key);
-        N nsCopy = namespaceSerializer == null ? namespace : namespaceSerializer.copy(namespace);
-        if (keySerializer == null
-                && key instanceof org.apache.flink.table.data.binary.BinaryRowData) {
-            keyCopy = (K) ((org.apache.flink.table.data.binary.BinaryRowData) key).copy();
+        return new KeyNamespace<>(copyStateKey(key), copyStateNamespace(namespace));
+    }
+
+    @SuppressWarnings("unchecked")
+    private K copyStateKey(K key) {
+        if (keySerializer != null) {
+            return keySerializer.copy(key);
         }
-        if (namespaceSerializer == null
-                && namespace instanceof org.apache.flink.table.data.binary.BinaryRowData) {
-            nsCopy = (N) ((org.apache.flink.table.data.binary.BinaryRowData) namespace).copy();
+        if (key instanceof org.apache.flink.table.data.binary.BinaryRowData) {
+            return (K) ((org.apache.flink.table.data.binary.BinaryRowData) key).copy();
         }
-        return new KeyNamespace<>(keyCopy, nsCopy);
+        return key;
+    }
+
+    @SuppressWarnings("unchecked")
+    private N copyStateNamespace(N namespace) {
+        if (namespaceSerializer != null) {
+            return namespaceSerializer.copy(namespace);
+        }
+        if (namespace instanceof org.apache.flink.table.data.binary.BinaryRowData) {
+            return (N) ((org.apache.flink.table.data.binary.BinaryRowData) namespace).copy();
+        }
+        return namespace;
     }
 
     private static final class KeyNamespace<K, N> {
@@ -3056,11 +4328,38 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
     }
 
-    private static final class MapSnapshot<UK> {
-        final List<UK> cachedUserKeys;
+    private static final class SnapshotAuthorityLookup<UV> {
+        final boolean present;
+        final UV value;
 
-        MapSnapshot(List<UK> cachedUserKeys) {
+        private SnapshotAuthorityLookup(boolean present, UV value) {
+            this.present = present;
+            this.value = value;
+        }
+
+        static <UV> SnapshotAuthorityLookup<UV> present(UV value) {
+            return new SnapshotAuthorityLookup<>(true, value);
+        }
+
+        static <UV> SnapshotAuthorityLookup<UV> absent() {
+            return new SnapshotAuthorityLookup<>(false, null);
+        }
+    }
+
+    private static final class MapSnapshot<UK, UV> {
+        final List<UK> cachedUserKeys;
+        final List<UV> cachedValues;
+
+        MapSnapshot(List<UK> cachedUserKeys, List<UV> cachedValues) {
             this.cachedUserKeys = Collections.unmodifiableList(new ArrayList<>(cachedUserKeys));
+            this.cachedValues =
+                    cachedValues == null
+                            ? null
+                            : Collections.unmodifiableList(new ArrayList<>(cachedValues));
+            if (this.cachedValues != null
+                    && this.cachedValues.size() != this.cachedUserKeys.size()) {
+                throw new IllegalArgumentException("Snapshot keys and values must have equal size");
+            }
         }
 
         boolean isEmpty() {
@@ -3079,16 +4378,66 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return cachedUserKeys.get(0);
         }
 
-        static <UK> MapSnapshot<UK> single(UK userKey) {
-            return new MapSnapshot<>(Collections.singletonList(userKey));
+        boolean hasValues() {
+            return cachedValues != null;
         }
 
-        static <UK> MapSnapshot<UK> of(List<UK> userKeys) {
-            return new MapSnapshot<>(userKeys);
+        static <UK, UV> MapSnapshot<UK, UV> single(UK userKey) {
+            return new MapSnapshot<>(Collections.singletonList(userKey), null);
         }
 
-        static <UK> MapSnapshot<UK> empty() {
-            return new MapSnapshot<>(Collections.emptyList());
+        static <UK, UV> MapSnapshot<UK, UV> of(List<UK> userKeys) {
+            return new MapSnapshot<>(userKeys, null);
+        }
+
+        static <UK, UV> MapSnapshot<UK, UV> withValues(
+                List<UK> userKeys, List<UV> cachedValues) {
+            return new MapSnapshot<>(userKeys, cachedValues);
+        }
+
+        static <UK, UV> MapSnapshot<UK, UV> empty() {
+            return new MapSnapshot<>(Collections.emptyList(), Collections.emptyList());
+        }
+    }
+
+    private interface DirtyOverlayEntryMarker {}
+
+    private final class DirtyOverlayEntry {
+        private final UK userKey;
+        private final UV value;
+        private final boolean tombstone;
+        private boolean emitted;
+
+        private DirtyOverlayEntry(UK userKey, UV value, boolean tombstone) {
+            this.userKey = userKey;
+            this.value = value;
+            this.tombstone = tombstone;
+        }
+    }
+
+    private final class DirtyOverlayMapEntry
+            implements Map.Entry<UK, UV>, DirtyOverlayEntryMarker {
+        private final UK userKey;
+        private final UV value;
+
+        private DirtyOverlayMapEntry(UK userKey, UV value) {
+            this.userKey = userKey;
+            this.value = value;
+        }
+
+        @Override
+        public UK getKey() {
+            return userKey;
+        }
+
+        @Override
+        public UV getValue() {
+            return value;
+        }
+
+        @Override
+        public UV setValue(UV ignored) {
+            throw new UnsupportedOperationException();
         }
     }
 
@@ -3097,21 +4446,26 @@ public final class CachedInternalMapState<K, N, UK, UV>
         private final K currentKey;
         private final N namespace;
         private final boolean cacheEntries;
+        private final boolean dirtyOverlay;
         private int iteratedCount = 0;
         private final List<UK> snapshotUserKeys = new ArrayList<>();
+        private final List<UV> snapshotValues = new ArrayList<>();
         private UK lastUserKey = null;
         private boolean backfilled = false;
+        private boolean removable;
 
         SnapshotAwareIterator(
                 Iterator<Map.Entry<UK, UV>> delegateIterator,
                 K currentKey,
                 N namespace,
-                boolean cacheEntries) {
+                boolean cacheEntries,
+                boolean dirtyOverlay) {
             this.delegateIterator = delegateIterator;
             KeyNamespace<K, N> captured = newStoredKeyNamespace(currentKey, namespace);
             this.currentKey = captured.key;
             this.namespace = captured.namespace;
             this.cacheEntries = cacheEntries;
+            this.dirtyOverlay = dirtyOverlay;
         }
 
         @Override
@@ -3127,21 +4481,59 @@ public final class CachedInternalMapState<K, N, UK, UV>
         @Override
         public Map.Entry<UK, UV> next() {
             Map.Entry<UK, UV> entry = delegateIterator.next();
-            if (cacheEntries) {
+            UK entryUserKey = entry.getKey();
+            UV entryValue = entry.getValue();
+            UK stableUserKey =
+                    snapshotOwnedKeyReuseEnabled ? copyUserKey(entryUserKey) : entryUserKey;
+            if (cacheEntries && !(entry instanceof DirtyOverlayEntryMarker)) {
                 cacheEntry(currentKey, namespace, entry);
             }
             iteratedCount++;
             if (iteratedCount <= mapSnapshotSmallMaxEntries) {
-                snapshotUserKeys.add(copyUserKey(entry.getKey()));
+                snapshotUserKeys.add(
+                        snapshotOwnedKeyReuseEnabled
+                                ? stableUserKey
+                                : copyUserKey(entryUserKey));
+                if (snapshotOwnedKeyReuseEnabled) {
+                    mapSnapshotCacheMetrics.recordInternalKeyCopyAvoided();
+                }
+                if (snapshotValueAuthorityEnabled) {
+                    snapshotValues.add(copyUserValue(entryValue));
+                }
             } else if (!snapshotUserKeys.isEmpty()) {
                 snapshotUserKeys.clear();
+                snapshotValues.clear();
             }
-            lastUserKey = entry.getKey();
-            return new SnapshotMapEntry(currentKey, namespace, entry.getKey(), entry.getValue());
+            lastUserKey = stableUserKey;
+            removable = true;
+            return snapshotOwnedKeyReuseEnabled
+                    ? new SnapshotMapEntry(
+                            currentKey,
+                            namespace,
+                            stableUserKey,
+                            entryValue,
+                            null,
+                            -1,
+                            true)
+                    : new SnapshotMapEntry(
+                            currentKey, namespace, entryUserKey, entryValue);
         }
 
         @Override
         public void remove() {
+            if (!removable) {
+                throw new IllegalStateException("remove() requires a preceding next()");
+            }
+            if (dirtyOverlay) {
+                try {
+                    mutateSnapshotEntry(currentKey, namespace, lastUserKey, null, true);
+                } catch (Exception e) {
+                    throw new RuntimeException("Failed to remove MapState entry", e);
+                }
+                backfilled = true;
+                removable = false;
+                return;
+            }
             delegateIterator.remove();
             advanceNativeGeneration();
             if (lastUserKey != null) {
@@ -3151,9 +4543,11 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 if (presenceCacheEnabled) {
                     updatePresence(currentKey, namespace, lastUserKey, false);
                 }
+                storePointValueMemo(currentKey, namespace, lastUserKey, false, false, null);
             }
             invalidateSnapshot(currentKey, namespace);
             backfilled = true;
+            removable = false;
         }
 
         private void backfillSnapshotCache() {
@@ -3165,7 +4559,13 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 storeSnapshot(stored, MapSnapshot.empty());
             } else if (iteratedCount <= mapSnapshotSmallMaxEntries
                     && snapshotUserKeys.size() == iteratedCount) {
-                storeSnapshot(stored, MapSnapshot.of(snapshotUserKeys));
+                if (snapshotValueAuthorityEnabled && snapshotValues.size() == iteratedCount) {
+                    storeSnapshot(stored, MapSnapshot.withValues(snapshotUserKeys, snapshotValues));
+                    snapshotValueAuthorityFills++;
+                    snapshotValueAuthorityEntriesStored += iteratedCount;
+                } else {
+                    storeSnapshot(stored, MapSnapshot.of(snapshotUserKeys));
+                }
             } else {
                 mapSnapshotCacheMetrics.recordMultiEntrySkip();
                 removeSnapshot(stored);

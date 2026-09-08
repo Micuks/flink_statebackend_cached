@@ -45,6 +45,11 @@ public final class MapSnapshotCacheMetrics {
     private final AtomicLong invalidations = new AtomicLong();
     private final AtomicLong staleInvalidations = new AtomicLong();
     private final AtomicLong evictions = new AtomicLong();
+    private final AtomicLong ownedKeyReuseActiveStates = new AtomicLong();
+    private final AtomicLong ownedInternalKeysReused = new AtomicLong();
+    private final AtomicLong internalKeyCopiesAvoided = new AtomicLong();
+    private final AtomicLong exposedKeyCopiesDeferred = new AtomicLong();
+    private final AtomicLong exposedKeyCopiesMaterialized = new AtomicLong();
     private final AtomicLong nativeCostOperations = new AtomicLong();
     private final AtomicLong nativeLookupOperations = new AtomicLong();
     private final AtomicLong nativePutOperations = new AtomicLong();
@@ -98,6 +103,26 @@ public final class MapSnapshotCacheMetrics {
                 "map_snapshot_cache_stale_invalidations",
                 metrics.staleInvalidations);
         registerGauge(diagnostics, "map_snapshot_cache_evictions", metrics.evictions);
+        registerGauge(
+                diagnostics,
+                "map_snapshot_owned_key_reuse_active_states",
+                metrics.ownedKeyReuseActiveStates);
+        registerGauge(
+                diagnostics,
+                "map_snapshot_owned_internal_keys_reused",
+                metrics.ownedInternalKeysReused);
+        registerGauge(
+                diagnostics,
+                "map_snapshot_internal_key_copies_avoided",
+                metrics.internalKeyCopiesAvoided);
+        registerGauge(
+                diagnostics,
+                "map_snapshot_exposed_key_copies_deferred",
+                metrics.exposedKeyCopiesDeferred);
+        registerGauge(
+                diagnostics,
+                "map_snapshot_exposed_key_copies_materialized",
+                metrics.exposedKeyCopiesMaterialized);
         registerGauge(diagnostics, "native_snapshot_cost_operations", metrics.nativeCostOperations);
         registerGauge(
                 diagnostics,
@@ -203,6 +228,26 @@ public final class MapSnapshotCacheMetrics {
         increment(evictions);
     }
 
+    void recordOwnedKeyReuseActiveState() {
+        increment(ownedKeyReuseActiveStates);
+    }
+
+    void recordOwnedInternalKeyReused() {
+        increment(ownedInternalKeysReused);
+    }
+
+    void recordInternalKeyCopyAvoided() {
+        increment(internalKeyCopiesAvoided);
+    }
+
+    void recordExposedKeyCopyDeferred() {
+        increment(exposedKeyCopiesDeferred);
+    }
+
+    void recordExposedKeyCopyMaterialized() {
+        increment(exposedKeyCopiesMaterialized);
+    }
+
     boolean shouldSampleNativeLookupCost() {
         return shouldSampleNativeCost(nativeLookupOperations);
     }
@@ -301,6 +346,26 @@ public final class MapSnapshotCacheMetrics {
         return invalidations.get();
     }
 
+    long ownedKeyReuseActiveStates() {
+        return ownedKeyReuseActiveStates.get();
+    }
+
+    long ownedInternalKeysReused() {
+        return ownedInternalKeysReused.get();
+    }
+
+    long internalKeyCopiesAvoided() {
+        return internalKeyCopiesAvoided.get();
+    }
+
+    long exposedKeyCopiesDeferred() {
+        return exposedKeyCopiesDeferred.get();
+    }
+
+    long exposedKeyCopiesMaterialized() {
+        return exposedKeyCopiesMaterialized.get();
+    }
+
     long nativeCostRawKeySamples() {
         return nativeCostRawKeySamples.get();
     }
@@ -347,7 +412,9 @@ public final class MapSnapshotCacheMetrics {
                 "enabled=%s probes=%d hits=%d misses=%d emptyShortCircuits=%d "
                         + "singleShortCircuits=%d smallShortCircuits=%d storesEmpty=%d "
                         + "storesSingle=%d storesSmall=%d multiEntrySkips=%d invalidations=%d "
-                        + "staleInvalidations=%d evictions=%d",
+                        + "staleInvalidations=%d evictions=%d ownedKeyReuseActiveStates=%d "
+                        + "ownedInternalKeysReused=%d internalKeyCopiesAvoided=%d "
+                        + "exposedKeyCopiesDeferred=%d exposedKeyCopiesMaterialized=%d",
                 enabled,
                 probes.get(),
                 hits.get(),
@@ -361,7 +428,12 @@ public final class MapSnapshotCacheMetrics {
                 multiEntrySkips.get(),
                 invalidations.get(),
                 staleInvalidations.get(),
-                evictions.get());
+                evictions.get(),
+                ownedKeyReuseActiveStates.get(),
+                ownedInternalKeysReused.get(),
+                internalKeyCopiesAvoided.get(),
+                exposedKeyCopiesDeferred.get(),
+                exposedKeyCopiesMaterialized.get());
     }
 
     private void increment(AtomicLong counter) {
