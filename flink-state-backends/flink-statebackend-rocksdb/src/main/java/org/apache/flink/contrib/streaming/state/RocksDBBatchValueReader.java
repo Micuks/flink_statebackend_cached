@@ -57,6 +57,21 @@ public interface RocksDBBatchValueReader<K, N, V> {
      */
     V getBatchDefaultValue();
 
+    /** Optional synchronous mailbox-only write capability; null values mean deletes. */
+    default boolean supportsSynchronousValueWriteBatch() {
+        return false;
+    }
+
+    /**
+     * Apply the complete ordered batch before returning, using the same value encoding and write
+     * options as ordinary ValueState writes. No ownership is retained after return. Callers must
+     * not publish clean cache entries until this operation succeeds.
+     */
+    default void writeSerializedValueBatch(List<byte[]> rocksDBKeys, List<V> values)
+            throws Exception {
+        throw new UnsupportedOperationException("Synchronous value write batch is unavailable.");
+    }
+
     byte[] serializeBatchKeyAndNamespace(
             K key,
             N namespace,
