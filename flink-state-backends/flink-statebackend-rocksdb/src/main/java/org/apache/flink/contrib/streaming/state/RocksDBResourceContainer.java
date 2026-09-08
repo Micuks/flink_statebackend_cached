@@ -44,8 +44,12 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nullable;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Locale;
 import java.util.Properties;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -61,6 +65,8 @@ public final class RocksDBResourceContainer implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(RocksDBResourceContainer.class);
 
     private static final String MEMTABLE_WHOLE_KEY_NATIVE_OPTION = "memtable_whole_key_filtering";
+    private static final boolean CACHEKIT_ENABLE_KUNPENG_MEMTABLE_BLOOM =
+            detectKunpengMemtableBloomTarget();
 
     // the filename length limit is 255 on most operating systems
     private static final int INSTANCE_PATH_LENGTH_LIMIT = 255 - "_LOG".length();
@@ -311,7 +317,8 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
     /** Create a {@link ColumnFamilyOptions} for RocksDB, including some common settings. */
     ColumnFamilyOptions createBaseCommonColumnOptions() {
-        if (!internalGetOption(RocksDBConfigurableOptions.MEMTABLE_BLOOM_WHOLE_KEY)) {
+        if (!CACHEKIT_ENABLE_KUNPENG_MEMTABLE_BLOOM
+                || !internalGetOption(RocksDBConfigurableOptions.MEMTABLE_BLOOM_WHOLE_KEY)) {
             return new ColumnFamilyOptions();
         }
 
@@ -327,6 +334,39 @@ public final class RocksDBResourceContainer implements AutoCloseable {
                 options,
                 "FRocksDB rejected native column-family option %s",
                 MEMTABLE_WHOLE_KEY_NATIVE_OPTION);
+    }
+
+    @VisibleForTesting
+    static boolean isKunpengMemtableBloomTarget(String osName, String osArch, String cpuInfo) {
+        final String normalizedOs = normalize(osName);
+        final String normalizedArch = normalize(osArch);
+        final String normalizedCpuInfo = normalize(cpuInfo);
+        return normalizedOs.contains("linux")
+                && (normalizedArch.equals("aarch64") || normalizedArch.equals("arm64"))
+                && normalizedCpuInfo.matches("(?s).*cpu implementer\\s*:\\s*0x48\\b.*")
+                && normalizedCpuInfo.matches("(?s).*cpu part\\s*:\\s*0xd0[12]\\b.*");
+    }
+
+    @VisibleForTesting
+    static boolean isKunpengMemtableBloomEnabled() {
+        return CACHEKIT_ENABLE_KUNPENG_MEMTABLE_BLOOM;
+    }
+
+    private static boolean detectKunpengMemtableBloomTarget() {
+        try {
+            final String cpuInfo =
+                    new String(
+                            Files.readAllBytes(new File("/proc/cpuinfo").toPath()),
+                            StandardCharsets.UTF_8);
+            return isKunpengMemtableBloomTarget(
+                    System.getProperty("os.name", ""), System.getProperty("os.arch", ""), cpuInfo);
+        } catch (IOException ignored) {
+            return false;
+        }
+    }
+
+    private static String normalize(String value) {
+        return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -408,15 +448,20 @@ public final class RocksDBResourceContainer implements AutoCloseable {
         currentOptions.setMinWriteBufferNumberToMerge(
                 internalGetOption(RocksDBConfigurableOptions.MIN_WRITE_BUFFER_NUMBER_TO_MERGE));
 
-        final double memtableBloomRatio =
+        final double configuredMemtableBloomRatio =
                 internalGetOption(RocksDBConfigurableOptions.MEMTABLE_BLOOM_RATIO);
-        final boolean memtableBloomWholeKey =
+        final boolean configuredMemtableBloomWholeKey =
                 internalGetOption(RocksDBConfigurableOptions.MEMTABLE_BLOOM_WHOLE_KEY);
+        final double memtableBloomRatio =
+                CACHEKIT_ENABLE_KUNPENG_MEMTABLE_BLOOM ? configuredMemtableBloomRatio : 0.0;
+        final boolean memtableBloomWholeKey =
+                CACHEKIT_ENABLE_KUNPENG_MEMTABLE_BLOOM && configuredMemtableBloomWholeKey;
         currentOptions.setMemtablePrefixBloomSizeRatio(memtableBloomRatio);
         LOG.info(
-                "Configured RocksDB memtable Bloom filter: ratio={}, whole-key={}",
+                "Configured RocksDB memtable Bloom filter: ratio={}, whole-key={}, kunpeng-gate={}",
                 memtableBloomRatio,
-                memtableBloomWholeKey);
+                memtableBloomWholeKey,
+                CACHEKIT_ENABLE_KUNPENG_MEMTABLE_BLOOM);
 
         TableFormatConfig tableFormatConfig = currentOptions.tableFormatConfig();
 

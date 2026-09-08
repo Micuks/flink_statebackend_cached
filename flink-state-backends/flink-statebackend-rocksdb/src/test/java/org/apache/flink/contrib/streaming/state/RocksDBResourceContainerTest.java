@@ -276,7 +276,10 @@ public class RocksDBResourceContainerTest {
                                     new ColumnFamilyDescriptor(
                                             RocksDB.DEFAULT_COLUMN_FAMILY, columnOptions)),
                             handles)) {
-                assertEquals(0.1, columnOptions.memtablePrefixBloomSizeRatio(), 0.0);
+                assertEquals(
+                        RocksDBResourceContainer.isKunpengMemtableBloomEnabled() ? 0.1 : 0.0,
+                        columnOptions.memtablePrefixBloomSizeRatio(),
+                        0.0);
                 assertNull(
                         ((BlockBasedTableConfig) columnOptions.tableFormatConfig()).filterPolicy());
             }
@@ -292,7 +295,30 @@ public class RocksDBResourceContainerTest {
                 new String(
                         java.nio.file.Files.readAllBytes(optionsFiles[0].toPath()),
                         StandardCharsets.UTF_8);
-        assertThat(optionsText, containsString("memtable_whole_key_filtering=true"));
+        assertThat(
+                optionsText,
+                containsString(
+                        "memtable_whole_key_filtering="
+                                + RocksDBResourceContainer.isKunpengMemtableBloomEnabled()));
+    }
+
+    @Test
+    public void testMemtableBloomGateOnlyAcceptsKunpeng920() {
+        assertTrue(
+                RocksDBResourceContainer.isKunpengMemtableBloomTarget(
+                        "Linux", "aarch64", "CPU implementer\t: 0x48\nCPU part\t: 0xd01\n"));
+        assertTrue(
+                RocksDBResourceContainer.isKunpengMemtableBloomTarget(
+                        "linux", "arm64", "CPU implementer : 0x48\nCPU part : 0xd02\n"));
+        assertFalse(
+                RocksDBResourceContainer.isKunpengMemtableBloomTarget(
+                        "Linux", "x86_64", "CPU implementer\t: 0x48\nCPU part\t: 0xd02\n"));
+        assertFalse(
+                RocksDBResourceContainer.isKunpengMemtableBloomTarget(
+                        "Linux", "aarch64", "CPU implementer\t: 0x41\nCPU part\t: 0xd0c\n"));
+        assertFalse(
+                RocksDBResourceContainer.isKunpengMemtableBloomTarget(
+                        "Windows", "aarch64", "CPU implementer\t: 0x48\nCPU part\t: 0xd02\n"));
     }
 
     @Test
