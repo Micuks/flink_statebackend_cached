@@ -51,6 +51,13 @@ settings. Leave unrelated exploratory gates off as the environment map specifies
 
 ## Usage and artifact checks
 
+On `cachekit/dev`, use the supported
+[locked Kunpeng reproduction recipe](../../../../reproduction/fullopt-lc/README.md).
+It includes the implementation, exact full config, source/class/JAR lock, rebuild
+verifier and an isolated prepare-only campaign tool. It requires the archived
+runtime dependencies; a full-tree distribution is not asserted equivalent.
+Publication was compile/unit/bytecode verified without a new performance run.
+
 1. Use an isolated checkout containing the tested source (or audited descendants).
    Build/package the CacheKit, RocksDB state-backend, and Flink table-common
    changes. A CacheKit-only JAR replacement cannot enable P30.

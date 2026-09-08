@@ -1,0 +1,85 @@
+{
+  "schema": "fullopt-lc-kunpeng-reproduction-v1",
+  "historical_source": "7b95de31e51a6ee6fec4e4b1f625dc6538960d2c",
+  "expected_config_sha256": "698eeacf91eb9c27b48ed0364d337a57b15a3c583703be313e519cd3a613acc6",
+  "runtime_sources": {
+    "flink-state-backends/flink-statebackend-cachekit/src/main/java/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState.java": "f88a266ac1b40ac6e201b9df46e6c51f52d230e603c4c8249204bcd3998196ab",
+    "flink-state-backends/flink-statebackend-cachekit/src/main/java/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState.java": "0745063e47429f80f237797298868c72f1969490ee1c61ea8e00a22f8f47b488",
+    "flink-state-backends/flink-statebackend-rocksdb/src/main/java/org/apache/flink/contrib/streaming/state/RocksDBBatchValueReader.java": "f7d8863289a6d78e00e99384cc77ae9acd31a29941c5f486b4e79f35e46bcecf",
+    "flink-state-backends/flink-statebackend-rocksdb/src/main/java/org/apache/flink/contrib/streaming/state/RocksDBValueState.java": "daca417176b720241a0733897fe97be1c4507adda621d19ffed2cd076659a75d",
+    "flink-table/flink-table-common/src/main/java/org/apache/flink/table/data/binary/BinaryStringData.java": "292914c5e622714e086552c09885539130922360a3cac5fcd3132de9b2358dd8"
+  },
+  "stems": {
+    "cachekit": [
+      "org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState",
+      "org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState"
+    ],
+    "rocksdb": [
+      "org/apache/flink/contrib/streaming/state/RocksDBBatchValueReader",
+      "org/apache/flink/contrib/streaming/state/RocksDBValueState"
+    ],
+    "table": [
+      "org/apache/flink/table/data/binary/BinaryStringData"
+    ]
+  },
+  "class_sha256": {
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$NativeSnapshotAdaptiveMode.class": "3ecb88406424a45b0887f1cb59535eaa75000674052871e9be0433d84ef43176",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$PrefetchedMapValue.class": "4f4e68266c75a65ddc907166747c54a556dbeb8c5fbb35fc67d97e34498004b1",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$KeyNamespaceUserKey.class": "dd4b1d0913805aec1cebbb2438330e735967228aab69217cf124b4f9505f384e",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState$NativePointAdaptiveMode.class": "49a62dc60e3af8f37a12388b12f8ca5530b135f8374554345cea03ec6bc29c90",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState.class": "5a8c685bca90a3f33cbb895059b39d5f4a33499121b06ca9261201a5f8e8cf44",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState$1.class": "8a328ffef8b68f30f5897d32b6ead675bb17d8e98c8fa5e629ea3df723fffc26",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState$KeyNamespaceKey.class": "0f58992b9f1ba081ce695ad4dba44e514663a64fe804eb032e51f3d9b2b397b0",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$SnapshotMapEntry.class": "5c5ff3c5fc0a9d3fd22ba40959a305a646ecdaa3440fe4cbb8842eb64c459abe",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState$PrefetchReservation.class": "174d5d8bd6d4291be0bc1c815760ffd35d980ec794104cdd2089a37c28e57b8d",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$PreparedMapValues.class": "a2ab83fc475fc7f5673b0f66a7ec8886b015b093d39eca164d8e733ee28ecba9",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$5.class": "9bac6f0acb0b7f4c715858faeab099f14acd9f0a5d3332faed88f2f2a835c341",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$KeyNamespace.class": "5dc891f5bf8e845fa770989fa16381eabbc058e9395aa96ddede1d070a974713",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$1.class": "de2e25deb1641740d3b08732b255307465fe12fb928ae53dc17b39977c658c1a",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState$StagedValue.class": "591645b435ffd3f64c1c0e76c7ed946a49d0d802fcfe22175df245cf14577674",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$MapSnapshot.class": "d0916513f536265814c2155971d3d9e7c30597375d1fc11586f026c2b9db60bb",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState.class": "208a8d5eefb0051bbf567058543e725ce401495834af70f4fa4e8a37a5fee6eb",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState$NativePointProbePermit.class": "42f5412037570ee9a4afe45a9e276351db900b3b94900c7d861a2dbe44b7a64b",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$SnapshotAwareIterator.class": "825051b9714c51639db971b064144b348e788e12e038e5ce2d3d720483d8e941",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState$NativePointCacheResult.class": "b24185fca6789b96a2346a6f6c0b9e139a2baa3bfe12185a71fd8bd0f3d2b83b",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$NativeMapRead.class": "1aaf9ab9fef1d7f328b5d3a43fc1288a52709a62e214809147ba97f44bffc75d",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$3.class": "aead8260d4a9a2dcf069d6dd3e57915c44f7edab6fb85115c4d414b437c03e19",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$4.class": "88e1b9785932b959ac4182143916ca5d7ca0ab94779f6afed2fba38333401f95",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState$PendingNativeMutation.class": "d8da030e3749a47b7e0c218156af6a4502d5b865602306fa46970068c16c6076",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$NoOpCachePolicy.class": "89a2dcf447d3e481a6a0c5cbbd77094b8a29be0b8f61aa2ea11f2043e86261c1",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState$CachedValue.class": "09e11f46103baee8ec8fc297c06f509a683e2264e8bc9b165489e4551a38663c",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$2.class": "afcbb46d9eee402f545492a76695ba64f5804c490db7e3da660ded533704032a",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$CachedMapValue.class": "6c725c8b6c75c0279739caff814ce20c9aa67a5f72b3ad077591d9ab92e2f9c5",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState$NativePointCacheDisposition.class": "27f6733f7d6060538dfde9aff2819af873ef6ba50ec66ee90e93d87962ba1db6",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState$SerializedStagedValue.class": "6474a8927bb3340902c6c1d429bdfaded22b621c92b7b2fcec4c3ce2fed14dd8",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalValueState$1TrackedPrefetchTask.class": "6e12e716b036b8b1aa9e7972e5304939371d53c4b9c1963b0276927bc8b289e7",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$6.class": "146e67d276d55694dea94b573382b620c7ab8a46e93d68c7da16baf647874f52",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$DirtyOverlayMapEntry.class": "206afeb391c889b33734e4033f5bd206c56b16b1993b0f8c998dedab1b5c1020",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$DirtyOverlayEntry.class": "31e82c44909cada64b944428df87db7f93ad9578f99c201e9df5933ab7e75de1",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$DirtyOverlayEntryMarker.class": "f9c24aa2637139a4ee7a2f3dbfa70439db2d56e35d5fc2f518e34dc78eab6998",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$SnapshotAuthorityLookup.class": "8b0b199cab61ca35ed142811dc888feed205856d9bc6d7c8937c92030a84cd0a",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$SingletonSnapshotIterable.class": "55f26fd5d5bf90ae0577ae80fd814a7bbfc73c3e7fa1b5637b674932e2576c27",
+    "cachekit/org/apache/flink/contrib/streaming/state/cachekit/state/CachedInternalMapState$SingletonSnapshotIteratorEntry.class": "2b0098668c53e4a880dc49759943615125d2df90da0ed751eebbf7f32e554b68",
+    "rocksdb/org/apache/flink/contrib/streaming/state/RocksDBValueState.class": "ab0a1638c9845561b5e7379da87a3d96b1cc59a679da894766c1e1ea770eee4c",
+    "rocksdb/org/apache/flink/contrib/streaming/state/RocksDBBatchValueReader.class": "5aec178ced119645fda20e795ca22c26d78e960b78e83b8548a9846ff244d60c",
+    "table/org/apache/flink/table/data/binary/BinaryStringData$1.class": "140e6566cccdb80c66090e02115359a63f77ab122702a702b05a8513154192ad",
+    "table/org/apache/flink/table/data/binary/BinaryStringData$SegmentAndOffset.class": "faafe5d96601bcbed2bc6716ad4a7784511aea70cfef852695f5e3f1f127395c",
+    "table/org/apache/flink/table/data/binary/BinaryStringData.class": "1bea6ac5040dd418c4a320cee1c9dfb0737ba309e7f7d175e212cee266f8bfb4",
+    "table/org/apache/flink/table/data/binary/BinaryStringData$LazyCopyObservation.class": "5010f21bafd4a2a0f0e8bf39a34381c6fba621bac7e5a2544ca64750f8538eae"
+  },
+  "reference_jars": {
+    "flink-dist-1.16.3.jar": "ea1419714cab42fa3b888b2344dfa74a4aff2925cc216a8c0432de12fc04fede",
+    "flink-statebackend-cachekit-1.16-SNAPSHOT.jar": "101ac51a6de7e19c63dc21658acd284c7c33eebc73b6f7ba6c4abc5395306824",
+    "flink-table-api-java-uber-1.16.3.jar": "6ef54fff3e74f646fe2f1dd2e4f1f572c7bfdf9698c3e7afedceb4939684afc1"
+  },
+  "historical_result": {
+    "platform": "Kunpeng",
+    "events": 100000000,
+    "rounds": 1,
+    "queries": 15,
+    "metric": "arithmetic mean of per-query K/s/core uplift",
+    "vs_historical_rocksdb_percent": 65.4830581251384,
+    "vs_historical_fullopt_percent": 15.599355993643734
+  },
+  "boundary": "Frozen-runtime class rebuild, not a whole-tree Maven distribution equivalence claim. No performance rerun requested."
+}
