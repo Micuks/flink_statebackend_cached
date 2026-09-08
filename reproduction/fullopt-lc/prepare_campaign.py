@@ -16,12 +16,16 @@ def sha(path):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--legacy-multi-jar', action='store_true',
+                   help='explicitly reconstruct historical multi-JAR experiment, not delivery')
     p.add_argument('--archive', type=Path, required=True)
     p.add_argument('--runtime', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--project', required=True)
     p.add_argument('--port-base', type=int, required=True)
     a = p.parse_args()
+    if not a.legacy_multi_jar:
+        p.error('legacy archive helper requires --legacy-multi-jar; deliver the single fat JAR using README.md')
     a.archive, a.runtime, a.output = [x.resolve() for x in (a.archive, a.runtime, a.output)]
     if a.output.exists() or a.output == a.archive or a.archive in a.output.parents:
         p.error('output must be a new directory outside archive')

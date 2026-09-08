@@ -1,5 +1,22 @@
 # Integration validation — 2026-09-08
 
+## Single-fat-JAR delivery update
+
+The Maven unpack step now includes BinaryStringData and all its nested classes,
+and refreshes selected SNAPSHOT overlays instead of silently preserving stale ones.
+The default builder emits one `00-cachekit-fullopt-lc.jar` plus audit/log files.
+Local system-classloader smoke checks verify seven critical classes originate
+from the CacheKit JAR and LC copy semantics pass in ON/OFF modes. This is not
+an actual JM/TM deployment test or a new performance result. The earlier
+byte-identical comparison below applies to the historical multi-JAR integration,
+not the new single-JAR packaging.
+
+Clean ordered builds of RocksDB, Table Common, Streaming Java, Table Runtime and
+CacheKit succeeded. The delivered JAR has 36 verified overlay class entries.
+Seven class-origin checks and LC copy semantics passed in each ON/OFF mode.
+A deliberately earlier historical table JAR was correctly rejected by the
+class-origin checker. Python tests also reject missing nested patch classes.
+
 The 43/43 byte-identical result below describes integration commit `0e8c22c175`.
 The subsequent CacheKit option rename changes two UTF8 constants in the outer
 BinaryStringData class only. The rebuild verifier checks precisely that migration

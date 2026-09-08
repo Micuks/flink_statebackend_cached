@@ -147,7 +147,7 @@ under the License.
             <!--
             Single-jar packaging. CacheKit needs a few classes that live in
             flink-streaming-java, flink-statebackend-rocksdb and
-            flink-table-runtime: some are new (batch/prefetch plumbing), some
+            flink-table-common and flink-table-runtime: some are new (batch/prefetch plumbing), some
             override an upstream class with an additive hook. Rather than asking
             operators to drop a patched flink-dist plus several jars into
             flink/lib/, those classes are copied into this artifact. Flink sorts
@@ -168,9 +168,18 @@ under the License.
                         <configuration>
                             <!-- do not clobber CacheKit's own freshly compiled classes -->
                             <overWriteReleases>false</overWriteReleases>
-                            <overWriteSnapshots>false</overWriteSnapshots>
+                            <overWriteSnapshots>true</overWriteSnapshots>
                             <outputDirectory>${project.build.outputDirectory}</outputDirectory>
                             <artifactItems>
+                                <artifactItem>
+                                    <groupId>org.apache.flink</groupId>
+                                    <artifactId>flink-table-common</artifactId>
+                                    <version>${project.version}</version>
+                                    <includes>
+                                        org/apache/flink/table/data/binary/BinaryStringData.class,
+                                        org/apache/flink/table/data/binary/BinaryStringData$*.class
+                                    </includes>
+                                </artifactItem>
                                 <artifactItem>
                                     <groupId>org.apache.flink</groupId>
                                     <artifactId>flink-streaming-java</artifactId>

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild the five source families into a locked Kunpeng runtime. Never launch jobs."""
+"""Default: one CacheKit fat JAR. Explicit legacy mode reconstructs archived JARs."""
 import argparse
 import copy
 import hashlib
@@ -59,11 +59,21 @@ def overlay(reference, output, replacements):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--reference-runtime', type=Path, required=True)
+    parser.add_argument('--reference-runtime', type=Path)
+    parser.add_argument('--legacy-multi-jar', action='store_true',
+                        help='historical archive reconstruction only; not the delivery format')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--compile', action='store_true',
                         help='compile target modules (requires project Maven dependencies)')
     args = parser.parse_args()
+    if not args.legacy_multi_jar:
+        command = ['python3', str(HERE / 'build_fat_jar.py'), '--output', str(args.output)]
+        if not args.compile:
+            command.append('--skip-build')
+        subprocess.run(command, check=True)
+        return
+    if args.reference_runtime is None:
+        parser.error('--legacy-multi-jar requires --reference-runtime')
     lock = json.loads((HERE / 'lock.json').read_text())
     require(not args.output.exists(), 'output must be a new directory')
     for name, expected in lock['runtime_sources'].items():

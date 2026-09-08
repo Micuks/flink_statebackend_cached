@@ -54,8 +54,12 @@ settings. Leave unrelated exploratory gates off as the environment map specifies
 
 ## Usage and artifact checks
 
+The required delivery is [one CacheKit fat JAR](single-fat-jar-delivery.md),
+including P30 and its nested classes. The older multi-JAR recipe is historical
+archive reconstruction only, not the default packaging or delivery path.
+
 On `cachekit/dev`, use the supported
-[locked Kunpeng reproduction recipe](../../../../reproduction/fullopt-lc/README.md).
+[single-JAR build and historical reconstruction appendix](../../../../reproduction/fullopt-lc/README.md).
 It includes the implementation, exact full config, source/class/JAR lock, rebuild
 verifier and an isolated prepare-only campaign tool. It requires the archived
 runtime dependencies; a full-tree distribution is not asserted equivalent.
@@ -63,8 +67,10 @@ Publication was compile/unit/bytecode verified without a new performance run.
 
 1. Use an isolated checkout containing the tested source (or audited descendants).
    Build/package the CacheKit, RocksDB state-backend, and Flink table-common
-   changes. A CacheKit-only JAR replacement cannot enable P30.
-2. Deploy a consistent runtime bundle to all JM/TM JVMs. The verified campaign
+   changes into one CacheKit fat JAR. An old CacheKit JAR without BinaryStringData
+   cannot enable P30; the corrected packaging includes it.
+2. Deploy the single CacheKit fat JAR to all JM/TM JVMs and verify class ownership.
+   For historical context only, the earlier verified campaign
    overlaid CacheKit classes in the CacheKit JAR, RocksDB ValueState/interface
    classes in `flink-dist`, and BinaryStringData classes in the table API uber
    JAR. Merely dropping a second table-common JAR into `lib/` is not sufficient:

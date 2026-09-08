@@ -7,6 +7,14 @@ metadata:
 
 # Flink Benchmark Operator Playbook
 
+## CacheKit delivery requirement
+
+Deliver CacheKit optimizations as **one CacheKit fat JAR**, including required
+Flink class overrides; do not require extra patched distribution/table JARs.
+Before building or deploying CacheKit, follow
+[single-fat-JAR delivery](references/single-fat-jar-delivery.md).
+Historical multi-JAR reproduction is not completion of this delivery contract.
+
 Everything lives in **one repo**: `github.com/Micuks/nexmark-bench`. No separate deployment repo.
 
 ## Kunpeng host access from a new session
@@ -265,7 +273,8 @@ reported as one of the reserved treatments.
 
 For **FullOpt+LC** (the agreed name for FullOpt+P29+P30), read
 [FullOpt+LC config and usage](references/fullopt-lc.md). This requires patched
-runtime JARs plus two JVM/environment gates, not just a Flink YAML profile.
+classes inside the single CacheKit fat JAR plus two JVM/environment gates,
+not just a Flink YAML profile.
 
 ### Required comparison-result format
 

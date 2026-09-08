@@ -1,4 +1,45 @@
-# FullOpt+LC: reproduce the Kunpeng historical +65.48% configuration
+# FullOpt+LC: single CacheKit fat JAR delivery
+
+## Default build and delivery
+
+Deliver **one** `00-cachekit-fullopt-lc.jar`. It contains CacheKit, bundled
+Caffeine/fastutil dependencies, LC's BinaryStringData family and the required
+RocksDB/Streaming/Table Runtime patch classes. No patched flink-dist or table
+uber JAR is produced as a deployment deliverable.
+
+```bash
+python3 reproduction/fullopt-lc/build_fat_jar.py \
+  --output /absolute/path/to/new-delivery-directory
+```
+
+The script clean-builds the five relevant modules in dependency order, verifies
+packaged class families and runs local class-origin/LC ON-OFF smoke checks.
+Use the repository's JDK 11/Maven wrapper and compatible project dependency cache;
+the existing Flink distribution and platform JNI dependencies are prerequisites.
+Intermediate sibling build artifacts are not additional user deliverables.
+`rebuild.py --compile --output ...` defaults to this same single-JAR build.
+
+Copy the one JAR into the compatible Flink distribution's `lib/` on every JM/TM
+and use the provided config/environment. The `00-` prefix places it before ordinary
+Flink JARs in the verified launcher sorting scheme; confirm the actual launcher
+and classloader order for your deployment. Do not leave other CacheKit versions
+or ad-hoc patch JARs competing for the same classes. Inspect ownership before
+removing anything, and restart only the owned cluster.
+
+The original Flink distribution JARs stay in place. This is whole-class loading
+precedence, not runtime method patching. Check class CodeSource on the actual
+JM/TMs; local smoke does not cover every planner/user-code classloader.
+
+The delivery directory contains one JAR plus BUILD_AUDIT.json and two diagnostic
+logs. The audit records the JAR hash, source revision and overlay inventory.
+No cluster or performance experiment is launched by this build.
+
+The single-JAR arrangement is a **new runtime identity**. Do not claim it has
+newly measured +65.48% throughput or is byte-identical to the previous three-JAR
+deployment. That number is historical evidence only; the user requested no new
+performance run.
+
+## Historical three-JAR appendix (explicit opt-in, not delivery)
 
 ## CacheKit option namespace migration
 
@@ -16,7 +57,7 @@ must still match the archive. `lock.json.class_sha256` retains historical hashes
 `rebuild.py` derives the renamed class expectation from the verified reference.
 This revision is not byte-identical to the historical runtime and was not benchmarked.
 
-This is the supported **frozen-runtime reproduction path**, not a promise that
+The following is a legacy **frozen-runtime reconstruction path**, not a promise that
 an arbitrary full-tree Maven distribution or YAML alone yields +65%.
 `cachekit/dev` now contains the five tested source families, their tests and
 three compile-time prerequisites. The unrelated experiment history is not merged.
@@ -54,7 +95,7 @@ is portable; keep the **Kunpeng reference runtime**, not x86 native libraries.
 From the root of `cachekit/dev`, with the three reference JARs already available:
 
 ```bash
-python3 reproduction/fullopt-lc/rebuild.py --compile \
+python3 reproduction/fullopt-lc/rebuild.py --legacy-multi-jar --compile \
   --reference-runtime /absolute/path/to/reference-runtime \
   --output /absolute/path/to/new-rebuilt-runtime
 ```
@@ -118,7 +159,7 @@ topology. No automatic 1.75 correction is valid.
 On the archive host, after copying the rebuilt runtime there:
 
 ```bash
-python3 reproduction/fullopt-lc/prepare_campaign.py \
+python3 reproduction/fullopt-lc/prepare_campaign.py --legacy-multi-jar \
   --archive /home/wuql/flink-cluster/experiments/cachekit-fullopt-p29-p30-100m-kunpeng-20260908 \
   --runtime /absolute/path/to/new-rebuilt-runtime \
   --output /home/wuql/flink-cluster/experiments/cachekit-dev-lc-reproduction-NEW \

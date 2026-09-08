@@ -52,7 +52,7 @@ class PrepareTests(unittest.TestCase):
                                        for jar in lock['reference_jars']]}
                         for n in ['jobmanager', 'taskmanager1', 'taskmanager2']}
             (archive / 'variants/p29p30/docker-compose.yml').write_text(yaml.safe_dump({'services': services}))
-            command = [sys.executable, str(HERE / 'prepare_campaign.py'), '--archive', str(archive),
+            command = [sys.executable, str(HERE / 'prepare_campaign.py'), '--legacy-multi-jar', '--archive', str(archive),
                        '--runtime', str(built), '--output', str(output), '--project', 'cklctest01',
                        '--port-base', '13980']
             done = subprocess.run(command, capture_output=True, text=True)
