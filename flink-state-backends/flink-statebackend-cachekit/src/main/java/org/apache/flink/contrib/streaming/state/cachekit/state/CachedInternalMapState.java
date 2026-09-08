@@ -73,6 +73,18 @@ public final class CachedInternalMapState<K, N, UK, UV>
     private static final String POINT_VALUE_MEMO_PROPERTY =
             "cachekit.map.point-value-memo.enabled";
     private static final String POINT_VALUE_MEMO_ENV = "CACHEKIT_MAP_POINT_VALUE_MEMO_ENABLED";
+    private static final String POINT_MEMO_USEFULNESS_PROPERTY =
+            "cachekit.map.point-value-memo.usefulness-gate.enabled";
+    private static final String POINT_MEMO_USEFULNESS_ENV =
+            "CACHEKIT_MAP_POINT_VALUE_MEMO_USEFULNESS_GATE_ENABLED";
+    private static final String POINT_MEMO_FIRST_PROPERTY =
+            "cachekit.map.point-value-memo.first.enabled";
+    private static final String POINT_MEMO_FIRST_ENV =
+            "CACHEKIT_MAP_POINT_VALUE_MEMO_FIRST_ENABLED";
+    private static final String POINT_MEMO_MAX_OWNERS_PROPERTY =
+            "cachekit.map.point-value-memo.max-owners";
+    private static final String POINT_MEMO_MAX_OWNERS_ENV =
+            "CACHEKIT_MAP_POINT_VALUE_MEMO_MAX_OWNERS";
     private static final int SNAPSHOT_VALUE_AUTHORITY_WAYS = 4;
     private static final long SNAPSHOT_VALUE_AUTHORITY_FINGERPRINT_ONES =
             0x0001000100010001L;
@@ -224,7 +236,19 @@ public final class CachedInternalMapState<K, N, UK, UV>
      * mutations while retaining the exact user-key/value observed through the write-through path.
      */
     private final boolean pointValueMemoEnabled;
-    private boolean pointValueMemoVisitorExposed;
+    private final boolean pointMemoUsefulnessGateEnabled;
+    private final boolean pointMemoFirstEnabled;
+    private long pointMemoFirstAuthorityProbesAvoided;
+    private int pointMemoUsefulnessBudget = 8192;
+    private boolean pointMemoUsefulnessEvaluated;
+    private boolean pointMemoUsefulnessBypassed;
+    private long pointMemoDecisionProbes;
+    private long pointMemoDecisionHits;
+    private long pointMemoDecisionStores;
+    private final boolean userKeyJavaEqualityMatchesSerialization;
+    private DataOutputSerializer userKeyComparisonLeft;
+    private DataOutputSerializer userKeyComparisonRight;
+    private boolean externalMutationVisitorExposed;
     private final Object[] pointValueMemoOwners;
     private final Object[] pointValueMemoUserKeys;
     private final Object[] pointValueMemoValues;
@@ -592,6 +616,8 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
         this.userKeySerializer = resolvedUserKeySerializer;
         this.userValueSerializer = resolvedUserValueSerializer;
+        this.userKeyJavaEqualityMatchesSerialization =
+                usesExactJavaKeyEquality(resolvedUserKeySerializer);
         if (nativeMapCacheEnabled
                 && (nativeRequestPlaneCoordinator == null
                         || resolvedUserKeySerializer == null
@@ -780,7 +806,16 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 snapshotValueAuthorityEnabled
                         && !mapCacheEnabled
                         && pointValueMemoRuntimeEnabled();
-        int pointMemoSetCount = pointValueMemoEnabled ? authoritySetCount : 0;
+        this.pointMemoUsefulnessGateEnabled =
+                pointValueMemoEnabled && pointMemoUsefulnessRuntimeEnabled();
+        String memoFirst = System.getProperty(POINT_MEMO_FIRST_PROPERTY);
+        if (memoFirst == null || memoFirst.trim().isEmpty()) {
+            memoFirst = System.getenv(POINT_MEMO_FIRST_ENV);
+        }
+        this.pointMemoFirstEnabled =
+                pointValueMemoEnabled && "true".equalsIgnoreCase(memoFirst);
+        int pointMemoSetCount = pointValueMemoEnabled
+                ? pointMemoOwnerCapacity(authoritySlots) / SNAPSHOT_VALUE_AUTHORITY_WAYS : 0;
         int pointMemoSlots = pointMemoSetCount * SNAPSHOT_VALUE_AUTHORITY_WAYS;
         this.pointValueMemoOwners = new Object[pointMemoSlots];
         this.pointValueMemoUserKeys = new Object[pointMemoSlots];
@@ -851,6 +886,41 @@ public final class CachedInternalMapState<K, N, UK, UV>
                 || "1".equals(normalized)
                 || "yes".equalsIgnoreCase(normalized)
                 || "on".equalsIgnoreCase(normalized);
+    }
+
+    private static boolean pointMemoUsefulnessRuntimeEnabled() {
+        String configured = System.getProperty(POINT_MEMO_USEFULNESS_PROPERTY);
+        if (configured == null || configured.trim().isEmpty()) {
+            configured = System.getenv(POINT_MEMO_USEFULNESS_ENV);
+        }
+        return configured != null
+                && ("true".equalsIgnoreCase(configured.trim())
+                        || "1".equals(configured.trim()));
+    }
+
+    /** Independent bounded entry budget; zero preserves the snapshot-derived default. */
+    private static int pointMemoOwnerCapacity(int defaultCapacity) {
+        String configured = System.getProperty(POINT_MEMO_MAX_OWNERS_PROPERTY);
+        if (configured == null || configured.trim().isEmpty()) {
+            configured = System.getenv(POINT_MEMO_MAX_OWNERS_ENV);
+        }
+        if (configured == null || configured.trim().isEmpty()) {
+            return defaultCapacity;
+        }
+        final int capacity;
+        try {
+            capacity = Integer.parseInt(configured.trim());
+        } catch (NumberFormatException invalid) {
+            throw new IllegalArgumentException("Invalid point memo max-owners: expected integer", invalid);
+        }
+        if (capacity == 0) {
+            return defaultCapacity;
+        }
+        if (capacity < SNAPSHOT_VALUE_AUTHORITY_WAYS || capacity > 262144
+                || Integer.bitCount(capacity) != 1) {
+            throw new IllegalArgumentException("Point memo max-owners must be zero or a power of two in [4,262144]");
+        }
+        return capacity;
     }
 
     // Helper to update lookup key safely without allocation
@@ -1337,15 +1407,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return prefetched.value;
         }
 
-        SnapshotAuthorityLookup<UV> authoritative =
-                lookupSnapshotValueAuthority(currentKey, userKey);
-        if (authoritative != null) {
-            return authoritative.value;
-        }
-        SnapshotAuthorityLookup<UV> memoized =
-                lookupPointValueMemo(currentKey, userKey, true);
-        if (memoized != null) {
-            return memoized.value;
+        SnapshotAuthorityLookup<UV> observed = lookupPointReadCaches(currentKey, userKey, true);
+        if (observed != null) {
+            return observed.value;
         }
 
         if (bypassEnabled && isBypassing && shouldBypassRead()) {
@@ -1511,15 +1575,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
             return prefetched.present;
         }
 
-        SnapshotAuthorityLookup<UV> authoritative =
-                lookupSnapshotValueAuthority(currentKey, userKey);
-        if (authoritative != null) {
-            return authoritative.present;
-        }
-        SnapshotAuthorityLookup<UV> memoized =
-                lookupPointValueMemo(currentKey, userKey, false);
-        if (memoized != null) {
-            return memoized.present;
+        SnapshotAuthorityLookup<UV> observed = lookupPointReadCaches(currentKey, userKey, false);
+        if (observed != null) {
+            return observed.present;
         }
 
         if (bypassEnabled && isBypassing && shouldBypassRead()) {
@@ -1804,7 +1862,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
     public StateIncrementalVisitor<K, N, Map<UK, UV>> getStateIncrementalVisitor(
             int recommendedMaxNumberOfReturnedRecords) {
         // The delegate visitor may outlive this call and mutate state outside wrapper hooks.
-        pointValueMemoVisitorExposed = true;
+        externalMutationVisitorExposed = true;
         ensureDelegateNamespace(null);
         flush();
         return delegate.getStateIncrementalVisitor(recommendedMaxNumberOfReturnedRecords);
@@ -2058,9 +2116,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
     }
 
     private boolean snapshotOptimizationEnabled() {
-        return mapSnapshotCacheEnabled
-                || nativeMapSnapshotEnabled
-                || standaloneNativeMapSnapshotEnabled;
+        return !externalMutationVisitorExposed
+                && (mapSnapshotCacheEnabled
+                        || nativeMapSnapshotEnabled
+                        || standaloneNativeMapSnapshotEnabled);
     }
 
     private void advanceNativeGeneration() {
@@ -2268,8 +2327,9 @@ public final class CachedInternalMapState<K, N, UK, UV>
      * non-null result is authoritative for both present and absent user keys because only complete
      * traversals publish values and every wrapper mutation invalidates the snapshot.
      */
-    private SnapshotAuthorityLookup<UV> lookupSnapshotValueAuthority(K currentKey, UK userKey) {
-        if (!snapshotValueAuthorityEnabled) {
+    private SnapshotAuthorityLookup<UV> lookupSnapshotValueAuthority(K currentKey, UK userKey)
+            throws java.io.IOException {
+        if (!snapshotValueAuthorityEnabled || externalMutationVisitorExposed) {
             return null;
         }
         snapshotValueAuthorityPointProbes++;
@@ -2279,7 +2339,7 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
         snapshotValueAuthorityPointSnapshotHits++;
         for (int index = 0; index < snapshot.cachedUserKeys.size(); index++) {
-            if (Objects.equals(snapshot.cachedUserKeys.get(index), userKey)) {
+            if (authorityUserKeysEqual(snapshot.cachedUserKeys.get(index), userKey)) {
                 snapshotValueAuthorityPointValueHits++;
                 snapshotValueAuthorityPointGetsElided++;
                 return SnapshotAuthorityLookup.present(
@@ -2289,6 +2349,54 @@ public final class CachedInternalMapState<K, N, UK, UV>
         snapshotValueAuthorityPointNegativeHits++;
         snapshotValueAuthorityPointGetsElided++;
         return SnapshotAuthorityLookup.absent();
+    }
+
+    private static boolean usesExactJavaKeyEquality(TypeSerializer<?> serializer) {
+        return serializer instanceof org.apache.flink.api.common.typeutils.base.StringSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.LongSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.IntSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.ShortSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.ByteSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.CharSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.BooleanSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.FloatSerializer
+                || serializer instanceof org.apache.flink.api.common.typeutils.base.DoubleSerializer;
+    }
+
+    /** RocksDB identifies user keys by serialized bytes, not arbitrary Java equals methods. */
+    private boolean authorityUserKeysEqual(UK left, UK right) throws java.io.IOException {
+        if (userKeyJavaEqualityMatchesSerialization) {
+            return Objects.equals(left, right);
+        }
+        if (userKeySerializer
+                        instanceof org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer
+                && left instanceof byte[]
+                && right instanceof byte[]) {
+            return java.util.Arrays.equals((byte[]) left, (byte[]) right);
+        }
+        if (userKeySerializer == null) {
+            return false;
+        }
+        if (userKeyComparisonLeft == null) {
+            userKeyComparisonLeft = new DataOutputSerializer(128);
+            userKeyComparisonRight = new DataOutputSerializer(128);
+        }
+        userKeyComparisonLeft.clear();
+        userKeyComparisonRight.clear();
+        userKeySerializer.serialize(left, userKeyComparisonLeft);
+        userKeySerializer.serialize(right, userKeyComparisonRight);
+        int size = userKeyComparisonLeft.length();
+        if (size != userKeyComparisonRight.length()) {
+            return false;
+        }
+        byte[] leftBytes = userKeyComparisonLeft.getSharedBuffer();
+        byte[] rightBytes = userKeyComparisonRight.getSharedBuffer();
+        for (int index = 0; index < size; index++) {
+            if (leftBytes[index] != rightBytes[index]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private MapSnapshot<UK, UV> lookupSnapshotValueAuthorityTable(
@@ -2419,12 +2527,29 @@ public final class CachedInternalMapState<K, N, UK, UV>
      * a general write-back MapState cache. A presence-only observation can answer contains(), but
      * deliberately remains UNKNOWN to get().
      */
+    private SnapshotAuthorityLookup<UV> lookupPointReadCaches(
+            K currentKey, UK userKey, boolean valueRequired) throws java.io.IOException {
+        if (pointMemoFirstEnabled) {
+            SnapshotAuthorityLookup<UV> memo = lookupPointValueMemo(currentKey, userKey, valueRequired);
+            if (memo != null) {
+                pointMemoFirstAuthorityProbesAvoided++;
+                return memo;
+            }
+        }
+        SnapshotAuthorityLookup<UV> snapshot = lookupSnapshotValueAuthority(currentKey, userKey);
+        if (snapshot != null) {
+            return snapshot;
+        }
+        return pointMemoFirstEnabled ? null : lookupPointValueMemo(currentKey, userKey, valueRequired);
+    }
+
     private SnapshotAuthorityLookup<UV> lookupPointValueMemo(
-            K currentKey, UK userKey, boolean valueRequired) {
+            K currentKey, UK userKey, boolean valueRequired) throws java.io.IOException {
         if (!pointValueMemoEnabled
-                || pointValueMemoVisitorExposed
+                || externalMutationVisitorExposed
                 || currentKey == null
-                || currentNamespace == null) {
+                || currentNamespace == null
+                || bypassPointMemoForLowUsefulness()) {
             return null;
         }
         pointValueMemoProbes++;
@@ -2450,6 +2575,11 @@ public final class CachedInternalMapState<K, N, UK, UV>
             }
             pointValueMemoOwnerHits++;
             if (!Objects.equals(pointValueMemoUserKeys[slot], userKey)) {
+                return null;
+            }
+            @SuppressWarnings("unchecked")
+            UK storedUserKey = (UK) pointValueMemoUserKeys[slot];
+            if (!authorityUserKeysEqual(storedUserKey, userKey)) {
                 return null;
             }
             byte kind = pointValueMemoKinds[slot];
@@ -2487,10 +2617,11 @@ public final class CachedInternalMapState<K, N, UK, UV>
             boolean hasValue,
             UV value) {
         if (!pointValueMemoEnabled
-                || pointValueMemoVisitorExposed
+                || externalMutationVisitorExposed
                 || currentKey == null
                 || namespace == null
-                || userKey == null) {
+                || userKey == null
+                || bypassPointMemoForLowUsefulness()) {
             return;
         }
         int hash = CacheKeyHash.hash(currentKey, namespace);
@@ -2543,6 +2674,38 @@ public final class CachedInternalMapState<K, N, UK, UV>
                         ? (hasValue ? POINT_MEMO_GET_NULL : POINT_MEMO_ABSENT)
                         : hasValue ? POINT_MEMO_PRESENT_VALUE : POINT_MEMO_PRESENT_ONLY;
         pointValueMemoStores++;
+    }
+
+    /**
+     * One-way startup gate, not a phase-adaptive controller. After 8192 memo operations,
+     * keep admission only if exact observations saved at least one in 128 probes. An
+     * all-write state also bypasses. Snapshot authority is independent and remains active.
+     * No entry can be resurrected: a bypassed instance never resumes memo reads or writes.
+     */
+    private boolean bypassPointMemoForLowUsefulness() {
+        if (!pointMemoUsefulnessGateEnabled) {
+            return false;
+        }
+        if (pointMemoUsefulnessEvaluated) {
+            return pointMemoUsefulnessBypassed;
+        }
+        if (--pointMemoUsefulnessBudget > 0) {
+            return false;
+        }
+        pointMemoUsefulnessEvaluated = true;
+        pointMemoDecisionProbes = pointValueMemoProbes;
+        pointMemoDecisionHits = pointValueMemoUserKeyHits;
+        pointMemoDecisionStores = pointValueMemoStores;
+        pointMemoUsefulnessBypassed =
+                pointMemoDecisionProbes == 0
+                        || pointMemoDecisionHits * 128 < pointMemoDecisionProbes;
+        if (pointMemoUsefulnessBypassed) {
+            java.util.Arrays.fill(pointValueMemoOwners, null);
+            java.util.Arrays.fill(pointValueMemoUserKeys, null);
+            java.util.Arrays.fill(pointValueMemoValues, null);
+            java.util.Arrays.fill(pointValueMemoFingerprints, 0L);
+        }
+        return pointMemoUsefulnessBypassed;
     }
 
     private void removePointValueMemoOwner(K currentKey, N namespace) {
@@ -3169,6 +3332,10 @@ public final class CachedInternalMapState<K, N, UK, UV>
         }
         if (pointValueMemoEnabled) {
             LOG.info(
+                    "[CACHEKIT MAP POINT MEMO CAPACITY] owners={} snapshotAuthorityOwners={}",
+                    pointValueMemoOwners.length,
+                    snapshotValueAuthorityKeys.length);
+            LOG.info(
                     "[CACHEKIT MAP POINT VALUE MEMO] enabled=true probes={} "
                             + "fingerprintRejects={} ownerHits={} userKeyHits={} valueHits={} "
                             + "negativeHits={} containsHits={} stores={} ownerAdmissions={} "
@@ -3184,6 +3351,22 @@ public final class CachedInternalMapState<K, N, UK, UV>
                     pointValueMemoOwnerAdmissions,
                     pointValueMemoOwnerReplacements,
                     pointValueMemoInvalidations);
+            if (pointMemoUsefulnessGateEnabled) {
+                LOG.info(
+                        "[CACHEKIT MAP POINT MEMO USEFULNESS] enabled=true evaluated={} "
+                                + "bypassed={} decisionProbes={} decisionHits={} decisionStores={} "
+                                + "policy=startup-one-way budget=8192 minHitRatio=1/128",
+                        pointMemoUsefulnessEvaluated,
+                        pointMemoUsefulnessBypassed,
+                        pointMemoDecisionProbes,
+                        pointMemoDecisionHits,
+                        pointMemoDecisionStores);
+            }
+            if (pointMemoFirstEnabled) {
+                LOG.info(
+                        "[CACHEKIT MAP POINT MEMO FIRST] enabled=true authorityProbesAvoided={}",
+                        pointMemoFirstAuthorityProbesAvoided);
+            }
         }
         if (nativeMapCacheEnabled) {
             LOG.info(
@@ -3300,6 +3483,22 @@ public final class CachedInternalMapState<K, N, UK, UV>
 
     long getPointValueMemoUserKeyHitsForTesting() {
         return pointValueMemoUserKeyHits;
+    }
+
+    boolean isPointMemoUsefulnessBypassedForTesting() {
+        return pointMemoUsefulnessBypassed;
+    }
+
+    long getPointMemoStoresForTesting() {
+        return pointValueMemoStores;
+    }
+
+    long getPointMemoFirstAuthorityProbesAvoidedForTesting() {
+        return pointMemoFirstAuthorityProbesAvoided;
+    }
+
+    int getPointMemoOwnerCapacityForTesting() {
+        return pointValueMemoOwners.length;
     }
 
     long getPointValueMemoNegativeHitsForTesting() {
