@@ -26,6 +26,7 @@ import org.apache.flink.table.data.StringData;
 
 import javax.annotation.Nonnull;
 
+import java.lang.management.ManagementFactory;
 import java.util.Arrays;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
@@ -41,6 +42,12 @@ import static org.apache.flink.util.Preconditions.checkArgument;
  */
 @Internal
 public final class BinaryStringData extends LazyBinaryFormat<String> implements StringData {
+
+    private static final boolean LAZY_COPY_ENABLED =
+            Boolean.parseBoolean(
+                    System.getProperty(
+                            "flink.table.binary-string.lazy-copy.enabled",
+                            System.getenv("FLINK_TABLE_BINARY_STRING_LAZY_COPY_ENABLED")));
 
     public static final BinaryStringData EMPTY_UTF8 =
             BinaryStringData.fromBytes(StringUtf8Utils.encodeUTF8(""));
@@ -355,6 +362,12 @@ public final class BinaryStringData extends LazyBinaryFormat<String> implements 
 
     /** Copy a new {@code BinaryStringData}. */
     public BinaryStringData copy() {
+        if (LAZY_COPY_ENABLED && binarySection == null && javaObject != null) {
+            // String is immutable, but the wrapper and any future binary materialization are not.
+            // Do not take this shortcut for binary-backed strings, even if javaObject is cached.
+            LazyCopyObservation.record();
+            return new BinaryStringData(javaObject);
+        }
         ensureMaterialized();
         byte[] copy =
                 BinarySegmentUtils.copyToBytes(
@@ -364,6 +377,29 @@ public final class BinaryStringData extends LazyBinaryFormat<String> implements 
                 0,
                 binarySection.sizeInBytes,
                 javaObject);
+    }
+
+    /** Gated diagnostic counts are sampled lower bounds, not exact end-of-job totals. */
+    private static final class LazyCopyObservation {
+        private static final org.slf4j.Logger LOG =
+                org.slf4j.LoggerFactory.getLogger(BinaryStringData.class);
+        private static final ThreadLocal<long[]> COPIES =
+                ThreadLocal.withInitial(() -> new long[1]);
+        private static final String JVM = ManagementFactory.getRuntimeMXBean().getName();
+        private static final String ORIGIN =
+                String.valueOf(BinaryStringData.class.getProtectionDomain().getCodeSource());
+
+        private static void record() {
+            long copies = ++COPIES.get()[0];
+            if (copies == 1 || (copies & ((1L << 20) - 1)) == 0) {
+                LOG.info(
+                        "[FLINK LAZY STRING COPY] enabled=true jvm={} thread={} observedCopies={} policy=immutable-java-only origin={}",
+                        JVM,
+                        Thread.currentThread().getId(),
+                        copies,
+                        ORIGIN);
+            }
+        }
     }
 
     /**
